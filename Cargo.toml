@@ -1,0 +1,18 @@
+[package]
+name = "mav-param-tool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.29"
+env_logger = "0.11.10"
+rust-ini = "0.21.3"
+iced = { git = "https://github.com/iced-rs/iced", features = ["tokio"]}
+
+mav-param = { git = "https://github.com/holsatus/mav-param" }
+mavio = { git = "https://gitlab.com/peterkrull/mavio", branch = "holsatus-branch", features = ["dlct-common", "tokio"] }
+async-trait = "0.1.89"
+tokio = { version = "1.51.0", features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+tokio-util = "0.7.18"
+serialport = "4.9.0"
+serial2-tokio = { version = "0.1.22", features = ["unix"] }
