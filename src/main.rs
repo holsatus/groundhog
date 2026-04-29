@@ -56,7 +56,7 @@ fn initialize_config() -> Result<Configuration, BoxError> {
             ron::from_str::<'_, Configuration>(&contents)?
         }
         Err(_) => {
-            std::fs::create_dir_all(project_path).unwrap();
+            std::fs::create_dir_all(project_path)?;
             let mut file = std::fs::File::create_new(&config_path)?;
             log::debug!("Creating configuration file at: {config_path:?}");
 
@@ -74,7 +74,7 @@ fn save_config(config: &Configuration) -> Result<(), BoxError> {
     let project_path = PROJECT_DIRS.config_dir();
     let config_path = project_path.join("config.ron");
 
-    std::fs::create_dir_all(project_path).unwrap();
+    std::fs::create_dir_all(project_path)?;
     let mut file = std::fs::File::create(&config_path)?;
 
     let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new())?;
@@ -94,7 +94,7 @@ fn main() {
         .title("Holsatus Groundhog")
         .scale_factor(|_| 1.0)
         .run()
-        .unwrap();
+        .expect("Groundhog died");
 }
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
