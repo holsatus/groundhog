@@ -1,9 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    num::{NonZeroU16, NonZeroUsize},
-    time::Instant,
-};
+use std::collections::{BTreeMap, HashSet};
 
+use iced::task::Handle;
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::MavParamType;
 
@@ -14,24 +11,24 @@ pub struct MavlinkId {
 }
 
 #[derive(Clone, Debug)]
-pub struct Vehicle {
-    pub(crate) params: Parameters,
-    pub(crate) last_heartbeat: Option<Instant>,
-    pub(crate) gyroscope: Option<(f32, f32, f32)>,
+pub struct Parameter {
+    pub(crate) value: Value,
+    pub(crate) state: ParamState,
+    pub(crate) editing: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Parameter {
-    pub(crate) value: Value,
-    pub(crate) changed: Option<Value>,
-    pub(crate) editing: Option<String>,
+pub enum ParamState {
+    Unchanged,
+    Changed(Value),
+    Uploading(Handle, Value),
 }
 
 impl Parameter {
     pub fn new(value: Value) -> Self {
         Parameter {
             value,
-            changed: None,
+            state: ParamState::Unchanged,
             editing: None,
         }
     }
@@ -67,7 +64,7 @@ impl Parameters {
     }
 }
 
-fn save_parameters_to_ini(
+pub(crate) fn save_parameters_to_ini(
     path: impl AsRef<std::path::Path>,
     parameters: Parameters,
 ) -> std::io::Result<()> {
@@ -108,8 +105,10 @@ fn save_parameters_to_ini(
     )
 }
 
-pub(crate) fn load_parameters_from_ini(path: impl AsRef<std::path::Path>) -> Parameters {
-    let conf = ini::Ini::load_from_file(path).unwrap();
+pub(crate) fn load_parameters_from_ini(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Parameters, ini::Error> {
+    let conf = ini::Ini::load_from_file(path)?;
     let mut parameter_map = BTreeMap::new();
 
     for (section, properties) in conf.iter() {
@@ -151,10 +150,10 @@ pub(crate) fn load_parameters_from_ini(path: impl AsRef<std::path::Path>) -> Par
         }
     }
 
-    Parameters {
+    Ok(Parameters {
         map: parameter_map,
         loading_state: LoadingState::new(),
-    }
+    })
 }
 
 pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option<Value> {
@@ -186,20 +185,49 @@ pub fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
     }
 }
 
-pub fn value_set_from(target: &mut Value, value: Value) -> bool {
+pub fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<Value> {
     use mav_param::Value;
-    match (target, value) {
-        (Value::U8(old), Value::U8(new)) => *old = new,
-        (Value::I8(old), Value::I8(new)) => *old = new,
-        (Value::U16(old), Value::U16(new)) => *old = new,
-        (Value::I16(old), Value::I16(new)) => *old = new,
-        (Value::U32(old), Value::U32(new)) => *old = new,
-        (Value::I32(old), Value::I32(new)) => *old = new,
-        (Value::F32(old), Value::F32(new)) => *old = new,
-        _ => return false,
+    let value = match param_type {
+        MavParamType::Uint8 => Value::U8(param_value as u8),
+        MavParamType::Int8 => Value::I8(param_value as i8),
+        MavParamType::Uint16 => Value::U16(param_value as u16),
+        MavParamType::Int16 => Value::I16(param_value as i16),
+        MavParamType::Uint32 => Value::U32(param_value as u32),
+        MavParamType::Int32 => Value::I32(param_value as i32),
+        MavParamType::Real32 => Value::F32(param_value),
+        _ => return None,
     };
 
-    true
+    Some(value)
+}
+
+#[allow(unused)]
+pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
+    use mav_param::Value;
+    match value {
+        Value::U8(v) => (v as f32, MavParamType::Uint8),
+        Value::I8(v) => (v as f32, MavParamType::Int8),
+        Value::U16(v) => (v as f32, MavParamType::Uint16),
+        Value::I16(v) => (v as f32, MavParamType::Int16),
+        Value::U32(v) => (v as f32, MavParamType::Uint32),
+        Value::I32(v) => (v as f32, MavParamType::Int32),
+        Value::F32(v) => (v, MavParamType::Real32),
+    }
+}
+
+pub fn value_type_matches(lhs: Value, rhs: Value) -> bool {
+    use mav_param::Value;
+
+    matches!(
+        (lhs, rhs),
+        (Value::U8(_), Value::U8(_))
+            | (Value::I8(_), Value::I8(_))
+            | (Value::U16(_), Value::U16(_))
+            | (Value::I16(_), Value::I16(_))
+            | (Value::U32(_), Value::U32(_))
+            | (Value::I32(_), Value::I32(_))
+            | (Value::F32(_), Value::F32(_))
+    )
 }
 
 pub fn value_parse_as(kind: Value, string: &str) -> Option<Value> {

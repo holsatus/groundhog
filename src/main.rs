@@ -1,41 +1,94 @@
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        btree_map::{self},
+    },
     error::Error,
-    num::NonZero,
-    sync::Arc,
+    io::Write,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
+use directories::ProjectDirs;
 use iced::{
     Alignment, Color, Element, Font, Length, Task,
     alignment::Vertical,
     widget::{
-        Button, Column, ProgressBar, Space, Text, button, column, container, pick_list,
-        progress_bar, row, rule, space, text::Ellipsis, text_input,
+        Button, Column, ProgressBar, Space, Text, TextInput, button, column, container, pick_list,
+        progress_bar, row, rule, space, stack, text::Ellipsis, text_input,
     },
 };
 use mav_param::{Ident, Value};
 use mavio::{
     Frame,
-    default_dialect::messages::{ParamRequestList, ParamSet},
+    default_dialect::{
+        enums::{MavCmd, MavProtocolCapability},
+        messages::{AutopilotVersion, CommandInt, Heartbeat, ParamRequestList, ParamSet},
+    },
     prelude::Versionless,
+};
+use rfd::AsyncFileDialog;
+use slippery::{
+    CacheMessage, Projector, TileCache, Viewpoint, Zoom, location, sources::OpenStreetMap,
 };
 
 mod parameters;
 use crate::{
     connection::{ConnectionHandle, LinkBuilder, LinkConfig, LinkId, LinkVariant},
-    parameters::{
-        MavlinkId, Parameter, Parameters, Vehicle, load_parameters_from_ini, value_as_string,
-        value_parse_as, value_type_name,
-    },
+    parameters::{MavlinkId, ParamState, Parameter, Parameters, value_as_string, value_type_name},
+    vehicle::Vehicle,
 };
 
 mod connection;
+mod vehicle;
+
+static PROJECT_DIRS: LazyLock<ProjectDirs> =
+    LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
+
+fn initialize_config() -> Configuration {
+    let project_path = PROJECT_DIRS.config_dir();
+    let config_path = project_path.join("config.ron");
+
+    log::info!("Using configuration at: {config_path:?}");
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            log::info!("Loaded configuration from file");
+            ron::from_str::<'_, Configuration>(&contents).unwrap()
+        }
+        Err(_) => {
+            std::fs::create_dir_all(project_path).unwrap();
+            let mut file = std::fs::File::create_new(&config_path).unwrap();
+            log::info!("Creating new configuration file");
+
+            let config = Configuration::default();
+            let serialized =
+                ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new()).unwrap();
+
+            file.write_all(serialized.as_bytes()).unwrap();
+
+            config
+        }
+    }
+}
+
+fn save_config(config: &Configuration) {
+    let project_path = PROJECT_DIRS.config_dir();
+    let config_path = project_path.join("config.ron");
+
+    std::fs::create_dir_all(project_path).unwrap();
+    let mut file = std::fs::File::create(&config_path).unwrap();
+
+    let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new()).unwrap();
+
+    file.write_all(serialized.as_bytes()).unwrap();
+}
 
 fn main() {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Warn)
-        .filter_module("mav_param_tool", log::LevelFilter::Debug)
+        .filter_module("groundhog", log::LevelFilter::Debug)
         .init();
 
     iced::application(Application::boot, Application::update, Application::view)
@@ -45,32 +98,67 @@ fn main() {
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
 
-struct Configuration;
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct Configuration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link_config: Option<LinkConfig>,
 
-struct LinkHandle;
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_picker_path: Option<PathBuf>,
+}
 
 struct Application {
+    viewpoint: Viewpoint,
+    projector: Option<Projector>,
+    tile_cache: TileCache,
     link_builder: LinkBuilder,
     link_config: Option<LinkConfig>,
     connection: Option<ConnectionHandle>,
     configuration: Configuration,
-    links: BTreeMap<LinkId, LinkHandle>,
     vehicles: BTreeMap<MavlinkId, Vehicle>,
+    parameter_filter: String,
+    parameter_filtered: Option<Parameters>,
+    primary_vehicle: Option<MavlinkId>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    Param(ParamMessage),
-    Conn(ConnMessage),
-    ReloadParameters,
-}
+    Noop,
 
-#[derive(Debug, Clone)]
-enum ParamMessage {
-    ResetParamValue(MavlinkId, Ident),
-    EditParamValue(MavlinkId, Ident, Value),
-    UploadParamValue(MavlinkId, Ident, Value),
-    EditParamBuffer(MavlinkId, Ident, String),
+    MapProjector(Projector),
+    MapCache(CacheMessage),
+    Conn(ConnMessage),
+
+    SaveConfigurationToFile,
+
+    SetPrimaryVehicle(MavlinkId),
+
+    /// Filter for only certain parameters
+    ParamFilterBuf(String),
+
+    /// Initiate a paramter list request to the target
+    ParamListReload(MavlinkId),
+
+    /// Upload all modified parameters to the target
+    ParamUploadAll(MavlinkId),
+
+    /// Reset a local parameter to its target-default
+    ParamValueReset(MavlinkId, Ident),
+
+    /// Upload a local parameter to the target
+    ParamValueUpload(MavlinkId, Ident, Value),
+
+    /// Upload a local parameter to the target
+    ParamValueUploadTimeout(MavlinkId, Ident),
+
+    /// Edit the text-value buffer of the local parameter
+    ParamBufferEdit(MavlinkId, Ident, String),
+
+    ParamSaveDialog(Parameters),
+    ParamLoadDialog(MavlinkId),
+
+    ParamSaveToFile(PathBuf, Parameters),
+    ParamLoadFromFile(PathBuf, MavlinkId),
 }
 
 #[derive(Debug, Clone)]
@@ -86,128 +174,326 @@ enum ConnMessage {
     DetectSerialPorts,
 }
 
+impl From<ConnMessage> for Message {
+    fn from(value: ConnMessage) -> Self {
+        Message::Conn(value)
+    }
+}
+
 impl Application {
     fn boot() -> Self {
+        let config = initialize_config();
+
+        let link_builder = config
+            .link_config
+            .as_ref()
+            .map(|cfg| cfg.to_builder())
+            .unwrap_or_else(LinkBuilder::default_udp);
+
         Application {
-            link_builder: LinkBuilder::default_udp(),
-            link_config: LinkBuilder::default_udp().try_build(),
+            viewpoint: Viewpoint {
+                position: location::paris().as_mercator(),
+                zoom: Zoom::try_from(8.0).unwrap(),
+            },
+            projector: None,
+            tile_cache: TileCache::new(OpenStreetMap),
+            link_builder: link_builder.clone(),
+            link_config: link_builder.try_build(),
             connection: None,
-            configuration: Configuration,
-            links: BTreeMap::new(),
-            vehicles: BTreeMap::from_iter([(
-                MavlinkId {
-                    system: 1,
-                    component: 1,
-                },
-                Vehicle {
-                    params: Parameters::new(),
-                    last_heartbeat: None,
-                    gyroscope: None,
-                },
-            )]),
+            configuration: config.clone(),
+            vehicles: BTreeMap::new(),
+            parameter_filter: String::new(),
+            parameter_filtered: None,
+
+            primary_vehicle: None,
         }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::ReloadParameters => {
-                if let Some(connection) = self.connection.as_mut() {
-                    for (mav_id, vehicle) in &mut self.vehicles {
-                        vehicle.params.loading_state.has_loaded.clear();
-                        connection.send_message(&ParamRequestList {
-                            target_system: mav_id.system,
-                            target_component: mav_id.component,
-                        });
-                    }
-                }
-                Task::none()
-            }
-            Message::Param(message) => self.update_param(message),
-            Message::Conn(message) => self.update_conn(message),
-        }
+        self.maybe_update(message).unwrap_or_default()
     }
 
-    fn update_param(&mut self, message: ParamMessage) -> Task<Message> {
+    fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
         match message {
-            ParamMessage::EditParamValue(identity, ident, new_value) => {
-                if let Some(entry) = self.vehicles.get_mut(&identity) {
-                    if let Some(param) = entry.params.map.get_mut(&ident) {
-                        let mut to_edit = param.value.clone();
-                        if !parameters::value_set_from(&mut to_edit, new_value) {
-                            log::error!("Parameter got set with the wrong type");
-                        }
+            Message::Noop => (),
+            Message::SaveConfigurationToFile => {
+                save_config(&self.configuration);
+            }
+            Message::MapProjector(projector) => {
+                self.viewpoint = projector.viewpoint;
+                self.projector = Some(projector);
+            }
+            Message::MapCache(message) => {
+                let map_task = self.tile_cache.update(message);
+                return Some(map_task.map(Message::MapCache));
+            }
+            Message::ParamFilterBuf(buffer) => {
+                self.parameter_filter = buffer;
 
-                        if to_edit != param.value {
-                            param.changed = Some(to_edit)
+                if self.parameter_filter.is_empty() {
+                    self.parameter_filtered = None;
+                    return None;
+                }
+
+                // TODO: Current filtering assumes we have a single vehicle
+                let vehicle = self.vehicles.first_key_value()?.1;
+
+                let param_map = vehicle.params.map.iter().filter_map(|(ident, param)| {
+                    ident
+                        .as_str()
+                        .contains(&self.parameter_filter)
+                        .then_some((ident.clone(), param.clone()))
+                });
+
+                self.parameter_filtered = Some(Parameters {
+                    map: param_map.collect(),
+                    loading_state: vehicle.params.loading_state.clone(),
+                });
+            }
+            Message::Conn(message) => return Some(self.update_conn(message)),
+            Message::ParamListReload(mav_id) => {
+                let connection = self.connection.clone()?;
+                let vehicle = self.vehicles.get_mut(&mav_id)?;
+
+                let get_capabilities = vehicle.capabilities.is_none();
+                vehicle.params.loading_state.has_loaded.clear();
+
+                return Some(Task::future(async move {
+                    if get_capabilities {
+                        connection
+                            .send_message(CommandInt {
+                                target_system: mav_id.system,
+                                target_component: mav_id.component,
+                                command: MavCmd::RequestMessage,
+                                param1: AutopilotVersion::ID as f32,
+                                ..Default::default()
+                            })
+                            .await;
+
+                        // Give MAV some time to respond in right order
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+
+                    connection
+                        .send_message(ParamRequestList {
+                            target_system: mav_id.system,
+                            target_component: mav_id.component,
+                        })
+                        .await;
+
+                    Message::Noop
+                }));
+            }
+            Message::ParamUploadAll(mav_id) => {
+                let connection = self.connection.as_ref()?;
+                let vehicle = self.vehicles.get_mut(&mav_id)?;
+
+                let mut timeout_tasks = Vec::new();
+
+                // Loop over all changed parameters and do a param set request.
+                // Mark the parameter as uploading to keep track of things.
+                for (ident, param, value) in
+                    vehicle
+                        .params
+                        .map
+                        .iter_mut()
+                        .filter_map(|(ident, param)| match param.state {
+                            ParamState::Changed(value) => Some((ident, param, value)),
+                            _ => None,
+                        })
+                {
+                    let ident_cloned = ident.clone();
+                    let (task, handle) = Task::future(async move {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        Message::ParamValueUploadTimeout(mav_id, ident_cloned)
+                    })
+                    .abortable();
+
+                    param.state = ParamState::Uploading(handle, param.value);
+
+                    let cap = vehicle.capabilities?;
+                    let (param_value, param_type) =
+                        if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
+                            parameters::value_into_bytewise(value)
+                        } else if cap.contains(MavProtocolCapability::PARAM_ENCODE_C_CAST) {
+                            parameters::value_into_c_cast(value)
                         } else {
-                            param.changed = None
-                        }
-                    }
-                }
-            }
-
-            ParamMessage::EditParamBuffer(identity, ident, buffer) => {
-                let Some(entry) = self.vehicles.get_mut(&identity) else {
-                    log::warn!("No set of parameters for vehicle: {:?}", identity);
-                    return Task::none();
-                };
-
-                let Some(param) = entry.params.map.get_mut(&ident) else {
-                    log::warn!("No parameter with identifier: {}", ident.as_str());
-                    return Task::none();
-                };
-
-                param.changed = None;
-
-                match value_parse_as(param.value, &buffer) {
-                    Some(new_value) => {
-                        if new_value != param.value {
-                            param.changed = Some(new_value);
-                        }
-                    }
-                    None => {
-                        log::error!("param: {} !! {buffer:?}", ident.as_str());
-                    }
-                }
-
-                param.editing = Some(buffer);
-            }
-
-            ParamMessage::ResetParamValue(identity, ident) => {
-                let Some(entry) = self.vehicles.get_mut(&identity) else {
-                    log::warn!("No set of parameters for vehicle: {:?}", identity);
-                    return Task::none();
-                };
-
-                let Some(param) = entry.params.map.get_mut(&ident) else {
-                    log::warn!("No parameter with identifier: {}", ident.as_str());
-                    return Task::none();
-                };
-
-                param.editing = None;
-                param.changed = None;
-            }
-            ParamMessage::UploadParamValue(identity, ident, value) => {
-                if let Some(connection) = self.connection.as_mut() {
-                    let (param_value, param_type) = parameters::value_into_bytewise(value);
+                            log::error!("Parameter encoding type not known for vehicle");
+                            return None;
+                        };
 
                     let param_set = ParamSet {
-                        target_system: identity.system,
-                        target_component: identity.component,
-                        param_id: ident.as_raw().clone(),
+                        target_system: mav_id.system,
+                        target_component: mav_id.component,
+                        param_id: *ident.as_raw(),
                         param_value,
                         param_type,
                     };
 
-                    connection.send_message(&param_set);
+                    connection.send_message_sync(&param_set);
+
+                    timeout_tasks.push(task);
                 }
+
+                return Some(Task::batch(timeout_tasks));
+            }
+            Message::ParamBufferEdit(mav_id, ident, buffer) => {
+                let entry = self.vehicles.get_mut(&mav_id)?;
+                let param = entry.params.map.get_mut(&ident)?;
+
+                param.state = ParamState::Unchanged;
+
+                if let Some(new_value) = parameters::value_parse_as(param.value, &buffer)
+                    && new_value != param.value
+                {
+                    param.state = ParamState::Changed(new_value);
+                }
+
+                param.editing = Some(buffer);
+            }
+            Message::ParamValueReset(mav_id, ident) => {
+                let entry = self.vehicles.get_mut(&mav_id)?;
+                let param = entry.params.map.get_mut(&ident)?;
+
+                param.editing = None;
+                param.state = ParamState::Unchanged;
+            }
+            Message::ParamValueUpload(mav_id, ident, value) => {
+                let connection = self.connection.as_ref()?;
+                let vehicle = self.vehicles.get_mut(&mav_id)?;
+                let param = vehicle.params.map.get_mut(&ident)?;
+
+                let ident_cloned = ident.clone();
+                let (timeout_task, handle) = Task::future(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Message::ParamValueUploadTimeout(mav_id, ident_cloned)
+                })
+                .abortable();
+
+                param.state = ParamState::Uploading(handle, param.value);
+
+                let cap = vehicle.capabilities?;
+                let (param_value, param_type) =
+                    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
+                        parameters::value_into_bytewise(value)
+                    } else if cap.contains(MavProtocolCapability::PARAM_ENCODE_C_CAST) {
+                        parameters::value_into_c_cast(value)
+                    } else {
+                        log::error!("Parameter encoding type not known for vehicle");
+                        return None;
+                    };
+
+                let param_set = ParamSet {
+                    target_system: mav_id.system,
+                    target_component: mav_id.component,
+                    param_id: *ident.as_raw(),
+                    param_value,
+                    param_type,
+                };
+
+                connection.send_message_sync(&param_set);
+
+                return Some(timeout_task);
+            }
+            Message::ParamValueUploadTimeout(mav_id, ident) => {
+                let entry = self.vehicles.get_mut(&mav_id)?;
+                let param = entry.params.map.get_mut(&ident)?;
+
+                if let ParamState::Uploading(handle, value) = param.state.clone() {
+                    log::warn!("Parameter upload for '{}' timed out", ident.as_str());
+                    param.state = ParamState::Changed(value);
+                    handle.abort();
+                }
+            }
+            Message::ParamSaveDialog(parameters) => {
+                let file_dialog = self.new_file_dialog();
+                return Some(Task::future(async move {
+                    match file_dialog.save_file().await {
+                        Some(path) => Message::ParamSaveToFile(path.path().to_owned(), parameters),
+                        None => Message::Noop,
+                    }
+                }));
+            }
+            Message::ParamSaveToFile(save_path, parameters) => {
+                log::info!("Saving to file: {save_path:?}");
+                let result = parameters::save_parameters_to_ini(save_path.clone(), parameters);
+                if let Err(error) = result {
+                    log::error!("Error saving to file: {}", error);
+                }
+
+                return self.set_file_picker_path_config(save_path);
+            }
+            Message::ParamLoadDialog(mav_id) => {
+                let file_dialog = self.new_file_dialog();
+                return Some(Task::future(async move {
+                    match file_dialog.pick_file().await {
+                        Some(path) => Message::ParamLoadFromFile(path.path().to_owned(), mav_id),
+                        None => Message::Noop,
+                    }
+                }));
+            }
+            Message::ParamLoadFromFile(load_path, mav_id) => {
+                let (_, vehicle) = self.vehicles.iter_mut().find(|v| *v.0 == mav_id)?;
+
+                let loaded_params = match parameters::load_parameters_from_ini(load_path.clone()) {
+                    Ok(loaded_params) => loaded_params,
+                    Err(error) => {
+                        log::error!("Could not load parameter file: {}", error);
+                        return None;
+                    }
+                };
+
+                // Set the parameters of the vehicle as modified if that is the case
+                for (ident, new_param) in loaded_params.map.iter() {
+                    if let Some(old_param) = vehicle.params.map.get_mut(ident)
+                        && parameters::value_type_matches(old_param.value, new_param.value)
+                        && old_param.value != new_param.value
+                    {
+                        old_param.state = ParamState::Changed(new_param.value);
+                        old_param.editing = Some(parameters::value_as_string(new_param.value));
+                    }
+                }
+
+                return self.set_file_picker_path_config(load_path);
+            }
+            Message::SetPrimaryVehicle(mav_id) => {
+                self.primary_vehicle = Some(mav_id);
             }
         }
 
-        Task::none()
+        None
+    }
+
+    fn set_file_picker_path_config(&mut self, path: PathBuf) -> Option<Task<Message>> {
+        let mut file_picker_path = None;
+        if path.is_dir() {
+            file_picker_path = Some(path);
+        } else {
+            if let Some(parent) = path.parent() {
+                file_picker_path = Some(parent.to_path_buf());
+            }
+        }
+
+        if let Some(path) = file_picker_path.take() {
+            self.configuration.file_picker_path = Some(path);
+            Some(Task::done(Message::SaveConfigurationToFile))
+        } else {
+            None
+        }
+    }
+
+    fn new_file_dialog(&self) -> AsyncFileDialog {
+        let mut file_dialog = rfd::AsyncFileDialog::new();
+
+        if let Some(path) = self.configuration.file_picker_path.as_ref() {
+            file_dialog = file_dialog.set_directory(path)
+        }
+
+        file_dialog
     }
 
     fn update_conn(&mut self, message: ConnMessage) -> Task<Message> {
+        let time_now = Instant::now();
         match message {
             ConnMessage::RecvFrame(frame, link_id) => {
                 let message = match frame.decode::<mavio::DefaultDialect>() {
@@ -223,27 +509,73 @@ impl Application {
                     component: frame.component_id(),
                 };
 
+                let vehicle = match self.vehicles.entry(mav_id) {
+                    btree_map::Entry::Vacant(vacant_entry) => {
+                        log::info!("New vehicle detected: {mav_id:?}");
+                        vacant_entry.insert(Vehicle::new())
+                    }
+                    btree_map::Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+                };
+
+                vehicle.link_info_mut(link_id).last_message = Some(time_now);
+                vehicle.message_history.push((time_now, message.clone()));
+
                 match message {
                     mavio::DefaultDialect::Heartbeat(msg) => {
+                        vehicle.last_heartbeat = Some((time_now, msg))
+                    }
+                    mavio::DefaultDialect::AutopilotVersion(msg) => {
                         if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                            vehicle.last_heartbeat = Some(Instant::now())
+                            if vehicle.capabilities.is_none() {
+                                log::debug!(
+                                    "Received capabilities for {:?}: {:?}",
+                                    mav_id,
+                                    msg.capabilities
+                                )
+                            }
+                            vehicle.capabilities = Some(msg.capabilities);
                         }
                     }
-
                     mavio::DefaultDialect::ScaledImu(msg) => {
                         if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                            vehicle.gyroscope = Some((
+                            vehicle.gyroscope = Some([
                                 msg.xgyro as f32 * 1e-3,
                                 msg.ygyro as f32 * 1e-3,
                                 msg.zgyro as f32 * 1e-3,
-                            ))
+                            ]);
+
+                            vehicle.accelerometer = Some([
+                                msg.xacc as f32 * 1e-3,
+                                msg.yacc as f32 * 1e-3,
+                                msg.zacc as f32 * 1e-3,
+                            ]);
                         }
                     }
                     mavio::DefaultDialect::ParamValue(msg) => {
-                        let Some(value) =
+                        use mavio::default_dialect::enums::MavProtocolCapability;
+                        let Some(proto_capabilities) = vehicle.capabilities else {
+                            log::error!(
+                                "Cannot handle parameters before knowing vehicle capabilities"
+                            );
+                            return Task::none();
+                        };
+
+                        // Decode the parameter according to capabilities flag
+                        let maybe_value = if proto_capabilities
+                            .contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE)
+                        {
                             parameters::value_from_bytewise(msg.param_value, msg.param_type)
-                        else {
-                            log::error!("Unsupported numeric type");
+                        } else if proto_capabilities
+                            .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST)
+                        {
+                            parameters::value_from_c_cast(msg.param_value, msg.param_type)
+                        } else {
+                            log::error!("Parameter encoding type not known for vehicle");
+                            return Task::none();
+                        };
+
+                        let Some(value) = maybe_value else {
+                            log::error!("Unsupported numeric type of parameter");
                             return Task::none();
                         };
 
@@ -281,16 +613,28 @@ impl Application {
                     _ => log::trace!("Unsupported message type: {}", frame.message_id()),
                 }
             }
-            ConnMessage::RecvError(error, link_id) => (),
+            ConnMessage::RecvError(error, link_id) => {
+                log::error!("Error receiving on {link_id:?}: {error:?}");
+            }
             ConnMessage::ChangeLinkVariant(variant) => {
-                if self.link_builder.to_variant() != variant {
-                    self.link_builder = variant.to_default_builder();
-                    self.link_config = self.link_builder.try_build();
+                if self.link_builder.to_variant() == variant {
+                    return Task::none();
+                }
+
+                self.link_builder = variant.to_default_builder();
+                self.link_config = self.link_builder.try_build();
+                if let Some(link_config) = self.link_config.clone() {
+                    self.configuration.link_config = Some(link_config);
+                    return Task::done(Message::SaveConfigurationToFile);
                 }
             }
             ConnMessage::UpdateLinkBuilder(link_builder) => {
                 self.link_builder = link_builder;
                 self.link_config = self.link_builder.try_build();
+                if let Some(link_config) = self.link_config.clone() {
+                    self.configuration.link_config = Some(link_config);
+                    return Task::done(Message::SaveConfigurationToFile);
+                }
             }
             ConnMessage::DetectSerialPorts => {
                 if let LinkBuilder::Serial {
@@ -314,18 +658,30 @@ impl Application {
                 }
             }
             ConnMessage::ConnectToLink(config) => {
+                self.configuration.link_config = Some(config.clone());
                 log::info!("Connecting to: {config:?}");
                 return config.connect();
             }
             ConnMessage::DisconnectLink => {
-                self.connection = None;
+                if let Some(connection) = self.connection.take() {
+                    connection.close();
+                }
             }
             ConnMessage::ConnectFailed(error) => {
                 log::error!("Connect failed: {error:?}");
             }
             ConnMessage::ConnectSuccess(connection) => {
                 log::info!("Connection established");
-                self.connection = Some(connection)
+                self.connection = Some(connection.clone());
+                tokio::spawn(async move {
+                    loop {
+                        let heartbeat = Heartbeat::default();
+                        if !connection.send_message(heartbeat).await {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                });
             }
         }
 
@@ -333,18 +689,20 @@ impl Application {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        column![
-            iced::widget::container(self.view_top_panel()),
-            row![
-                self.view_param_list_scrollable(),
-                iced::widget::container(self.view_vehicle_information())
-                    .style(iced::widget::container::bordered_box)
-                    .padding(10.0),
+        stack!(
+            slippery::MapWidget::new(&self.tile_cache, Message::MapCache, self.viewpoint)
+                .on_update(Message::MapProjector),
+            column![
+                iced::widget::container(self.view_top_panel()),
+                row![
+                    self.view_param_list_scrollable(),
+                    self.view_vehicle_information(),
+                ]
+                .spacing(10.0)
             ]
             .spacing(10.0)
-        ]
-        .spacing(10.0)
-        .padding(10.0)
+            .padding(10.0)
+        )
         .into()
     }
 
@@ -368,7 +726,7 @@ impl Application {
                 let addr_input = text_input("address", addr)
                     .on_input(|addr| {
                         Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
-                            addr: addr,
+                            addr,
                             port: port.clone(),
                         }))
                     })
@@ -379,7 +737,7 @@ impl Application {
                     .on_input(|port| {
                         Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
                             addr: addr.clone(),
-                            port: port,
+                            port,
                         }))
                     })
                     .width(100.0)
@@ -392,7 +750,7 @@ impl Application {
                 let addr_input = text_input("address", addr)
                     .on_input(|addr| {
                         Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Udp {
-                            addr: addr,
+                            addr,
                             port: port.clone(),
                         }))
                     })
@@ -403,7 +761,7 @@ impl Application {
                     .on_input(|port| {
                         Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Udp {
                             addr: addr.clone(),
-                            port: port,
+                            port,
                         }))
                     })
                     .width(100.0)
@@ -451,6 +809,16 @@ impl Application {
 
         row_contents.push(iced::widget::space::Space::new().width(Length::Fill).into());
 
+        if self.vehicles.len() > 1 {
+            let mut vehicle_ids = self.vehicles.keys().cloned().collect::<Vec<_>>();
+            vehicle_ids.sort();
+            let vehicle_picker = pick_list(self.primary_vehicle, vehicle_ids, |v| {
+                format!("sys: {} - com: {}", v.system, v.component)
+            })
+            .on_select(Message::SetPrimaryVehicle);
+            row_contents.push(vehicle_picker.into());
+        }
+
         if self.connection.is_none() {
             let connect_button = Button::new(
                 container("Connect")
@@ -491,6 +859,10 @@ impl Application {
     }
 
     fn view_vehicle_information(&self) -> Element<'_, Message> {
+        if self.vehicles.is_empty() {
+            return space::Space::new().into();
+        }
+
         let mut entries = Vec::new();
 
         for (identity, vehicle) in &self.vehicles {
@@ -503,23 +875,32 @@ impl Application {
             );
 
             entries.push(
-                Text::new(format!("Heartbeat: {:?}", vehicle.last_heartbeat))
+                Text::new(format!("Heartbeat: {:#?}", vehicle.last_heartbeat))
                     .color_maybe(
                         vehicle
                             .last_heartbeat
-                            .is_none_or(|hb| hb.elapsed() > Duration::from_secs(2))
+                            .as_ref()
+                            .is_none_or(|(hb, _)| hb.elapsed() > Duration::from_secs(2))
                             .then(|| Color::from_rgb8(255, 100, 100)),
                     )
                     .into(),
             );
 
-            entries.push(Text::new(format!("Gyroscope: {:?}", vehicle.gyroscope)).into());
+            entries.push(Text::new(format!("Gyros: {:?}", vehicle.gyroscope)).into());
+            entries.push(Text::new(format!("Accel: {:?}", vehicle.accelerometer)).into());
         }
 
-        Column::from_vec(entries).into()
+        iced::widget::container(Column::from_vec(entries))
+            .style(iced::widget::container::bordered_box)
+            .padding(10.0)
+            .into()
     }
 
     fn view_param_list_scrollable(&self) -> Element<'_, Message> {
+        if self.vehicles.is_empty() {
+            return space::Space::new().into();
+        }
+
         iced::widget::container(
             iced::widget::scrollable(self.view_param_list())
                 .style(iced::widget::scrollable::default)
@@ -532,14 +913,34 @@ impl Application {
     fn view_param_list(&self) -> Element<'_, Message> {
         let mut entries = Vec::new();
 
-        let reload_button = Button::new("Reload parameters")
-            .on_press(Message::ReloadParameters)
-            .into();
-
-        entries.push(reload_button);
-
         for (identity, vehicle) in &self.vehicles {
-            let identity = identity.clone();
+            let reload_button = Button::new("Reload parameters")
+                .on_press(Message::ParamListReload(*identity))
+                .into();
+
+            let upload_button = Button::new("Upload changed parameters")
+                .on_press(Message::ParamUploadAll(*identity))
+                .into();
+
+            let save_button = Button::new("Save parameters to file")
+                .on_press_with(|| Message::ParamSaveDialog(vehicle.params.clone()))
+                .into();
+
+            let load_button = Button::new("Load parameters from file")
+                .on_press(Message::ParamLoadDialog(*identity))
+                .into();
+
+            let filter_field = TextInput::new("Filter parameters", &self.parameter_filter)
+                .on_input(Message::ParamFilterBuf)
+                .into();
+
+            entries.push(reload_button);
+            entries.push(upload_button);
+            entries.push(save_button);
+            entries.push(load_button);
+            entries.push(filter_field);
+
+            let identity = *identity;
 
             let got = vehicle.params.loading_state.has_loaded.len();
             let exp = vehicle.params.loading_state.expected_count;
@@ -559,7 +960,9 @@ impl Application {
 
             let mut section = None;
 
-            for (ident, param) in &vehicle.params.map {
+            let parameters = self.parameter_filtered.as_ref().unwrap_or(&vehicle.params);
+
+            for (ident, param) in &parameters.map {
                 let type_name = value_type_name(param.value);
 
                 let this_section = ident.as_str().split_once('.').map(|(sec, _)| sec);
@@ -586,41 +989,54 @@ impl Application {
                     None => value_as_string(param.value),
                 };
 
-                let is_modified = param.changed.is_some_and(|new| new != param.value);
-
                 let ident_owned = ident.clone();
                 let text_input = iced::widget::TextInput::new("Write value", &value_string)
                     .on_input(move |string| {
-                        Message::Param(ParamMessage::EditParamBuffer(
-                            identity,
-                            ident_owned.clone(),
-                            string,
-                        ))
+                        Message::ParamBufferEdit(identity, ident_owned.clone(), string)
                     })
                     .style(move |theme, status| {
                         let mut style = iced::widget::text_input::default(theme, status);
-                        if is_modified {
-                            style.background =
-                                iced::Background::Color(Color::from_rgb8(30, 120, 60));
+                        match param.state {
+                            ParamState::Unchanged => {}
+                            ParamState::Changed(..) => {
+                                style.background =
+                                    iced::Background::Color(Color::from_rgb8(30, 120, 60));
+                            }
+                            ParamState::Uploading(..) => {
+                                style.background =
+                                    iced::Background::Color(Color::from_rgb8(180, 150, 0));
+                            }
                         }
                         style
                     });
 
+                // let text_input = if !matches!(param.state, ParamState::Unchanged) {
+                //     let tooltip = container(Text::new(format!("Was: {:?}", param.value))).style(shaded_bordered_box).padding(10.0);
+                //     let content = iced::widget::tooltip(text_input, tooltip, iced::widget::tooltip::Position::Left);
+                //     container(content)
+                // } else {
+                //     container(text_input)
+                // };
+
                 let ident_owned = ident.clone();
                 let restore_button = Button::new("Restore")
-                    .on_press_maybe(param.changed.map(|_| {
-                        Message::Param(ParamMessage::ResetParamValue(identity, ident_owned.clone()))
-                    }))
+                    .on_press_maybe(match param.state {
+                        ParamState::Changed(..) => {
+                            Some(Message::ParamValueReset(identity, ident_owned.clone()))
+                        }
+                        _ => None,
+                    })
                     .width(80.0);
 
                 let commit_button = Button::new("Upload")
-                    .on_press_maybe(param.changed.map(|value| {
-                        Message::Param(ParamMessage::UploadParamValue(
+                    .on_press_maybe(match param.state {
+                        ParamState::Changed(value) => Some(Message::ParamValueUpload(
                             identity,
                             ident_owned.clone(),
                             value,
-                        ))
-                    }))
+                        )),
+                        _ => None,
+                    })
                     .width(80.0);
 
                 let row = row![
@@ -645,5 +1061,25 @@ impl Application {
         }
 
         Column::from_vec(entries).spacing(5.0).padding(10.0).into()
+    }
+}
+
+pub fn shaded_bordered_box(theme: &iced::Theme) -> container::Style {
+    let palette = theme.palette();
+
+    container::Style {
+        background: Some(palette.background.weaker.color.into()),
+        text_color: Some(palette.background.weakest.text),
+        border: iced::Border {
+            width: 1.0,
+            radius: 5.0.into(),
+            color: palette.background.weak.color,
+        },
+        shadow: iced::Shadow {
+            color: iced::Color::BLACK.scale_alpha(0.5),
+            offset: iced::Vector::new(0.0, 1.0),
+            blur_radius: 6.0,
+        },
+        ..container::Style::default()
     }
 }

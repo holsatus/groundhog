@@ -17,7 +17,7 @@ use mavio::{Frame, prelude::Versionless, protocol::FrameBuilder};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::{connection::mav_tokio::AsyncReceiver, parameters::MavlinkId};
+use crate::{ConnMessage, connection::mav_tokio::AsyncReceiver, parameters::MavlinkId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LinkId(usize);
@@ -34,7 +34,7 @@ pub const BAUDRATES: &[u32] = &[
     921_600, 1_000_000,
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LinkConfig {
     Tcp { sock_addr: SocketAddrV4 },
     Udp { sock_addr: SocketAddrV4 },
@@ -70,33 +70,28 @@ impl LinkConfig {
                     let (rcv, snd) = stream.into_split();
                     Connection::spawn(rcv, snd)
                 }
-                Err(error) => Task::done(crate::Message::Conn(crate::ConnMessage::ConnectFailed(
-                    Arc::new(error),
-                ))),
+                Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
             }),
-            LinkConfig::Udp { .. } => {
-                let error =
-                    std::io::Error::other("UDP connection type has not been implemented yet");
-                Task::done(crate::Message::Conn(crate::ConnMessage::ConnectFailed(
-                    Arc::new(error),
-                )))
-            }
+            LinkConfig::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
+                .then(|result| match result {
+                    Ok(socket) => {
+                        let udp = udp_wrap::UdpReaderWriter::new(socket);
+                        Connection::spawn(udp.clone(), udp)
+                    }
+                    Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
+                }),
             LinkConfig::Serial { port, baud } => {
                 let port = match serial2_tokio::SerialPort::open(&port, baud) {
-                    Err(error) => {
-                        return Task::done(crate::Message::Conn(
-                            crate::ConnMessage::ConnectFailed(Arc::new(error)),
-                        ));
-                    }
                     Ok(port) => port,
+                    Err(error) => {
+                        return Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into());
+                    }
                 };
 
                 let rcv = match port.try_clone() {
                     Ok(rcv) => rcv,
                     Err(error) => {
-                        return Task::done(crate::Message::Conn(
-                            crate::ConnMessage::ConnectFailed(Arc::new(error)),
-                        ));
+                        return Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into());
                     }
                 };
 
@@ -187,7 +182,7 @@ pub enum LinkVariant {
 }
 
 impl LinkVariant {
-    pub fn to_default_builder(&self) -> LinkBuilder {
+    pub fn to_default_builder(self) -> LinkBuilder {
         match self {
             LinkVariant::Tcp => LinkBuilder::default_tcp(),
             LinkVariant::Udp => LinkBuilder::default_udp(),
@@ -200,14 +195,13 @@ impl LinkVariant {
     }
 }
 
-impl ToString for LinkVariant {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for LinkVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkVariant::Tcp => "TCP",
-            LinkVariant::Udp => "UDP",
-            LinkVariant::Serial => "Serial",
+            LinkVariant::Tcp => f.write_str("TCP"),
+            LinkVariant::Udp => f.write_str("UDP"),
+            LinkVariant::Serial => f.write_str("Serial"),
         }
-        .into()
     }
 }
 
@@ -249,7 +243,7 @@ impl ConnectionHandle {
         }
     }
 
-    pub fn send_message(&self, message: &dyn mavio::Message) {
+    pub fn send_message_sync(&self, message: &dyn mavio::Message) {
         let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
 
         let frame = FrameBuilder::new()
@@ -267,15 +261,38 @@ impl ConnectionHandle {
                 log::error!("Mavlink channel is full, blocking on send");
                 if self.send_state.send_frame.blocking_send(frame).is_err() {
                     log::error!("Failed to send MAVLink frame because connection queue closed");
-                    return;
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 log::error!("Failed to send MAVLink frame because connection queue closed");
-                return;
             }
             _ => (),
         }
+    }
+
+    pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
+        let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
+
+        let frame = FrameBuilder::new()
+            .system_id(self.mav_id.system)
+            .component_id(self.mav_id.component)
+            .version(mavio::prelude::V2)
+            .sequence(sequence)
+            .message(&message)
+            .unwrap()
+            .build()
+            .into_versionless();
+
+        if self.send_state.send_frame.send(frame).await.is_err() {
+            log::error!("Failed to send MAVLink frame because connection queue closed");
+            false
+        } else {
+            true
+        }
+    }
+
+    pub fn close(self) {
+        self.send_state.cancellation_token.cancel();
     }
 }
 
@@ -297,12 +314,12 @@ impl Connection {
 
         let link_id = LinkId::new_unique();
 
-        struct MavReceiverStream {
+        struct ReceiverStream {
             receiver: AsyncReceiver,
             cancellation_token: CancellationToken,
         }
 
-        impl Stream for MavReceiverStream {
+        impl Stream for ReceiverStream {
             type Item = Result<Frame<Versionless>, mavio::Error>;
 
             fn poll_next(
@@ -332,13 +349,13 @@ impl Connection {
         }
 
         let recv_task = Task::stream(
-            MavReceiverStream {
+            ReceiverStream {
                 receiver: mav_receiver,
                 cancellation_token: cancellation_token.clone(),
             }
             .map(move |result| match result {
-                Ok(frame) => crate::Message::Conn(crate::ConnMessage::RecvFrame(frame, link_id)),
-                Err(error) => crate::Message::Conn(crate::ConnMessage::RecvError(error, link_id)),
+                Ok(frame) => crate::Message::Conn(ConnMessage::RecvFrame(frame, link_id)),
+                Err(error) => crate::Message::Conn(ConnMessage::RecvError(error, link_id)),
             }),
         );
 
@@ -349,6 +366,7 @@ impl Connection {
 
         tokio::spawn(connection.run());
 
+        // TODO: Make configurable
         let mav_id = MavlinkId {
             system: 255,
             component: 1,
@@ -357,7 +375,7 @@ impl Connection {
         let connection_handle =
             ConnectionHandle::new(mav_id, send_frame, cancellation_token.clone());
 
-        Task::done(crate::Message::Conn(crate::ConnMessage::ConnectSuccess(
+        Task::done(crate::Message::Conn(ConnMessage::ConnectSuccess(
             connection_handle,
         )))
         .chain(recv_task)
@@ -449,5 +467,80 @@ mod mav_tokio {
     /// Construct a new [`AsyncSender`]
     pub fn new_async_sender<W: DynAsyncWriter + 'static>(writer: W) -> AsyncSender {
         mavio::io::AsyncSender::new(BoxedWriter(Box::new(writer)))
+    }
+}
+
+mod udp_wrap {
+    use std::io::Error;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::net::UdpSocket;
+
+    /// A wrapper around [`UdpSocket`] that implements [`AsyncRead`] and [`AsyncWrite`].
+    #[derive(Clone)]
+    pub struct UdpReaderWriter {
+        socket: Arc<UdpSocket>,
+    }
+
+    impl UdpReaderWriter {
+        /// Creates a new UDP reader/writer.
+        pub fn new(socket: UdpSocket) -> Self {
+            Self {
+                socket: Arc::new(socket),
+            }
+        }
+    }
+
+    impl AsyncRead for UdpReaderWriter {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            match self.socket.poll_recv_ready(cx) {
+                Poll::Ready(Ok(())) => match self.socket.try_recv_buf(buf) {
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                    Err(e) => Poll::Ready(Err(e)),
+                },
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl AsyncWrite for UdpReaderWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, Error>> {
+            match self.socket.poll_send_ready(cx) {
+                Poll::Ready(Ok(())) => match self.socket.try_send(buf) {
+                    Ok(bytes_sent) => Poll::Ready(Ok(bytes_sent)),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                    Err(e) => Poll::Ready(Err(e)),
+                },
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            Poll::Ready(Ok(()))
+        }
     }
 }
