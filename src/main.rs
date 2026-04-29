@@ -6,7 +6,7 @@ use std::{
     error::Error,
     io::Write,
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, atomic::AtomicU16},
     time::{Duration, Instant},
 };
 
@@ -46,43 +46,42 @@ mod vehicle;
 static PROJECT_DIRS: LazyLock<ProjectDirs> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
 
-fn initialize_config() -> Configuration {
+fn initialize_config() -> Result<Configuration, BoxError> {
     let project_path = PROJECT_DIRS.config_dir();
     let config_path = project_path.join("config.ron");
 
-    log::info!("Using configuration at: {config_path:?}");
-
-    match std::fs::read_to_string(&config_path) {
+    Ok(match std::fs::read_to_string(&config_path) {
         Ok(contents) => {
-            log::info!("Loaded configuration from file");
-            ron::from_str::<'_, Configuration>(&contents).unwrap()
+            log::debug!("Loaded configuration file from: {config_path:?}");
+            ron::from_str::<'_, Configuration>(&contents)?
         }
         Err(_) => {
             std::fs::create_dir_all(project_path).unwrap();
-            let mut file = std::fs::File::create_new(&config_path).unwrap();
-            log::info!("Creating new configuration file");
+            let mut file = std::fs::File::create_new(&config_path)?;
+            log::debug!("Creating configuration file at: {config_path:?}");
 
             let config = Configuration::default();
-            let serialized =
-                ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new()).unwrap();
+            let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new())?;
 
-            file.write_all(serialized.as_bytes()).unwrap();
+            file.write_all(serialized.as_bytes())?;
 
             config
         }
-    }
+    })
 }
 
-fn save_config(config: &Configuration) {
+fn save_config(config: &Configuration) -> Result<(), BoxError> {
     let project_path = PROJECT_DIRS.config_dir();
     let config_path = project_path.join("config.ron");
 
     std::fs::create_dir_all(project_path).unwrap();
-    let mut file = std::fs::File::create(&config_path).unwrap();
+    let mut file = std::fs::File::create(&config_path)?;
 
-    let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new()).unwrap();
+    let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new())?;
 
-    file.write_all(serialized.as_bytes()).unwrap();
+    file.write_all(serialized.as_bytes())?;
+
+    Ok(())
 }
 
 fn main() {
@@ -92,11 +91,14 @@ fn main() {
         .init();
 
     iced::application(Application::boot, Application::update, Application::view)
+        .title("Holsatus Groundhog")
+        .scale_factor(|_| 1.0)
         .run()
         .unwrap();
 }
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
+type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct Configuration {
@@ -120,6 +122,29 @@ struct Application {
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
 }
+
+#[derive(Debug)]
+struct AtomicMavlinkId(AtomicU16);
+
+impl AtomicMavlinkId {
+    pub const fn new(sys: u8, com: u8) -> Self {
+        Self(AtomicU16::new(u16::from_le_bytes([sys, com])))
+    }
+
+    pub fn load(&self) -> MavlinkId {
+        let inner = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        let [system, component] = inner.to_le_bytes();
+        MavlinkId { system, component }
+    }
+
+    #[allow(unused)] // TODO
+    pub fn store(&self, mav_id: MavlinkId) {
+        let inner = u16::from_le_bytes([mav_id.system, mav_id.component]);
+        self.0.store(inner, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+static GCS_MAVLINK_ID: AtomicMavlinkId = AtomicMavlinkId::new(255, 1);
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -182,7 +207,10 @@ impl From<ConnMessage> for Message {
 
 impl Application {
     fn boot() -> Self {
-        let config = initialize_config();
+        let config = initialize_config().unwrap_or_else(|e| {
+            log::error!("Unable to initialize configuration file: {}", e);
+            Configuration::default()
+        });
 
         let link_builder = config
             .link_config
@@ -217,7 +245,9 @@ impl Application {
         match message {
             Message::Noop => (),
             Message::SaveConfigurationToFile => {
-                save_config(&self.configuration);
+                if let Err(error) = save_config(&self.configuration) {
+                    log::error!("Unable to save configuration file: {}", error);
+                }
             }
             Message::MapProjector(projector) => {
                 self.viewpoint = projector.viewpoint;
@@ -415,7 +445,8 @@ impl Application {
                 }));
             }
             Message::ParamSaveToFile(save_path, parameters) => {
-                log::info!("Saving to file: {save_path:?}");
+                log::info!("Saving parameters to file: {save_path:?}");
+
                 let result = parameters::save_parameters_to_ini(save_path.clone(), parameters);
                 if let Err(error) = result {
                     log::error!("Error saving to file: {}", error);
@@ -433,8 +464,9 @@ impl Application {
                 }));
             }
             Message::ParamLoadFromFile(load_path, mav_id) => {
-                let (_, vehicle) = self.vehicles.iter_mut().find(|v| *v.0 == mav_id)?;
+                log::info!("Loading parameters from file: {load_path:?}");
 
+                let vehicle = self.vehicles.get_mut(&mav_id)?;
                 let loaded_params = match parameters::load_parameters_from_ini(load_path.clone()) {
                     Ok(loaded_params) => loaded_params,
                     Err(error) => {
