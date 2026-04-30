@@ -17,7 +17,7 @@ use mavio::{Frame, prelude::Versionless, protocol::FrameBuilder};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ConnMessage, connection::mav_tokio::AsyncReceiver, parameters::MavlinkId};
+use crate::{ConnMessage, connection::mav_tokio::AsyncReceiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LinkId(usize);
@@ -231,7 +231,6 @@ struct ConnectionSendRunner {
 
 #[derive(Debug, Clone)]
 pub struct WeakConnectionHandle {
-    mav_id: MavlinkId,
     send_state: std::sync::Weak<ConnectionHandleState>,
 }
 
@@ -240,7 +239,6 @@ impl WeakConnectionHandle {
         self.send_state
             .upgrade()
             .map(|send_state| ConnectionHandle {
-                mav_id: self.mav_id.clone(),
                 send_state,
             })
     }
@@ -264,25 +262,21 @@ impl WeakConnectionHandle {
 
 #[derive(Debug, Clone)]
 pub struct ConnectionHandle {
-    mav_id: MavlinkId,
     send_state: Arc<ConnectionHandleState>,
 }
 
 impl ConnectionHandle {
     pub fn downgrade(&self) -> WeakConnectionHandle {
         WeakConnectionHandle {
-            mav_id: self.mav_id.clone(),
             send_state: Arc::downgrade(&self.send_state),
         }
     }
 
     pub fn new(
-        mav_id: MavlinkId,
         sender: Sender<Frame<Versionless>>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
-            mav_id,
             send_state: Arc::new(ConnectionHandleState {
                 sequence: AtomicU8::new(0),
                 send_frame: sender,
@@ -294,9 +288,11 @@ impl ConnectionHandle {
     async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
         let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
 
+        let mav_id = crate::GCS_MAVLINK_ID.load();
+
         let frame = FrameBuilder::new()
-            .system_id(self.mav_id.system)
-            .component_id(self.mav_id.component)
+            .system_id(mav_id.system)
+            .component_id(mav_id.component)
             .version(mavio::prelude::V2)
             .sequence(sequence)
             .message(&message)
@@ -385,14 +381,7 @@ impl ConnectionSendRunner {
 
         tokio::spawn(connection.run());
 
-        // TODO: Make configurable
-        let mav_id = MavlinkId {
-            system: 255,
-            component: 1,
-        };
-
-        let connection_handle =
-            ConnectionHandle::new(mav_id, send_frame, cancellation_token.clone());
+        let connection_handle = ConnectionHandle::new(send_frame, cancellation_token.clone());
 
         Task::done(crate::Message::Conn(ConnMessage::ConnectSuccess(
             connection_handle,
