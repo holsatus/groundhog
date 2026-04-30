@@ -252,7 +252,7 @@ impl Application {
             }
             Message::Conn(message) => return Some(self.update_conn(message)),
             Message::ParamListReload(mav_id) => {
-                let connection = self.connection.clone()?;
+                let connection = self.connection.as_ref()?.downgrade();
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
 
                 let get_capabilities = vehicle.capabilities.is_none();
@@ -285,7 +285,7 @@ impl Application {
                 }));
             }
             Message::ParamUploadAll(mav_id) => {
-                let connection = self.connection.as_ref()?;
+                let connection = self.connection.as_ref()?.downgrade();
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
 
                 let mut timeout_tasks = Vec::new();
@@ -330,7 +330,7 @@ impl Application {
                         param_type,
                     };
 
-                    connection.send_message_sync(&param_set);
+                    connection.spawn_send_message(param_set);
 
                     timeout_tasks.push(task);
                 }
@@ -359,7 +359,7 @@ impl Application {
                 param.state = ParamState::Unchanged;
             }
             Message::ParamValueUpload(mav_id, ident, value) => {
-                let connection = self.connection.as_ref()?;
+                let connection = self.connection.as_ref()?.downgrade();
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
                 let param = vehicle.params.map.get_mut(&ident)?;
 
@@ -391,7 +391,7 @@ impl Application {
                     param_type,
                 };
 
-                connection.send_message_sync(&param_set);
+                connection.spawn_send_message(param_set);
 
                 return Some(timeout_task);
             }
@@ -672,11 +672,12 @@ impl Application {
             }
             ConnMessage::ConnectSuccess(connection) => {
                 log::info!("Connection established");
-                self.connection = Some(connection.clone());
+                let weak_connection = connection.downgrade();
+                self.connection = Some(connection);
                 tokio::spawn(async move {
                     loop {
                         let heartbeat = Heartbeat::default();
-                        if !connection.send_message(heartbeat).await {
+                        if !weak_connection.send_message(heartbeat).await {
                             return;
                         }
                         tokio::time::sleep(Duration::from_secs(1)).await;
