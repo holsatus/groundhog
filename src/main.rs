@@ -42,47 +42,8 @@ use crate::{
 
 mod connection;
 mod vehicle;
+mod config;
 
-static PROJECT_DIRS: LazyLock<ProjectDirs> =
-    LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
-
-fn initialize_config() -> Result<Configuration, BoxError> {
-    let project_path = PROJECT_DIRS.config_dir();
-    let config_path = project_path.join("config.ron");
-
-    Ok(match std::fs::read_to_string(&config_path) {
-        Ok(contents) => {
-            log::debug!("Loaded configuration file from: {config_path:?}");
-            ron::from_str::<'_, Configuration>(&contents)?
-        }
-        Err(_) => {
-            std::fs::create_dir_all(project_path)?;
-            let mut file = std::fs::File::create_new(&config_path)?;
-            log::debug!("Creating configuration file at: {config_path:?}");
-
-            let config = Configuration::default();
-            let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new())?;
-
-            file.write_all(serialized.as_bytes())?;
-
-            config
-        }
-    })
-}
-
-fn save_config(config: &Configuration) -> Result<(), BoxError> {
-    let project_path = PROJECT_DIRS.config_dir();
-    let config_path = project_path.join("config.ron");
-
-    std::fs::create_dir_all(project_path)?;
-    let mut file = std::fs::File::create(&config_path)?;
-
-    let serialized = ron::ser::to_string_pretty(&config, ron::ser::PrettyConfig::new())?;
-
-    file.write_all(serialized.as_bytes())?;
-
-    Ok(())
-}
 
 fn main() {
     env_logger::Builder::new()
@@ -100,15 +61,6 @@ fn main() {
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
 type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
-#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
-struct Configuration {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    link_config: Option<LinkConfig>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    file_picker_path: Option<PathBuf>,
-}
-
 struct Application {
     viewpoint: Viewpoint,
     projector: Option<Projector>,
@@ -116,7 +68,7 @@ struct Application {
     link_builder: LinkBuilder,
     link_config: Option<LinkConfig>,
     connection: Option<ConnectionHandle>,
-    configuration: Configuration,
+    configuration: config::Configuration,
     vehicles: BTreeMap<MavlinkId, Vehicle>,
     parameter_filter: String,
     parameter_filtered: Option<Parameters>,
@@ -155,6 +107,7 @@ enum Message {
     Conn(ConnMessage),
 
     SaveConfigurationToFile,
+    UpdateAndSaveConfiguration(config::Configuration),
 
     SetPrimaryVehicle(MavlinkId),
 
@@ -207,9 +160,9 @@ impl From<ConnMessage> for Message {
 
 impl Application {
     fn boot() -> Self {
-        let config = initialize_config().unwrap_or_else(|e| {
+        let config = config::Configuration::initialize().unwrap_or_else(|e| {
             log::error!("Unable to initialize configuration file: {}", e);
-            Configuration::default()
+            config::Configuration::default()
         });
 
         let link_builder = config
@@ -245,9 +198,13 @@ impl Application {
         match message {
             Message::Noop => (),
             Message::SaveConfigurationToFile => {
-                if let Err(error) = save_config(&self.configuration) {
+                if let Err(error) = self.configuration.write_to_file() {
                     log::error!("Unable to save configuration file: {}", error);
                 }
+            }
+            Message::UpdateAndSaveConfiguration(config) => {
+                self.configuration = config;
+                return Some(Task::done(Message::SaveConfigurationToFile));
             }
             Message::MapProjector(projector) => {
                 self.viewpoint = projector.viewpoint;
