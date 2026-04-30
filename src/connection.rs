@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     task::Poll,
 };
@@ -68,18 +68,21 @@ impl LinkConfig {
             .then(|result| match result {
                 Ok(stream) => {
                     let (rcv, snd) = stream.into_split();
-                    Connection::spawn(rcv, snd)
+                    ConnectionSendRunner::spawn(rcv, snd)
                 }
                 Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
             }),
             LinkConfig::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
-                .then(|result| match result {
-                    Ok(socket) => {
-                        let udp = udp_wrap::UdpReaderWriter::new(socket);
-                        Connection::spawn(udp.clone(), udp)
-                    }
-                    Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
-                }),
+            .then(|result| match result {
+                Ok(socket) => {
+                    let connected = AtomicBool::new(false);
+                    let socket = std::sync::Arc::new((socket, connected));
+                    let writer = udp_wrap::UdpWriter::new(socket.clone());
+                    let reader = udp_wrap::UdpReader::new(socket);
+                    ConnectionSendRunner::spawn(reader, writer)
+                }
+                Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
+            }),
             LinkConfig::Serial { port, baud } => {
                 let port = match serial2_tokio::SerialPort::open(&port, baud) {
                     Ok(port) => port,
@@ -96,7 +99,7 @@ impl LinkConfig {
                 };
 
                 let snd = port;
-                Connection::spawn(rcv, snd)
+                ConnectionSendRunner::spawn(rcv, snd)
             }
         }
     }
@@ -209,27 +212,72 @@ impl std::fmt::Display for LinkVariant {
 ///
 /// Dropping this handle will release the associated system resources.
 #[derive(Debug)]
-struct ConnectionSendState {
+struct ConnectionHandleState {
     sequence: AtomicU8,
     send_frame: Sender<Frame<Versionless>>,
     cancellation_token: CancellationToken,
 }
 
-impl Drop for ConnectionSendState {
+impl Drop for ConnectionHandleState {
     fn drop(&mut self) {
         self.cancellation_token.cancel();
     }
 }
 
+struct ConnectionSendRunner {
+    mav_sender: mav_tokio::AsyncSender,
+    recv_frame: Receiver<Frame<Versionless>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WeakConnectionHandle {
+    send_state: std::sync::Weak<ConnectionHandleState>,
+}
+
+impl WeakConnectionHandle {
+    pub fn upgrade(&self) -> Option<ConnectionHandle> {
+        self.send_state
+            .upgrade()
+            .map(|send_state| ConnectionHandle {
+                send_state,
+            })
+    }
+
+    pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
+        if let Some(handle) = self.upgrade() {
+            handle.send_message(message).await
+        } else {
+            false
+        }
+    }
+
+    /// Send the message on this connection if it is still live.
+    pub fn spawn_send_message<M: mavio::Message + Send + 'static>(&self, message: M) {
+        let connection = self.clone();
+        tokio::spawn(async move {
+            connection.send_message(message).await;
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionHandle {
-    send_state: Arc<ConnectionSendState>,
+    send_state: Arc<ConnectionHandleState>,
 }
 
 impl ConnectionHandle {
-    pub fn new(sender: Sender<Frame<Versionless>>, cancellation_token: CancellationToken) -> Self {
+    pub fn downgrade(&self) -> WeakConnectionHandle {
+        WeakConnectionHandle {
+            send_state: Arc::downgrade(&self.send_state),
+        }
+    }
+
+    pub fn new(
+        sender: Sender<Frame<Versionless>>,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
-            send_state: Arc::new(ConnectionSendState {
+            send_state: Arc::new(ConnectionHandleState {
                 sequence: AtomicU8::new(0),
                 send_frame: sender,
                 cancellation_token,
@@ -237,36 +285,7 @@ impl ConnectionHandle {
         }
     }
 
-    pub fn send_message_sync(&self, message: &dyn mavio::Message) {
-        let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
-
-        let mav_id = crate::GCS_MAVLINK_ID.load();
-
-        let frame = FrameBuilder::new()
-            .system_id(mav_id.system)
-            .component_id(mav_id.component)
-            .version(mavio::prelude::V2)
-            .sequence(sequence)
-            .message(message)
-            .unwrap()
-            .build()
-            .into_versionless();
-
-        match self.send_state.send_frame.try_send(frame) {
-            Err(mpsc::error::TrySendError::Full(frame)) => {
-                log::error!("Mavlink channel is full, blocking on send");
-                if self.send_state.send_frame.blocking_send(frame).is_err() {
-                    log::error!("Failed to send MAVLink frame because connection queue closed");
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                log::error!("Failed to send MAVLink frame because connection queue closed");
-            }
-            _ => (),
-        }
-    }
-
-    pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
+    async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
         let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
 
         let mav_id = crate::GCS_MAVLINK_ID.load();
@@ -294,12 +313,7 @@ impl ConnectionHandle {
     }
 }
 
-struct Connection {
-    mav_sender: mav_tokio::AsyncSender,
-    recv_frame: Receiver<Frame<Versionless>>,
-}
-
-impl Connection {
+impl ConnectionSendRunner {
     fn spawn<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'static>(
         rcv: R,
         snd: W,
@@ -351,13 +365,16 @@ impl Connection {
                 receiver: mav_receiver,
                 cancellation_token: cancellation_token.clone(),
             }
-            .map(move |result| match result {
-                Ok(frame) => crate::Message::Conn(ConnMessage::RecvFrame(frame, link_id)),
-                Err(error) => crate::Message::Conn(ConnMessage::RecvError(error, link_id)),
+            .map(move |result| {
+                match result {
+                    Ok(frame) => ConnMessage::RecvFrame(frame, link_id),
+                    Err(error) => ConnMessage::RecvError(error, link_id),
+                }
+                .into()
             }),
         );
 
-        let connection = Connection {
+        let connection = ConnectionSendRunner {
             mav_sender,
             recv_frame,
         };
@@ -376,7 +393,6 @@ impl Connection {
         while let Some(frame_out) = self.recv_frame.recv().await {
             if let Err(err) = self.mav_sender.send(&frame_out).await {
                 log::error!("Failed to send MAVLink frame to transport: {err}");
-                return;
             }
         }
     }
@@ -465,63 +481,119 @@ mod udp_wrap {
     use std::io::Error;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::net::UdpSocket;
 
-    /// A wrapper around [`UdpSocket`] that implements [`AsyncRead`] and [`AsyncWrite`].
-    #[derive(Clone)]
-    pub struct UdpReaderWriter {
-        socket: Arc<UdpSocket>,
+    pub struct UdpReader {
+        socket: Arc<(UdpSocket, AtomicBool)>,
+        buffer: Box<[u8; 2048]>,
+        head: usize,
+        tail: usize,
     }
 
-    impl UdpReaderWriter {
-        /// Creates a new UDP reader/writer.
-        pub fn new(socket: UdpSocket) -> Self {
+    impl UdpReader {
+        pub fn new(socket: Arc<(UdpSocket, AtomicBool)>) -> Self {
             Self {
-                socket: Arc::new(socket),
+                socket,
+                buffer: Box::new([0u8; 2048]),
+                head: 0,
+                tail: 0,
             }
         }
     }
 
-    impl AsyncRead for UdpReaderWriter {
+    impl AsyncRead for UdpReader {
         fn poll_read(
-            self: Pin<&mut Self>,
+            mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            match self.socket.poll_recv_ready(cx) {
-                Poll::Ready(Ok(())) => match self.socket.try_recv_buf(buf) {
-                    Ok(_) => Poll::Ready(Ok(())),
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
+            if self.tail < self.head {
+                // Fill the ReadBuf from the internal buffer storage
+                let to_copy = std::cmp::min(buf.remaining(), self.head - self.tail);
+                buf.put_slice(&self.buffer[self.tail..self.tail + to_copy]);
+                self.tail += to_copy;
+                return Poll::Ready(Ok(()));
+            }
+
+            let socket = self.socket.clone();
+
+            let mut read_buf = ReadBuf::new(self.buffer.as_mut());
+            
+            match socket.0.poll_recv_from(cx, &mut read_buf) {
+                Poll::Ready(Ok(from)) => {
+
+                    // Try to connect to source if we arent already connected
+                    if !socket.1.load(Ordering::Relaxed) {
+                        let pinned = core::pin::pin!(socket.0.connect(from));
+                        if let Poll::Ready(Ok(())) = pinned.poll(cx) {
+                            socket.1.store(true, Ordering::Relaxed);
+                        }
                     }
-                    Err(e) => Poll::Ready(Err(e)),
-                },
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+
+                    let filled = read_buf.filled().len();
+
+                    drop(read_buf);
+
+                    self.tail = 0;
+                    self.head = filled;
+
+                    // Fill the ReadBuf from the internal buffer storage
+                    let to_copy = std::cmp::min(buf.remaining(), self.head - self.tail);
+                    buf.put_slice(&self.buffer[self.tail..self.tail + to_copy]);
+                    self.tail += to_copy;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => {
+                    cx.waker().wake_by_ref();
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Err(e))
+                    }
+                }
                 Poll::Pending => Poll::Pending,
             }
         }
     }
 
-    impl AsyncWrite for UdpReaderWriter {
+    #[derive(Clone)]
+    pub struct UdpWriter {
+        socket: Arc<(UdpSocket, AtomicBool)>,
+    }
+
+    impl UdpWriter {
+        pub fn new(socket: Arc<(UdpSocket, AtomicBool)>) -> Self {
+            Self { socket }
+        }
+    }
+
+    impl AsyncWrite for UdpWriter {
         fn poll_write(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<Result<usize, Error>> {
-            match self.socket.poll_send_ready(cx) {
-                Poll::Ready(Ok(())) => match self.socket.try_send(buf) {
-                    Ok(bytes_sent) => Poll::Ready(Ok(bytes_sent)),
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        cx.waker().wake_by_ref();
+
+            // Pretend to write successfully if we arent connected yet,
+            // since the reader will connect on the first packet received.
+            if !self.socket.1.load(Ordering::Relaxed) {
+                return Poll::Ready(Ok(buf.len()))
+            }
+
+            match self.socket.0.poll_send(cx, buf) {
+                Poll::Ready(Ok(bytes_sent)) => Poll::Ready(Ok(bytes_sent)),
+                Poll::Ready(Err(e)) => {
+                    cx.waker().wake_by_ref();
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
                         Poll::Pending
+                    } else {
+                        Poll::Ready(Err(e))
                     }
-                    Err(e) => Poll::Ready(Err(e)),
                 },
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 Poll::Pending => Poll::Pending,
             }
         }
