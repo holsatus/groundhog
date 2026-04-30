@@ -4,13 +4,11 @@ use std::{
         btree_map::{self},
     },
     error::Error,
-    io::Write,
     path::PathBuf,
-    sync::{Arc, LazyLock, atomic::AtomicU16},
+    sync::{Arc, atomic::AtomicU16},
     time::{Duration, Instant},
 };
 
-use directories::ProjectDirs;
 use iced::{
     Alignment, Color, Element, Font, Length, Task,
     alignment::Vertical,
@@ -107,6 +105,8 @@ enum Message {
     Conn(ConnMessage),
 
     SaveConfigurationToFile,
+
+    #[allow(unused)] // TODO
     UpdateAndSaveConfiguration(config::Configuration),
 
     SetPrimaryVehicle(MavlinkId),
@@ -901,7 +901,7 @@ impl Application {
     }
 
     fn view_param_list(&self) -> Element<'_, Message> {
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(128);
 
         for (identity, vehicle) in &self.vehicles {
             let reload_button = Button::new("Reload parameters")

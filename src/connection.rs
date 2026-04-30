@@ -534,12 +534,8 @@ mod udp_wrap {
                         }
                     }
 
-                    let filled = read_buf.filled().len();
-
-                    drop(read_buf);
-
+                    self.head = read_buf.filled().len();
                     self.tail = 0;
-                    self.head = filled;
 
                     // Fill the ReadBuf from the internal buffer storage
                     let to_copy = std::cmp::min(buf.remaining(), self.head - self.tail);
