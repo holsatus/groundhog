@@ -38,10 +38,9 @@ use crate::{
     vehicle::Vehicle,
 };
 
+mod config;
 mod connection;
 mod vehicle;
-mod config;
-
 
 fn main() {
     env_logger::Builder::new()
@@ -498,10 +497,15 @@ impl Application {
                     component: frame.component_id(),
                 };
 
+                // This will be the first vehicle, set it as the primary
+                if self.vehicles.is_empty() {
+                    self.primary_vehicle = Some(mav_id);
+                }
+
                 let vehicle = match self.vehicles.entry(mav_id) {
                     btree_map::Entry::Vacant(vacant_entry) => {
                         log::info!("New vehicle detected: {mav_id:?}");
-                        vacant_entry.insert(Vehicle::new())
+                        vacant_entry.insert(Vehicle::new(mav_id))
                     }
                     btree_map::Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
                 };
@@ -514,31 +518,33 @@ impl Application {
                         vehicle.last_heartbeat = Some((time_now, msg))
                     }
                     mavio::DefaultDialect::AutopilotVersion(msg) => {
-                        if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                            if vehicle.capabilities.is_none() {
-                                log::debug!(
-                                    "Received capabilities for {:?}: {:?}",
-                                    mav_id,
-                                    msg.capabilities
-                                )
-                            }
-                            vehicle.capabilities = Some(msg.capabilities);
+                        vehicle.set_mav_capability(msg.capabilities);
+                    }
+                    mavio::DefaultDialect::ComponentInformationBasic(msg) => {
+                        if let Ok(model_name) = str::from_utf8(&msg.model_name)
+                            && !model_name.is_empty()
+                        {
+                            vehicle.model_name = Some(Box::from(model_name))
                         }
+                        if let Ok(vendor_name) = str::from_utf8(&msg.vendor_name)
+                            && !vendor_name.is_empty()
+                        {
+                            vehicle.vendor_name = Some(Box::from(vendor_name))
+                        }
+                        vehicle.set_mav_capability(msg.capabilities);
                     }
                     mavio::DefaultDialect::ScaledImu(msg) => {
-                        if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                            vehicle.gyroscope = Some([
-                                msg.xgyro as f32 * 1e-3,
-                                msg.ygyro as f32 * 1e-3,
-                                msg.zgyro as f32 * 1e-3,
-                            ]);
+                        vehicle.gyroscope = Some([
+                            msg.xgyro as f32 * 1e-3,
+                            msg.ygyro as f32 * 1e-3,
+                            msg.zgyro as f32 * 1e-3,
+                        ]);
 
-                            vehicle.accelerometer = Some([
-                                msg.xacc as f32 * 1e-3,
-                                msg.yacc as f32 * 1e-3,
-                                msg.zacc as f32 * 1e-3,
-                            ]);
-                        }
+                        vehicle.accelerometer = Some([
+                            msg.xacc as f32 * 1e-3,
+                            msg.yacc as f32 * 1e-3,
+                            msg.zacc as f32 * 1e-3,
+                        ]);
                     }
                     mavio::DefaultDialect::ParamValue(msg) => {
                         use mavio::default_dialect::enums::MavProtocolCapability;
@@ -573,28 +579,26 @@ impl Application {
                             return Task::none();
                         };
 
-                        if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                            log::info!("Got parameter: {}: {:?}", ident.as_str(), value);
-                            vehicle.params.map.insert(ident, Parameter::new(value));
+                        log::info!("Got parameter: {}: {:?}", ident.as_str(), value);
+                        vehicle.params.map.insert(ident, Parameter::new(value));
 
-                            // Keep track of how many we expect
-                            if msg.param_count > 0 {
-                                vehicle
-                                    .params
-                                    .loading_state
-                                    .has_loaded
-                                    .insert(msg.param_index);
+                        // Keep track of how many we expect
+                        if msg.param_count > 0 {
+                            vehicle
+                                .params
+                                .loading_state
+                                .has_loaded
+                                .insert(msg.param_index);
 
-                                vehicle.params.loading_state.expected_count = msg.param_count;
+                            vehicle.params.loading_state.expected_count = msg.param_count;
 
-                                if msg.param_index + 1 == msg.param_count {
-                                    let got = vehicle.params.loading_state.has_loaded.len();
-                                    let exp = msg.param_count;
-                                    if got == exp as usize {
-                                        log::info!("Loaded total of {got} parameters");
-                                    } else {
-                                        log::warn!("Expected {exp} paramaters, got {got}");
-                                    }
+                            if msg.param_index + 1 == msg.param_count {
+                                let got = vehicle.params.loading_state.has_loaded.len();
+                                let exp = msg.param_count;
+                                if got == exp as usize {
+                                    log::info!("Loaded total of {got} parameters");
+                                } else {
+                                    log::warn!("Expected {exp} paramaters, got {got}");
                                 }
                             }
                         }
@@ -800,6 +804,7 @@ impl Application {
         row_contents.push(iced::widget::space::Space::new().width(Length::Fill).into());
 
         if self.vehicles.len() > 1 {
+            // TODO: We should use vendor and model name here instead
             let mut vehicle_ids = self.vehicles.keys().cloned().collect::<Vec<_>>();
             vehicle_ids.sort();
             let vehicle_picker = pick_list(self.primary_vehicle, vehicle_ids, |v| {
@@ -849,36 +854,38 @@ impl Application {
     }
 
     fn view_vehicle_information(&self) -> Element<'_, Message> {
-        if self.vehicles.is_empty() {
+        let Some(mav_id) = self.primary_vehicle else {
             return space::Space::new().into();
-        }
+        };
 
+        let Some(vehicle) = self.vehicles.get(&mav_id) else {
+            return space::Space::new().into();
+        };
+        
         let mut entries = Vec::new();
 
-        for (identity, vehicle) in &self.vehicles {
-            entries.push(
-                Text::new(format!(
-                    "System: {}, component: {}",
-                    identity.system, identity.component
-                ))
+        entries.push(
+            Text::new(format!(
+                "System: {}, component: {}",
+                mav_id.system, mav_id.component
+            ))
+            .into(),
+        );
+
+        entries.push(
+            Text::new(format!("Heartbeat: {:#?}", vehicle.last_heartbeat))
+                .color_maybe(
+                    vehicle
+                        .last_heartbeat
+                        .as_ref()
+                        .is_none_or(|(hb, _)| hb.elapsed() > Duration::from_secs(2))
+                        .then(|| Color::from_rgb8(255, 100, 100)),
+                )
                 .into(),
-            );
+        );
 
-            entries.push(
-                Text::new(format!("Heartbeat: {:#?}", vehicle.last_heartbeat))
-                    .color_maybe(
-                        vehicle
-                            .last_heartbeat
-                            .as_ref()
-                            .is_none_or(|(hb, _)| hb.elapsed() > Duration::from_secs(2))
-                            .then(|| Color::from_rgb8(255, 100, 100)),
-                    )
-                    .into(),
-            );
-
-            entries.push(Text::new(format!("Gyros: {:?}", vehicle.gyroscope)).into());
-            entries.push(Text::new(format!("Accel: {:?}", vehicle.accelerometer)).into());
-        }
+        entries.push(Text::new(format!("Gyros: {:?}", vehicle.gyroscope)).into());
+        entries.push(Text::new(format!("Accel: {:?}", vehicle.accelerometer)).into());
 
         iced::widget::container(Column::from_vec(entries))
             .style(iced::widget::container::bordered_box)
@@ -901,153 +908,150 @@ impl Application {
     }
 
     fn view_param_list(&self) -> Element<'_, Message> {
+
+        let Some(mav_id) = self.primary_vehicle else {
+            return space::Space::new().into();
+        };
+
+        let Some(vehicle) = self.vehicles.get(&mav_id) else {
+            return space::Space::new().into();
+        };
+
         let mut entries = Vec::with_capacity(128);
 
-        for (identity, vehicle) in &self.vehicles {
-            let reload_button = Button::new("Reload parameters")
-                .on_press(Message::ParamListReload(*identity))
-                .into();
+        let reload_button = Button::new("Reload parameters")
+            .on_press(Message::ParamListReload(mav_id))
+            .into();
 
-            let upload_button = Button::new("Upload changed parameters")
-                .on_press(Message::ParamUploadAll(*identity))
-                .into();
+        let upload_button = Button::new("Upload changed parameters")
+            .on_press(Message::ParamUploadAll(mav_id))
+            .into();
 
-            let save_button = Button::new("Save parameters to file")
-                .on_press_with(|| Message::ParamSaveDialog(vehicle.params.clone()))
-                .into();
+        let save_button = Button::new("Save parameters to file")
+            .on_press_with(|| Message::ParamSaveDialog(vehicle.params.clone()))
+            .into();
 
-            let load_button = Button::new("Load parameters from file")
-                .on_press(Message::ParamLoadDialog(*identity))
-                .into();
+        let load_button = Button::new("Load parameters from file")
+            .on_press(Message::ParamLoadDialog(mav_id))
+            .into();
 
-            let filter_field = TextInput::new("Filter parameters", &self.parameter_filter)
-                .on_input(Message::ParamFilterBuf)
-                .into();
+        let filter_field = TextInput::new("Filter parameters", &self.parameter_filter)
+            .on_input(Message::ParamFilterBuf)
+            .into();
 
-            entries.push(reload_button);
-            entries.push(upload_button);
-            entries.push(save_button);
-            entries.push(load_button);
-            entries.push(filter_field);
+        entries.push(reload_button);
+        entries.push(upload_button);
+        entries.push(save_button);
+        entries.push(load_button);
+        entries.push(filter_field);
 
-            let identity = *identity;
+        let got = vehicle.params.loading_state.has_loaded.len();
+        let exp = vehicle.params.loading_state.expected_count;
 
-            let got = vehicle.params.loading_state.has_loaded.len();
-            let exp = vehicle.params.loading_state.expected_count;
+        let style = if got != exp as usize {
+            progress_bar::primary
+        } else {
+            progress_bar::success
+        };
 
-            let style = if got != exp as usize {
-                progress_bar::primary
-            } else {
-                progress_bar::success
+        let progress = ProgressBar::new((0.0)..=(exp as f32), got as f32)
+            .style(style)
+            .girth(10.0)
+            .into();
+
+        entries.push(progress);
+
+        let mut section = None;
+
+        let parameters = self.parameter_filtered.as_ref().unwrap_or(&vehicle.params);
+
+        for (ident, param) in &parameters.map {
+            let type_name = value_type_name(param.value);
+
+            let this_section = ident.as_str().split_once('.').map(|(sec, _)| sec);
+
+            // Add larger section headers and separators
+            if this_section != section {
+                if section.is_some() {
+                    entries.push(space::vertical().height(0.0).into());
+                    entries.push(rule::horizontal(1.0).into());
+                }
+                if let Some(section) = this_section {
+                    entries.push(
+                        Text::new(format!("[{section}]"))
+                            .size(24.0)
+                            .font(Font::MONOSPACE)
+                            .into(),
+                    );
+                }
+                section = this_section;
+            }
+
+            let value_string = match param.editing.clone() {
+                Some(buffer) => buffer.clone(),
+                None => value_as_string(param.value),
             };
 
-            let progress = ProgressBar::new((0.0)..=(exp as f32), got as f32)
-                .style(style)
-                .girth(10.0)
-                .into();
-
-            entries.push(progress);
-
-            let mut section = None;
-
-            let parameters = self.parameter_filtered.as_ref().unwrap_or(&vehicle.params);
-
-            for (ident, param) in &parameters.map {
-                let type_name = value_type_name(param.value);
-
-                let this_section = ident.as_str().split_once('.').map(|(sec, _)| sec);
-
-                // Add larger section headers and separators
-                if this_section != section {
-                    if section.is_some() {
-                        entries.push(space::vertical().height(0.0).into());
-                        entries.push(rule::horizontal(1.0).into());
-                    }
-                    if let Some(section) = this_section {
-                        entries.push(
-                            Text::new(format!("[{section}]"))
-                                .size(24.0)
-                                .font(Font::MONOSPACE)
-                                .into(),
-                        );
-                    }
-                    section = this_section;
-                }
-
-                let value_string = match param.editing.clone() {
-                    Some(buffer) => buffer.clone(),
-                    None => value_as_string(param.value),
-                };
-
-                let ident_owned = ident.clone();
-                let text_input = iced::widget::TextInput::new("Write value", &value_string)
-                    .on_input(move |string| {
-                        Message::ParamBufferEdit(identity, ident_owned.clone(), string)
-                    })
-                    .style(move |theme, status| {
-                        let mut style = iced::widget::text_input::default(theme, status);
-                        match param.state {
-                            ParamState::Unchanged => {}
-                            ParamState::Changed(..) => {
-                                style.background =
-                                    iced::Background::Color(Color::from_rgb8(30, 120, 60));
-                            }
-                            ParamState::Uploading(..) => {
-                                style.background =
-                                    iced::Background::Color(Color::from_rgb8(180, 150, 0));
-                            }
-                        }
-                        style
-                    });
-
-                // let text_input = if !matches!(param.state, ParamState::Unchanged) {
-                //     let tooltip = container(Text::new(format!("Was: {:?}", param.value))).style(shaded_bordered_box).padding(10.0);
-                //     let content = iced::widget::tooltip(text_input, tooltip, iced::widget::tooltip::Position::Left);
-                //     container(content)
-                // } else {
-                //     container(text_input)
-                // };
-
-                let ident_owned = ident.clone();
-                let restore_button = Button::new("Restore")
-                    .on_press_maybe(match param.state {
+            let ident_owned = ident.clone();
+            let text_input = iced::widget::TextInput::new("Write value", &value_string)
+                .on_input(move |string| {
+                    Message::ParamBufferEdit(mav_id, ident_owned.clone(), string)
+                })
+                .style(move |theme, status| {
+                    let mut style = iced::widget::text_input::default(theme, status);
+                    match param.state {
+                        ParamState::Unchanged => {}
                         ParamState::Changed(..) => {
-                            Some(Message::ParamValueReset(identity, ident_owned.clone()))
+                            style.background =
+                                iced::Background::Color(Color::from_rgb8(30, 120, 60));
                         }
-                        _ => None,
-                    })
-                    .width(80.0);
+                        ParamState::Uploading(..) => {
+                            style.background =
+                                iced::Background::Color(Color::from_rgb8(180, 150, 0));
+                        }
+                    }
+                    style
+                });
 
-                let commit_button = Button::new("Upload")
-                    .on_press_maybe(match param.state {
-                        ParamState::Changed(value) => Some(Message::ParamValueUpload(
-                            identity,
-                            ident_owned.clone(),
-                            value,
-                        )),
-                        _ => None,
-                    })
-                    .width(80.0);
+            let ident_owned = ident.clone();
+            let restore_button = Button::new("Restore")
+                .on_press_maybe(match param.state {
+                    ParamState::Changed(..) => {
+                        Some(Message::ParamValueReset(mav_id, ident_owned.clone()))
+                    }
+                    _ => None,
+                })
+                .width(80.0);
 
-                let row = row![
-                    Text::new(ident.as_str().to_string())
-                        .width(180.0)
-                        .font(Font::MONOSPACE),
-                    Text::new(type_name)
-                        .width(50.0)
-                        .font(Font::MONOSPACE)
-                        .align_x(Alignment::End)
-                        .color(Color::from_rgba8(255, 255, 255, 0.5)),
-                    Space::new().width(10.0),
-                    text_input.width(100.0),
-                    restore_button,
-                    commit_button,
-                ]
-                .spacing(5.0)
-                .align_y(Vertical::Center);
+            let commit_button = Button::new("Upload")
+                .on_press_maybe(match param.state {
+                    ParamState::Changed(value) => Some(Message::ParamValueUpload(
+                        mav_id,
+                        ident_owned.clone(),
+                        value,
+                    )),
+                    _ => None,
+                })
+                .width(80.0);
 
-                entries.push(row.into());
-            }
+            let row = row![
+                Text::new(ident.as_str().to_string())
+                    .width(180.0)
+                    .font(Font::MONOSPACE),
+                Text::new(type_name)
+                    .width(50.0)
+                    .font(Font::MONOSPACE)
+                    .align_x(Alignment::End)
+                    .color(Color::from_rgba8(255, 255, 255, 0.5)),
+                Space::new().width(10.0),
+                text_input.width(100.0),
+                restore_button,
+                commit_button,
+            ]
+            .spacing(5.0)
+            .align_y(Vertical::Center);
+
+            entries.push(row.into());
         }
 
         Column::from_vec(entries).spacing(5.0).padding(10.0).into()

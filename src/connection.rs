@@ -73,16 +73,16 @@ impl LinkConfig {
                 Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
             }),
             LinkConfig::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
-            .then(|result| match result {
-                Ok(socket) => {
-                    let connected = AtomicBool::new(false);
-                    let socket = std::sync::Arc::new((socket, connected));
-                    let writer = udp_wrap::UdpWriter::new(socket.clone());
-                    let reader = udp_wrap::UdpReader::new(socket);
-                    ConnectionSendRunner::spawn(reader, writer)
-                }
-                Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
-            }),
+                .then(|result| match result {
+                    Ok(socket) => {
+                        let connected = AtomicBool::new(false);
+                        let socket = std::sync::Arc::new((socket, connected));
+                        let writer = udp_wrap::UdpWriter::new(socket.clone());
+                        let reader = udp_wrap::UdpReader::new(socket);
+                        ConnectionSendRunner::spawn(reader, writer)
+                    }
+                    Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
+                }),
             LinkConfig::Serial { port, baud } => {
                 let port = match serial2_tokio::SerialPort::open(&port, baud) {
                     Ok(port) => port,
@@ -238,9 +238,7 @@ impl WeakConnectionHandle {
     pub fn upgrade(&self) -> Option<ConnectionHandle> {
         self.send_state
             .upgrade()
-            .map(|send_state| ConnectionHandle {
-                send_state,
-            })
+            .map(|send_state| ConnectionHandle { send_state })
     }
 
     pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
@@ -272,10 +270,7 @@ impl ConnectionHandle {
         }
     }
 
-    pub fn new(
-        sender: Sender<Frame<Versionless>>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    pub fn new(sender: Sender<Frame<Versionless>>, cancellation_token: CancellationToken) -> Self {
         Self {
             send_state: Arc::new(ConnectionHandleState {
                 sequence: AtomicU8::new(0),
@@ -522,10 +517,9 @@ mod udp_wrap {
             let socket = self.socket.clone();
 
             let mut read_buf = ReadBuf::new(self.buffer.as_mut());
-            
+
             match socket.0.poll_recv_from(cx, &mut read_buf) {
                 Poll::Ready(Ok(from)) => {
-
                     // Try to connect to source if we arent already connected
                     if !socket.1.load(Ordering::Relaxed) {
                         let pinned = core::pin::pin!(socket.0.connect(from));
@@ -573,11 +567,10 @@ mod udp_wrap {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<Result<usize, Error>> {
-
             // Pretend to write successfully if we arent connected yet,
             // since the reader will connect on the first packet received.
             if !self.socket.1.load(Ordering::Relaxed) {
-                return Poll::Ready(Ok(buf.len()))
+                return Poll::Ready(Ok(buf.len()));
             }
 
             match self.socket.0.poll_send(cx, buf) {
@@ -589,7 +582,7 @@ mod udp_wrap {
                     } else {
                         Poll::Ready(Err(e))
                     }
-                },
+                }
                 Poll::Pending => Poll::Pending,
             }
         }

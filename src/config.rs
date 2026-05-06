@@ -4,10 +4,8 @@ use directories::ProjectDirs;
 
 use crate::{BoxError, connection::LinkConfig};
 
-
 static PROJECT_DIRS: LazyLock<ProjectDirs> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
-
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
 pub struct Configuration {
@@ -22,7 +20,7 @@ impl Configuration {
     pub fn initialize() -> Result<Self, BoxError> {
         let project_path = PROJECT_DIRS.config_dir();
         let config_path = project_path.join("config.ron");
-    
+
         Ok(match std::fs::read_to_string(&config_path) {
             Ok(contents) => {
                 log::debug!("Loaded configuration file from: {config_path:?}");
@@ -35,20 +33,18 @@ impl Configuration {
             }
         })
     }
-    
+
     pub fn write_to_file(&self) -> Result<(), BoxError> {
         let project_path = PROJECT_DIRS.config_dir();
         let config_path = project_path.join("config.ron");
-    
+
         std::fs::create_dir_all(project_path)?;
         let mut file = std::fs::File::create(&config_path)?;
-    
+
         let serialized = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())?;
-    
+
         file.write_all(serialized.as_bytes())?;
-    
+
         Ok(())
     }
 }
-
-

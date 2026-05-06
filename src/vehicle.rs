@@ -8,11 +8,17 @@ use mavio::{
     default_dialect::{enums::MavProtocolCapability, messages::Heartbeat},
 };
 
-use crate::{connection::LinkId, parameters::Parameters};
+use crate::{
+    connection::LinkId,
+    parameters::{MavlinkId, Parameters},
+};
 
 #[derive(Clone, Debug)]
 pub struct Vehicle {
+    pub mav_id: MavlinkId,
     pub capabilities: Option<MavProtocolCapability>,
+    pub model_name: Option<Box<str>>,
+    pub vendor_name: Option<Box<str>>,
     pub params: Parameters,
     pub link_info: HashMap<LinkId, VehicleLinkInfo>,
     pub message_history: Vec<(Instant, DefaultDialect)>,
@@ -22,9 +28,12 @@ pub struct Vehicle {
 }
 
 impl Vehicle {
-    pub fn new() -> Self {
+    pub fn new(mav_id: MavlinkId) -> Self {
         Self {
+            mav_id,
             capabilities: None,
+            model_name: None,
+            vendor_name: None,
             params: Parameters::new(),
             link_info: HashMap::new(),
             message_history: Vec::with_capacity(100),
@@ -39,6 +48,13 @@ impl Vehicle {
             Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
             Entry::Vacant(vacant_entry) => vacant_entry.insert(VehicleLinkInfo::default()),
         }
+    }
+
+    pub fn set_mav_capability(&mut self, cap: MavProtocolCapability) {
+        if self.capabilities != Some(cap) {
+            log::debug!("Received capabilities for {:?}: {:?}", self.mav_id, cap)
+        }
+        self.capabilities = Some(cap);
     }
 }
 
