@@ -52,7 +52,7 @@ impl Vehicle {
 
     pub fn set_mav_capability(&mut self, cap: MavProtocolCapability) {
         if self.capabilities != Some(cap) {
-            log::debug!("Received capabilities for {:?}: {:?}", self.mav_id, cap)
+            log::debug!("Received capabilities for {:?}: {:b}", self.mav_id, cap)
         }
         self.capabilities = Some(cap);
     }

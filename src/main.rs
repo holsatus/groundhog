@@ -1,10 +1,7 @@
 use std::{
-    collections::{
-        BTreeMap,
-        btree_map::{self},
-    },
+    collections::BTreeMap,
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicU16},
     time::{Duration, Instant},
 };
@@ -33,7 +30,9 @@ use slippery::{
 
 mod parameters;
 use crate::{
-    connection::{ConnectionHandle, LinkBuilder, LinkConfig, LinkId, LinkVariant},
+    connection::{
+        ConnectionHandle, LinkBuild, LinkBuilder, LinkConfig, LinkId, LinkVariant, WeakConnectionHandle
+    },
     parameters::{MavlinkId, ParamState, Parameter, Parameters, value_as_string, value_type_name},
     vehicle::Vehicle,
 };
@@ -50,9 +49,8 @@ fn main() {
 
     iced::application(Application::boot, Application::update, Application::view)
         .title("Holsatus Groundhog")
-        .scale_factor(|_| 1.0)
         .run()
-        .expect("Groundhog died");
+        .expect("Groundhog dead");
 }
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
@@ -62,8 +60,7 @@ struct Application {
     viewpoint: Viewpoint,
     projector: Option<Projector>,
     tile_cache: TileCache,
-    link_builder: LinkBuilder,
-    link_config: Option<LinkConfig>,
+    link_config: LinkConfig,
     connection: Option<ConnectionHandle>,
     configuration: config::Configuration,
     vehicles: BTreeMap<MavlinkId, Vehicle>,
@@ -97,11 +94,9 @@ static GCS_MAVLINK_ID: AtomicMavlinkId = AtomicMavlinkId::new(255, 1);
 
 #[derive(Debug, Clone)]
 enum Message {
-    Noop,
-
     MapProjector(Projector),
     MapCache(CacheMessage),
-    Conn(ConnMessage),
+    Conn(ConnectionMessage),
 
     SaveConfigurationToFile,
 
@@ -139,20 +134,20 @@ enum Message {
 }
 
 #[derive(Debug, Clone)]
-enum ConnMessage {
+enum ConnectionMessage {
     ConnectFailed(ArcError),
     ConnectSuccess(ConnectionHandle),
     RecvFrame(Frame<Versionless>, LinkId),
     RecvError(mavio::Error, LinkId),
-    ConnectToLink(LinkConfig),
+    ConnectToLink(LinkBuild),
     DisconnectLink,
     ChangeLinkVariant(LinkVariant),
     UpdateLinkBuilder(LinkBuilder),
     DetectSerialPorts,
 }
 
-impl From<ConnMessage> for Message {
-    fn from(value: ConnMessage) -> Self {
+impl From<ConnectionMessage> for Message {
+    fn from(value: ConnectionMessage) -> Self {
         Message::Conn(value)
     }
 }
@@ -163,6 +158,8 @@ impl Application {
             log::error!("Unable to initialize configuration file: {}", e);
             config::Configuration::default()
         });
+
+        log::debug!("Using configuration: {config:#?}");
 
         let link_builder = config
             .link_config
@@ -177,14 +174,12 @@ impl Application {
             },
             projector: None,
             tile_cache: TileCache::new(OpenStreetMap),
-            link_builder: link_builder.clone(),
-            link_config: link_builder.try_build(),
+            link_config: LinkConfig::new(link_builder, "Default".to_owned()),
             connection: None,
             configuration: config.clone(),
             vehicles: BTreeMap::new(),
             parameter_filter: String::new(),
             parameter_filtered: None,
-
             primary_vehicle: None,
         }
     }
@@ -193,9 +188,12 @@ impl Application {
         self.maybe_update(message).unwrap_or_default()
     }
 
+    fn get_connection_handle(&self) -> Option<WeakConnectionHandle> {
+        self.connection.as_ref().map(|handle| handle.downgrade())
+    }
+
     fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
         match message {
-            Message::Noop => (),
             Message::SaveConfigurationToFile => {
                 if let Err(error) = self.configuration.write_to_file() {
                     log::error!("Unable to save configuration file: {}", error);
@@ -221,13 +219,13 @@ impl Application {
                     return None;
                 }
 
-                // TODO: Current filtering assumes we have a single vehicle
-                let vehicle = self.vehicles.first_key_value()?.1;
+                let mav_id = self.primary_vehicle?;
+                let vehicle = self.vehicles.get(&mav_id)?;
 
                 let param_map = vehicle.params.map.iter().filter_map(|(ident, param)| {
                     ident
-                        .as_str()
-                        .contains(&self.parameter_filter)
+                        .as_str().to_lowercase()
+                        .contains(&self.parameter_filter.to_lowercase())
                         .then_some((ident.clone(), param.clone()))
                 });
 
@@ -236,16 +234,17 @@ impl Application {
                     loading_state: vehicle.params.loading_state.clone(),
                 });
             }
-            Message::Conn(message) => return Some(self.update_conn(message)),
+            Message::Conn(message) => return Some(self.connection_message_update(message)),
             Message::ParamListReload(mav_id) => {
-                let connection = self.connection.as_ref()?.downgrade();
+                let connection = self.get_connection_handle()?;
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
 
                 let get_capabilities = vehicle.capabilities.is_none();
                 vehicle.params.loading_state.has_loaded.clear();
 
-                return Some(Task::future(async move {
+                tokio::spawn(async move {
                     if get_capabilities {
+                        log::debug!("Requesting capabilities");
                         connection
                             .send_message(CommandInt {
                                 target_system: mav_id.system,
@@ -260,18 +259,17 @@ impl Application {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
 
+                    log::debug!("Requesting parameters");
                     connection
                         .send_message(ParamRequestList {
                             target_system: mav_id.system,
                             target_component: mav_id.component,
                         })
                         .await;
-
-                    Message::Noop
-                }));
+                });
             }
             Message::ParamUploadAll(mav_id) => {
-                let connection = self.connection.as_ref()?.downgrade();
+                let connection = self.get_connection_handle()?;
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
 
                 let mut timeout_tasks = Vec::new();
@@ -345,7 +343,7 @@ impl Application {
                 param.state = ParamState::Unchanged;
             }
             Message::ParamValueUpload(mav_id, ident, value) => {
-                let connection = self.connection.as_ref()?.downgrade();
+                let connection = self.get_connection_handle()?;
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
                 let param = vehicle.params.map.get_mut(&ident)?;
 
@@ -377,7 +375,9 @@ impl Application {
                     param_type,
                 };
 
-                connection.spawn_send_message(param_set);
+                tokio::spawn(async move {
+                    connection.send_message(param_set).await;
+                });
 
                 return Some(timeout_task);
             }
@@ -393,37 +393,43 @@ impl Application {
             }
             Message::ParamSaveDialog(parameters) => {
                 let file_dialog = self.new_file_dialog();
-                return Some(Task::future(async move {
-                    match file_dialog.save_file().await {
-                        Some(path) => Message::ParamSaveToFile(path.path().to_owned(), parameters),
-                        None => Message::Noop,
-                    }
-                }));
+
+                return Some(
+                    Task::future(async move {
+                        file_dialog.save_file().await.map(|file| (file, parameters))
+                    })
+                    .and_then(|(file, parameters)| {
+                        Task::done(Message::ParamSaveToFile(file.path().to_owned(), parameters))
+                    }),
+                );
             }
             Message::ParamSaveToFile(save_path, parameters) => {
                 log::info!("Saving parameters to file: {save_path:?}");
 
-                let result = parameters::save_parameters_to_ini(save_path.clone(), parameters);
+                let result = parameters::save_parameters_to_ini(&save_path, parameters);
                 if let Err(error) = result {
                     log::error!("Error saving to file: {}", error);
                 }
 
-                return self.set_file_picker_path_config(save_path);
+                return self.set_file_picker_path_config(save_path.as_path());
             }
             Message::ParamLoadDialog(mav_id) => {
                 let file_dialog = self.new_file_dialog();
-                return Some(Task::future(async move {
-                    match file_dialog.pick_file().await {
-                        Some(path) => Message::ParamLoadFromFile(path.path().to_owned(), mav_id),
-                        None => Message::Noop,
-                    }
-                }));
+
+                return Some(
+                    Task::future(async move {
+                        file_dialog.pick_file().await.map(|file| (file, mav_id))
+                    })
+                    .and_then(|(file, mav_id)| {
+                        Task::done(Message::ParamLoadFromFile(file.path().to_owned(), mav_id))
+                    }),
+                );
             }
             Message::ParamLoadFromFile(load_path, mav_id) => {
                 log::info!("Loading parameters from file: {load_path:?}");
 
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
-                let loaded_params = match parameters::load_parameters_from_ini(load_path.clone()) {
+                let loaded_params = match parameters::load_parameters_from_ini(&load_path) {
                     Ok(loaded_params) => loaded_params,
                     Err(error) => {
                         log::error!("Could not load parameter file: {}", error);
@@ -442,7 +448,7 @@ impl Application {
                     }
                 }
 
-                return self.set_file_picker_path_config(load_path);
+                return self.set_file_picker_path_config(load_path.as_path());
             }
             Message::SetPrimaryVehicle(mav_id) => {
                 self.primary_vehicle = Some(mav_id);
@@ -452,22 +458,13 @@ impl Application {
         None
     }
 
-    fn set_file_picker_path_config(&mut self, path: PathBuf) -> Option<Task<Message>> {
-        let mut file_picker_path = None;
-        if path.is_dir() {
-            file_picker_path = Some(path);
-        } else {
-            if let Some(parent) = path.parent() {
-                file_picker_path = Some(parent.to_path_buf());
-            }
-        }
+    fn set_file_picker_path_config(&mut self, path: &Path) -> Option<Task<Message>> {
+        let file_picker_path = path.is_dir().then_some(path).or(path.parent());
 
-        if let Some(path) = file_picker_path.take() {
-            self.configuration.file_picker_path = Some(path);
-            Some(Task::done(Message::SaveConfigurationToFile))
-        } else {
-            None
-        }
+        file_picker_path.map(|path| {
+            self.configuration.file_picker_path = Some(path.to_path_buf());
+            Task::done(Message::SaveConfigurationToFile)
+        })
     }
 
     fn new_file_dialog(&self) -> AsyncFileDialog {
@@ -480,10 +477,10 @@ impl Application {
         file_dialog
     }
 
-    fn update_conn(&mut self, message: ConnMessage) -> Task<Message> {
+    fn connection_message_update(&mut self, message: ConnectionMessage) -> Task<Message> {
         let time_now = Instant::now();
         match message {
-            ConnMessage::RecvFrame(frame, link_id) => {
+            ConnectionMessage::RecvFrame(frame, link_id) => {
                 let message = match frame.decode::<mavio::DefaultDialect>() {
                     Ok(message) => message,
                     Err(error) => {
@@ -502,13 +499,10 @@ impl Application {
                     self.primary_vehicle = Some(mav_id);
                 }
 
-                let vehicle = match self.vehicles.entry(mav_id) {
-                    btree_map::Entry::Vacant(vacant_entry) => {
-                        log::info!("New vehicle detected: {mav_id:?}");
-                        vacant_entry.insert(Vehicle::new(mav_id))
-                    }
-                    btree_map::Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
-                };
+                let vehicle = self.vehicles.entry(mav_id).or_insert_with(|| {
+                    log::info!("New vehicle detected: {mav_id:?}");
+                    Vehicle::new(mav_id)
+                });
 
                 vehicle.link_info_mut(link_id).last_message = Some(time_now);
                 vehicle.message_history.push((time_now, message.clone()));
@@ -555,18 +549,27 @@ impl Application {
                             return Task::none();
                         };
 
+                        // // Decode the parameter according to capabilities flag
+                        // let maybe_value = if proto_capabilities
+                        //     .contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE)
+                        // {
+                        //     parameters::value_from_bytewise(msg.param_value, msg.param_type)
+                        // } else if proto_capabilities
+                        //     .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST)
+                        // {
+                        //     parameters::value_from_c_cast(msg.param_value, msg.param_type)
+                        // } else {
+                        //     log::error!("Parameter encoding type not known for vehicle");
+                        //     return Task::none();
+                        // };
+
                         // Decode the parameter according to capabilities flag
                         let maybe_value = if proto_capabilities
                             .contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE)
                         {
                             parameters::value_from_bytewise(msg.param_value, msg.param_type)
-                        } else if proto_capabilities
-                            .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST)
-                        {
-                            parameters::value_from_c_cast(msg.param_value, msg.param_type)
                         } else {
-                            log::error!("Parameter encoding type not known for vehicle");
-                            return Task::none();
+                            parameters::value_from_c_cast(msg.param_value, msg.param_type)
                         };
 
                         let Some(value) = maybe_value else {
@@ -606,64 +609,69 @@ impl Application {
                     _ => log::trace!("Unsupported message type: {}", frame.message_id()),
                 }
             }
-            ConnMessage::RecvError(error, link_id) => {
+            ConnectionMessage::RecvError(error, link_id) => {
                 log::error!("Error receiving on {link_id:?}: {error:?}");
             }
-            ConnMessage::ChangeLinkVariant(variant) => {
-                if self.link_builder.to_variant() == variant {
+            ConnectionMessage::ChangeLinkVariant(variant) => {
+                if self.link_config.builder.to_variant() == variant {
                     return Task::none();
                 }
 
-                self.link_builder = variant.to_default_builder();
-                self.link_config = self.link_builder.try_build();
-                if let Some(link_config) = self.link_config.clone() {
+                self.link_config.builder = variant.to_default_builder();
+                self.link_config.build = self.link_config.builder.try_build();
+                if let Some(link_config) = self.link_config.build.clone() {
                     self.configuration.link_config = Some(link_config);
                     return Task::done(Message::SaveConfigurationToFile);
                 }
             }
-            ConnMessage::UpdateLinkBuilder(link_builder) => {
-                self.link_builder = link_builder;
-                self.link_config = self.link_builder.try_build();
-                if let Some(link_config) = self.link_config.clone() {
+            ConnectionMessage::UpdateLinkBuilder(link_builder) => {
+                self.link_config.builder = link_builder;
+                self.link_config.build = self.link_config.builder.try_build();
+                if let Some(link_config) = self.link_config.build.clone() {
                     self.configuration.link_config = Some(link_config);
                     return Task::done(Message::SaveConfigurationToFile);
                 }
             }
-            ConnMessage::DetectSerialPorts => {
+            ConnectionMessage::DetectSerialPorts => {
                 if let LinkBuilder::Serial {
                     available_ports, ..
-                } = &mut self.link_builder
+                } = &mut self.link_config.builder
                 {
-                    match serial2_tokio::SerialPort::available_ports() {
+
+                    match serialport::available_ports() {
                         Ok(ports) => {
                             *available_ports = ports
-                                .iter()
-                                .map(|p| p.to_string_lossy().to_string())
+                                .into_iter()
+                                .filter(|p| {
+                                    matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
+                                })
+                                .map(|p| p.port_name)
                                 .collect();
+
                             available_ports.sort();
                         }
                         Err(error) => {
                             log::error!("Unable to fetch serial ports: {error}");
-                        }
+                        },
                     }
 
-                    self.link_config = self.link_builder.try_build();
+                    self.link_config.build = self.link_config.builder.try_build();
                 }
             }
-            ConnMessage::ConnectToLink(config) => {
+            ConnectionMessage::ConnectToLink(config) => {
                 self.configuration.link_config = Some(config.clone());
                 log::info!("Connecting to: {config:?}");
                 return config.connect();
             }
-            ConnMessage::DisconnectLink => {
+            ConnectionMessage::DisconnectLink => {
                 if let Some(connection) = self.connection.take() {
                     connection.close();
                 }
             }
-            ConnMessage::ConnectFailed(error) => {
+            ConnectionMessage::ConnectFailed(error) => {
                 log::error!("Connect failed: {error:?}");
             }
-            ConnMessage::ConnectSuccess(connection) => {
+            ConnectionMessage::ConnectSuccess(connection) => {
                 log::info!("Connection established");
                 let weak_connection = connection.downgrade();
                 self.connection = Some(connection);
@@ -704,22 +712,22 @@ impl Application {
         let mut row_contents = Vec::<Element<'_, Message>>::new();
 
         let selector = iced::widget::pick_list(
-            Some(self.link_builder.to_variant()),
+            Some(self.link_config.builder.to_variant()),
             LinkVariant::list(),
             ToString::to_string,
         )
         .placeholder("Pick one")
-        .on_select(|v| Message::Conn(ConnMessage::ChangeLinkVariant(v)))
+        .on_select(|v| Message::Conn(ConnectionMessage::ChangeLinkVariant(v)))
         .into();
 
         row_contents.push(selector);
         row_contents.push(iced::widget::rule::vertical(1.0).into());
 
-        match &self.link_builder {
+        match &self.link_config.builder {
             LinkBuilder::Tcp { addr, port } => {
                 let addr_input = text_input("address", addr)
                     .on_input(|addr| {
-                        Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
+                        Message::Conn(ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
                             addr,
                             port: port.clone(),
                         }))
@@ -729,7 +737,7 @@ impl Application {
 
                 let port_input = text_input("port", port)
                     .on_input(|port| {
-                        Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
+                        Message::Conn(ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
                             addr: addr.clone(),
                             port,
                         }))
@@ -743,7 +751,7 @@ impl Application {
             LinkBuilder::Udp { addr, port } => {
                 let addr_input = text_input("address", addr)
                     .on_input(|addr| {
-                        Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Udp {
+                        Message::Conn(ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Udp {
                             addr,
                             port: port.clone(),
                         }))
@@ -753,7 +761,7 @@ impl Application {
 
                 let port_input = text_input("port", port)
                     .on_input(|port| {
-                        Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Udp {
+                        Message::Conn(ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Udp {
                             addr: addr.clone(),
                             port,
                         }))
@@ -771,23 +779,29 @@ impl Application {
             } => {
                 let port_picker =
                     pick_list(port.as_ref(), available_ports.as_slice(), |x| x.clone())
-                        .placeholder("Select a port")
+                        .placeholder(if available_ports.is_empty() {
+                            "No connection"
+                        } else {
+                            "Select a port"
+                        })
                         .ellipsis(Ellipsis::Start)
-                        .on_open(Message::Conn(ConnMessage::DetectSerialPorts))
+                        .on_open(Message::Conn(ConnectionMessage::DetectSerialPorts))
                         .on_select(|selected_port| {
-                            Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Serial {
-                                port: Some(selected_port),
-                                baud: *baud,
-                                available_ports: available_ports.clone(),
-                            }))
+                            Message::Conn(ConnectionMessage::UpdateLinkBuilder(
+                                LinkBuilder::Serial {
+                                    port: Some(selected_port),
+                                    baud: *baud,
+                                    available_ports: available_ports.clone(),
+                                },
+                            ))
                         })
                         .width(160.0)
                         .into();
 
                 let baud_picker = pick_list(Some(baud), connection::BAUDRATES, |x| x.to_string())
-                    .on_open(Message::Conn(ConnMessage::DetectSerialPorts))
+                    .on_open(Message::Conn(ConnectionMessage::DetectSerialPorts))
                     .on_select(|selected_baud| {
-                        Message::Conn(ConnMessage::UpdateLinkBuilder(LinkBuilder::Serial {
+                        Message::Conn(ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Serial {
                             port: port.clone(),
                             baud: selected_baud,
                             available_ports: available_ports.clone(),
@@ -821,9 +835,9 @@ impl Application {
                     .align_y(Alignment::Center),
             )
             .on_press_maybe(
-                self.link_config
+                self.link_config.build
                     .as_ref()
-                    .map(|config| Message::Conn(ConnMessage::ConnectToLink(config.clone()))),
+                    .map(|config| Message::Conn(ConnectionMessage::ConnectToLink(config.clone()))),
             )
             .width(100.0)
             .into();
@@ -835,7 +849,7 @@ impl Application {
                     .align_y(Alignment::Center),
             )
             .style(button::danger)
-            .on_press(Message::Conn(ConnMessage::DisconnectLink))
+            .on_press(Message::Conn(ConnectionMessage::DisconnectLink))
             .width(100.0)
             .into();
             row_contents.push(disconnect_button);
@@ -861,7 +875,7 @@ impl Application {
         let Some(vehicle) = self.vehicles.get(&mav_id) else {
             return space::Space::new().into();
         };
-        
+
         let mut entries = Vec::new();
 
         entries.push(
@@ -908,7 +922,6 @@ impl Application {
     }
 
     fn view_param_list(&self) -> Element<'_, Message> {
-
         let Some(mav_id) = self.primary_vehicle else {
             return space::Space::new().into();
         };

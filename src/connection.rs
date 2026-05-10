@@ -17,7 +17,7 @@ use mavio::{Frame, prelude::Versionless, protocol::FrameBuilder};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ConnMessage, connection::mav_tokio::AsyncReceiver};
+use crate::{ConnectionMessage, connection::mav_tokio::AsyncReceiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LinkId(usize);
@@ -34,25 +34,45 @@ pub const BAUDRATES: &[u32] = &[
     921_600, 1_000_000,
 ];
 
+pub struct LinkConfig {
+    pub name: String,
+    pub auto_connect: bool,
+    pub high_latency: bool,
+    pub builder: LinkBuilder,
+    pub build: Option<LinkBuild>,
+}
+
+impl LinkConfig {
+    pub fn new(builder: LinkBuilder, name: String) -> LinkConfig {
+        LinkConfig {
+            name,
+            auto_connect: false,
+            high_latency: false,
+            builder: builder.clone(),
+            build: builder.try_build(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum LinkConfig {
+pub enum LinkBuild {
     Tcp { sock_addr: SocketAddrV4 },
     Udp { sock_addr: SocketAddrV4 },
     Serial { port: String, baud: u32 },
 }
 
-impl LinkConfig {
+impl LinkBuild {
     pub fn to_builder(&self) -> LinkBuilder {
         match self {
-            LinkConfig::Tcp { sock_addr } => LinkBuilder::Tcp {
+            LinkBuild::Tcp { sock_addr } => LinkBuilder::Tcp {
                 addr: sock_addr.ip().to_string(),
                 port: sock_addr.port().to_string(),
             },
-            LinkConfig::Udp { sock_addr } => LinkBuilder::Udp {
+            LinkBuild::Udp { sock_addr } => LinkBuilder::Udp {
                 addr: sock_addr.ip().to_string(),
                 port: sock_addr.port().to_string(),
             },
-            LinkConfig::Serial { port, baud } => LinkBuilder::Serial {
+            LinkBuild::Serial { port, baud } => LinkBuilder::Serial {
                 port: Some(port.clone()),
                 available_ports: Vec::new(),
                 baud: *baud,
@@ -62,7 +82,7 @@ impl LinkConfig {
 
     pub fn connect(&self) -> Task<crate::Message> {
         match self.clone() {
-            LinkConfig::Tcp { sock_addr } => Task::future(tokio::net::TcpStream::connect(
+            LinkBuild::Tcp { sock_addr } => Task::future(tokio::net::TcpStream::connect(
                 sock_addr,
             ))
             .then(|result| match result {
@@ -70,9 +90,9 @@ impl LinkConfig {
                     let (rcv, snd) = stream.into_split();
                     ConnectionSendRunner::spawn(rcv, snd)
                 }
-                Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
+                Err(error) => Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into()),
             }),
-            LinkConfig::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
+            LinkBuild::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
                 .then(|result| match result {
                     Ok(socket) => {
                         let connected = AtomicBool::new(false);
@@ -81,20 +101,26 @@ impl LinkConfig {
                         let reader = udp_wrap::UdpReader::new(socket);
                         ConnectionSendRunner::spawn(reader, writer)
                     }
-                    Err(error) => Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into()),
+                    Err(error) => {
+                        Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
+                    }
                 }),
-            LinkConfig::Serial { port, baud } => {
+            LinkBuild::Serial { port, baud } => {
                 let port = match serial2_tokio::SerialPort::open(&port, baud) {
                     Ok(port) => port,
                     Err(error) => {
-                        return Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into());
+                        return Task::done(
+                            ConnectionMessage::ConnectFailed(Arc::new(error)).into(),
+                        );
                     }
                 };
 
                 let rcv = match port.try_clone() {
                     Ok(rcv) => rcv,
                     Err(error) => {
-                        return Task::done(ConnMessage::ConnectFailed(Arc::new(error)).into());
+                        return Task::done(
+                            ConnectionMessage::ConnectFailed(Arc::new(error)).into(),
+                        );
                     }
                 };
 
@@ -153,23 +179,23 @@ impl LinkBuilder {
         }
     }
 
-    pub fn try_build(&self) -> Option<LinkConfig> {
+    pub fn try_build(&self) -> Option<LinkBuild> {
         let config = match self {
             LinkBuilder::Tcp { addr, port } => {
                 let addr = Ipv4Addr::from_str(addr).ok()?;
                 let port = u16::from_str(port).ok()?;
                 let sock = SocketAddrV4::new(addr, port);
-                LinkConfig::Tcp { sock_addr: sock }
+                LinkBuild::Tcp { sock_addr: sock }
             }
             LinkBuilder::Udp { addr, port } => {
                 let addr = Ipv4Addr::from_str(addr).ok()?;
                 let port = u16::from_str(port).ok()?;
                 let sock = SocketAddrV4::new(addr, port);
-                LinkConfig::Udp { sock_addr: sock }
+                LinkBuild::Udp { sock_addr: sock }
             }
             LinkBuilder::Serial { port, baud, .. } => {
                 let port = port.to_owned()?;
-                LinkConfig::Serial { port, baud: *baud }
+                LinkBuild::Serial { port, baud: *baud }
             }
         };
 
@@ -362,8 +388,8 @@ impl ConnectionSendRunner {
             }
             .map(move |result| {
                 match result {
-                    Ok(frame) => ConnMessage::RecvFrame(frame, link_id),
-                    Err(error) => ConnMessage::RecvError(error, link_id),
+                    Ok(frame) => ConnectionMessage::RecvFrame(frame, link_id),
+                    Err(error) => ConnectionMessage::RecvError(error, link_id),
                 }
                 .into()
             }),
@@ -378,7 +404,7 @@ impl ConnectionSendRunner {
 
         let connection_handle = ConnectionHandle::new(send_frame, cancellation_token.clone());
 
-        Task::done(crate::Message::Conn(ConnMessage::ConnectSuccess(
+        Task::done(crate::Message::Conn(ConnectionMessage::ConnectSuccess(
             connection_handle,
         )))
         .chain(recv_task)
