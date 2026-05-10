@@ -44,10 +44,7 @@ impl Vehicle {
     }
 
     pub fn link_info_mut(&'_ mut self, link_id: LinkId) -> &mut VehicleLinkInfo {
-        match self.link_info.entry(link_id) {
-            Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
-            Entry::Vacant(vacant_entry) => vacant_entry.insert(VehicleLinkInfo::default()),
-        }
+        self.link_info.entry(link_id).or_default()
     }
 
     pub fn set_mav_capability(&mut self, cap: MavProtocolCapability) {
