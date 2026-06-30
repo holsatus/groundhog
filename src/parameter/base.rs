@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use iced::task::Handle;
 use mav_param::{Ident, Value};
-use mavio::default_dialect::enums::MavParamType;
+use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MavlinkId {
@@ -40,6 +40,8 @@ pub struct Parameters {
     pub(crate) loading_state: LoadingState,
 }
 
+/// Used to track which parameters in a continuous sequence have been received.
+/// Any that are missing can be re-requested afterwards
 #[derive(Clone, Debug)]
 pub struct LoadingState {
     pub(crate) has_loaded: HashSet<u16>,
@@ -212,6 +214,36 @@ pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
         Value::U32(v) => (v as f32, MavParamType::Uint32),
         Value::I32(v) => (v as f32, MavParamType::Int32),
         Value::F32(v) => (v, MavParamType::Real32),
+    }
+}
+
+pub fn from_value(cap: MavProtocolCapability, value: Value) -> Option<(f32, MavParamType)> {
+    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
+        Some(value_into_bytewise(value))
+    } else if cap
+        .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT)
+    {
+        Some(value_into_c_cast(value))
+    } else {
+        log::error!("Parameter encoding type not known for vehicle");
+        return None;
+    }
+}
+
+pub fn into_value(
+    cap: MavProtocolCapability,
+    param_value: f32,
+    param_type: MavParamType,
+) -> Option<Value> {
+    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
+        value_from_bytewise(param_value, param_type)
+    } else if cap
+        .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT)
+    {
+        value_from_c_cast(param_value, param_type)
+    } else {
+        log::error!("Parameter encoding type not known for vehicle");
+        return None;
     }
 }
 
