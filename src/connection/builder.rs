@@ -19,7 +19,7 @@ use mavio::{Frame, prelude::Versionless, protocol::FrameBuilder};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
-use crate::ConnectionMessage;
+use crate::{ConnectionMessage, connection::builder::mav_tokio::StreamingAsyncReceiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LinkId(usize);
@@ -349,6 +349,8 @@ impl ConnectionSendRunner {
 
         let link_id = LinkId::new_unique();
 
+        let streamer = StreamingAsyncReceiver(mav_receiver);
+
         struct ReceiverStream {
             receiver: AsyncReceiver,
             cancellation_token: CancellationToken,
@@ -383,11 +385,11 @@ impl ConnectionSendRunner {
             }
         }
 
+        let recv_cancellation_token = cancellation_token.clone();
         let recv_task = Task::stream(
-            ReceiverStream {
-                receiver: mav_receiver,
-                cancellation_token: cancellation_token.clone(),
-            }
+            streamer.take_until(async move { 
+                recv_cancellation_token.cancelled().await;
+            })
             .map(move |result| {
                 match result {
                     Ok(frame) => ConnectionMessage::RecvFrame(frame, link_id),
@@ -484,6 +486,25 @@ mod mav_tokio {
         mavio::prelude::Versionless,
         mavio::protocol::FrameParser<mavio::prelude::Versionless>,
     >;
+
+    pub struct StreamingAsyncReceiver(pub AsyncReceiver);
+
+    impl iced::futures::Stream for StreamingAsyncReceiver {
+        type Item = Result<mavio::Frame<mavio::prelude::Versionless>, mavio::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            let pinned = core::pin::pin!(self.0.recv());
+            match pinned.poll(cx) {
+                std::task::Poll::Ready(Err(mavio::Error::Io(_))) => std::task::Poll::Ready(None),
+                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        }
+    }
+
 
     /// Construct a new [`AsyncReceiver`]
     pub fn new_async_receiver<W: DynAsyncReader + 'static>(writer: W) -> AsyncReceiver {

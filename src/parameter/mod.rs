@@ -245,7 +245,7 @@ impl crate::Application {
                     log::error!("Error saving to file: {}", error);
                 }
 
-                return self.set_file_picker_path_config(save_path.as_path());
+                self.set_file_picker_path_config(save_path.as_path());
             }
             Message::LoadDialog(mav_id) => {
                 let file_dialog = self.new_file_dialog();
@@ -283,7 +283,7 @@ impl crate::Application {
                     }
                 }
 
-                return self.set_file_picker_path_config(load_path.as_path());
+                self.set_file_picker_path_config(load_path.as_path());
             }
         }
 

@@ -180,19 +180,23 @@ impl Application {
         self.maybe_update(message).unwrap_or_default()
     }
 
+    fn save_configuration_to_file(&mut self) {
+        if let Err(error) = self.configuration.write_to_file() {
+            log::error!("Unable to save configuration file: {}", error);
+        }
+    }
+
     fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
         match message {
             Message::Animate(at) => {
                 self.animate_time = at;
             }
             Message::SaveConfigurationToFile => {
-                if let Err(error) = self.configuration.write_to_file() {
-                    log::error!("Unable to save configuration file: {}", error);
-                }
+                self.save_configuration_to_file()
             }
             Message::UpdateAndSaveConfiguration(config) => {
                 self.configuration = config;
-                return Some(Task::done(Message::SaveConfigurationToFile));
+                self.save_configuration_to_file()
             }
             Message::MapProjector(projector) => {
                 self.viewpoint = projector.viewpoint;
@@ -221,13 +225,13 @@ impl Application {
         self.connection.as_ref().map(|handle| handle.downgrade())
     }
 
-    fn set_file_picker_path_config(&mut self, path: &Path) -> Option<Task<Message>> {
-        let file_picker_path = path.is_dir().then_some(path).or(path.parent());
+    fn set_file_picker_path_config(&mut self, path: &Path) -> Option<()> {
+        let file_picker_path = path.is_dir().then_some(path).or(path.parent())?;
 
-        file_picker_path.map(|path| {
-            self.configuration.file_picker_path = Some(path.to_path_buf());
-            Task::done(Message::SaveConfigurationToFile)
-        })
+        self.configuration.file_picker_path = Some(file_picker_path.to_path_buf());
+        self.save_configuration_to_file();
+
+        Some(())
     }
 
     fn new_file_dialog(&self) -> AsyncFileDialog {
@@ -357,6 +361,7 @@ impl Application {
             ConnectionMessage::DisconnectLink => {
                 if let Some(connection) = self.connection.take() {
                     connection.close();
+                    log::info!("Disconnected");
                 }
             }
             ConnectionMessage::ConnectFailed(error) => {
