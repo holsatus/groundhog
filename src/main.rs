@@ -7,8 +7,8 @@ use std::{
 };
 
 use iced::{
-    Alignment, Animation, Color, Element, Font, Length, Subscription, Task,
-    alignment::{Vertical},
+    Alignment, Color, Element, Font, Length, Subscription, Task, Theme,
+    alignment::Vertical,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, button, container, pick_list,
         progress_bar, row, rule, space, stack, text::Ellipsis, text_input,
@@ -16,9 +16,7 @@ use iced::{
 };
 use mavio::{
     Frame,
-    default_dialect::{
-        messages::{Heartbeat},
-    },
+    default_dialect::{enums::MavSeverity, messages::Heartbeat},
     prelude::Versionless,
 };
 use rfd::AsyncFileDialog;
@@ -31,9 +29,7 @@ use crate::{
         ConnectionHandle, LinkBuild, LinkBuilder, LinkConfig, LinkId, LinkVariant,
         WeakConnectionHandle,
     },
-    parameter::base::{
-        MavlinkId, ParamState, Parameters, value_as_string, value_type_name,
-    },
+    parameter::base::{MavlinkId, ParamState, Parameters, value_as_string, value_type_name},
     vehicle::Vehicle,
 };
 
@@ -52,6 +48,7 @@ fn main() {
     iced::application(Application::boot, Application::update, Application::view)
         .subscription(Application::subscription)
         .title("Holsatus Groundhog")
+        .theme(Theme::GruvboxDark)
         .run()
         .expect("Groundhog dead");
 }
@@ -70,8 +67,6 @@ struct Application {
     parameter_filter: String,
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
-    left_slideout_animation: Animation<bool>,
-    animate_time: Instant,
 }
 
 #[derive(Debug)]
@@ -99,7 +94,6 @@ static GCS_MAVLINK_ID: AtomicMavlinkId = AtomicMavlinkId::new(255, 1);
 
 #[derive(Debug, Clone)]
 enum Message {
-    Animate(Instant),
     MapProjector(Projector),
     MapCache(CacheMessage),
     Connection(ConnectionMessage),
@@ -111,8 +105,6 @@ enum Message {
     UpdateAndSaveConfiguration(config::Configuration),
 
     SetPrimaryVehicle(MavlinkId),
-
-    ToggleLeftSlideout,
 }
 
 impl From<parameter::Message> for Message {
@@ -169,10 +161,6 @@ impl Application {
             parameter_filter: String::new(),
             parameter_filtered: None,
             primary_vehicle: None,
-            left_slideout_animation: Animation::new(false)
-                .easing(iced::animation::Easing::EaseOutExpo)
-                .slow(),
-            animate_time: Instant::now(),
         }
     }
 
@@ -188,12 +176,7 @@ impl Application {
 
     fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
         match message {
-            Message::Animate(at) => {
-                self.animate_time = at;
-            }
-            Message::SaveConfigurationToFile => {
-                self.save_configuration_to_file()
-            }
+            Message::SaveConfigurationToFile => self.save_configuration_to_file(),
             Message::UpdateAndSaveConfiguration(config) => {
                 self.configuration = config;
                 self.save_configuration_to_file()
@@ -211,10 +194,6 @@ impl Application {
 
             Message::SetPrimaryVehicle(mav_id) => {
                 self.primary_vehicle = Some(mav_id);
-            }
-            Message::ToggleLeftSlideout => {
-                self.left_slideout_animation
-                    .go_mut(!self.left_slideout_animation.value(), Instant::now());
             }
         }
 
@@ -274,6 +253,7 @@ impl Application {
                 }
 
                 let vehicle = self.get_vehicle_or_insert(mav_id);
+                let mut params_dirty = false;
 
                 vehicle.link_info_mut(link_id).last_message = Some(time_now);
                 vehicle.message_history.push((time_now, message.clone()));
@@ -298,12 +278,49 @@ impl Application {
                         }
                         vehicle.set_mav_capability(msg.capabilities);
                     }
-                    mavio::DefaultDialect::ParamValue(msg) => vehicle.on_param_value(msg),
+                    mavio::DefaultDialect::ParamValue(msg) => {
+                        vehicle.on_param_value(msg);
+                        params_dirty = true;
+                    }
+                    mavio::DefaultDialect::Statustext(msg) => {
+                        let null = msg
+                            .text
+                            .iter()
+                            .position(|c| *c == 0)
+                            .unwrap_or(msg.text.len());
+
+                        let text_string = match str::from_utf8(&msg.text[..null]) {
+                            Ok(text) => text.to_string(),
+                            Err(error) => {
+                                log::warn!(
+                                    "Statustext from '{}' not valid utf8: {}",
+                                    vehicle.pretty_name(),
+                                    error
+                                );
+                                return Task::none();
+                            }
+                        };
+
+                        log::debug!(
+                            "{}: [{:?}] {}",
+                            vehicle.pretty_name(),
+                            msg.severity,
+                            text_string
+                        );
+
+                        vehicle
+                            .status_messages
+                            .push((time_now, msg.severity, text_string));
+                    }
                     _ => log::trace!("Unsupported message type: {}", frame.message_id()),
                 }
 
                 // Lastly, move the message into our vehicle message registry
                 vehicle.register_message(time_now, message);
+
+                if params_dirty && self.primary_vehicle.is_some_and(|id| id == mav_id) {
+                    self.refresh_filtered_parameter();
+                }
             }
             ConnectionMessage::RecvError(error, link_id) => {
                 log::error!("Error receiving on {link_id:?}: {error:?}");
@@ -388,14 +405,18 @@ impl Application {
 
     fn view(&self) -> Element<'_, Message> {
         let map = slippery::MapWidget::new(&self.tile_cache, Message::MapCache, self.viewpoint)
-                .on_update(Message::MapProjector);
+            .on_update(Message::MapProjector);
 
         let overlay = iced::widget::column![
-            self.view_top_panel(),
+            iced::widget::opaque(self.view_top_panel()),
             iced::widget::row![
-                self.view_param_list_scrollable(),
-                self.view_vehicle_information()
+                iced::widget::opaque(self.view_param_list_scrollable()),
+                iced::widget::opaque(self.view_vehicle_information()),
+                iced::widget::space::Space::new().width(Length::Fill),
+                iced::widget::opaque(self.view_right_side_panel()),
             ]
+            .spacing(10.0),
+            iced::widget::space::Space::new().height(Length::Fill),
         ]
         .padding(10.0)
         .spacing(10.0);
@@ -404,7 +425,7 @@ impl Application {
     }
 
     fn view_top_panel(&self) -> Element<'_, Message> {
-        let mut row_contents = Vec::<Element<'_, Message>>::new();
+        let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(16);
 
         let selector = iced::widget::pick_list(
             Some(self.link_config.builder.to_variant()),
@@ -527,7 +548,9 @@ impl Application {
             let mut vehicle_ids = self.vehicles.keys().cloned().collect::<Vec<_>>();
             vehicle_ids.sort();
             let vehicle_picker = pick_list(self.primary_vehicle, vehicle_ids, |id| {
-                self.vehicles.get(id).map_or_else(||"Invalid vehicle".to_string(), |v|v.pretty_name())
+                self.vehicles
+                    .get(id)
+                    .map_or_else(|| "Invalid vehicle".to_string(), |v| v.pretty_name())
             })
             .on_select(Message::SetPrimaryVehicle);
             row_contents.push(vehicle_picker.into());
@@ -564,8 +587,90 @@ impl Application {
                 .align_y(Alignment::Center)
                 .spacing(10.0),
         )
-        .style(iced::widget::container::bordered_box)
+        .style(shaded_bordered_box)
         .width(Length::Fill)
+        .padding(10.0)
+        .into()
+    }
+
+    fn view_right_side_panel(&self) -> Element<'_, Message> {
+        let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(16);
+
+        let mut roll = 0.0;
+        let mut pitch = 0.0;
+        let mut yaw = 0.0;
+
+        if let Some(mav_id) = self.primary_vehicle {
+            if let Some(vehicle) = self.vehicles.get(&mav_id) {
+                if let Some(attitude) = vehicle.attitude {
+                    (roll, pitch, yaw) = attitude.euler_angles();
+                }
+            }
+        }
+
+        row_contents.push(
+            iced::widget::container(
+                iced::widget::column![
+                    iced::widget::text(format!("R: {roll}")),
+                    iced::widget::text(format!("P: {pitch}")),
+                    iced::widget::text(format!("Y: {yaw}"))
+                ]
+                .spacing(10.0),
+            )
+            .width(80.0)
+            .into(),
+        );
+
+        if let Some(mav_id) = self.primary_vehicle {
+            if let Some(vehicle) = self.vehicles.get(&mav_id) {
+                use iced::font;
+                use iced::widget::{rich_text, span};
+                use iced::{Font, color, never};
+
+                row_contents.push(iced::widget::rule::horizontal(1.0).into());
+                row_contents.push(
+                    iced::widget::scrollable(row![
+                        iced::widget::Column::from_iter(vehicle.status_messages.iter().map(
+                            |(_, severity, message)| {
+                                let color = match severity {
+                                    MavSeverity::Emergency => color!(0xff0000),
+                                    MavSeverity::Alert => color!(0xff0000),
+                                    MavSeverity::Critical => color!(0xff0000),
+                                    MavSeverity::Error => color!(0xff0000),
+                                    MavSeverity::Warning => color!(0xff8800),
+                                    MavSeverity::Notice => color!(0xffff00),
+                                    MavSeverity::Info => color!(0x8888ff),
+                                    MavSeverity::Debug => color!(0xffffff),
+                                };
+
+                                rich_text![
+                                    span(format!("[{severity:?}]")).color(color).font(Font {
+                                        weight: font::Weight::Bold,
+                                        ..Font::default()
+                                    }),
+                                    span(" "),
+                                    span(message),
+                                ]
+                                .on_link_click(never)
+                                .into()
+                            }
+                        ))
+                        .spacing(10.0),
+                        iced::widget::Space::new().width(Length::Fill)
+                    ])
+                    .into(),
+                );
+            }
+        }
+
+        iced::widget::container(
+            iced::widget::Column::from_vec(row_contents)
+                .width(Length::Fill)
+                .align_x(Alignment::Start)
+                .spacing(10.0),
+        )
+        .style(shaded_bordered_box)
+        .width(400.0)
         .padding(10.0)
         .into()
     }
@@ -602,7 +707,7 @@ impl Application {
         );
 
         iced::widget::container(Column::from_vec(entries))
-            .style(iced::widget::container::bordered_box)
+            .style(shaded_bordered_box)
             .padding(10.0)
             .into()
     }
@@ -617,7 +722,7 @@ impl Application {
                 .style(iced::widget::scrollable::default)
                 .spacing(0.0),
         )
-        .style(iced::widget::container::bordered_box)
+        .style(shaded_bordered_box)
         .into()
     }
 
@@ -661,7 +766,7 @@ impl Application {
         let got = vehicle.params.loading_state.has_loaded.len();
         let exp = vehicle.params.loading_state.expected_count;
 
-        let style = if got != exp as usize {
+        let style = if got < exp as usize {
             progress_bar::primary
         } else {
             progress_bar::success
@@ -769,13 +874,7 @@ impl Application {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let is_animating = self.left_slideout_animation.is_animating(self.animate_time);
-
-        if is_animating {
-            iced::window::frames().map(Message::Animate)
-        } else {
-            Subscription::none()
-        }
+        Subscription::none()
     }
 }
 
@@ -783,12 +882,12 @@ pub fn shaded_bordered_box(theme: &iced::Theme) -> container::Style {
     let palette = theme.palette();
 
     container::Style {
-        background: Some(palette.background.weaker.color.into()),
+        background: Some(palette.background.weakest.color.into()),
         text_color: Some(palette.background.weakest.text),
         border: iced::Border {
             width: 1.0,
-            radius: 5.0.into(),
-            color: palette.background.weak.color,
+            radius: 6.0.into(),
+            color: palette.background.strongest.color,
         },
         shadow: iced::Shadow {
             color: iced::Color::BLACK.scale_alpha(0.5),

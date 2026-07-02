@@ -66,6 +66,29 @@ impl Parameters {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ParamEncoding {
+    CCast,
+    Bytewise,
+    #[allow(unused)]
+    Unspecified,
+}
+
+impl From<MavProtocolCapability> for ParamEncoding {
+    fn from(value: MavProtocolCapability) -> Self {
+        if value.intersects(
+            MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT,
+        ) {
+            ParamEncoding::CCast
+        } else if value.intersects(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
+            ParamEncoding::Bytewise
+        } else {
+            // ParamEncoding::Unspecified
+            ParamEncoding::Bytewise
+        }
+    }
+}
+
 pub(crate) fn save_parameters_to_ini(
     path: impl AsRef<std::path::Path>,
     parameters: Parameters,
@@ -217,33 +240,23 @@ pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
     }
 }
 
-pub fn from_value(cap: MavProtocolCapability, value: Value) -> Option<(f32, MavParamType)> {
-    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
-        Some(value_into_bytewise(value))
-    } else if cap
-        .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT)
-    {
-        Some(value_into_c_cast(value))
-    } else {
-        log::error!("Parameter encoding type not known for vehicle");
-        return None;
+pub fn mavio_from_value(cap: MavProtocolCapability, value: Value) -> Option<(f32, MavParamType)> {
+    match ParamEncoding::from(cap) {
+        ParamEncoding::CCast => Some(value_into_c_cast(value)),
+        ParamEncoding::Bytewise => Some(value_into_bytewise(value)),
+        ParamEncoding::Unspecified => None,
     }
 }
 
-pub fn into_value(
+pub fn mavio_into_value(
     cap: MavProtocolCapability,
     param_value: f32,
     param_type: MavParamType,
 ) -> Option<Value> {
-    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
-        value_from_bytewise(param_value, param_type)
-    } else if cap
-        .contains(MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT)
-    {
-        value_from_c_cast(param_value, param_type)
-    } else {
-        log::error!("Parameter encoding type not known for vehicle");
-        return None;
+    match ParamEncoding::from(cap) {
+        ParamEncoding::CCast => value_from_c_cast(param_value, param_type),
+        ParamEncoding::Bytewise => value_from_bytewise(param_value, param_type),
+        ParamEncoding::Unspecified => None,
     }
 }
 

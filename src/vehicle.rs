@@ -4,7 +4,7 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavProtocolCapability, MavState},
+        enums::{MavProtocolCapability, MavSeverity, MavState},
         messages::ParamValue,
     },
     protocol::MessageSpec,
@@ -32,6 +32,7 @@ pub struct Vehicle {
     pub velocity_ned: Option<Vector3<f32>>,
     pub altitude_msl: Option<f32>,
     pub global_position: Option<(f64, f64)>,
+    pub status_messages: Vec<(Instant, MavSeverity, String)>,
 }
 
 impl Vehicle {
@@ -45,6 +46,7 @@ impl Vehicle {
             params: Parameters::new(),
             link_info: HashMap::new(),
             message_history: Vec::with_capacity(100),
+            status_messages: Vec::new(),
             latest_message: HashMap::new(),
             attitude: None,
             angular_rates: None,
@@ -55,12 +57,9 @@ impl Vehicle {
     }
 
     pub fn on_param_value(&mut self, message: &ParamValue) {
-        let Some(cap) = self.capabilities else {
-            log::error!("Cannot handle parameters before knowing vehicle capabilities");
-            return;
-        };
+        let cap = self.capabilities.unwrap_or_default();
 
-        let maybe_value = base::into_value(cap, message.param_value, message.param_type);
+        let maybe_value = base::mavio_into_value(cap, message.param_value, message.param_type);
 
         let Some(value) = maybe_value else {
             log::error!("Unsupported type of parameter: {:?}", message.param_type);
@@ -87,7 +86,7 @@ impl Vehicle {
             if message.param_index + 1 == message.param_count {
                 let got = self.params.loading_state.has_loaded.len();
                 let exp = message.param_count;
-                if got == exp as usize {
+                if got >= exp as usize {
                     log::info!("Loaded total of {got} parameters");
                 } else {
                     log::warn!("Expected {exp} paramaters, got {got}");
@@ -159,10 +158,11 @@ impl Vehicle {
     }
 
     pub fn pretty_name(&self) -> String {
-        format!("{} {} (mav {}:{})", 
-            self.vendor_name.as_deref().unwrap_or("Unknown"), 
-            self.model_name.as_deref().unwrap_or("Unknown"), 
-            self.mav_id.system, 
+        format!(
+            "{} {} (mav {}:{})",
+            self.vendor_name.as_deref().unwrap_or("Unknown"),
+            self.model_name.as_deref().unwrap_or("Unknown"),
+            self.mav_id.system,
             self.mav_id.component
         )
     }

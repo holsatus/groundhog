@@ -88,7 +88,7 @@ impl LinkBuild {
                 .then(|result| match result {
                     Ok(stream) => {
                         let (rcv, snd) = stream.into_split();
-                        ConnectionSendRunner::spawn(rcv, snd)
+                        start_mavlink_connection(rcv, snd)
                     }
                     Err(error) => {
                         Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
@@ -100,8 +100,8 @@ impl LinkBuild {
                         let connected = AtomicBool::new(false);
                         let socket = std::sync::Arc::new((socket, connected));
                         let writer = super::udp::UdpWriter::new(socket.clone());
-                        let reader = super::udp::UdpReader::new(socket);
-                        ConnectionSendRunner::spawn(reader, writer)
+                        let rcv = super::udp::UdpReader::new(socket);
+                        start_mavlink_connection(rcv, writer)
                     }
                     Err(error) => {
                         Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
@@ -127,7 +127,7 @@ impl LinkBuild {
                 };
 
                 let snd = port;
-                ConnectionSendRunner::spawn(rcv, snd)
+                start_mavlink_connection(rcv, snd)
             }
         }
     }
@@ -241,6 +241,7 @@ impl std::fmt::Display for LinkVariant {
 /// Dropping this handle will release the associated system resources.
 #[derive(Debug)]
 struct ConnectionHandleState {
+    link_id: LinkId,
     sequence: AtomicU8,
     send_frame: Sender<Frame<Versionless>>,
     cancellation_token: CancellationToken,
@@ -298,9 +299,14 @@ impl ConnectionHandle {
         }
     }
 
-    pub fn new(sender: Sender<Frame<Versionless>>, cancellation_token: CancellationToken) -> Self {
+    pub fn new(
+        link_id: LinkId,
+        sender: Sender<Frame<Versionless>>,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             send_state: Arc::new(ConnectionHandleState {
+                link_id,
                 sequence: AtomicU8::new(0),
                 send_frame: sender,
                 cancellation_token,
@@ -337,58 +343,41 @@ impl ConnectionHandle {
 }
 
 impl ConnectionSendRunner {
-    fn spawn<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'static>(
-        rcv: R,
-        snd: W,
-    ) -> Task<crate::Message> {
-        let mav_receiver = new_async_receiver(rcv);
-        let mav_sender = new_async_sender(snd);
-
-        let (send_frame, recv_frame) = mpsc::channel::<Frame<Versionless>>(32);
-        let cancellation_token = CancellationToken::new();
-
-        let link_id = LinkId::new_unique();
-
-        let streamer = StreamingAsyncReceiver(mav_receiver);
-
-        struct ReceiverStream {
-            receiver: AsyncReceiver,
-            cancellation_token: CancellationToken,
-        }
-
-        impl Stream for ReceiverStream {
-            type Item = Result<Frame<Versionless>, mavio::Error>;
-
-            fn poll_next(
-                mut self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-            ) -> Poll<Option<Self::Item>> {
-                if self.cancellation_token.is_cancelled() {
-                    return Poll::Ready(None);
-                }
-
-                {
-                    let cancelled = core::pin::pin!(self.cancellation_token.cancelled());
-                    if cancelled.poll(cx).is_ready() {
-                        return Poll::Ready(None);
-                    }
-                }
-
-                {
-                    let pinned = core::pin::pin!(self.receiver.recv());
-                    match pinned.poll(cx) {
-                        Poll::Ready(Err(mavio::Error::Io(_))) => Poll::Ready(None),
-                        Poll::Ready(result) => Poll::Ready(Some(result)),
-                        Poll::Pending => Poll::Pending,
-                    }
-                }
+    async fn run(mut self) {
+        while let Some(frame_out) = self.recv_frame.recv().await {
+            if let Err(err) = self.mav_sender.send(&frame_out).await {
+                log::error!("Failed to send MAVLink frame to transport: {err}");
             }
         }
+    }
+}
 
-        let recv_cancellation_token = cancellation_token.clone();
-        let recv_task = Task::stream(
-            streamer.take_until(async move { 
-                recv_cancellation_token.cancelled().await;
+fn start_mavlink_connection<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'static>(
+    rcv: R,
+    snd: W,
+) -> Task<crate::Message> {
+    let mav_receiver = new_async_receiver(rcv);
+    let mav_sender = new_async_sender(snd);
+
+    let (send_frame, recv_frame) = mpsc::channel::<Frame<Versionless>>(32);
+    let cancellation_token = CancellationToken::new();
+
+    let link_id = LinkId::new_unique();
+
+    tokio::spawn(
+        ConnectionSendRunner {
+            mav_sender,
+            recv_frame,
+        }
+        .run(),
+    );
+
+    let connection_handle = ConnectionHandle::new(link_id, send_frame, cancellation_token.clone());
+
+    let recv_task = Task::stream(
+        StreamingAsyncReceiver(mav_receiver)
+            .take_until(async move {
+                cancellation_token.cancelled().await;
             })
             .map(move |result| {
                 match result {
@@ -397,30 +386,12 @@ impl ConnectionSendRunner {
                 }
                 .into()
             }),
-        );
+    );
 
-        let connection = ConnectionSendRunner {
-            mav_sender,
-            recv_frame,
-        };
-
-        tokio::spawn(connection.run());
-
-        let connection_handle = ConnectionHandle::new(send_frame, cancellation_token.clone());
-
-        Task::done(crate::Message::Connection(
-            ConnectionMessage::ConnectSuccess(connection_handle),
-        ))
-        .chain(recv_task)
-    }
-
-    async fn run(mut self) {
-        while let Some(frame_out) = self.recv_frame.recv().await {
-            if let Err(err) = self.mav_sender.send(&frame_out).await {
-                log::error!("Failed to send MAVLink frame to transport: {err}");
-            }
-        }
-    }
+    Task::done(crate::Message::Connection(
+        ConnectionMessage::ConnectSuccess(connection_handle),
+    ))
+    .chain(recv_task)
 }
 
 mod mav_tokio {
@@ -504,7 +475,6 @@ mod mav_tokio {
             }
         }
     }
-
 
     /// Construct a new [`AsyncReceiver`]
     pub fn new_async_receiver<W: DynAsyncReader + 'static>(writer: W) -> AsyncReceiver {

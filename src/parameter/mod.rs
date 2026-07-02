@@ -3,7 +3,7 @@ use std::{path::PathBuf, time::Duration};
 use iced::Task;
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
-    enums::{MavCmd, MavProtocolCapability},
+    enums::MavCmd,
     messages::{AutopilotVersion, CommandInt, ParamRequestList, ParamSet},
 };
 
@@ -49,31 +49,35 @@ pub enum Message {
 }
 
 impl crate::Application {
+    pub fn refresh_filtered_parameter(&mut self) -> Option<&Parameters> {
+        if self.parameter_filter.is_empty() {
+            self.parameter_filtered = None;
+            return None;
+        }
+
+        let mav_id = self.primary_vehicle?;
+        let vehicle = self.vehicles.get(&mav_id)?;
+
+        let param_map = vehicle.params.map.iter().filter_map(|(ident, param)| {
+            ident
+                .as_str()
+                .to_lowercase()
+                .contains(&self.parameter_filter.to_lowercase())
+                .then_some((ident.clone(), param.clone()))
+        });
+
+        self.parameter_filtered = Some(Parameters {
+            map: param_map.collect(),
+            loading_state: vehicle.params.loading_state.clone(),
+        });
+
+        self.parameter_filtered.as_ref()
+    }
+
     pub fn parameter_message_update(&mut self, message: Message) -> Option<Task<crate::Message>> {
         match message {
             Message::FilterBuf(buffer) => {
                 self.parameter_filter = buffer;
-
-                if self.parameter_filter.is_empty() {
-                    self.parameter_filtered = None;
-                    return None;
-                }
-
-                let mav_id = self.primary_vehicle?;
-                let vehicle = self.vehicles.get(&mav_id)?;
-
-                let param_map = vehicle.params.map.iter().filter_map(|(ident, param)| {
-                    ident
-                        .as_str()
-                        .to_lowercase()
-                        .contains(&self.parameter_filter.to_lowercase())
-                        .then_some((ident.clone(), param.clone()))
-                });
-
-                self.parameter_filtered = Some(Parameters {
-                    map: param_map.collect(),
-                    loading_state: vehicle.params.loading_state.clone(),
-                });
             }
 
             Message::ListReload(mav_id) => {
@@ -137,7 +141,7 @@ impl crate::Application {
                     param.state = ParamState::Uploading(handle, param.value);
 
                     let cap = vehicle.capabilities?;
-                    let (param_value, param_type) = base::from_value(cap, value)?;
+                    let (param_value, param_type) = base::mavio_from_value(cap, value)?;
 
                     let param_set = ParamSet {
                         target_system: mav_id.system,
@@ -190,15 +194,7 @@ impl crate::Application {
                 param.state = ParamState::Uploading(handle, param.value);
 
                 let cap = vehicle.capabilities?;
-                let (param_value, param_type) =
-                    if cap.contains(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
-                        base::value_into_bytewise(value)
-                    } else if cap.contains(MavProtocolCapability::PARAM_ENCODE_C_CAST) {
-                        base::value_into_c_cast(value)
-                    } else {
-                        log::error!("Parameter encoding type not known for vehicle");
-                        return None;
-                    };
+                let (param_value, param_type) = base::mavio_from_value(cap, value)?;
 
                 let param_set = ParamSet {
                     target_system: mav_id.system,
@@ -286,6 +282,8 @@ impl crate::Application {
                 self.set_file_picker_path_config(load_path.as_path());
             }
         }
+
+        self.refresh_filtered_parameter()?;
 
         None
     }
