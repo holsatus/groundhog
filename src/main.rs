@@ -2,27 +2,31 @@ use std::{
     collections::BTreeMap,
     error::Error,
     path::Path,
-    sync::{Arc, atomic::AtomicU16},
+    sync::{Arc, LazyLock, atomic::AtomicU16},
     time::{Duration, Instant},
 };
 
 use iced::{
-    Alignment, Color, Element, Font, Length, Subscription, Task, Theme,
+    Alignment, Color, Element, Font,
+    Length::{self},
+    Subscription, Task, Theme,
     alignment::Vertical,
     widget::{
-        Button, Column, ProgressBar, Space, Text, TextInput, button, container, pick_list,
-        progress_bar, row, rule, space, stack, text::Ellipsis, text_input,
+        Button, Column, ProgressBar, Space, Text, TextInput, button, canvas::Stroke, container,
+        image::Handle, pick_list, progress_bar, row, rule, space, stack, text::Ellipsis,
+        text_input,
     },
 };
 use mavio::{
     Frame,
-    default_dialect::{enums::MavSeverity, messages::Heartbeat},
+    default_dialect::{
+        enums::{MavCmd, MavSeverity},
+        messages::{CommandLong, ComponentInformationBasic, Heartbeat, ParamRequestList},
+    },
     prelude::Versionless,
 };
 use rfd::AsyncFileDialog;
-use slippery::{
-    CacheMessage, Projector, TileCache, Viewpoint, Zoom, location, sources::OpenStreetMap,
-};
+use slippery::{CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location};
 
 use crate::{
     connection::builder::{
@@ -55,6 +59,8 @@ fn main() {
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
 type BoxError = Box<dyn Error + Send + Sync + 'static>;
+static ARROW_HANDLE: LazyLock<Handle> =
+    LazyLock::new(|| Handle::from_bytes(include_bytes!("../assets/pointer.png").as_slice()));
 
 struct Application {
     viewpoint: Viewpoint,
@@ -67,6 +73,7 @@ struct Application {
     parameter_filter: String,
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
+    follow_primary_vehicle: bool,
 }
 
 #[derive(Debug)]
@@ -95,6 +102,7 @@ static GCS_MAVLINK_ID: AtomicMavlinkId = AtomicMavlinkId::new(255, 1);
 #[derive(Debug, Clone)]
 enum Message {
     MapProjector(Projector),
+    SetViewPosition(Mercator),
     MapCache(CacheMessage),
     Connection(ConnectionMessage),
     Parameter(parameter::Message),
@@ -105,6 +113,7 @@ enum Message {
     UpdateAndSaveConfiguration(config::Configuration),
 
     SetPrimaryVehicle(MavlinkId),
+    SetFollowPrimaryVehicle(bool),
 }
 
 impl From<parameter::Message> for Message {
@@ -139,8 +148,6 @@ impl Application {
             config::Configuration::default()
         });
 
-        log::debug!("Using configuration: {config:#?}");
-
         let link_builder = config
             .link_config
             .as_ref()
@@ -153,7 +160,7 @@ impl Application {
                 zoom: Zoom::try_from(8.0).unwrap(),
             },
             projector: None,
-            tile_cache: TileCache::new(OpenStreetMap),
+            tile_cache: TileCache::new(slippery::sources::ArcGisWorldMap),
             link_config: LinkConfig::new(link_builder, "Default".to_owned()),
             connection: None,
             configuration: config.clone(),
@@ -161,6 +168,7 @@ impl Application {
             parameter_filter: String::new(),
             parameter_filtered: None,
             primary_vehicle: None,
+            follow_primary_vehicle: false,
         }
     }
 
@@ -182,8 +190,14 @@ impl Application {
                 self.save_configuration_to_file()
             }
             Message::MapProjector(projector) => {
+                // Only update the zoom if we are following the vehicle
+
                 self.viewpoint = projector.viewpoint;
+                self.follow_primary_vehicle = false;
                 self.projector = Some(projector);
+            }
+            Message::SetViewPosition(mercator) => {
+                self.viewpoint.position = mercator;
             }
             Message::MapCache(message) => {
                 let map_task = self.tile_cache.update(message);
@@ -194,6 +208,9 @@ impl Application {
 
             Message::SetPrimaryVehicle(mav_id) => {
                 self.primary_vehicle = Some(mav_id);
+            }
+            Message::SetFollowPrimaryVehicle(follow) => {
+                self.follow_primary_vehicle = follow;
             }
         }
 
@@ -226,8 +243,57 @@ impl Application {
     fn get_vehicle_or_insert(&mut self, mav_id: MavlinkId) -> &mut Vehicle {
         self.vehicles.entry(mav_id).or_insert_with(|| {
             log::info!("New vehicle detected: {mav_id:?}");
+            if let Some(handle) = self.connection.as_ref() {
+                Self::request_vehicle_info(handle, mav_id);
+            }
             Vehicle::new(mav_id)
         })
+    }
+
+    fn request_vehicle_info(handle: &ConnectionHandle, mav_id: MavlinkId) {
+        let handle = handle.downgrade();
+        tokio::spawn(async move {
+            // Request parameters
+            handle
+                .send_message(ParamRequestList {
+                    target_system: mav_id.system,
+                    target_component: mav_id.component,
+                    ..ParamRequestList::default()
+                })
+                .await;
+
+            // Request basic component information
+            let command = MavCmd::RequestMessage;
+            handle
+                .send_message(CommandLong {
+                    target_system: mav_id.system,
+                    target_component: mav_id.component,
+                    command,
+                    param1: ComponentInformationBasic::ID as f32,
+                    ..CommandLong::default()
+                })
+                .await;
+
+            // Wait for ack/nack to request command
+            let ack = handle
+                .await_messages(|message| match message {
+                    mavio::DefaultDialect::CommandAck(ack) if ack.command == command => {
+                        let target = MavlinkId {
+                            system: ack.target_system,
+                            component: ack.target_component,
+                        };
+
+                        (GCS_MAVLINK_ID.load() == target).then(|| ack.clone())
+                    }
+                    _ => None,
+                })
+                .await;
+
+            match ack {
+                Some(ack) => log::debug!("ACK for {:?} - {:?}", ack.command, ack.result),
+                None => log::warn!("No response to command"),
+            };
+        });
     }
 
     fn connection_message_update(&mut self, message: ConnectionMessage) -> Task<Message> {
@@ -236,6 +302,10 @@ impl Application {
             ConnectionMessage::RecvFrame(frame, link_id) => {
                 let message = match frame.decode::<mavio::DefaultDialect>() {
                     Ok(message) => message,
+                    Err(mavio::Error::Frame(mavio::error::FrameError::NotInDialect(id))) => {
+                        log::trace!("Message with id: {id} is not in dialect");
+                        return Task::none();
+                    }
                     Err(error) => {
                         log::error!("Mavlink decode error: {error:?}");
                         return Task::none();
@@ -253,73 +323,26 @@ impl Application {
                 }
 
                 let vehicle = self.get_vehicle_or_insert(mav_id);
-                let mut params_dirty = false;
 
                 vehicle.link_info_mut(link_id).last_message = Some(time_now);
-                vehicle.message_history.push((time_now, message.clone()));
+                vehicle.handle_message(time_now, message);
 
-                match &message {
-                    mavio::DefaultDialect::Heartbeat(msg) => {
-                        vehicle.set_mav_state(msg.system_status);
-                    }
-                    mavio::DefaultDialect::AutopilotVersion(msg) => {
-                        vehicle.set_mav_capability(msg.capabilities);
-                    }
-                    mavio::DefaultDialect::ComponentInformationBasic(msg) => {
-                        if let Ok(model_name) = str::from_utf8(&msg.model_name)
-                            && !model_name.is_empty()
-                        {
-                            vehicle.model_name = Some(Box::from(model_name))
-                        }
-                        if let Ok(vendor_name) = str::from_utf8(&msg.vendor_name)
-                            && !vendor_name.is_empty()
-                        {
-                            vehicle.vendor_name = Some(Box::from(vendor_name))
-                        }
-                        vehicle.set_mav_capability(msg.capabilities);
-                    }
-                    mavio::DefaultDialect::ParamValue(msg) => {
-                        vehicle.on_param_value(msg);
-                        params_dirty = true;
-                    }
-                    mavio::DefaultDialect::Statustext(msg) => {
-                        let null = msg
-                            .text
-                            .iter()
-                            .position(|c| *c == 0)
-                            .unwrap_or(msg.text.len());
-
-                        let text_string = match str::from_utf8(&msg.text[..null]) {
-                            Ok(text) => text.to_string(),
-                            Err(error) => {
-                                log::warn!(
-                                    "Statustext from '{}' not valid utf8: {}",
-                                    vehicle.pretty_name(),
-                                    error
-                                );
-                                return Task::none();
-                            }
-                        };
-
-                        log::debug!(
-                            "{}: [{:?}] {}",
-                            vehicle.pretty_name(),
-                            msg.severity,
-                            text_string
-                        );
-
-                        vehicle
-                            .status_messages
-                            .push((time_now, msg.severity, text_string));
-                    }
-                    _ => log::trace!("Unsupported message type: {}", frame.message_id()),
+                if self.primary_vehicle.is_some_and(|id| id == mav_id) {
+                    self.refresh_filtered_parameter();
                 }
 
-                // Lastly, move the message into our vehicle message registry
-                vehicle.register_message(time_now, message);
-
-                if params_dirty && self.primary_vehicle.is_some_and(|id| id == mav_id) {
-                    self.refresh_filtered_parameter();
+                if self.follow_primary_vehicle {
+                    if let Some(prim_id) = self.primary_vehicle
+                        && prim_id == mav_id
+                    {
+                        if let Some(primary_vehicle) = self.vehicles.get(&prim_id) {
+                            if let Some(position) = &primary_vehicle.global_position {
+                                return Task::done(Message::SetViewPosition(
+                                    Geodetic::new(position.lon, position.lat).as_mercator(),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             ConnectionMessage::RecvError(error, link_id) => {
@@ -404,19 +427,73 @@ impl Application {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let map = slippery::MapWidget::new(&self.tile_cache, Message::MapCache, self.viewpoint)
-            .on_update(Message::MapProjector);
+        let map = slippery::MapProgram::new(&self.tile_cache)
+            .on_cache(Message::MapCache)
+            .on_update(Message::MapProjector)
+            .with_draw_layer(move |projector, frame| {
+                for (_, vehicle) in &self.vehicles {
+                    if let Some(pos) = &vehicle.global_position {
+                        let center = projector.mercator_into_screen_space(
+                            Geodetic::new(pos.lon, pos.lat).as_mercator(),
+                        );
+
+                        let yaw_angle = vehicle
+                            .attitude
+                            .as_ref()
+                            .map(|att| att.attitude.euler_angles().2)
+                            .unwrap_or_default();
+
+                        let mut last_position = vehicle.global_positions.front().unwrap();
+                        for this_position in vehicle.global_positions.iter().skip(1) {
+                            let from = projector.geodetic_into_screen_space(Geodetic::new(
+                                last_position.lon,
+                                last_position.lat,
+                            ));
+                            let to = projector.geodetic_into_screen_space(Geodetic::new(
+                                this_position.lon,
+                                this_position.lat,
+                            ));
+
+                            last_position = this_position;
+
+                            frame.stroke(
+                                &iced::widget::canvas::Path::line(from, to),
+                                Stroke::default().with_color(Color::BLACK).with_width(2.0),
+                            );
+                            frame.stroke(
+                                &iced::widget::canvas::Path::circle(from, 1.0),
+                                Stroke::default().with_color(Color::BLACK).with_width(3.0),
+                            );
+                        }
+
+                        frame.with_save(|frame| {
+                            frame.translate(iced::Vector::new(center.x, center.y));
+                            frame.rotate(yaw_angle);
+
+                            const WIDTH: f32 = 60.0;
+                            frame.draw_image(
+                                iced::Rectangle {
+                                    x: -WIDTH / 2.0,
+                                    y: -WIDTH / 2.0,
+                                    width: WIDTH,
+                                    height: WIDTH,
+                                },
+                                &*ARROW_HANDLE,
+                            );
+                        });
+                    }
+                }
+            })
+            .build(self.viewpoint);
 
         let overlay = iced::widget::column![
             iced::widget::opaque(self.view_top_panel()),
             iced::widget::row![
                 iced::widget::opaque(self.view_param_list_scrollable()),
-                iced::widget::opaque(self.view_vehicle_information()),
                 iced::widget::space::Space::new().width(Length::Fill),
                 iced::widget::opaque(self.view_right_side_panel()),
             ]
             .spacing(10.0),
-            iced::widget::space::Space::new().height(Length::Fill),
         ]
         .padding(10.0)
         .spacing(10.0);
@@ -541,6 +618,14 @@ impl Application {
             }
         }
 
+        row_contents.push(iced::widget::rule::vertical(1.0).into());
+        row_contents.push(iced::widget::text("Follow primary vehicle").into());
+        row_contents.push(
+            iced::widget::checkbox(self.follow_primary_vehicle)
+                .on_toggle(Message::SetFollowPrimaryVehicle)
+                .into(),
+        );
+
         row_contents.push(iced::widget::space::Space::new().width(Length::Fill).into());
 
         if self.vehicles.len() > 1 {
@@ -602,8 +687,8 @@ impl Application {
 
         if let Some(mav_id) = self.primary_vehicle {
             if let Some(vehicle) = self.vehicles.get(&mav_id) {
-                if let Some(attitude) = vehicle.attitude {
-                    (roll, pitch, yaw) = attitude.euler_angles();
+                if let Some(attitude) = vehicle.attitude.as_ref() {
+                    (roll, pitch, yaw) = attitude.attitude.euler_angles();
                 }
             }
         }
@@ -617,7 +702,7 @@ impl Application {
                 ]
                 .spacing(10.0),
             )
-            .width(80.0)
+            .width(250.0)
             .into(),
         );
 
@@ -630,34 +715,48 @@ impl Application {
                 row_contents.push(iced::widget::rule::horizontal(1.0).into());
                 row_contents.push(
                     iced::widget::scrollable(row![
-                        iced::widget::Column::from_iter(vehicle.status_messages.iter().map(
-                            |(_, severity, message)| {
-                                let color = match severity {
-                                    MavSeverity::Emergency => color!(0xff0000),
-                                    MavSeverity::Alert => color!(0xff0000),
-                                    MavSeverity::Critical => color!(0xff0000),
-                                    MavSeverity::Error => color!(0xff0000),
-                                    MavSeverity::Warning => color!(0xff8800),
-                                    MavSeverity::Notice => color!(0xffff00),
-                                    MavSeverity::Info => color!(0x8888ff),
-                                    MavSeverity::Debug => color!(0xffffff),
-                                };
-
-                                rich_text![
-                                    span(format!("[{severity:?}]")).color(color).font(Font {
-                                        weight: font::Weight::Bold,
-                                        ..Font::default()
-                                    }),
-                                    span(" "),
-                                    span(message),
-                                ]
-                                .on_link_click(never)
-                                .into()
-                            }
-                        ))
+                        iced::widget::Column::from_iter(
+                            vehicle
+                                .status_texts
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, status)| {
+                                    let color = match status.severity {
+                                        MavSeverity::Emergency => color!(0xff0000),
+                                        MavSeverity::Alert => color!(0xff0000),
+                                        MavSeverity::Critical => color!(0xff0000),
+                                        MavSeverity::Error => color!(0xff0000),
+                                        MavSeverity::Warning => color!(0xff8800),
+                                        MavSeverity::Notice => color!(0xdddd00),
+                                        MavSeverity::Info => color!(0x6666ff),
+                                        MavSeverity::Debug => color!(0xaaaaaa),
+                                    };
+                                    iced::widget::container(row![
+                                        rich_text![
+                                            span(format!("[{:?}]", status.severity))
+                                                .color(color)
+                                                .font(Font {
+                                                    weight: font::Weight::Bold,
+                                                    ..Font::default()
+                                                }),
+                                            span(" "),
+                                            span(&status.text),
+                                        ]
+                                        .on_link_click(never),
+                                        iced::widget::Space::new().width(Length::Fill)
+                                    ])
+                                    .style(if idx % 2 == 0 {
+                                        list_default
+                                    } else {
+                                        list_brighter
+                                    })
+                                    .padding(5.0)
+                                    .into()
+                                })
+                        )
                         .spacing(10.0),
-                        iced::widget::Space::new().width(Length::Fill)
                     ])
+                    .anchor_bottom()
                     .into(),
                 );
             }
@@ -670,46 +769,9 @@ impl Application {
                 .spacing(10.0),
         )
         .style(shaded_bordered_box)
-        .width(400.0)
+        .width(500.0)
         .padding(10.0)
         .into()
-    }
-
-    fn view_vehicle_information(&self) -> Element<'_, Message> {
-        let Some(mav_id) = self.primary_vehicle else {
-            return space::Space::new().into();
-        };
-
-        let Some(vehicle) = self.vehicles.get(&mav_id) else {
-            return space::Space::new().into();
-        };
-
-        let mut entries = Vec::new();
-
-        entries.push(
-            Text::new(format!(
-                "System: {}, component: {}",
-                mav_id.system, mav_id.component
-            ))
-            .into(),
-        );
-
-        let heartbeat = vehicle.latest_message.get(&Heartbeat::ID);
-        entries.push(
-            Text::new(format!("Heartbeat: {:#?}", heartbeat))
-                .color_maybe(
-                    heartbeat
-                        .as_ref()
-                        .is_none_or(|(hb_at, _)| hb_at.elapsed() > Duration::from_secs(2))
-                        .then(|| Color::from_rgb8(255, 100, 100)),
-                )
-                .into(),
-        );
-
-        iced::widget::container(Column::from_vec(entries))
-            .style(shaded_bordered_box)
-            .padding(10.0)
-            .into()
     }
 
     fn view_param_list_scrollable(&self) -> Element<'_, Message> {
@@ -746,7 +808,7 @@ impl Application {
             .into();
 
         let save_button = Button::new("Save parameters to file")
-            .on_press_with(|| parameter::Message::SaveDialog(vehicle.params.clone()).into())
+            .on_press_with(|| parameter::Message::SaveDialog(vehicle.parameters.clone()).into())
             .into();
 
         let load_button = Button::new("Load parameters from file")
@@ -763,8 +825,8 @@ impl Application {
         entries.push(load_button);
         entries.push(filter_field);
 
-        let got = vehicle.params.loading_state.has_loaded.len();
-        let exp = vehicle.params.loading_state.expected_count;
+        let got = vehicle.parameters.loading_state.has_loaded.len();
+        let exp = vehicle.parameters.loading_state.expected_count;
 
         let style = if got < exp as usize {
             progress_bar::primary
@@ -781,7 +843,10 @@ impl Application {
 
         let mut section = None;
 
-        let parameters = self.parameter_filtered.as_ref().unwrap_or(&vehicle.params);
+        let parameters = self
+            .parameter_filtered
+            .as_ref()
+            .unwrap_or(&vehicle.parameters);
 
         for (ident, param) in &parameters.map {
             let type_name = value_type_name(param.value);
@@ -894,6 +959,26 @@ pub fn shaded_bordered_box(theme: &iced::Theme) -> container::Style {
             offset: iced::Vector::new(0.0, 1.0),
             blur_radius: 6.0,
         },
+        ..container::Style::default()
+    }
+}
+
+pub fn list_brighter(theme: &iced::Theme) -> container::Style {
+    let palette = theme.palette();
+
+    container::Style {
+        background: Some(palette.background.weaker.color.into()),
+        text_color: Some(palette.background.weakest.text),
+        ..container::Style::default()
+    }
+}
+
+pub fn list_default(theme: &iced::Theme) -> container::Style {
+    let palette = theme.palette();
+
+    container::Style {
+        background: Some(palette.background.weakest.color.into()),
+        text_color: Some(palette.background.weakest.text),
         ..container::Style::default()
     }
 }

@@ -7,7 +7,7 @@ use mavio::default_dialect::{
     messages::{AutopilotVersion, CommandInt, ParamRequestList, ParamSet},
 };
 
-use crate::parameter::base::MavlinkId;
+use crate::{GCS_MAVLINK_ID, parameter::base::MavlinkId};
 
 pub mod base;
 use base::*;
@@ -58,7 +58,7 @@ impl crate::Application {
         let mav_id = self.primary_vehicle?;
         let vehicle = self.vehicles.get(&mav_id)?;
 
-        let param_map = vehicle.params.map.iter().filter_map(|(ident, param)| {
+        let param_map = vehicle.parameters.map.iter().filter_map(|(ident, param)| {
             ident
                 .as_str()
                 .to_lowercase()
@@ -68,7 +68,7 @@ impl crate::Application {
 
         self.parameter_filtered = Some(Parameters {
             map: param_map.collect(),
-            loading_state: vehicle.params.loading_state.clone(),
+            loading_state: vehicle.parameters.loading_state.clone(),
         });
 
         self.parameter_filtered.as_ref()
@@ -85,7 +85,7 @@ impl crate::Application {
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
 
                 let get_capabilities = vehicle.capabilities.is_none();
-                vehicle.params.loading_state.has_loaded.clear();
+                vehicle.parameters.loading_state.has_loaded.clear();
 
                 tokio::spawn(async move {
                     if get_capabilities {
@@ -99,6 +99,30 @@ impl crate::Application {
                                 ..Default::default()
                             })
                             .await;
+
+                        // Wait for ack/nack to request command
+                        let ack = connection
+                            .await_messages(|message| match message {
+                                mavio::DefaultDialect::CommandAck(ack)
+                                    if ack.command == MavCmd::RequestMessage =>
+                                {
+                                    let target = MavlinkId {
+                                        system: ack.target_system,
+                                        component: ack.target_component,
+                                    };
+
+                                    (GCS_MAVLINK_ID.load() == target).then(|| ack.clone())
+                                }
+                                _ => None,
+                            })
+                            .await;
+
+                        match ack {
+                            Some(ack) => {
+                                log::debug!("(ACK for {:?} - {:?}", ack.command, ack.result)
+                            }
+                            None => log::warn!("No response to command"),
+                        };
 
                         // Give MAV some time to respond in right order
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -123,7 +147,7 @@ impl crate::Application {
                 // Mark the parameter as uploading to keep track of things.
                 for (ident, param, value) in
                     vehicle
-                        .params
+                        .parameters
                         .map
                         .iter_mut()
                         .filter_map(|(ident, param)| match param.state {
@@ -160,7 +184,7 @@ impl crate::Application {
             }
             Message::BufferEdit(mav_id, ident, buffer) => {
                 let entry = self.vehicles.get_mut(&mav_id)?;
-                let param = entry.params.map.get_mut(&ident)?;
+                let param = entry.parameters.map.get_mut(&ident)?;
 
                 param.state = ParamState::Unchanged;
 
@@ -174,7 +198,7 @@ impl crate::Application {
             }
             Message::ValueReset(mav_id, ident) => {
                 let entry = self.vehicles.get_mut(&mav_id)?;
-                let param = entry.params.map.get_mut(&ident)?;
+                let param = entry.parameters.map.get_mut(&ident)?;
 
                 param.editing = None;
                 param.state = ParamState::Unchanged;
@@ -182,7 +206,7 @@ impl crate::Application {
             Message::ValueUpload(mav_id, ident, value) => {
                 let connection = self.get_connection_handle()?;
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
-                let param = vehicle.params.map.get_mut(&ident)?;
+                let param = vehicle.parameters.map.get_mut(&ident)?;
 
                 let ident_cloned = ident.clone();
                 let (timeout_task, handle) = Task::future(async move {
@@ -212,7 +236,7 @@ impl crate::Application {
             }
             Message::ValueUploadTimeout(mav_id, ident) => {
                 let entry = self.vehicles.get_mut(&mav_id)?;
-                let param = entry.params.map.get_mut(&ident)?;
+                let param = entry.parameters.map.get_mut(&ident)?;
 
                 if let ParamState::Uploading(handle, value) = param.state.clone() {
                     log::warn!("Parameter upload for '{}' timed out", ident.as_str());
@@ -270,7 +294,7 @@ impl crate::Application {
 
                 // Set the parameters of the vehicle as modified if that is the case
                 for (ident, new_param) in loaded_params.map.iter() {
-                    if let Some(old_param) = vehicle.params.map.get_mut(ident)
+                    if let Some(old_param) = vehicle.parameters.map.get_mut(ident)
                         && base::value_type_matches(old_param.value, new_param.value)
                         && old_param.value != new_param.value
                     {

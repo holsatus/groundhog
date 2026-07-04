@@ -4,7 +4,7 @@ use iced::task::Handle;
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MavlinkId {
     pub(crate) system: u8,
     pub(crate) component: u8,
@@ -34,7 +34,7 @@ impl Parameter {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct Parameters {
     pub(crate) map: BTreeMap<Ident, Parameter>,
     pub(crate) loading_state: LoadingState,
@@ -42,28 +42,10 @@ pub struct Parameters {
 
 /// Used to track which parameters in a continuous sequence have been received.
 /// Any that are missing can be re-requested afterwards
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct LoadingState {
     pub(crate) has_loaded: HashSet<u16>,
     pub(crate) expected_count: u16,
-}
-
-impl LoadingState {
-    pub fn new() -> LoadingState {
-        LoadingState {
-            has_loaded: HashSet::new(),
-            expected_count: 0,
-        }
-    }
-}
-
-impl Parameters {
-    pub fn new() -> Self {
-        Parameters {
-            map: BTreeMap::new(),
-            loading_state: LoadingState::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,14 +152,14 @@ pub(crate) fn load_parameters_from_ini(
 
             match parse() {
                 Some(value) => _ = parameter_map.insert(ident, Parameter::new(value)),
-                None => println!("client: Could not parse value ({val}) as type ({ty})"),
+                None => log::warn!("client: Could not parse value ({val}) as type ({ty})"),
             }
         }
     }
 
     Ok(Parameters {
         map: parameter_map,
-        loading_state: LoadingState::new(),
+        loading_state: LoadingState::default(),
     })
 }
 

@@ -22,10 +22,7 @@ impl Configuration {
         let config_path = project_path.join("config.ron");
 
         Ok(match std::fs::read_to_string(&config_path) {
-            Ok(contents) => {
-                log::debug!("Loaded configuration file from: {config_path:?}");
-                ron::from_str::<'_, Configuration>(&contents)?
-            }
+            Ok(contents) => ron::from_str::<'_, Configuration>(&contents)?,
             Err(_) => {
                 let config = Self::default();
                 config.write_to_file()?;

@@ -5,18 +5,12 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
-    task::Poll,
 };
 
-use iced::{
-    Task,
-    futures::{Stream, StreamExt},
-};
-pub use mav_tokio::{
-    AsyncReceiver, DynAsyncReader, DynAsyncWriter, new_async_receiver, new_async_sender,
-};
-use mavio::{Frame, prelude::Versionless, protocol::FrameBuilder};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use iced::{Task, futures::StreamExt};
+pub use mav_tokio::{DynAsyncReader, DynAsyncWriter, new_async_receiver, new_async_sender};
+use mavio::{DefaultDialect, Frame, prelude::Versionless, protocol::FrameBuilder};
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{ConnectionMessage, connection::builder::mav_tokio::StreamingAsyncReceiver};
@@ -243,7 +237,8 @@ impl std::fmt::Display for LinkVariant {
 struct ConnectionHandleState {
     link_id: LinkId,
     sequence: AtomicU8,
-    send_frame: Sender<Frame<Versionless>>,
+    send_frame: mpsc::Sender<Frame<Versionless>>,
+    weak_frame_sender: broadcast::WeakSender<Frame<Versionless>>,
     cancellation_token: CancellationToken,
 }
 
@@ -255,19 +250,29 @@ impl Drop for ConnectionHandleState {
 
 struct ConnectionSendRunner {
     mav_sender: mav_tokio::AsyncSender,
-    recv_frame: Receiver<Frame<Versionless>>,
+    recv_frame: mpsc::Receiver<Frame<Versionless>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct WeakConnectionHandle {
-    send_state: std::sync::Weak<ConnectionHandleState>,
+    state: std::sync::Weak<ConnectionHandleState>,
 }
 
 impl WeakConnectionHandle {
     pub fn upgrade(&self) -> Option<ConnectionHandle> {
-        self.send_state
+        self.state
             .upgrade()
             .map(|send_state| ConnectionHandle { send_state })
+    }
+
+    pub fn frame_subcriber(&self) -> Option<broadcast::Receiver<Frame<Versionless>>> {
+        Some(
+            self.state
+                .upgrade()?
+                .weak_frame_sender
+                .upgrade()?
+                .subscribe(),
+        )
     }
 
     pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
@@ -275,6 +280,27 @@ impl WeakConnectionHandle {
             handle.send_message(message).await
         } else {
             false
+        }
+    }
+
+    pub async fn await_messages<R>(
+        &self,
+        mut predicate: impl FnMut(&DefaultDialect) -> Option<R>,
+    ) -> Option<R> {
+        let mut receiver = self.frame_subcriber()?;
+        loop {
+            match receiver.recv().await {
+                Ok(frame) => match frame.decode::<DefaultDialect>() {
+                    Ok(message) => match predicate(&message) {
+                        Some(data) => return Some(data),
+                        None => continue,
+                    },
+                    // Decode error, continue
+                    Err(_) => continue,
+                },
+                // Chanel closed, exit
+                Err(_) => return None,
+            }
         }
     }
 
@@ -295,13 +321,14 @@ pub struct ConnectionHandle {
 impl ConnectionHandle {
     pub fn downgrade(&self) -> WeakConnectionHandle {
         WeakConnectionHandle {
-            send_state: Arc::downgrade(&self.send_state),
+            state: Arc::downgrade(&self.send_state),
         }
     }
 
     pub fn new(
         link_id: LinkId,
-        sender: Sender<Frame<Versionless>>,
+        sender: mpsc::Sender<Frame<Versionless>>,
+        weak_sender: broadcast::WeakSender<Frame<Versionless>>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
@@ -309,6 +336,7 @@ impl ConnectionHandle {
                 link_id,
                 sequence: AtomicU8::new(0),
                 send_frame: sender,
+                weak_frame_sender: weak_sender,
                 cancellation_token,
             }),
         }
@@ -359,7 +387,8 @@ fn start_mavlink_connection<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'st
     let mav_receiver = new_async_receiver(rcv);
     let mav_sender = new_async_sender(snd);
 
-    let (send_frame, recv_frame) = mpsc::channel::<Frame<Versionless>>(32);
+    let (mpsc_send_frame, mpsc_recv_frame) = mpsc::channel::<Frame<Versionless>>(32);
+    let (broad_send_frame, _) = broadcast::channel::<Frame<Versionless>>(32);
     let cancellation_token = CancellationToken::new();
 
     let link_id = LinkId::new_unique();
@@ -367,12 +396,17 @@ fn start_mavlink_connection<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'st
     tokio::spawn(
         ConnectionSendRunner {
             mav_sender,
-            recv_frame,
+            recv_frame: mpsc_recv_frame,
         }
         .run(),
     );
 
-    let connection_handle = ConnectionHandle::new(link_id, send_frame, cancellation_token.clone());
+    let connection_handle = ConnectionHandle::new(
+        link_id,
+        mpsc_send_frame,
+        broad_send_frame.downgrade(),
+        cancellation_token.clone(),
+    );
 
     let recv_task = Task::stream(
         StreamingAsyncReceiver(mav_receiver)
@@ -381,7 +415,10 @@ fn start_mavlink_connection<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'st
             })
             .map(move |result| {
                 match result {
-                    Ok(frame) => ConnectionMessage::RecvFrame(frame, link_id),
+                    Ok(frame) => {
+                        _ = broad_send_frame.send(frame.clone());
+                        ConnectionMessage::RecvFrame(frame, link_id)
+                    }
                     Err(error) => ConnectionMessage::RecvError(error, link_id),
                 }
                 .into()
