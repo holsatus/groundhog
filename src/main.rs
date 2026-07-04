@@ -160,7 +160,7 @@ impl Application {
                 zoom: Zoom::try_from(8.0).unwrap(),
             },
             projector: None,
-            tile_cache: TileCache::new(slippery::sources::ArcGisWorldMap),
+            tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
             link_config: LinkConfig::new(link_builder, "Default".to_owned()),
             connection: None,
             configuration: config.clone(),
@@ -190,8 +190,6 @@ impl Application {
                 self.save_configuration_to_file()
             }
             Message::MapProjector(projector) => {
-                // Only update the zoom if we are following the vehicle
-
                 self.viewpoint = projector.viewpoint;
                 self.follow_primary_vehicle = false;
                 self.projector = Some(projector);
