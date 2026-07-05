@@ -118,6 +118,15 @@ struct Application {
     primary_vehicle: Option<MavlinkId>,
     follow_primary_vehicle: bool,
     parameter_namespace_sep: char,
+    fly_to_position: FlyToPositionState,
+}
+
+#[derive(Default)]
+struct FlyToPositionState {
+    start: Option<Geodetic>,
+    end: Option<Geodetic>,
+    radius: Option<f32>,
+    altitude: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -159,7 +168,9 @@ enum Message {
     SetPrimaryVehicle(MavlinkId),
     SetFollowPrimaryVehicle(bool),
 
-    FlyToPosition(Geodetic),
+    FlyToPositionStart(Geodetic),
+    FlyToPositionInProgress(Geodetic),
+    FlyToPositionFinalize(Geodetic),
 }
 
 impl From<parameter::Message> for Message {
@@ -216,6 +227,7 @@ impl Application {
             primary_vehicle: None,
             follow_primary_vehicle: false,
             parameter_namespace_sep: '_',
+            fly_to_position: FlyToPositionState::default(),
         }
     }
 
@@ -250,39 +262,60 @@ impl Application {
             }
             Message::Parameter(message) => return self.parameter_message_update(message),
             Message::Connection(message) => return Some(self.connection_message_update(message)),
-
             Message::SetPrimaryVehicle(mav_id) => {
                 self.primary_vehicle = Some(mav_id);
             }
             Message::SetFollowPrimaryVehicle(follow) => {
                 self.follow_primary_vehicle = follow;
             }
-            Message::FlyToPosition(position) => {
-                let mav_id = self.primary_vehicle?;
-                let connection = self.get_connection_handle()?;
-                tokio::spawn(async move {
-                    connection
-                        .send_message(CommandInt {
-                            target_system: mav_id.system,
-                            target_component: mav_id.component,
-                            command: MavCmd::DoReposition,
-                            param1: -1.0,
-                            param2: 0.0,
-                            param3: 150.0,
-                            param4: f32::NAN,
-                            x: (position.latitude() * 1e7) as i32,
-                            y: (position.longitude() * 1e7) as i32,
-                            z: 1000.0,
-                            frame: mavio::default_dialect::enums::MavFrame::GlobalInt,
-                            current: 0,
-                            autocontinue: 0,
-                        })
-                        .await;
-                });
+            Message::FlyToPositionStart(position) => {
+                self.fly_to_position = FlyToPositionState {
+                    start: Some(position),
+                    end: None,
+                    radius: None,
+                    altitude: None,
+                }
+            }
+            Message::FlyToPositionInProgress(geodetic) => {
+                self.fly_to_position.end = Some(geodetic);
+            }
+            Message::FlyToPositionFinalize(geodetic) => {
+                if let Some(start) = self.fly_to_position.start {
+                    let radius = dbg!(haversine_distance(start, geodetic));
+                    self.fly_to_position.end = Some(geodetic);
+                    self.fly_to_position.radius = Some(radius as f32);
+                    self.commmand_fly_primary_vehicle_to(start, radius as f32);
+                }
             }
         }
 
         None
+    }
+
+    fn commmand_fly_primary_vehicle_to(&mut self, position: Geodetic, radius: f32) -> Option<()> {
+        let mav_id = self.primary_vehicle?;
+        let connection = self.get_connection_handle()?;
+        tokio::spawn(async move {
+            connection
+                .send_message(CommandInt {
+                    target_system: mav_id.system,
+                    target_component: mav_id.component,
+                    command: MavCmd::DoReposition,
+                    param1: -1.0,
+                    param2: 0.0,
+                    param3: radius,
+                    param4: f32::NAN,
+                    x: (position.latitude() * 1e7) as i32,
+                    y: (position.longitude() * 1e7) as i32,
+                    z: 1000.0,
+                    frame: mavio::default_dialect::enums::MavFrame::GlobalInt,
+                    current: 0,
+                    autocontinue: 0,
+                })
+                .await;
+        });
+
+        Some(())
     }
 
     fn get_connection_handle(&self) -> Option<WeakConnectionHandle> {
@@ -520,94 +553,124 @@ impl Application {
                 black_fill.style = Style::Solid(Color::BLACK.scale_alpha(0.5));
                 frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);
 
-                for (_, vehicle) in &self.vehicles {
-                    if let Some(pos) = &vehicle.global_position {
-                        let center = projector.mercator_into_screen_space(
-                            Geodetic::new(pos.lon, pos.lat).as_mercator(),
-                        );
-
-                        let yaw_angle = vehicle
-                            .attitude
-                            .as_ref()
-                            .map(|att| att.attitude.euler_angles().2)
-                            .unwrap_or_default();
-
-                        let screen_points = vehicle
-                            .global_positions
-                            .iter()
-                            .map(|position| {
-                                (
-                                    projector.geodetic_into_screen_space(Geodetic::new(
-                                        position.lon,
-                                        position.lat,
-                                    )),
-                                    altitude_to_color(position.alt_agl, 0.5),
-                                    altitude_to_color(position.alt_agl, 1.0),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-
-                        for point in screen_points.windows(2) {
-                            let mut stroke = Stroke::default()
-                                .with_width(8.0)
-                                .with_line_cap(iced::widget::canvas::LineCap::Round);
-                            stroke.style = Style::Gradient(Gradient::Linear(
-                                Linear::new(point[0].0, point[1].0)
-                                    .add_stop(0.0, point[0].1)
-                                    .add_stop(1.0, point[1].1),
-                            ));
-
-                            frame.stroke(
-                                &iced::widget::canvas::Path::line(point[0].0, point[1].0),
-                                stroke,
+                iced::debug::time_with("position_segments_view", || {
+                    for (_, vehicle) in &self.vehicles {
+                        if let Some(pos) = &vehicle.global_position {
+                            let center = projector.mercator_into_screen_space(
+                                Geodetic::new(pos.lon, pos.lat).as_mercator(),
                             );
+
+                            let yaw_angle = vehicle
+                                .attitude
+                                .as_ref()
+                                .map(|att| att.attitude.euler_angles().2)
+                                .unwrap_or_default();
+
+                            let screen_points = vehicle
+                                .global_positions
+                                .iter()
+                                .map(|position| {
+                                    (
+                                        projector.geodetic_into_screen_space(Geodetic::new(
+                                            position.lon,
+                                            position.lat,
+                                        )),
+                                        altitude_to_color(position.alt_agl, 0.5),
+                                        altitude_to_color(position.alt_agl, 1.0),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+
+                            for point in screen_points.windows(2) {
+                                let mut stroke = Stroke::default()
+                                    .with_width(8.0)
+                                    .with_line_cap(iced::widget::canvas::LineCap::Round);
+                                stroke.style = Style::Gradient(Gradient::Linear(
+                                    Linear::new(point[0].0, point[1].0)
+                                        .add_stop(0.0, point[0].1)
+                                        .add_stop(1.0, point[1].1),
+                                ));
+
+                                frame.stroke(
+                                    &iced::widget::canvas::Path::line(point[0].0, point[1].0),
+                                    stroke,
+                                );
+                            }
+
+                            for point in screen_points.windows(2) {
+                                let mut stroke = Stroke::default()
+                                    .with_width(4.0)
+                                    .with_line_cap(iced::widget::canvas::LineCap::Round);
+                                stroke.style = Style::Gradient(Gradient::Linear(
+                                    Linear::new(point[0].0, point[1].0)
+                                        .add_stop(0.0, point[0].2)
+                                        .add_stop(1.0, point[1].2),
+                                ));
+
+                                frame.stroke(
+                                    &iced::widget::canvas::Path::line(point[0].0, point[1].0),
+                                    stroke,
+                                );
+                            }
+
+                            match (self.fly_to_position.start, self.fly_to_position.end) {
+                                (Some(start), Some(end)) => {
+                                    let point = projector.geodetic_into_screen_space(start);
+                                    let dist = point - projector.geodetic_into_screen_space(end);
+                                    let radius = (dist.x * dist.x + dist.y * dist.y).sqrt();
+                                    frame.stroke(
+                                        &iced::widget::canvas::Path::circle(point, radius),
+                                        Stroke::default().with_width(4.0).with_color(Color::WHITE),
+                                    );
+                                }
+                                _ => (),
+                            }
+
+                            frame.with_save(|frame| {
+                                frame.translate(iced::Vector::new(center.x, center.y));
+                                frame.rotate(yaw_angle);
+
+                                const WIDTH: f32 = 60.0;
+                                frame.draw_image(
+                                    iced::Rectangle {
+                                        x: -WIDTH / 2.0,
+                                        y: -WIDTH / 2.0,
+                                        width: WIDTH,
+                                        height: WIDTH,
+                                    },
+                                    &*ARROW_HANDLE,
+                                );
+                            });
                         }
-
-                        for point in screen_points.windows(2) {
-                            let mut stroke = Stroke::default()
-                                .with_width(4.0)
-                                .with_line_cap(iced::widget::canvas::LineCap::Round);
-                            stroke.style = Style::Gradient(Gradient::Linear(
-                                Linear::new(point[0].0, point[1].0)
-                                    .add_stop(0.0, point[0].2)
-                                    .add_stop(1.0, point[1].2),
-                            ));
-
-                            frame.stroke(
-                                &iced::widget::canvas::Path::line(point[0].0, point[1].0),
-                                stroke,
-                            );
-                        }
-
-                        frame.with_save(|frame| {
-                            frame.translate(iced::Vector::new(center.x, center.y));
-                            frame.rotate(yaw_angle);
-
-                            const WIDTH: f32 = 60.0;
-                            frame.draw_image(
-                                iced::Rectangle {
-                                    x: -WIDTH / 2.0,
-                                    y: -WIDTH / 2.0,
-                                    width: WIDTH,
-                                    height: WIDTH,
-                                },
-                                &*ARROW_HANDLE,
-                            );
-                        });
                     }
-                }
+                })
             })
             .with_interaction(|projector, cursor, event| {
-                if matches!(
-                    event,
-                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-                        iced::mouse::Button::Right
-                    ))
-                ) {
-                    if let Some(cursor) = cursor.position() {
-                        let clicked_on = projector.screen_space_into_geodetic(cursor);
-                        return Action::Capture(Message::FlyToPosition(clicked_on));
-                    }
+                match event {
+                    iced::Event::Mouse(event) => match event {
+                        iced::mouse::Event::CursorMoved { position } => {
+                            if self.fly_to_position.start.is_some()
+                                && self.fly_to_position.radius.is_none()
+                            {
+                                let position = projector.screen_space_into_geodetic(*position);
+                                return Action::Capture(Message::FlyToPositionInProgress(position));
+                            }
+                        }
+                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right) => {
+                            if let Some(cursor) = cursor.position() {
+                                let clicked_on = projector.screen_space_into_geodetic(cursor);
+                                return Action::Capture(Message::FlyToPositionStart(clicked_on));
+                            }
+                        }
+                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Right) => {
+                            if let Some(cursor) = cursor.position() {
+                                let clicked_on = projector.screen_space_into_geodetic(cursor);
+                                return Action::Capture(Message::FlyToPositionFinalize(clicked_on));
+                            }
+                        }
+                        _ => (),
+                    },
+                    _ => (),
                 }
 
                 Action::None
@@ -1161,4 +1224,24 @@ pub fn darken(_theme: &iced::Theme) -> container::Style {
         text_color: None,
         ..container::Style::default()
     }
+}
+
+pub fn haversine_distance(p1: Geodetic, p2: Geodetic) -> f64 {
+    const R: f64 = 6371000.0;
+
+    // Convert degrees to radians
+    let phi1 = p1.latitude().to_radians();
+    let phi2 = p2.latitude().to_radians();
+    let delta_phi = (p2.latitude() - p1.latitude()).to_radians();
+    let delta_lambda = (p2.longitude() - p1.longitude()).to_radians();
+
+    // Haversine core formula
+    let a = (delta_phi / 2.0).sin().powi(2)
+        + phi1.cos() * phi2.cos() * (delta_lambda / 2.0).sin().powi(2);
+
+    let c = 2.0 * (a.sqrt()).atan2((1.0 - a).sqrt());
+
+    // Distance in meters
+    // THe additional factor is not correct, but works with AP?
+    (R * c) * (0.5 + phi1.cos() / 2.0)
 }
