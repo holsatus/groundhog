@@ -13,8 +13,7 @@ use iced::{
     alignment::Vertical,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, button, canvas::Stroke, container,
-        image::Handle, pick_list, progress_bar, row, rule, space, stack, text::Ellipsis,
-        text_input,
+        image::Handle, pick_list, progress_bar, row, rule, space, text::Ellipsis, text_input,
     },
 };
 use mavio::{
@@ -74,6 +73,7 @@ struct Application {
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
     follow_primary_vehicle: bool,
+    parameter_namespace_sep: char,
 }
 
 #[derive(Debug)]
@@ -169,6 +169,7 @@ impl Application {
             parameter_filtered: None,
             primary_vehicle: None,
             follow_primary_vehicle: false,
+            parameter_namespace_sep: '_',
         }
     }
 
@@ -425,7 +426,23 @@ impl Application {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let map = slippery::MapProgram::new(&self.tile_cache)
+        let overlay = iced::widget::column![
+            iced::widget::opaque(self.view_top_panel()),
+            iced::widget::row![
+                iced::widget::opaque(self.view_parameter_panel()),
+                iced::widget::space().width(Length::Fill),
+                iced::widget::opaque(self.view_right_side_panel()),
+            ]
+            .spacing(10.0),
+        ]
+        .padding(10.0)
+        .spacing(10.0);
+
+        iced::widget::stack!(self.view_osm_map(), overlay).into()
+    }
+
+    fn view_osm_map(&self) -> Element<'_, Message> {
+        slippery::MapProgram::new(&self.tile_cache)
             .on_cache(Message::MapCache)
             .on_update(Message::MapProjector)
             .with_draw_layer(move |projector, frame| {
@@ -482,21 +499,7 @@ impl Application {
                     }
                 }
             })
-            .build(self.viewpoint);
-
-        let overlay = iced::widget::column![
-            iced::widget::opaque(self.view_top_panel()),
-            iced::widget::row![
-                iced::widget::opaque(self.view_param_list_scrollable()),
-                iced::widget::space::Space::new().width(Length::Fill),
-                iced::widget::opaque(self.view_right_side_panel()),
-            ]
-            .spacing(10.0),
-        ]
-        .padding(10.0)
-        .spacing(10.0);
-
-        stack!(map, overlay).into()
+            .build(self.viewpoint)
     }
 
     fn view_top_panel(&self) -> Element<'_, Message> {
@@ -683,32 +686,58 @@ impl Application {
         let mut pitch = 0.0;
         let mut yaw = 0.0;
 
+        let mut voltage = 0.0;
+        let mut current = 0.0;
+        let mut charge = 0.0;
+
         if let Some(mav_id) = self.primary_vehicle {
             if let Some(vehicle) = self.vehicles.get(&mav_id) {
                 if let Some(attitude) = vehicle.attitude.as_ref() {
                     (roll, pitch, yaw) = attitude.attitude.euler_angles();
                 }
+
+                if let Some(battery) = vehicle.battery_state.as_ref() {
+                    voltage = battery.voltage;
+                    current = battery.current;
+                    charge = battery.charge;
+                }
             }
         }
 
         row_contents.push(
-            iced::widget::container(
-                iced::widget::column![
-                    iced::widget::text(format!("R: {roll}")),
-                    iced::widget::text(format!("P: {pitch}")),
-                    iced::widget::text(format!("Y: {yaw}"))
-                ]
-                .spacing(10.0),
-            )
-            .width(250.0)
+            iced::widget::row![
+                iced::widget::container(iced::widget::text(format!("roll: {roll:.5} rad")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("pitch: {pitch:.5} rad")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("yaw: {yaw:.5} rad")),)
+                    .width(Length::FillPortion(1)),
+            ]
+            .width(Length::Fill)
+            .spacing(10.0)
+            .into(),
+        );
+
+        row_contents.push(
+            iced::widget::row![
+                iced::widget::container(iced::widget::text(format!("volt: {voltage:.5} V")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("curr: {current:.5} A")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("chrg: {charge:.5} %")),)
+                    .width(Length::FillPortion(1)),
+            ]
+            .width(Length::Fill)
+            .spacing(10.0)
             .into(),
         );
 
         if let Some(mav_id) = self.primary_vehicle {
             if let Some(vehicle) = self.vehicles.get(&mav_id) {
+                let palette = Theme::GruvboxDark.palette();
                 use iced::font;
                 use iced::widget::{rich_text, span};
-                use iced::{Font, color, never};
+                use iced::{Font, never};
 
                 row_contents.push(iced::widget::rule::horizontal(1.0).into());
                 row_contents.push(
@@ -720,14 +749,14 @@ impl Application {
                                 .enumerate()
                                 .map(|(idx, status)| {
                                     let color = match status.severity {
-                                        MavSeverity::Emergency => color!(0xff0000),
-                                        MavSeverity::Alert => color!(0xff0000),
-                                        MavSeverity::Critical => color!(0xff0000),
-                                        MavSeverity::Error => color!(0xff0000),
-                                        MavSeverity::Warning => color!(0xff8800),
-                                        MavSeverity::Notice => color!(0xdddd00),
-                                        MavSeverity::Info => color!(0x6666ff),
-                                        MavSeverity::Debug => color!(0xaaaaaa),
+                                        MavSeverity::Emergency => palette.danger.base.color,
+                                        MavSeverity::Alert => palette.danger.base.color,
+                                        MavSeverity::Critical => palette.danger.base.color,
+                                        MavSeverity::Error => palette.danger.base.color,
+                                        MavSeverity::Warning => palette.warning.base.color,
+                                        MavSeverity::Notice => palette.warning.base.color,
+                                        MavSeverity::Info => palette.primary.base.color,
+                                        MavSeverity::Debug => palette.secondary.base.color,
                                     };
                                     iced::widget::container(row![
                                         rich_text![
@@ -772,21 +801,7 @@ impl Application {
         .into()
     }
 
-    fn view_param_list_scrollable(&self) -> Element<'_, Message> {
-        if self.vehicles.is_empty() {
-            return space::Space::new().into();
-        }
-
-        iced::widget::container(
-            iced::widget::scrollable(self.view_param_list())
-                .style(iced::widget::scrollable::default)
-                .spacing(0.0),
-        )
-        .style(shaded_bordered_box)
-        .into()
-    }
-
-    fn view_param_list(&self) -> Element<'_, Message> {
+    fn view_parameter_panel(&self) -> Element<'_, Message> {
         let Some(mav_id) = self.primary_vehicle else {
             return space::Space::new().into();
         };
@@ -798,30 +813,37 @@ impl Application {
         let mut entries = Vec::with_capacity(128);
 
         let reload_button = Button::new("Reload parameters")
-            .on_press(parameter::Message::ListReload(mav_id).into())
-            .into();
+            .width(Length::Fill)
+            .on_press(parameter::Message::ListReload(mav_id).into());
 
-        let upload_button = Button::new("Upload changed parameters")
-            .on_press(parameter::Message::UploadAll(mav_id).into())
-            .into();
+        let upload_button = Button::new("Upload parameters")
+            .width(Length::FillPortion(1))
+            .on_press(parameter::Message::UploadAll(mav_id).into());
 
         let save_button = Button::new("Save parameters to file")
-            .on_press_with(|| parameter::Message::SaveDialog(vehicle.parameters.clone()).into())
-            .into();
+            .width(Length::FillPortion(1))
+            .on_press_with(|| parameter::Message::SaveDialog(vehicle.parameters.clone()).into());
 
         let load_button = Button::new("Load parameters from file")
-            .on_press(parameter::Message::LoadDialog(mav_id).into())
-            .into();
+            .width(Length::FillPortion(1))
+            .on_press(parameter::Message::LoadDialog(mav_id).into());
 
         let filter_field = TextInput::new("Filter parameters", &self.parameter_filter)
-            .on_input(|buf| parameter::Message::FilterBuf(buf).into())
-            .into();
+            .width(Length::FillPortion(1))
+            .on_input(|buf| parameter::Message::FilterBuf(buf).into());
 
-        entries.push(reload_button);
-        entries.push(upload_button);
-        entries.push(save_button);
-        entries.push(load_button);
-        entries.push(filter_field);
+        entries.push(
+            iced::widget::row![reload_button, upload_button]
+                .spacing(5.0)
+                .into(),
+        );
+        entries.push(
+            iced::widget::row![save_button, load_button]
+                .spacing(5.0)
+                .into(),
+        );
+
+        entries.push(filter_field.into());
 
         let got = vehicle.parameters.loading_state.has_loaded.len();
         let exp = vehicle.parameters.loading_state.expected_count;
@@ -839,6 +861,32 @@ impl Application {
 
         entries.push(progress);
 
+        iced::widget::container(
+            iced::widget::column![
+                iced::widget::Column::from_iter(entries).spacing(5.0),
+                iced::widget::scrollable(self.view_param_list())
+                    .style(iced::widget::scrollable::default)
+                    .spacing(5.0),
+            ]
+            .spacing(5.0),
+        )
+        .padding(10.0)
+        .width(500.0)
+        .style(shaded_bordered_box)
+        .into()
+    }
+
+    fn view_param_list(&self) -> Element<'_, Message> {
+        let Some(mav_id) = self.primary_vehicle else {
+            return space::Space::new().into();
+        };
+
+        let Some(vehicle) = self.vehicles.get(&mav_id) else {
+            return space::Space::new().into();
+        };
+
+        let mut entries = Vec::with_capacity(128);
+
         let mut section = None;
 
         let parameters = self
@@ -849,12 +897,14 @@ impl Application {
         for (ident, param) in &parameters.map {
             let type_name = value_type_name(param.value);
 
-            let this_section = ident.as_str().split_once('.').map(|(sec, _)| sec);
+            let this_section = ident
+                .as_str()
+                .split_once(self.parameter_namespace_sep)
+                .map(|(sec, _)| sec);
 
             // Add larger section headers and separators
             if this_section != section {
                 if section.is_some() {
-                    entries.push(space::vertical().height(0.0).into());
                     entries.push(rule::horizontal(1.0).into());
                 }
                 if let Some(section) = this_section {
@@ -873,10 +923,9 @@ impl Application {
                 None => value_as_string(param.value),
             };
 
-            let ident_owned = ident.clone();
             let text_input = iced::widget::TextInput::new("Write value", &value_string)
                 .on_input(move |string| {
-                    parameter::Message::BufferEdit(mav_id, ident_owned.clone(), string).into()
+                    parameter::Message::BufferEdit(mav_id, ident.clone(), string).into()
                 })
                 .style(move |theme, status| {
                     let mut style = iced::widget::text_input::default(theme, status);
@@ -892,30 +941,30 @@ impl Application {
                         }
                     }
                     style
-                });
+                })
+                .width(Length::Fill);
 
-            let ident_owned = ident.clone();
             let restore_button = Button::new("Restore")
                 .on_press_maybe(match param.state {
                     ParamState::Changed(..) => {
-                        Some(parameter::Message::ValueReset(mav_id, ident_owned.clone()).into())
+                        Some(parameter::Message::ValueReset(mav_id, ident.clone()).into())
                     }
                     _ => None,
                 })
                 .width(80.0);
 
-            let commit_button = Button::new("Upload")
+            let upload_button = Button::new("Upload")
                 .on_press_maybe(match param.state {
-                    ParamState::Changed(value) => Some(
-                        parameter::Message::ValueUpload(mav_id, ident_owned.clone(), value).into(),
-                    ),
+                    ParamState::Changed(value) => {
+                        Some(parameter::Message::ValueUpload(mav_id, ident.clone(), value).into())
+                    }
                     _ => None,
                 })
                 .width(80.0);
 
             let row = row![
                 Text::new(ident.as_str().to_string())
-                    .width(180.0)
+                    .width(160.0)
                     .font(Font::MONOSPACE),
                 Text::new(type_name)
                     .width(50.0)
@@ -923,9 +972,9 @@ impl Application {
                     .align_x(Alignment::End)
                     .color(Color::from_rgba8(255, 255, 255, 0.5)),
                 Space::new().width(10.0),
-                text_input.width(100.0),
+                text_input,
                 restore_button,
-                commit_button,
+                upload_button,
             ]
             .spacing(5.0)
             .align_y(Vertical::Center);
@@ -933,7 +982,10 @@ impl Application {
             entries.push(row.into());
         }
 
-        Column::from_vec(entries).spacing(5.0).padding(10.0).into()
+        Column::from_vec(entries)
+            .spacing(5.0)
+            .width(Length::Fill)
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
