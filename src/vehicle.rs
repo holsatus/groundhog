@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use mav_param::Ident;
@@ -13,11 +13,15 @@ use mavio::{
     protocol::MessageSpec,
 };
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+use slippery::Geodetic;
 
 use crate::{
     connection::builder::LinkId,
     parameter::base::{self, MavlinkId, Parameter, Parameters},
 };
+
+pub const GLOBAL_POSITION_MAX: usize = 1000;
+pub const GLOBAL_POSITION_DECIMATION: usize = 25;
 
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
@@ -37,6 +41,7 @@ pub struct Vehicle {
     pub altitude_msl: Option<f32>,
     pub global_position: Option<GlobalPosition>,
     pub global_positions: VecDeque<GlobalPosition>,
+    pub last_global_positions_pop_count: usize,
     pub battery_state: Option<BatteryState>,
     pub status_texts: Vec<StatusText>,
 }
@@ -187,10 +192,86 @@ impl Vehicle {
 
     pub fn register_global_position(&mut self, position: GlobalPosition) {
         self.global_position = Some(position.clone());
-        if self.global_positions.len() >= 500 {
+        self.global_positions.push_back(position);
+
+        if self.global_positions.len() > GLOBAL_POSITION_MAX {
+            self.prune_one_global_position();
+        }
+    }
+
+    fn prune_one_global_position(&mut self) {
+        if self.global_positions.len() < 3 {
+            self.global_positions.pop_front();
+            return;
+        }
+
+        if self.last_global_positions_pop_count >= GLOBAL_POSITION_DECIMATION {
+            self.last_global_positions_pop_count = 0;
+            self.global_positions.pop_front();
+            return;
+        }
+
+        let mut prune_idx: Option<(usize, f32)> = None;
+        let mut prev = self.global_positions[0].clone();
+        let mut eval = self.global_positions[1].clone();
+
+        for (next_idx, next) in self.global_positions.iter().enumerate().skip(2) {
+            if next_idx + 3 > self.global_positions.len() {
+                break;
+            }
+
+            if next.at.duration_since(prev.at) > Duration::from_secs(10) {
+                prev = eval;
+                eval = next.clone();
+                continue;
+            }
+
+            let prev_geo = Geodetic::new(prev.lon, prev.lat).as_mercator();
+            let eval_geo = Geodetic::new(eval.lon, eval.lat).as_mercator();
+            let next_geo = Geodetic::new(next.lon, next.lat).as_mercator();
+
+            let next_vec = nalgebra::Vector2::new(
+                (next_geo.east_x() - prev_geo.east_x()) as f32,
+                (next_geo.south_y() - prev_geo.south_y()) as f32,
+            );
+
+            let eval_vec = nalgebra::Vector2::new(
+                (eval_geo.east_x() - prev_geo.east_x()) as f32,
+                (eval_geo.south_y() - prev_geo.south_y()) as f32,
+            );
+
+            let next_len = next_vec.norm();
+
+            let perp_distance = if next_len > f32::EPSILON {
+                let cross_product = (next_vec.x * eval_vec.y) - (next_vec.y * eval_vec.x);
+                cross_product.abs() / next_len
+            } else {
+                eval_vec.norm()
+            };
+
+            let time_weight = next_idx as f32 / self.global_positions.len() as f32;
+            let weighted_distance = perp_distance * (0.1 + 0.9 * time_weight.powi(2));
+
+            match prune_idx {
+                Some((_, prior_distance)) => {
+                    if weighted_distance < prior_distance {
+                        prune_idx = Some((next_idx - 1, weighted_distance));
+                    }
+                }
+                None => prune_idx = Some((next_idx - 1, weighted_distance)),
+            }
+
+            prev = eval;
+            eval = next.clone();
+        }
+
+        if let Some((idx, _)) = prune_idx {
+            self.last_global_positions_pop_count += 1;
+            self.global_positions.remove(idx);
+        } else {
+            self.last_global_positions_pop_count = 0;
             self.global_positions.pop_front();
         }
-        self.global_positions.push_back(position);
     }
 
     fn on_sys_status(&mut self, message: &messages::SysStatus, time: Instant) {

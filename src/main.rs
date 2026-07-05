@@ -9,23 +9,32 @@ use std::{
 use iced::{
     Alignment, Color, Element, Font,
     Length::{self},
-    Subscription, Task, Theme,
+    Size, Subscription, Task, Theme,
     alignment::Vertical,
     widget::{
-        Button, Column, ProgressBar, Space, Text, TextInput, button, canvas::Stroke, container,
-        image::Handle, pick_list, progress_bar, row, rule, space, text::Ellipsis, text_input,
+        Button, Column, ProgressBar, Space, Text, TextInput, button,
+        canvas::{Gradient, Stroke, Style, gradient::Linear},
+        container,
+        image::Handle,
+        pick_list, progress_bar, row, rule, space,
+        text::Ellipsis,
+        text_input,
     },
 };
 use mavio::{
     Frame,
     default_dialect::{
         enums::{MavCmd, MavSeverity},
-        messages::{CommandLong, ComponentInformationBasic, Heartbeat, ParamRequestList},
+        messages::{
+            CommandInt, CommandLong, ComponentInformationBasic, Heartbeat, ParamRequestList,
+        },
     },
     prelude::Versionless,
 };
 use rfd::AsyncFileDialog;
-use slippery::{CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location};
+use slippery::{
+    Action, CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
+};
 
 use crate::{
     connection::builder::{
@@ -149,6 +158,8 @@ enum Message {
 
     SetPrimaryVehicle(MavlinkId),
     SetFollowPrimaryVehicle(bool),
+
+    FlyToPosition(Geodetic),
 }
 
 impl From<parameter::Message> for Message {
@@ -245,6 +256,29 @@ impl Application {
             }
             Message::SetFollowPrimaryVehicle(follow) => {
                 self.follow_primary_vehicle = follow;
+            }
+            Message::FlyToPosition(position) => {
+                let mav_id = self.primary_vehicle?;
+                let connection = self.get_connection_handle()?;
+                tokio::spawn(async move {
+                    connection
+                        .send_message(CommandInt {
+                            target_system: mav_id.system,
+                            target_component: mav_id.component,
+                            command: MavCmd::DoReposition,
+                            param1: -1.0,
+                            param2: 0.0,
+                            param3: 150.0,
+                            param4: f32::NAN,
+                            x: (position.latitude() * 1e7) as i32,
+                            y: (position.longitude() * 1e7) as i32,
+                            z: 1000.0,
+                            frame: mavio::default_dialect::enums::MavFrame::GlobalInt,
+                            current: 0,
+                            autocontinue: 0,
+                        })
+                        .await;
+                });
             }
         }
 
@@ -481,6 +515,11 @@ impl Application {
             .on_cache(Message::MapCache)
             .on_update(Message::MapProjector)
             .with_draw_layer(move |projector, frame| {
+                // Darken the map background to make overlay stand out more
+                let mut black_fill = iced::widget::canvas::Fill::default();
+                black_fill.style = Style::Solid(Color::BLACK.scale_alpha(0.5));
+                frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);
+
                 for (_, vehicle) in &self.vehicles {
                     if let Some(pos) = &vehicle.global_position {
                         let center = projector.mercator_into_screen_space(
@@ -493,44 +532,50 @@ impl Application {
                             .map(|att| att.attitude.euler_angles().2)
                             .unwrap_or_default();
 
-                        let mut last_position = vehicle.global_positions.front().unwrap();
-                        for this_position in vehicle.global_positions.iter().skip(1) {
-                            let from = projector.geodetic_into_screen_space(Geodetic::new(
-                                last_position.lon,
-                                last_position.lat,
+                        let screen_points = vehicle
+                            .global_positions
+                            .iter()
+                            .map(|position| {
+                                (
+                                    projector.geodetic_into_screen_space(Geodetic::new(
+                                        position.lon,
+                                        position.lat,
+                                    )),
+                                    altitude_to_color(position.alt_agl, 0.5),
+                                    altitude_to_color(position.alt_agl, 1.0),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        for point in screen_points.windows(2) {
+                            let mut stroke = Stroke::default()
+                                .with_width(8.0)
+                                .with_line_cap(iced::widget::canvas::LineCap::Round);
+                            stroke.style = Style::Gradient(Gradient::Linear(
+                                Linear::new(point[0].0, point[1].0)
+                                    .add_stop(0.0, point[0].1)
+                                    .add_stop(1.0, point[1].1),
                             ));
-                            let to = projector.geodetic_into_screen_space(Geodetic::new(
-                                this_position.lon,
-                                this_position.lat,
+
+                            frame.stroke(
+                                &iced::widget::canvas::Path::line(point[0].0, point[1].0),
+                                stroke,
+                            );
+                        }
+
+                        for point in screen_points.windows(2) {
+                            let mut stroke = Stroke::default()
+                                .with_width(4.0)
+                                .with_line_cap(iced::widget::canvas::LineCap::Round);
+                            stroke.style = Style::Gradient(Gradient::Linear(
+                                Linear::new(point[0].0, point[1].0)
+                                    .add_stop(0.0, point[0].2)
+                                    .add_stop(1.0, point[1].2),
                             ));
 
-                            println!("altitude: {}", last_position.alt_agl);
-
-                            let color = altitude_to_color(
-                                (last_position.alt_agl + this_position.alt_agl) * 0.5,
-                                1.0,
-                            );
-                            let color_bg = altitude_to_color(
-                                (last_position.alt_agl + this_position.alt_agl) * 0.5,
-                                0.5,
-                            );
-                            last_position = this_position;
-
                             frame.stroke(
-                                &iced::widget::canvas::Path::line(from, to),
-                                Stroke::default().with_color(color_bg).with_width(6.0),
-                            );
-                            frame.stroke(
-                                &iced::widget::canvas::Path::line(from, to),
-                                Stroke::default().with_color(color).with_width(2.0),
-                            );
-                            frame.stroke(
-                                &iced::widget::canvas::Path::circle(from, 1.0),
-                                Stroke::default().with_color(color_bg).with_width(7.0),
-                            );
-                            frame.stroke(
-                                &iced::widget::canvas::Path::circle(from, 1.0),
-                                Stroke::default().with_color(color).with_width(3.0),
+                                &iced::widget::canvas::Path::line(point[0].0, point[1].0),
+                                stroke,
                             );
                         }
 
@@ -551,6 +596,21 @@ impl Application {
                         });
                     }
                 }
+            })
+            .with_interaction(|projector, cursor, event| {
+                if matches!(
+                    event,
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Right
+                    ))
+                ) {
+                    if let Some(cursor) = cursor.position() {
+                        let clicked_on = projector.screen_space_into_geodetic(cursor);
+                        return Action::Capture(Message::FlyToPosition(clicked_on));
+                    }
+                }
+
+                Action::None
             })
             .build(self.viewpoint)
     }
@@ -759,12 +819,21 @@ impl Application {
 
         row_contents.push(
             iced::widget::row![
-                iced::widget::container(iced::widget::text(format!("roll: {roll:.5} rad")),)
-                    .width(Length::FillPortion(1)),
-                iced::widget::container(iced::widget::text(format!("pitch: {pitch:.5} rad")),)
-                    .width(Length::FillPortion(1)),
-                iced::widget::container(iced::widget::text(format!("yaw: {yaw:.5} rad")),)
-                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!(
+                    "roll: {:.5} deg",
+                    roll.to_degrees()
+                )),)
+                .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!(
+                    "pitch: {:.5} deg",
+                    pitch.to_degrees()
+                )),)
+                .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!(
+                    "yaw: {:.5} deg",
+                    yaw.to_degrees()
+                )),)
+                .width(Length::FillPortion(1)),
             ]
             .width(Length::Fill)
             .spacing(10.0)
@@ -1082,6 +1151,14 @@ pub fn list_default(theme: &iced::Theme) -> container::Style {
     container::Style {
         background: Some(palette.background.weakest.color.into()),
         text_color: Some(palette.background.weakest.text),
+        ..container::Style::default()
+    }
+}
+
+pub fn darken(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::color::Color::BLACK.scale_alpha(0.5).into()),
+        text_color: None,
         ..container::Style::default()
     }
 }
