@@ -82,6 +82,7 @@ pub struct BatteryState {
 pub struct GlobalPosition {
     pub at: Instant,
     pub alt_msl: f32,
+    pub alt_agl: f32,
     pub lat: f64,
     pub lon: f64,
 }
@@ -250,6 +251,7 @@ impl Vehicle {
             lat: message.lat as f64 * 1e-7,
             lon: message.lon as f64 * 1e-7,
             alt_msl: message.alt as f32 * 1e-3,
+            alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
             message.vx as f32 / 100.,
@@ -269,6 +271,7 @@ impl Vehicle {
             lat: message.lat as f64 * 1e-7,
             lon: message.lon as f64 * 1e-7,
             alt_msl: message.alt as f32 * 1e-3,
+            alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
             message.vx as f32 / 100.,

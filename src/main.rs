@@ -61,6 +61,41 @@ type BoxError = Box<dyn Error + Send + Sync + 'static>;
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../assets/pointer.png").as_slice()));
 
+fn altitude_to_color(altitude_m: f32, brightness: f32) -> Color {
+    const MIN_ALT_M: f32 = 0.0;
+    const MAX_ALT_M: f32 = 1000.0;
+    const YELLOW_HUE_DEG: f32 = 50.0;
+    const PURPLE_HUE_DEG: f32 = 320.0;
+
+    let t = ((altitude_m - MIN_ALT_M) / (MAX_ALT_M - MIN_ALT_M)).clamp(0.0, 1.0);
+    let hue = YELLOW_HUE_DEG + t * (PURPLE_HUE_DEG - YELLOW_HUE_DEG);
+
+    hsv_to_color(hue, 0.9, brightness)
+}
+
+fn hsv_to_color(hue_deg: f32, saturation: f32, brightness: f32) -> Color {
+    let hue = hue_deg.rem_euclid(360.0);
+    let chroma = brightness * saturation;
+    let x = chroma * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = brightness - chroma;
+
+    let (r1, g1, b1) = if hue < 60.0 {
+        (chroma, x, 0.0)
+    } else if hue < 120.0 {
+        (x, chroma, 0.0)
+    } else if hue < 180.0 {
+        (0.0, chroma, x)
+    } else if hue < 240.0 {
+        (0.0, x, chroma)
+    } else if hue < 300.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+
+    Color::from_rgb(r1 + m, g1 + m, b1 + m)
+}
+
 struct Application {
     viewpoint: Viewpoint,
     projector: Option<Projector>,
@@ -469,15 +504,33 @@ impl Application {
                                 this_position.lat,
                             ));
 
+                            println!("altitude: {}", last_position.alt_agl);
+
+                            let color = altitude_to_color(
+                                (last_position.alt_agl + this_position.alt_agl) * 0.5,
+                                1.0,
+                            );
+                            let color_bg = altitude_to_color(
+                                (last_position.alt_agl + this_position.alt_agl) * 0.5,
+                                0.5,
+                            );
                             last_position = this_position;
 
                             frame.stroke(
                                 &iced::widget::canvas::Path::line(from, to),
-                                Stroke::default().with_color(Color::BLACK).with_width(2.0),
+                                Stroke::default().with_color(color_bg).with_width(6.0),
+                            );
+                            frame.stroke(
+                                &iced::widget::canvas::Path::line(from, to),
+                                Stroke::default().with_color(color).with_width(2.0),
                             );
                             frame.stroke(
                                 &iced::widget::canvas::Path::circle(from, 1.0),
-                                Stroke::default().with_color(Color::BLACK).with_width(3.0),
+                                Stroke::default().with_color(color_bg).with_width(7.0),
+                            );
+                            frame.stroke(
+                                &iced::widget::canvas::Path::circle(from, 1.0),
+                                Stroke::default().with_color(color).with_width(3.0),
                             );
                         }
 
