@@ -134,6 +134,10 @@ impl Vehicle {
 
         self.parameters.map.insert(ident, Parameter::new(value));
 
+        if message.param_index == u16::MAX {
+            return;
+        }
+
         // Keep track of how many we expect
         if message.param_count > 0 {
             self.parameters
