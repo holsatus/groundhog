@@ -9,7 +9,7 @@ use std::{
 use iced::{
     Alignment, Color, Element, Font,
     Length::{self},
-    Size, Subscription, Task, Theme,
+    Subscription, Task, Theme,
     alignment::Vertical,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, button,
@@ -123,8 +123,8 @@ struct Application {
 
 #[derive(Default)]
 struct FlyToPositionState {
-    start: Option<Geodetic>,
-    end: Option<Geodetic>,
+    center: Option<Geodetic>,
+    perimeter: Option<Geodetic>,
     radius: Option<f32>,
     altitude: Option<f32>,
 }
@@ -270,19 +270,19 @@ impl Application {
             }
             Message::FlyToPositionStart(position) => {
                 self.fly_to_position = FlyToPositionState {
-                    start: Some(position),
-                    end: None,
+                    center: Some(position),
+                    perimeter: None,
                     radius: None,
                     altitude: None,
                 }
             }
             Message::FlyToPositionInProgress(geodetic) => {
-                self.fly_to_position.end = Some(geodetic);
+                self.fly_to_position.perimeter = Some(geodetic);
             }
             Message::FlyToPositionFinalize(geodetic) => {
-                if let Some(start) = self.fly_to_position.start {
+                if let Some(start) = self.fly_to_position.center {
                     let radius = dbg!(haversine_distance(start, geodetic));
-                    self.fly_to_position.end = Some(geodetic);
+                    self.fly_to_position.perimeter = Some(geodetic);
                     self.fly_to_position.radius = Some(radius as f32);
                     self.commmand_fly_primary_vehicle_to(start, radius as f32);
                 }
@@ -438,9 +438,7 @@ impl Application {
                     {
                         if let Some(primary_vehicle) = self.vehicles.get(&prim_id) {
                             if let Some(position) = &primary_vehicle.global_position {
-                                return Task::done(Message::SetViewPosition(
-                                    Geodetic::new(position.lon, position.lat).as_mercator(),
-                                ));
+                                return Task::done(Message::SetViewPosition(position.pos));
                             }
                         }
                     }
@@ -547,7 +545,7 @@ impl Application {
         slippery::MapProgram::new(&self.tile_cache)
             .on_cache(Message::MapCache)
             .on_update(Message::MapProjector)
-            .with_draw_layer(move |projector, frame| {
+            .with_draw_layer(|projector, frame| {
                 // Darken the map background to make overlay stand out more
                 let mut black_fill = iced::widget::canvas::Fill::default();
                 black_fill.style = Style::Solid(Color::BLACK.scale_alpha(0.5));
@@ -555,10 +553,8 @@ impl Application {
 
                 iced::debug::time_with("position_segments_view", || {
                     for (_, vehicle) in &self.vehicles {
-                        if let Some(pos) = &vehicle.global_position {
-                            let center = projector.mercator_into_screen_space(
-                                Geodetic::new(pos.lon, pos.lat).as_mercator(),
-                            );
+                        if let Some(position) = &vehicle.global_position {
+                            let center = projector.mercator_into_screen_space(position.pos);
 
                             let yaw_angle = vehicle
                                 .attitude
@@ -566,20 +562,20 @@ impl Application {
                                 .map(|att| att.attitude.euler_angles().2)
                                 .unwrap_or_default();
 
-                            let screen_points = vehicle
-                                .global_positions
-                                .iter()
-                                .map(|position| {
-                                    (
-                                        projector.geodetic_into_screen_space(Geodetic::new(
-                                            position.lon,
-                                            position.lat,
-                                        )),
-                                        altitude_to_color(position.alt_agl, 0.5),
-                                        altitude_to_color(position.alt_agl, 1.0),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
+                            let screen_points =
+                                iced::debug::time_with("position_segments_prep", || {
+                                    vehicle
+                                        .global_positions
+                                        .iter()
+                                        .map(|position| {
+                                            (
+                                                projector.mercator_into_screen_space(position.pos),
+                                                altitude_to_color(position.alt_agl, 0.5),
+                                                altitude_to_color(position.alt_agl, 1.0),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                });
 
                             for point in screen_points.windows(2) {
                                 let mut stroke = Stroke::default()
@@ -613,7 +609,7 @@ impl Application {
                                 );
                             }
 
-                            match (self.fly_to_position.start, self.fly_to_position.end) {
+                            match (self.fly_to_position.center, self.fly_to_position.perimeter) {
                                 (Some(start), Some(end)) => {
                                     let point = projector.geodetic_into_screen_space(start);
                                     let dist = point - projector.geodetic_into_screen_space(end);
@@ -649,7 +645,7 @@ impl Application {
                 match event {
                     iced::Event::Mouse(event) => match event {
                         iced::mouse::Event::CursorMoved { position } => {
-                            if self.fly_to_position.start.is_some()
+                            if self.fly_to_position.center.is_some()
                                 && self.fly_to_position.radius.is_none()
                             {
                                 let position = projector.screen_space_into_geodetic(*position);

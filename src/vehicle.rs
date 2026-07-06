@@ -13,7 +13,7 @@ use mavio::{
     protocol::MessageSpec,
 };
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
-use slippery::Geodetic;
+use slippery::{Geodetic, Mercator};
 
 use crate::{
     connection::builder::LinkId,
@@ -21,7 +21,7 @@ use crate::{
 };
 
 pub const GLOBAL_POSITION_MAX: usize = 1000;
-pub const GLOBAL_POSITION_DECIMATION: usize = 50;
+pub const GLOBAL_POSITION_DECIMATION: usize = 20;
 
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
@@ -88,8 +88,7 @@ pub struct GlobalPosition {
     pub at: Instant,
     pub alt_msl: f32,
     pub alt_agl: f32,
-    pub lat: f64,
-    pub lon: f64,
+    pub pos: Mercator,
 }
 
 #[derive(Clone, Debug)]
@@ -193,7 +192,6 @@ impl Vehicle {
     pub fn register_global_position(&mut self, position: GlobalPosition) {
         self.global_position = Some(position.clone());
         self.global_positions.push_back(position);
-
         if self.global_positions.len() > GLOBAL_POSITION_MAX {
             self.prune_one_global_position();
         }
@@ -216,50 +214,32 @@ impl Vehicle {
             let mut prev = self.global_positions[0].clone();
             let mut eval = self.global_positions[1].clone();
 
+            // Enumerate starting from index 2 up to the end of the list
             for (next_idx, next) in self.global_positions.iter().enumerate().skip(2) {
-                if next_idx + 3 > self.global_positions.len() {
-                    break;
-                }
-
-                if next.at.duration_since(prev.at) > Duration::from_secs(30) {
+                // Do not allow the time gap between two points to be too large
+                if eval.at.duration_since(prev.at) > Duration::from_secs(20) {
                     prev = eval;
                     eval = next.clone();
                     continue;
                 }
 
-                let prev_geo = Geodetic::new(prev.lon, prev.lat).as_mercator();
-                let eval_geo = Geodetic::new(eval.lon, eval.lat).as_mercator();
-                let next_geo = Geodetic::new(next.lon, next.lat).as_mercator();
+                // Shoelace formula triangle area
+                let area = (prev.pos.east_x() * ((eval.pos.south_y() - next.pos.south_y()) * 1e6)
+                    + eval.pos.east_x() * ((next.pos.south_y() - prev.pos.south_y()) * 1e6)
+                    + next.pos.east_x() * ((prev.pos.south_y() - eval.pos.south_y()) * 1e6))
+                    .abs();
 
-                let next_vec = nalgebra::Vector2::new(
-                    (next_geo.east_x() - prev_geo.east_x()) as f32,
-                    (next_geo.south_y() - prev_geo.south_y()) as f32,
-                );
-
-                let eval_vec = nalgebra::Vector2::new(
-                    (eval_geo.east_x() - prev_geo.east_x()) as f32,
-                    (eval_geo.south_y() - prev_geo.south_y()) as f32,
-                );
-
-                let next_len = next_vec.norm();
-
-                let perp_distance = if next_len > f32::EPSILON {
-                    let cross_product = (next_vec.x * eval_vec.y) - (next_vec.y * eval_vec.x);
-                    cross_product.abs() / next_len
-                } else {
-                    eval_vec.norm()
-                };
-
-                let time_weight = next_idx as f32 / self.global_positions.len() as f32;
-                let weighted_distance = perp_distance * (0.1 + 0.9 * time_weight.powi(2));
+                // Cost is dynamically weighed by the span of time beteen the outer points
+                let span = next.at.saturating_duration_since(prev.at);
+                let cost = (area as f32) * (1.0 + span.as_secs_f32());
 
                 match prune_idx {
-                    Some((_, prior_distance)) => {
-                        if weighted_distance < prior_distance {
-                            prune_idx = Some((next_idx - 1, weighted_distance));
+                    Some((_, other_cost)) => {
+                        if cost < other_cost {
+                            prune_idx = Some((next_idx - 1, cost));
                         }
                     }
-                    None => prune_idx = Some((next_idx - 1, weighted_distance)),
+                    None => prune_idx = Some((next_idx - 1, cost)),
                 }
 
                 prev = eval;
@@ -331,8 +311,7 @@ impl Vehicle {
     fn on_global_position_int(&mut self, message: &messages::GlobalPositionInt, time: Instant) {
         self.register_global_position(GlobalPosition {
             at: time,
-            lat: message.lat as f64 * 1e-7,
-            lon: message.lon as f64 * 1e-7,
+            pos: Geodetic::new(message.lon as f64 * 1e-7, message.lat as f64 * 1e-7).as_mercator(),
             alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
@@ -351,8 +330,7 @@ impl Vehicle {
     ) {
         self.register_global_position(GlobalPosition {
             at: time,
-            lat: message.lat as f64 * 1e-7,
-            lon: message.lon as f64 * 1e-7,
+            pos: Geodetic::new(message.lon as f64 * 1e-7, message.lat as f64 * 1e-7).as_mercator(),
             alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
