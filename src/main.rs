@@ -23,15 +23,16 @@ use iced::{
     },
 };
 use mavio::{
-    Frame,
+    DefaultDialect, Frame,
     default_dialect::{
-        enums::{MavCmd, MavSeverity},
+        enums::{MavCmd, MavModeFlag, MavSeverity},
         messages::{
             CommandInt, CommandLong, ComponentInformationBasic, Heartbeat, ParamRequestList,
         },
     },
     prelude::Versionless,
 };
+use num_enum::FromPrimitive;
 use rfd::AsyncFileDialog;
 use slippery::{
     Action, CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
@@ -50,6 +51,7 @@ mod parameter;
 
 mod config;
 mod connection;
+mod firmware;
 mod vehicle;
 
 fn main() {
@@ -586,7 +588,7 @@ impl Application {
                                     let alpha = if self.faint { 0.25 } else { 1.0 };
                                     let mut stroke = Stroke::default()
                                         .with_width(self.width)
-                                        .with_line_cap(iced::widget::canvas::LineCap::Square);
+                                        .with_line_cap(iced::widget::canvas::LineCap::Round);
                                     stroke.style = Style::Gradient(Gradient::Linear(
                                         Linear::new(self.from_point, self.to_point)
                                             .add_stop(0.0, self.from_color.scale_alpha(alpha))
@@ -918,6 +920,10 @@ impl Application {
         let mut current = 0.0;
         let mut charge = 0.0;
 
+        let mut flight_mode = "Unknown".to_string();
+        let mut mav_state = "Unknown".to_string();
+        let mut armed = "Unknown".to_string();
+
         if let Some(mav_id) = self.primary_vehicle {
             if let Some(vehicle) = self.vehicles.get(&mav_id) {
                 if let Some(attitude) = vehicle.attitude.as_ref() {
@@ -929,8 +935,58 @@ impl Application {
                     current = battery.current;
                     charge = battery.charge;
                 }
+
+                if let Some(message) = vehicle.latest_message.get(&Heartbeat::ID) {
+                    if let DefaultDialect::Heartbeat(hb) = &message.message {
+                        match hb.autopilot {
+                            mavio::dialects::minimal::enums::MavAutopilot::Ardupilotmega => {
+                                match hb.type_ {
+                                    mavio::dialects::minimal::enums::MavType::FixedWing
+                                    | mavio::dialects::minimal::enums::MavType::VtolTiltrotor => {
+                                        let mode =
+                                            firmware::ardupilot::flight_mode::Plane::from_primitive(
+                                                hb.custom_mode as u8,
+                                            );
+
+                                        flight_mode = format!("{mode:?}");
+                                    }
+                                    mavio::dialects::minimal::enums::MavType::Quadrotor
+                                    | mavio::dialects::minimal::enums::MavType::Helicopter => {
+                                        let mode =
+                                            firmware::ardupilot::flight_mode::Copter::from_primitive(
+                                                hb.custom_mode as u8,
+                                            );
+
+                                        flight_mode = format!("{mode:?}");
+                                    }
+                                    _ => (),
+                                }
+                            }
+                            _ => (),
+                        }
+
+                        mav_state = format!("{:?}", hb.system_status);
+                        armed = format!("{}", hb.base_mode.intersects(MavModeFlag::SAFETY_ARMED));
+                    }
+                }
             }
         }
+
+        row_contents.push(
+            iced::widget::row![
+                iced::widget::container(iced::widget::text(format!("armed: {armed}")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("state: {mav_state}")),)
+                    .width(Length::FillPortion(1)),
+                iced::widget::container(iced::widget::text(format!("mode: {flight_mode}")),)
+                    .width(Length::FillPortion(1)),
+            ]
+            .width(Length::Fill)
+            .spacing(10.0)
+            .into(),
+        );
+
+        row_contents.push(iced::widget::rule::horizontal(1.0).into());
 
         row_contents.push(
             iced::widget::row![

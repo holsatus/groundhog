@@ -1843,6 +1843,7 @@ dependencies = [
  "mav-param",
  "mavio",
  "nalgebra",
+ "num_enum",
  "rfd",
  "ron",
  "rust-ini",
