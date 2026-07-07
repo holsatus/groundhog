@@ -11,6 +11,7 @@ use iced::{
     Length::{self},
     Subscription, Task, Theme,
     alignment::Vertical,
+    color::Oklch,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, button,
         canvas::{Gradient, Stroke, Style, gradient::Linear},
@@ -70,39 +71,23 @@ type BoxError = Box<dyn Error + Send + Sync + 'static>;
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../assets/pointer.png").as_slice()));
 
+/// Convert an altitude in meters to a corresponding color, for use with position trails.
+/// The color sweeps from yellow -> green -> blue -> purple -> red as altitude goes from 0.0 -> 1000.0.
 fn altitude_to_color(altitude_m: f32, brightness: f32) -> Color {
     const MIN_ALT_M: f32 = 0.0;
     const MAX_ALT_M: f32 = 1000.0;
-    const YELLOW_HUE_DEG: f32 = 50.0;
-    const PURPLE_HUE_DEG: f32 = 320.0;
+    const YELLOW_HUE_DEG: f32 = 90.0;
+    const PURPLE_HUE_DEG: f32 = 380.0;
 
     let t = ((altitude_m - MIN_ALT_M) / (MAX_ALT_M - MIN_ALT_M)).clamp(0.0, 1.0);
-    let hue = YELLOW_HUE_DEG + t * (PURPLE_HUE_DEG - YELLOW_HUE_DEG);
+    let hue_deg = YELLOW_HUE_DEG + t * (PURPLE_HUE_DEG - YELLOW_HUE_DEG);
 
-    hsv_to_color(hue, 0.9, brightness)
-}
-
-fn hsv_to_color(hue_deg: f32, saturation: f32, brightness: f32) -> Color {
-    let hue = hue_deg.rem_euclid(360.0);
-    let chroma = brightness * saturation;
-    let x = chroma * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
-    let m = brightness - chroma;
-
-    let (r1, g1, b1) = if hue < 60.0 {
-        (chroma, x, 0.0)
-    } else if hue < 120.0 {
-        (x, chroma, 0.0)
-    } else if hue < 180.0 {
-        (0.0, chroma, x)
-    } else if hue < 240.0 {
-        (0.0, x, chroma)
-    } else if hue < 300.0 {
-        (x, 0.0, chroma)
-    } else {
-        (chroma, 0.0, x)
-    };
-
-    Color::from_rgb(r1 + m, g1 + m, b1 + m)
+    Color::from(Oklch {
+        l: brightness,
+        c: 0.2 * brightness,
+        h: hue_deg.to_radians(),
+        a: 1.0,
+    })
 }
 
 struct Application {
@@ -117,6 +102,7 @@ struct Application {
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
     follow_primary_vehicle: bool,
+    draw_line_segment_dots: bool,
     parameter_namespace_sep: char,
     fly_to_position: FlyToPositionState,
 }
@@ -167,6 +153,8 @@ enum Message {
 
     SetPrimaryVehicle(MavlinkId),
     SetFollowPrimaryVehicle(bool),
+    #[allow(unused)] // TODO: Debug view
+    DrawLineSegmentDots(bool),
 
     FlyToPositionStart(Geodetic),
     FlyToPositionInProgress(Geodetic),
@@ -226,6 +214,7 @@ impl Application {
             parameter_filtered: None,
             primary_vehicle: None,
             follow_primary_vehicle: false,
+            draw_line_segment_dots: false,
             parameter_namespace_sep: '_',
             fly_to_position: FlyToPositionState::default(),
         }
@@ -265,8 +254,11 @@ impl Application {
             Message::SetPrimaryVehicle(mav_id) => {
                 self.primary_vehicle = Some(mav_id);
             }
-            Message::SetFollowPrimaryVehicle(follow) => {
-                self.follow_primary_vehicle = follow;
+            Message::SetFollowPrimaryVehicle(value) => {
+                self.follow_primary_vehicle = value;
+            }
+            Message::DrawLineSegmentDots(value) => {
+                self.draw_line_segment_dots = value;
             }
             Message::FlyToPositionStart(position) => {
                 self.fly_to_position = FlyToPositionState {
@@ -562,51 +554,106 @@ impl Application {
                                 .map(|att| att.attitude.euler_angles().2)
                                 .unwrap_or_default();
 
-                            let screen_points =
-                                iced::debug::time_with("position_segments_prep", || {
-                                    vehicle
-                                        .global_positions
-                                        .iter()
-                                        .map(|position| {
-                                            (
-                                                projector.mercator_into_screen_space(position.pos),
-                                                altitude_to_color(position.alt_agl, 0.5),
-                                                altitude_to_color(position.alt_agl, 1.0),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                });
-
-                            for point in screen_points.windows(2) {
-                                let mut stroke = Stroke::default()
-                                    .with_width(8.0)
-                                    .with_line_cap(iced::widget::canvas::LineCap::Round);
-                                stroke.style = Style::Gradient(Gradient::Linear(
-                                    Linear::new(point[0].0, point[1].0)
-                                        .add_stop(0.0, point[0].1)
-                                        .add_stop(1.0, point[1].1),
-                                ));
-
-                                frame.stroke(
-                                    &iced::widget::canvas::Path::line(point[0].0, point[1].0),
-                                    stroke,
-                                );
+                            struct ScreenPosition {
+                                point: iced::Point,
+                                dark: iced::Color,
+                                light: iced::Color,
+                                time: Instant,
                             }
 
-                            for point in screen_points.windows(2) {
-                                let mut stroke = Stroke::default()
-                                    .with_width(4.0)
-                                    .with_line_cap(iced::widget::canvas::LineCap::Round);
-                                stroke.style = Style::Gradient(Gradient::Linear(
-                                    Linear::new(point[0].0, point[1].0)
-                                        .add_stop(0.0, point[0].2)
-                                        .add_stop(1.0, point[1].2),
-                                ));
+                            let screen_points = vehicle
+                                .global_positions
+                                .iter()
+                                .map(|position| ScreenPosition {
+                                    point: projector.mercator_into_screen_space(position.pos),
+                                    dark: altitude_to_color(position.alt_agl, 0.4),
+                                    light: altitude_to_color(position.alt_agl, 0.85),
+                                    time: position.at,
+                                })
+                                .collect::<Vec<_>>();
 
-                                frame.stroke(
-                                    &iced::widget::canvas::Path::line(point[0].0, point[1].0),
-                                    stroke,
-                                );
+                            struct DrawLineSegment {
+                                from_point: iced::Point,
+                                to_point: iced::Point,
+                                from_color: iced::Color,
+                                to_color: iced::Color,
+                                faint: bool,
+                                width: f32,
+                            }
+
+                            impl DrawLineSegment {
+                                fn draw(self, frame: &mut iced::widget::canvas::Frame) {
+                                    let alpha = if self.faint { 0.25 } else { 1.0 };
+                                    let mut stroke = Stroke::default()
+                                        .with_width(self.width)
+                                        .with_line_cap(iced::widget::canvas::LineCap::Square);
+                                    stroke.style = Style::Gradient(Gradient::Linear(
+                                        Linear::new(self.from_point, self.to_point)
+                                            .add_stop(0.0, self.from_color.scale_alpha(alpha))
+                                            .add_stop(1.0, self.to_color.scale_alpha(alpha)),
+                                    ));
+
+                                    frame.stroke(
+                                        &iced::widget::canvas::Path::line(
+                                            self.from_point,
+                                            self.to_point,
+                                        ),
+                                        stroke,
+                                    );
+                                }
+                            }
+
+                            let mut points_iterator = screen_points.iter();
+                            let Some(mut prev) = points_iterator.next() else {
+                                return;
+                            };
+
+                            // First draw all the dark background sections
+                            for next in points_iterator {
+                                let long_time = prev.time.saturating_duration_since(next.time)
+                                    > Duration::from_secs(30);
+
+                                DrawLineSegment {
+                                    from_point: prev.point,
+                                    from_color: prev.dark,
+                                    to_point: next.point,
+                                    to_color: next.dark,
+                                    faint: long_time,
+                                    width: 10.0,
+                                }
+                                .draw(frame);
+
+                                prev = next;
+                            }
+
+                            let mut points_iterator = screen_points.iter();
+                            let Some(mut prev) = points_iterator.next() else {
+                                return;
+                            };
+
+                            // Then draw all the light foreground sections
+                            for next in points_iterator {
+                                let long_time = prev.time.saturating_duration_since(next.time)
+                                    > Duration::from_secs(30);
+
+                                DrawLineSegment {
+                                    from_point: prev.point,
+                                    from_color: prev.light,
+                                    to_point: next.point,
+                                    to_color: next.light,
+                                    faint: long_time,
+                                    width: 4.0,
+                                }
+                                .draw(frame);
+
+                                if self.draw_line_segment_dots {
+                                    frame.fill(
+                                        &iced::widget::canvas::Path::circle(prev.point, 5.0),
+                                        iced::widget::canvas::Fill::from(iced::Color::WHITE),
+                                    );
+                                }
+
+                                prev = next;
                             }
 
                             match (self.fly_to_position.center, self.fly_to_position.perimeter) {
@@ -799,6 +846,14 @@ impl Application {
                 .into(),
         );
 
+        // row_contents.push(iced::widget::rule::vertical(1.0).into());
+        // row_contents.push(iced::widget::text("Draw line segment dots").into());
+        // row_contents.push(
+        //     iced::widget::checkbox(self.draw_line_segment_dots)
+        //         .on_toggle(Message::DrawLineSegmentDots)
+        //         .into(),
+        // );
+
         row_contents.push(iced::widget::space::Space::new().width(Length::Fill).into());
 
         if self.vehicles.len() > 1 {
@@ -843,7 +898,8 @@ impl Application {
             row::Row::from_vec(row_contents)
                 .width(Length::Fill)
                 .align_y(Alignment::Center)
-                .spacing(10.0),
+                .spacing(10.0)
+                .height(32.0),
         )
         .style(shaded_bordered_box)
         .width(Length::Fill)

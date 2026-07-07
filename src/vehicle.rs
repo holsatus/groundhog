@@ -20,8 +20,8 @@ use crate::{
     parameter::base::{self, MavlinkId, Parameter, Parameters},
 };
 
-pub const GLOBAL_POSITION_MAX: usize = 1000;
-pub const GLOBAL_POSITION_DECIMATION: usize = 20;
+pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
+pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
 
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
@@ -192,7 +192,7 @@ impl Vehicle {
     pub fn register_global_position(&mut self, position: GlobalPosition) {
         self.global_position = Some(position.clone());
         self.global_positions.push_back(position);
-        if self.global_positions.len() > GLOBAL_POSITION_MAX {
+        if self.global_positions.len() > GLOBAL_POSITION_MAX_LEN {
             self.prune_one_global_position();
         }
     }
@@ -204,8 +204,9 @@ impl Vehicle {
                 return;
             }
 
-            if self.last_global_positions_pop_count >= GLOBAL_POSITION_DECIMATION {
-                self.last_global_positions_pop_count = 0;
+            if let Some(oldest) = self.global_positions.front()
+                && oldest.at.elapsed() > GLOBAL_POSITION_MAX_AGE
+            {
                 self.global_positions.pop_front();
                 return;
             }

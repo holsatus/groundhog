@@ -162,22 +162,22 @@ impl crate::Application {
                     })
                     .abortable();
 
-                    param.state = ParamState::Uploading(handle, param.value);
+                    let cap = vehicle.capabilities.unwrap_or_default();
+                    if let Some((param_value, param_type)) = base::mavio_from_value(cap, value) {
+                        param.state = ParamState::Uploading(handle, param.value);
 
-                    let cap = vehicle.capabilities?;
-                    let (param_value, param_type) = base::mavio_from_value(cap, value)?;
+                        let param_set = ParamSet {
+                            target_system: mav_id.system,
+                            target_component: mav_id.component,
+                            param_id: *ident.as_raw(),
+                            param_value,
+                            param_type,
+                        };
 
-                    let param_set = ParamSet {
-                        target_system: mav_id.system,
-                        target_component: mav_id.component,
-                        param_id: *ident.as_raw(),
-                        param_value,
-                        param_type,
-                    };
+                        connection.spawn_send_message(param_set);
 
-                    connection.spawn_send_message(param_set);
-
-                    timeout_tasks.push(task);
+                        timeout_tasks.push(task);
+                    }
                 }
 
                 return Some(Task::batch(timeout_tasks).map(crate::Message::Parameter));
@@ -208,6 +208,9 @@ impl crate::Application {
                 let vehicle = self.vehicles.get_mut(&mav_id)?;
                 let param = vehicle.parameters.map.get_mut(&ident)?;
 
+                let cap = vehicle.capabilities.unwrap_or_default();
+                let (param_value, param_type) = base::mavio_from_value(cap, value)?;
+
                 let ident_cloned = ident.clone();
                 let (timeout_task, handle) = Task::future(async move {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -217,9 +220,6 @@ impl crate::Application {
 
                 param.state = ParamState::Uploading(handle, param.value);
 
-                let cap = vehicle.capabilities?;
-                let (param_value, param_type) = base::mavio_from_value(cap, value)?;
-
                 let param_set = ParamSet {
                     target_system: mav_id.system,
                     target_component: mav_id.component,
@@ -228,15 +228,13 @@ impl crate::Application {
                     param_type,
                 };
 
-                tokio::spawn(async move {
-                    connection.send_message(param_set).await;
-                });
+                connection.spawn_send_message(param_set);
 
                 return Some(timeout_task.map(crate::Message::Parameter));
             }
             Message::ValueUploadTimeout(mav_id, ident) => {
-                let entry = self.vehicles.get_mut(&mav_id)?;
-                let param = entry.parameters.map.get_mut(&ident)?;
+                let vehicle = self.vehicles.get_mut(&mav_id)?;
+                let param = vehicle.parameters.map.get_mut(&ident)?;
 
                 if let ParamState::Uploading(handle, value) = param.state.clone() {
                     log::warn!("Parameter upload for '{}' timed out", ident.as_str());
