@@ -1,27 +1,26 @@
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     str::FromStr,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
 
-use iced::{Task, futures::StreamExt};
+use iced::Task;
+#[cfg(test)]
+pub use mav_tokio::{AsyncReceiver, AsyncSender};
 pub use mav_tokio::{DynAsyncReader, DynAsyncWriter, new_async_receiver, new_async_sender};
-use mavio::{DefaultDialect, Frame, prelude::Versionless, protocol::FrameBuilder};
-use tokio::sync::{broadcast, mpsc};
-use tokio_util::sync::CancellationToken;
 
-use crate::{ConnectionMessage, connection::builder::mav_tokio::StreamingAsyncReceiver};
+use crate::{ConnectionMessage, mav};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LinkId(usize);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LinkId(Arc<str>);
 
 impl LinkId {
-    pub fn new_unique() -> Self {
-        static LINK_ID: AtomicUsize = AtomicUsize::new(0);
-        LinkId(LINK_ID.fetch_add(1, Ordering::Relaxed))
+    pub fn new(id: &str) -> Self {
+        LinkId(Arc::from(id))
+    }
+
+    pub fn str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -30,7 +29,26 @@ pub const BAUDRATES: &[u32] = &[
     921_600, 1_000_000,
 ];
 
+#[derive(Debug, Clone)]
 pub struct LinkConfig {
+    pub name: String,
+    pub auto_connect: bool,
+    pub high_latency: bool,
+    pub build: LinkBuild,
+}
+
+impl LinkConfigurator {
+    pub fn parse(&self) -> Option<LinkConfig> {
+        self.build.as_ref().map(|build| LinkConfig {
+            name: self.name.clone(),
+            auto_connect: self.auto_connect,
+            high_latency: self.high_latency,
+            build: build.clone(),
+        })
+    }
+}
+
+pub struct LinkConfigurator {
     pub name: String,
     pub auto_connect: bool,
     pub high_latency: bool,
@@ -38,9 +56,9 @@ pub struct LinkConfig {
     pub build: Option<LinkBuild>,
 }
 
-impl LinkConfig {
-    pub fn new(builder: LinkBuilder, name: String) -> LinkConfig {
-        LinkConfig {
+impl LinkConfigurator {
+    pub fn new(builder: LinkBuilder, name: String) -> LinkConfigurator {
+        LinkConfigurator {
             name,
             auto_connect: false,
             high_latency: false,
@@ -76,54 +94,55 @@ impl LinkBuild {
         }
     }
 
-    pub fn connect(&self) -> Task<crate::Message> {
-        match self.clone() {
+    /// Open the transport and attach it to the provided `router`.
+    pub fn connect(&self, id: LinkId, router: mav::MavlinkRouter) -> Task<crate::Message> {
+        fn attached(id: &LinkId, handle: mav::LinkGuard) -> Task<crate::Message> {
+            Task::done(ConnectionMessage::ConnectSuccess(id.clone(), handle).into())
+        }
+
+        fn error_map<E: std::error::Error + Send + Sync + 'static>(
+            error: E,
+        ) -> Task<crate::Message> {
+            Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
+        }
+
+        let task = match self.clone() {
             LinkBuild::Tcp { sock_addr } => Task::future(tokio::net::TcpStream::connect(sock_addr))
-                .then(|result| match result {
+                .then(move |result| match result {
                     Ok(stream) => {
-                        let (rcv, snd) = stream.into_split();
-                        start_mavlink_connection(rcv, snd)
+                        let (reader, writer) = stream.into_split();
+                        attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
                     }
-                    Err(error) => {
-                        Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
-                    }
+                    Err(error) => error_map(error),
                 }),
             LinkBuild::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
-                .then(|result| match result {
+                .then(move |result| match result {
                     Ok(socket) => {
                         let connected = AtomicBool::new(false);
                         let socket = std::sync::Arc::new((socket, connected));
                         let writer = super::udp::UdpWriter::new(socket.clone());
-                        let rcv = super::udp::UdpReader::new(socket);
-                        start_mavlink_connection(rcv, writer)
+                        let reader = super::udp::UdpReader::new(socket);
+                        attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
                     }
-                    Err(error) => {
-                        Task::done(ConnectionMessage::ConnectFailed(Arc::new(error)).into())
-                    }
+                    Err(error) => error_map(error),
                 }),
             LinkBuild::Serial { port, baud } => {
-                let port = match serial2_tokio::SerialPort::open(&port, baud) {
+                let writer = match serial2_tokio::SerialPort::open(&port, baud) {
                     Ok(port) => port,
-                    Err(error) => {
-                        return Task::done(
-                            ConnectionMessage::ConnectFailed(Arc::new(error)).into(),
-                        );
-                    }
+                    Err(error) => return error_map(error),
                 };
 
-                let rcv = match port.try_clone() {
+                // Not sure why this would ever fail?
+                let reader = match writer.try_clone() {
                     Ok(rcv) => rcv,
-                    Err(error) => {
-                        return Task::done(
-                            ConnectionMessage::ConnectFailed(Arc::new(error)).into(),
-                        );
-                    }
+                    Err(error) => return error_map(error),
                 };
 
-                let snd = port;
-                start_mavlink_connection(rcv, snd)
+                attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
             }
-        }
+        };
+
+        task
     }
 }
 
@@ -230,207 +249,6 @@ impl std::fmt::Display for LinkVariant {
     }
 }
 
-/// A handle to interact with an established MAVLink connection.
-///
-/// Dropping this handle will release the associated system resources.
-#[derive(Debug)]
-struct ConnectionHandleState {
-    link_id: LinkId,
-    sequence: AtomicU8,
-    send_frame: mpsc::Sender<Frame<Versionless>>,
-    weak_frame_sender: broadcast::WeakSender<Frame<Versionless>>,
-    cancellation_token: CancellationToken,
-}
-
-impl Drop for ConnectionHandleState {
-    fn drop(&mut self) {
-        self.cancellation_token.cancel();
-    }
-}
-
-struct ConnectionSendRunner {
-    mav_sender: mav_tokio::AsyncSender,
-    recv_frame: mpsc::Receiver<Frame<Versionless>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WeakConnectionHandle {
-    state: std::sync::Weak<ConnectionHandleState>,
-}
-
-impl WeakConnectionHandle {
-    pub fn upgrade(&self) -> Option<ConnectionHandle> {
-        self.state
-            .upgrade()
-            .map(|send_state| ConnectionHandle { send_state })
-    }
-
-    pub fn frame_subcriber(&self) -> Option<broadcast::Receiver<Frame<Versionless>>> {
-        Some(
-            self.state
-                .upgrade()?
-                .weak_frame_sender
-                .upgrade()?
-                .subscribe(),
-        )
-    }
-
-    pub async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
-        if let Some(handle) = self.upgrade() {
-            handle.send_message(message).await
-        } else {
-            false
-        }
-    }
-
-    pub async fn await_messages<R>(
-        &self,
-        mut predicate: impl FnMut(&DefaultDialect) -> Option<R>,
-    ) -> Option<R> {
-        let mut receiver = self.frame_subcriber()?;
-        loop {
-            match receiver.recv().await {
-                Ok(frame) => match frame.decode::<DefaultDialect>() {
-                    Ok(message) => match predicate(&message) {
-                        Some(data) => return Some(data),
-                        None => continue,
-                    },
-                    // Decode error, continue
-                    Err(_) => continue,
-                },
-                // Chanel closed, exit
-                Err(_) => return None,
-            }
-        }
-    }
-
-    /// Send the message on this connection if it is still live.
-    pub fn spawn_send_message<M: mavio::Message + Send + 'static>(&self, message: M) {
-        let connection = self.clone();
-        tokio::spawn(async move {
-            connection.send_message(message).await;
-        });
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConnectionHandle {
-    send_state: Arc<ConnectionHandleState>,
-}
-
-impl ConnectionHandle {
-    pub fn downgrade(&self) -> WeakConnectionHandle {
-        WeakConnectionHandle {
-            state: Arc::downgrade(&self.send_state),
-        }
-    }
-
-    pub fn new(
-        link_id: LinkId,
-        sender: mpsc::Sender<Frame<Versionless>>,
-        weak_sender: broadcast::WeakSender<Frame<Versionless>>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
-        Self {
-            send_state: Arc::new(ConnectionHandleState {
-                link_id,
-                sequence: AtomicU8::new(0),
-                send_frame: sender,
-                weak_frame_sender: weak_sender,
-                cancellation_token,
-            }),
-        }
-    }
-
-    async fn send_message<M: mavio::Message>(&self, message: M) -> bool {
-        let sequence = self.send_state.sequence.fetch_add(1, Ordering::AcqRel);
-
-        let mav_id = crate::GCS_MAVLINK_ID.load();
-
-        let frame = FrameBuilder::new()
-            .system_id(mav_id.system)
-            .component_id(mav_id.component)
-            .version(mavio::prelude::V2)
-            .sequence(sequence)
-            .message(&message)
-            .unwrap()
-            .build()
-            .into_versionless();
-
-        if self.send_state.send_frame.send(frame).await.is_err() {
-            log::error!("Failed to send MAVLink frame because connection queue closed");
-            false
-        } else {
-            true
-        }
-    }
-
-    pub fn close(self) {
-        self.send_state.cancellation_token.cancel();
-    }
-}
-
-impl ConnectionSendRunner {
-    async fn run(mut self) {
-        while let Some(frame_out) = self.recv_frame.recv().await {
-            if let Err(err) = self.mav_sender.send(&frame_out).await {
-                log::error!("Failed to send MAVLink frame to transport: {err}");
-            }
-        }
-    }
-}
-
-fn start_mavlink_connection<R: DynAsyncReader + 'static, W: DynAsyncWriter + 'static>(
-    rcv: R,
-    snd: W,
-) -> Task<crate::Message> {
-    let mav_receiver = new_async_receiver(rcv);
-    let mav_sender = new_async_sender(snd);
-
-    let (mpsc_send_frame, mpsc_recv_frame) = mpsc::channel::<Frame<Versionless>>(32);
-    let (broad_send_frame, _) = broadcast::channel::<Frame<Versionless>>(32);
-    let cancellation_token = CancellationToken::new();
-
-    let link_id = LinkId::new_unique();
-
-    tokio::spawn(
-        ConnectionSendRunner {
-            mav_sender,
-            recv_frame: mpsc_recv_frame,
-        }
-        .run(),
-    );
-
-    let connection_handle = ConnectionHandle::new(
-        link_id,
-        mpsc_send_frame,
-        broad_send_frame.downgrade(),
-        cancellation_token.clone(),
-    );
-
-    let recv_task = Task::stream(
-        StreamingAsyncReceiver(mav_receiver)
-            .take_until(async move {
-                cancellation_token.cancelled().await;
-            })
-            .map(move |result| {
-                match result {
-                    Ok(frame) => {
-                        _ = broad_send_frame.send(frame.clone());
-                        ConnectionMessage::RecvFrame(frame, link_id)
-                    }
-                    Err(error) => ConnectionMessage::RecvError(error, link_id),
-                }
-                .into()
-            }),
-    );
-
-    Task::done(crate::Message::Connection(
-        ConnectionMessage::ConnectSuccess(connection_handle),
-    ))
-    .chain(recv_task)
-}
-
 mod mav_tokio {
     // ----- dyn-compatible trait definition -----
 
@@ -494,24 +312,6 @@ mod mav_tokio {
         mavio::prelude::Versionless,
         mavio::protocol::FrameParser<mavio::prelude::Versionless>,
     >;
-
-    pub struct StreamingAsyncReceiver(pub AsyncReceiver);
-
-    impl iced::futures::Stream for StreamingAsyncReceiver {
-        type Item = Result<mavio::Frame<mavio::prelude::Versionless>, mavio::Error>;
-
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            let pinned = core::pin::pin!(self.0.recv());
-            match pinned.poll(cx) {
-                std::task::Poll::Ready(Err(mavio::Error::Io(_))) => std::task::Poll::Ready(None),
-                std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            }
-        }
-    }
 
     /// Construct a new [`AsyncReceiver`]
     pub fn new_async_receiver<W: DynAsyncReader + 'static>(writer: W) -> AsyncReceiver {

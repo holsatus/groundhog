@@ -15,10 +15,7 @@ use mavio::{
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use slippery::{Geodetic, Mercator};
 
-use crate::{
-    connection::builder::LinkId,
-    parameter::base::{self, MavlinkId, Parameter, Parameters},
-};
+use crate::parameter::base::{self, MavlinkId, Parameter, Parameters};
 
 pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
 pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
@@ -32,7 +29,6 @@ pub struct Vehicle {
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
     pub parameters: Parameters,
-    pub link_info: HashMap<LinkId, VehicleLinkInfo>,
     pub message_history: VecDeque<MavMessage>,
     pub latest_message: HashMap<u32, MavMessage>,
     pub attitude: Option<Attitude>,
@@ -128,7 +124,7 @@ impl Vehicle {
 
         let maybe_value = base::mavio_into_value(cap, message.param_value, message.param_type);
 
-        let Some(value) = maybe_value else {
+        let Some(new_value) = maybe_value else {
             log::error!("Unsupported type of parameter: {:?}", message.param_type);
             return;
         };
@@ -138,7 +134,15 @@ impl Vehicle {
             return;
         };
 
-        self.parameters.map.insert(ident, Parameter::new(value));
+        match self.parameters.map.entry(ident) {
+            std::collections::btree_map::Entry::Vacant(vacant_entry) => {
+                _ = vacant_entry.insert(Parameter::new(new_value))
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
+                // Upload results are handled by `parameter::Message::ValueUploaded`
+                occupied_entry.get_mut().value = new_value;
+            }
+        }
 
         if message.param_index == u16::MAX {
             return;
@@ -303,8 +307,8 @@ impl Vehicle {
         // TODO: Check order quaternion scalars
         self.attitude = Some(Attitude {
             at: time,
-            attitude: UnitQuaternion::from_quaternion(Quaternion::from_vector(
-                [message.q1, message.q2, message.q3, message.q4].into(),
+            attitude: UnitQuaternion::from_quaternion(Quaternion::new(
+                message.q4, message.q1, message.q2, message.q3,
             )),
         });
     }
@@ -420,10 +424,6 @@ impl Vehicle {
             .insert(message.id(), MavMessage { at: time, message });
     }
 
-    pub fn link_info_mut(&mut self, link_id: LinkId) -> &mut VehicleLinkInfo {
-        self.link_info.entry(link_id).or_default()
-    }
-
     pub fn set_mav_capability(&mut self, capab: MavProtocolCapability) {
         if self.capabilities != Some(capab) {
             log::debug!("Received capabilities for {:?}: {:b}", self.mav_id, capab);
@@ -440,10 +440,4 @@ impl Vehicle {
             self.mav_id.component
         )
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct VehicleLinkInfo {
-    pub last_message: Option<Instant>,
-    // Some stuff about reliability?
 }

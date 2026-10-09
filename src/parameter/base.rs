@@ -20,8 +20,22 @@ pub struct Parameter {
 #[derive(Clone, Debug)]
 pub enum ParamState {
     Unchanged,
-    Changed(Value),
-    Uploading(Handle, Value),
+    Changed {
+        value: Value,
+        status: ChangedStatus,
+    },
+    Uploading {
+        value: Value,
+        #[allow(unused)]
+        handle: Handle,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum ChangedStatus {
+    None,
+    Failed,
+    Rejected,
 }
 
 impl Parameter {

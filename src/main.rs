@@ -9,9 +9,11 @@ use std::{
 use iced::{
     Alignment, Color, Element, Font,
     Length::{self},
-    Subscription, Task, Theme,
+    Subscription, Task, Theme, Widget,
     alignment::Vertical,
     color::Oklch,
+    futures::channel::mpsc::SendError,
+    theme,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, button,
         canvas::{Gradient, Stroke, Style, gradient::Linear},
@@ -19,32 +21,31 @@ use iced::{
         image::Handle,
         pick_list, progress_bar, row, rule, space,
         text::Ellipsis,
-        text_input,
+        text_input, tooltip,
     },
 };
+use mav_param::Ident;
 use mavio::{
-    DefaultDialect, Frame,
+    DefaultDialect,
     default_dialect::{
-        enums::{MavCmd, MavModeFlag, MavSeverity},
-        messages::{
-            CommandInt, CommandLong, ComponentInformationBasic, Heartbeat, ParamRequestList,
-        },
+        enums::{MavModeFlag, MavSeverity},
+        messages::{ComponentInformationBasic, Heartbeat},
     },
-    prelude::Versionless,
+    error::SpecError,
 };
 use num_enum::FromPrimitive;
 use rfd::AsyncFileDialog;
-use slippery::{
-    Action, CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
-};
+use slippery::{CacheMessage, Geodetic, Mercator, Projector, TileCache, Viewpoint, Zoom, location};
 
 use crate::{
-    connection::builder::{
-        ConnectionHandle, LinkBuild, LinkBuilder, LinkConfig, LinkId, LinkVariant,
-        WeakConnectionHandle,
+    connection::builder::{LinkBuilder, LinkConfig, LinkConfigurator, LinkId, LinkVariant},
+    mav::MavlinkRouter,
+    parameter::base::{
+        ChangedStatus, MavlinkId, ParamState, Parameter, Parameters, value_as_string,
+        value_type_name,
     },
-    parameter::base::{MavlinkId, ParamState, Parameters, value_as_string, value_type_name},
-    vehicle::Vehicle,
+    vehicle::{MavMessage, Vehicle},
+    virtualized::virtual_list,
 };
 
 mod parameter;
@@ -52,20 +53,21 @@ mod parameter;
 mod config;
 mod connection;
 mod firmware;
+mod mav;
 mod vehicle;
+mod virtualized;
 
-fn main() {
+fn main() -> Result<(), impl std::error::Error> {
     env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Error)
         .filter_module("groundhog", log::LevelFilter::Debug)
         .init();
 
     iced::application(Application::boot, Application::update, Application::view)
         .subscription(Application::subscription)
-        .title("Holsatus Groundhog")
-        .theme(Theme::GruvboxDark)
+        .theme(Application::theme)
+        .title(Application::title)
         .run()
-        .expect("Groundhog dead");
 }
 
 type ArcError = Arc<dyn Error + Send + Sync + 'static>;
@@ -92,29 +94,27 @@ fn altitude_to_color(altitude_m: f32, brightness: f32) -> Color {
     })
 }
 
+struct Link {
+    id: LinkId,
+    config: LinkConfig,
+    handle: Option<mav::LinkGuard>,
+}
 struct Application {
+    theme: Theme,
     viewpoint: Viewpoint,
     projector: Option<Projector>,
     tile_cache: TileCache,
-    link_config: LinkConfig,
-    connection: Option<ConnectionHandle>,
+    link_config: LinkConfigurator,
+    router: MavlinkRouter,
+    links: BTreeMap<String, Link>,
     configuration: config::Configuration,
     vehicles: BTreeMap<MavlinkId, Vehicle>,
-    parameter_filter: String,
+    parameter_filter: parameter::ParameterFilter,
     parameter_filtered: Option<Parameters>,
     primary_vehicle: Option<MavlinkId>,
     follow_primary_vehicle: bool,
     draw_line_segment_dots: bool,
     parameter_namespace_sep: char,
-    fly_to_position: FlyToPositionState,
-}
-
-#[derive(Default)]
-struct FlyToPositionState {
-    center: Option<Geodetic>,
-    perimeter: Option<Geodetic>,
-    radius: Option<f32>,
-    altitude: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -140,6 +140,12 @@ impl AtomicMavlinkId {
 
 static GCS_MAVLINK_ID: AtomicMavlinkId = AtomicMavlinkId::new(255, 1);
 
+impl From<SendError> for Message {
+    fn from(_: SendError) -> Self {
+        unreachable!("Why are we here ya dingus?")
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     MapProjector(Projector),
@@ -157,10 +163,6 @@ enum Message {
     SetFollowPrimaryVehicle(bool),
     #[allow(unused)] // TODO: Debug view
     DrawLineSegmentDots(bool),
-
-    FlyToPositionStart(Geodetic),
-    FlyToPositionInProgress(Geodetic),
-    FlyToPositionFinalize(Geodetic),
 }
 
 impl From<parameter::Message> for Message {
@@ -172,11 +174,14 @@ impl From<parameter::Message> for Message {
 #[derive(Debug, Clone)]
 enum ConnectionMessage {
     ConnectFailed(ArcError),
-    ConnectSuccess(ConnectionHandle),
-    RecvFrame(Frame<Versionless>, LinkId),
-    RecvError(mavio::Error, LinkId),
-    ConnectToLink(LinkBuild),
-    DisconnectLink,
+    ConnectSuccess(LinkId, mav::LinkGuard),
+    Event(mav::Event),
+    SaveLink(LinkId, LinkConfig),
+    Connect(LinkId),
+    Disconnect(LinkId),
+    ChangeLinkName(String),
+    SetLinkHighLatency(bool),
+    SetLinkAutoconnect(bool),
     ChangeLinkVariant(LinkVariant),
     UpdateLinkBuilder(LinkBuilder),
     DetectSerialPorts,
@@ -189,7 +194,7 @@ impl From<ConnectionMessage> for Message {
 }
 
 impl Application {
-    fn boot() -> Self {
+    fn boot() -> (Self, Task<Message>) {
         let config = config::Configuration::initialize().unwrap_or_else(|e| {
             log::error!("Unable to initialize configuration file: {}", e);
             config::Configuration::default()
@@ -201,25 +206,39 @@ impl Application {
             .map(|cfg| cfg.to_builder())
             .unwrap_or_else(LinkBuilder::default_udp);
 
-        Application {
+        let (client, events) = mav::MavlinkRouter::new();
+        let events = Task::stream(events).map(|event| ConnectionMessage::Event(event).into());
+
+        let application = Application {
+            theme: theme::Theme::GruvboxDark,
             viewpoint: Viewpoint {
                 position: location::paris().as_mercator(),
                 zoom: Zoom::try_from(8.0).unwrap(),
             },
             projector: None,
             tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
-            link_config: LinkConfig::new(link_builder, "Default".to_owned()),
-            connection: None,
+            link_config: LinkConfigurator::new(link_builder, "Default".to_owned()),
+            router: client,
+            links: BTreeMap::new(),
             configuration: config.clone(),
             vehicles: BTreeMap::new(),
-            parameter_filter: String::new(),
+            parameter_filter: parameter::ParameterFilter::default(),
             parameter_filtered: None,
             primary_vehicle: None,
             follow_primary_vehicle: false,
             draw_line_segment_dots: false,
             parameter_namespace_sep: '_',
-            fly_to_position: FlyToPositionState::default(),
-        }
+        };
+
+        (application, events)
+    }
+
+    fn theme(&self) -> Theme {
+        self.theme.clone()
+    }
+
+    fn title(&self) -> String {
+        "Holsatus Groundhog".to_string()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -262,58 +281,9 @@ impl Application {
             Message::DrawLineSegmentDots(value) => {
                 self.draw_line_segment_dots = value;
             }
-            Message::FlyToPositionStart(position) => {
-                self.fly_to_position = FlyToPositionState {
-                    center: Some(position),
-                    perimeter: None,
-                    radius: None,
-                    altitude: None,
-                }
-            }
-            Message::FlyToPositionInProgress(geodetic) => {
-                self.fly_to_position.perimeter = Some(geodetic);
-            }
-            Message::FlyToPositionFinalize(geodetic) => {
-                if let Some(start) = self.fly_to_position.center {
-                    let radius = dbg!(haversine_distance(start, geodetic));
-                    self.fly_to_position.perimeter = Some(geodetic);
-                    self.fly_to_position.radius = Some(radius as f32);
-                    self.commmand_fly_primary_vehicle_to(start, radius as f32);
-                }
-            }
         }
 
         None
-    }
-
-    fn commmand_fly_primary_vehicle_to(&mut self, position: Geodetic, radius: f32) -> Option<()> {
-        let mav_id = self.primary_vehicle?;
-        let connection = self.get_connection_handle()?;
-        tokio::spawn(async move {
-            connection
-                .send_message(CommandInt {
-                    target_system: mav_id.system,
-                    target_component: mav_id.component,
-                    command: MavCmd::DoReposition,
-                    param1: -1.0,
-                    param2: 0.0,
-                    param3: radius,
-                    param4: f32::NAN,
-                    x: (position.latitude() * 1e7) as i32,
-                    y: (position.longitude() * 1e7) as i32,
-                    z: 1000.0,
-                    frame: mavio::default_dialect::enums::MavFrame::GlobalInt,
-                    current: 0,
-                    autocontinue: 0,
-                })
-                .await;
-        });
-
-        Some(())
-    }
-
-    fn get_connection_handle(&self) -> Option<WeakConnectionHandle> {
-        self.connection.as_ref().map(|handle| handle.downgrade())
     }
 
     fn set_file_picker_path_config(&mut self, path: &Path) -> Option<()> {
@@ -335,111 +305,84 @@ impl Application {
         file_dialog
     }
 
-    fn get_vehicle_or_insert(&mut self, mav_id: MavlinkId) -> &mut Vehicle {
-        self.vehicles.entry(mav_id).or_insert_with(|| {
-            log::info!("New vehicle detected: {mav_id:?}");
-            if let Some(handle) = self.connection.as_ref() {
-                Self::request_vehicle_info(handle, mav_id);
-            }
-            Vehicle::new(mav_id)
-        })
-    }
+    /// Fetch basic information and the parameter list from a newly detected vehicle.
+    fn initialize_vehicle(&self, mav_id: MavlinkId) -> Task<Message> {
+        let router = self.router.clone();
+        Task::perform(
+            async move {
+                if let Err(error) = router
+                    .request_message::<ComponentInformationBasic>(mav_id)
+                    .await
+                {
+                    log::warn!("No COMPONENT_INFORMATION_BASIC from {mav_id:?}: {error}");
+                }
 
-    fn request_vehicle_info(handle: &ConnectionHandle, mav_id: MavlinkId) {
-        let handle = handle.downgrade();
-        tokio::spawn(async move {
-            // Request parameters
-            handle
-                .send_message(ParamRequestList {
-                    target_system: mav_id.system,
-                    target_component: mav_id.component,
-                    ..ParamRequestList::default()
-                })
-                .await;
-
-            // Request basic component information
-            let command = MavCmd::RequestMessage;
-            handle
-                .send_message(CommandLong {
-                    target_system: mav_id.system,
-                    target_component: mav_id.component,
-                    command,
-                    param1: ComponentInformationBasic::ID as f32,
-                    ..CommandLong::default()
-                })
-                .await;
-
-            // Wait for ack/nack to request command
-            let ack = handle
-                .await_messages(|message| match message {
-                    mavio::DefaultDialect::CommandAck(ack) if ack.command == command => {
-                        let target = MavlinkId {
-                            system: ack.target_system,
-                            component: ack.target_component,
-                        };
-
-                        (GCS_MAVLINK_ID.load() == target).then(|| ack.clone())
-                    }
-                    _ => None,
-                })
-                .await;
-
-            match ack {
-                Some(ack) => log::debug!("ACK for {:?} - {:?}", ack.command, ack.result),
-                None => log::warn!("No response to command"),
-            };
-        });
+                // This requests AUTOPILOT_VERSION to get capabilities for param encoding
+                router.param_list(mav_id, true).await
+            },
+            move |result| parameter::Message::ListReloadResult(mav_id, result).into(),
+        )
     }
 
     fn connection_message_update(&mut self, message: ConnectionMessage) -> Task<Message> {
-        let time_now = Instant::now();
         match message {
-            ConnectionMessage::RecvFrame(frame, link_id) => {
-                let message = match frame.decode::<mavio::DefaultDialect>() {
-                    Ok(message) => message,
-                    Err(mavio::Error::Frame(mavio::error::FrameError::NotInDialect(id))) => {
-                        log::trace!("Message with id: {id} is not in dialect");
-                        return Task::none();
-                    }
-                    Err(error) => {
-                        log::error!("Mavlink decode error: {error:?}");
-                        return Task::none();
-                    }
-                };
-
-                let mav_id = MavlinkId {
-                    system: frame.system_id(),
-                    component: frame.component_id(),
-                };
+            ConnectionMessage::Event(mav::Event::Message(inbound)) => {
+                let mav_id = inbound.source_mav;
 
                 // This will be the first vehicle, set it as the primary
                 if self.vehicles.is_empty() {
                     self.primary_vehicle = Some(mav_id);
                 }
 
-                let vehicle = self.get_vehicle_or_insert(mav_id);
-
-                vehicle.link_info_mut(link_id).last_message = Some(time_now);
-                vehicle.handle_message(time_now, message);
-
-                if self.primary_vehicle.is_some_and(|id| id == mav_id) {
-                    self.refresh_filtered_parameter();
+                let mut tasks = Vec::new();
+                if !self.vehicles.contains_key(&mav_id) {
+                    log::info!("New vehicle detected: {mav_id:?}");
+                    self.vehicles.insert(mav_id, Vehicle::new(mav_id));
+                    tasks.push(self.initialize_vehicle(mav_id));
                 }
 
-                if self.follow_primary_vehicle {
-                    if let Some(prim_id) = self.primary_vehicle
-                        && prim_id == mav_id
-                    {
-                        if let Some(primary_vehicle) = self.vehicles.get(&prim_id) {
-                            if let Some(position) = &primary_vehicle.global_position {
-                                return Task::done(Message::SetViewPosition(position.pos));
+                if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
+                    match inbound.frame.decode::<DefaultDialect>() {
+                        Ok(message) => vehicle.handle_message(inbound.received_at, message),
+                        Err(error) => {
+                            match error {
+                                mavio::Error::Spec(SpecError::NotInDialect(id)) => {
+                                    // Downgrade this error to trace to avoid spamming the logs
+                                    log::trace!("mavlink message id {id} is not in default dialect")
+                                }
+                                error => {
+                                    log::trace!("could not decode mavlink frame: {error}");
+                                }
                             }
                         }
                     }
                 }
+
+                if self.primary_vehicle.is_some_and(|id| id == mav_id) {
+                    self.refresh_filtered_parameter();
+
+                    if self.follow_primary_vehicle
+                        && let Some(vehicle) = self.vehicles.get(&mav_id)
+                        && let Some(position) = &vehicle.global_position
+                    {
+                        tasks.push(Task::done(Message::SetViewPosition(position.pos)));
+                    }
+                }
+
+                return Task::batch(tasks);
             }
-            ConnectionMessage::RecvError(error, link_id) => {
-                log::error!("Error receiving on {link_id:?}: {error:?}");
+            ConnectionMessage::Event(mav::Event::LinkClosed(link_id)) => {
+                log::info!("Link {link_id:?} closed");
+                // self.links.retain(|link| link.id != link_id);
+            }
+            ConnectionMessage::ChangeLinkName(name) => {
+                self.link_config.name = name;
+            }
+            ConnectionMessage::SetLinkHighLatency(high_latency) => {
+                self.link_config.high_latency = high_latency;
+            }
+            ConnectionMessage::SetLinkAutoconnect(auto_connect) => {
+                self.link_config.auto_connect = auto_connect;
             }
             ConnectionMessage::ChangeLinkVariant(variant) => {
                 if self.link_config.builder.to_variant() == variant {
@@ -486,44 +429,52 @@ impl Application {
                     self.link_config.build = self.link_config.builder.try_build();
                 }
             }
-            ConnectionMessage::ConnectToLink(config) => {
-                self.configuration.link_config = Some(config.clone());
-                log::info!("Connecting to: {config:?}");
-                return config.connect();
+            ConnectionMessage::SaveLink(link_id, config) => {
+                self.configuration.link_config = Some(config.build.clone());
+
+                self.links.insert(
+                    config.name.clone(),
+                    Link {
+                        id: link_id,
+                        config,
+                        handle: None,
+                    },
+                );
             }
-            ConnectionMessage::DisconnectLink => {
-                if let Some(connection) = self.connection.take() {
-                    connection.close();
-                    log::info!("Disconnected");
+            ConnectionMessage::Connect(link_id) => {
+                if let Some(link) = self.links.get(link_id.str()) {
+                    return link
+                        .config
+                        .build
+                        .connect(link_id.clone(), self.router.clone());
+                }
+            }
+            ConnectionMessage::Disconnect(link_id) => {
+                if let Some(link) = self.links.values_mut().find(|this| this.id == link_id) {
+                    drop(link.handle.take())
                 }
             }
             ConnectionMessage::ConnectFailed(error) => {
                 log::error!("Connect failed: {error:?}");
             }
-            ConnectionMessage::ConnectSuccess(connection) => {
+            ConnectionMessage::ConnectSuccess(link_id, handle) => {
                 log::info!("Connection established");
-                let weak_connection = connection.downgrade();
-                self.connection = Some(connection);
-                tokio::spawn(async move {
-                    loop {
-                        let heartbeat = Heartbeat::default();
-                        if !weak_connection.send_message(heartbeat).await {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                });
+                if let Some(link) = self.links.values_mut().find(|link| link.id == link_id) {
+                    link.handle = Some(handle)
+                }
             }
         }
 
         Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self) -> impl Widget<Message> + '_ {
         let overlay = iced::widget::column![
             iced::widget::opaque(self.view_top_panel()),
             iced::widget::row![
                 iced::widget::opaque(self.view_parameter_panel()),
+                iced::widget::opaque(self.view_links_editor()),
+                iced::widget::opaque(self.view_links_status()),
                 iced::widget::space().width(Length::Fill),
                 iced::widget::opaque(self.view_right_side_panel()),
             ]
@@ -532,7 +483,199 @@ impl Application {
         .padding(10.0)
         .spacing(10.0);
 
-        iced::widget::stack!(self.view_osm_map(), overlay).into()
+        iced::widget::stack!(self.view_osm_map(), overlay)
+    }
+
+    fn view_links_editor(&self) -> impl Widget<Message> {
+        let link = &self.link_config;
+
+        let name_editor = iced::widget::text_input("Link name", &link.name)
+            .on_input(|name| ConnectionMessage::ChangeLinkName(name).into());
+
+        let high_latency = iced::widget::checkbox(link.high_latency)
+            .on_toggle(|value| ConnectionMessage::SetLinkHighLatency(value).into())
+            .label("High latency");
+
+        let auto_connect = iced::widget::checkbox(link.auto_connect)
+            .on_toggle(|value| ConnectionMessage::SetLinkAutoconnect(value).into())
+            .label("Auto connect");
+
+        let link_kind = iced::widget::pick_list(
+            Some(link.builder.to_variant()),
+            LinkVariant::list(),
+            LinkVariant::to_string,
+        )
+        .width(Length::Fill)
+        .on_select(|kind| ConnectionMessage::ChangeLinkVariant(kind).into());
+
+        let mut children = Vec::with_capacity(2);
+
+        match &link.builder {
+            LinkBuilder::Tcp { addr, port } => {
+                let addr_input = text_input("address", addr)
+                    .on_input(|addr| {
+                        ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
+                            addr,
+                            port: port.clone(),
+                        })
+                        .into()
+                    })
+                    .width(Length::Fill)
+                    .boxed();
+
+                let port_input = text_input("port", port)
+                    .on_input(|port| {
+                        ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Tcp {
+                            addr: addr.clone(),
+                            port,
+                        })
+                        .into()
+                    })
+                    .width(Length::Fill)
+                    .boxed();
+
+                children.push(addr_input);
+                children.push(port_input);
+            }
+            LinkBuilder::Udp { addr, port } => {
+                let addr_input = text_input("address", addr)
+                    .on_input(|addr| {
+                        ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Udp {
+                            addr,
+                            port: port.clone(),
+                        })
+                        .into()
+                    })
+                    .width(Length::Fill)
+                    .boxed();
+
+                let port_input = text_input("port", port)
+                    .on_input(|port| {
+                        ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Udp {
+                            addr: addr.clone(),
+                            port,
+                        })
+                        .into()
+                    })
+                    .width(Length::Fill)
+                    .boxed();
+
+                children.push(addr_input);
+                children.push(port_input);
+            }
+            LinkBuilder::Serial {
+                port,
+                available_ports,
+                baud,
+            } => {
+                let port_picker =
+                    pick_list(port.as_ref(), available_ports.as_slice(), |x| x.clone())
+                        .placeholder(if available_ports.is_empty() {
+                            "No connection"
+                        } else {
+                            "Select a port"
+                        })
+                        .ellipsis(Ellipsis::Start)
+                        .on_open(ConnectionMessage::DetectSerialPorts.into())
+                        .on_select(|selected_port| {
+                            ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Serial {
+                                port: Some(selected_port),
+                                baud: *baud,
+                                available_ports: available_ports.clone(),
+                            })
+                            .into()
+                        })
+                        .width(Length::Fill)
+                        .boxed();
+
+                let baud_picker =
+                    pick_list(Some(baud), connection::builder::BAUDRATES, u32::to_string)
+                        .on_select(|selected_baud| {
+                            ConnectionMessage::UpdateLinkBuilder(LinkBuilder::Serial {
+                                port: port.clone(),
+                                baud: selected_baud,
+                                available_ports: available_ports.clone(),
+                            })
+                            .into()
+                        })
+                        .width(Length::Fill)
+                        .boxed();
+
+                children.push(port_picker);
+                children.push(baud_picker);
+            }
+        }
+
+        let button = Button::new(
+            container("Save link")
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .on_press_maybe(self.link_config.parse().map(|config| {
+            Message::Connection(ConnectionMessage::SaveLink(
+                LinkId::new(&self.link_config.name),
+                config,
+            ))
+        }))
+        .width(Length::Fill)
+        .boxed();
+
+        let contents = iced::widget::column![
+            name_editor,
+            high_latency,
+            auto_connect,
+            link_kind,
+            iced::widget::Column::from_vec(children).spacing(10.0),
+            button,
+        ]
+        .spacing(10.0);
+
+        container(contents)
+            .style(shaded_bordered_box)
+            .padding(10.0)
+            .width(170.0)
+    }
+
+    fn view_links_status<'a>(&'a self) -> impl Widget<Message> + 'a {
+        let mut contents = Vec::new();
+
+        for link in self.links.values() {
+            let button = if link.handle.is_some() {
+                Button::new(
+                    container("Disconnect")
+                        .align_x(Alignment::Center)
+                        .align_y(Alignment::Center),
+                )
+                .style(button::danger)
+                .on_press_with(|| {
+                    Message::Connection(ConnectionMessage::Disconnect(link.id.clone()))
+                })
+                .width(100.0)
+            } else {
+                Button::new(
+                    container("Connect")
+                        .align_x(Alignment::Center)
+                        .align_y(Alignment::Center),
+                )
+                .on_press_with(|| Message::Connection(ConnectionMessage::Connect(link.id.clone())))
+                .width(100.0)
+            };
+
+            let content = iced::widget::container(iced::widget::row![
+                iced::widget::text(&link.config.name),
+                iced::widget::text(if link.handle.is_some() {
+                    ": connected"
+                } else {
+                    ": disconnected"
+                }),
+                button
+            ])
+            .style(shaded_bordered_box)
+            .padding(10.0);
+            contents.push(content.boxed());
+        }
+
+        iced::widget::Column::from_vec(contents).spacing(10.0)
     }
 
     fn view_osm_map(&self) -> Element<'_, Message> {
@@ -658,19 +801,6 @@ impl Application {
                                 prev = next;
                             }
 
-                            match (self.fly_to_position.center, self.fly_to_position.perimeter) {
-                                (Some(start), Some(end)) => {
-                                    let point = projector.geodetic_into_screen_space(start);
-                                    let dist = point - projector.geodetic_into_screen_space(end);
-                                    let radius = (dist.x * dist.x + dist.y * dist.y).sqrt();
-                                    frame.stroke(
-                                        &iced::widget::canvas::Path::circle(point, radius),
-                                        Stroke::default().with_width(4.0).with_color(Color::WHITE),
-                                    );
-                                }
-                                _ => (),
-                            }
-
                             frame.with_save(|frame| {
                                 frame.translate(iced::Vector::new(center.x, center.y));
                                 frame.rotate(yaw_angle);
@@ -690,40 +820,10 @@ impl Application {
                     }
                 })
             })
-            .with_interaction(|projector, cursor, event| {
-                match event {
-                    iced::Event::Mouse(event) => match event {
-                        iced::mouse::Event::CursorMoved { position } => {
-                            if self.fly_to_position.center.is_some()
-                                && self.fly_to_position.radius.is_none()
-                            {
-                                let position = projector.screen_space_into_geodetic(*position);
-                                return Action::Capture(Message::FlyToPositionInProgress(position));
-                            }
-                        }
-                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right) => {
-                            if let Some(cursor) = cursor.position() {
-                                let clicked_on = projector.screen_space_into_geodetic(cursor);
-                                return Action::Capture(Message::FlyToPositionStart(clicked_on));
-                            }
-                        }
-                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Right) => {
-                            if let Some(cursor) = cursor.position() {
-                                let clicked_on = projector.screen_space_into_geodetic(cursor);
-                                return Action::Capture(Message::FlyToPositionFinalize(clicked_on));
-                            }
-                        }
-                        _ => (),
-                    },
-                    _ => (),
-                }
-
-                Action::None
-            })
             .build(self.viewpoint)
     }
 
-    fn view_top_panel(&self) -> Element<'_, Message> {
+    fn view_top_panel(&self) -> impl Widget<Message> + '_ {
         let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(16);
 
         let selector = iced::widget::pick_list(
@@ -733,10 +833,10 @@ impl Application {
         )
         .placeholder("Pick one")
         .on_select(|v| Message::Connection(ConnectionMessage::ChangeLinkVariant(v)))
-        .into();
+        .boxed();
 
         row_contents.push(selector);
-        row_contents.push(iced::widget::rule::vertical(1.0).into());
+        row_contents.push(iced::widget::rule::vertical(1.0).boxed());
 
         match &self.link_config.builder {
             LinkBuilder::Tcp { addr, port } => {
@@ -750,7 +850,7 @@ impl Application {
                         ))
                     })
                     .width(160.0)
-                    .into();
+                    .boxed();
 
                 let port_input = text_input("port", port)
                     .on_input(|port| {
@@ -762,7 +862,7 @@ impl Application {
                         ))
                     })
                     .width(100.0)
-                    .into();
+                    .boxed();
 
                 row_contents.push(addr_input);
                 row_contents.push(port_input);
@@ -778,7 +878,7 @@ impl Application {
                         ))
                     })
                     .width(160.0)
-                    .into();
+                    .boxed();
 
                 let port_input = text_input("port", port)
                     .on_input(|port| {
@@ -790,7 +890,7 @@ impl Application {
                         ))
                     })
                     .width(100.0)
-                    .into();
+                    .boxed();
 
                 row_contents.push(addr_input);
                 row_contents.push(port_input);
@@ -819,7 +919,7 @@ impl Application {
                             ))
                         })
                         .width(160.0)
-                        .into();
+                        .boxed();
 
                 let baud_picker = pick_list(Some(baud), connection::builder::BAUDRATES, |x| {
                     x.to_string()
@@ -833,19 +933,19 @@ impl Application {
                     }))
                 })
                 .width(100.0)
-                .into();
+                .boxed();
 
                 row_contents.push(port_picker);
                 row_contents.push(baud_picker);
             }
         }
 
-        row_contents.push(iced::widget::rule::vertical(1.0).into());
-        row_contents.push(iced::widget::text("Follow primary vehicle").into());
+        row_contents.push(iced::widget::rule::vertical(1.0).boxed());
+        row_contents.push(iced::widget::text("Follow primary vehicle").boxed());
         row_contents.push(
             iced::widget::checkbox(self.follow_primary_vehicle)
                 .on_toggle(Message::SetFollowPrimaryVehicle)
-                .into(),
+                .boxed(),
         );
 
         // row_contents.push(iced::widget::rule::vertical(1.0).into());
@@ -856,7 +956,11 @@ impl Application {
         //         .into(),
         // );
 
-        row_contents.push(iced::widget::space::Space::new().width(Length::Fill).into());
+        row_contents.push(
+            iced::widget::space::Space::new()
+                .width(Length::Fill)
+                .boxed(),
+        );
 
         if self.vehicles.len() > 1 {
             // TODO: We should use vendor and model name here instead
@@ -868,32 +972,7 @@ impl Application {
                     .map_or_else(|| "Invalid vehicle".to_string(), |v| v.pretty_name())
             })
             .on_select(Message::SetPrimaryVehicle);
-            row_contents.push(vehicle_picker.into());
-        }
-
-        if self.connection.is_none() {
-            let connect_button = Button::new(
-                container("Connect")
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            )
-            .on_press_maybe(self.link_config.build.as_ref().map(|config| {
-                Message::Connection(ConnectionMessage::ConnectToLink(config.clone()))
-            }))
-            .width(100.0)
-            .into();
-            row_contents.push(connect_button);
-        } else {
-            let disconnect_button = Button::new(
-                container("Disconnect")
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            )
-            .style(button::danger)
-            .on_press(Message::Connection(ConnectionMessage::DisconnectLink))
-            .width(100.0)
-            .into();
-            row_contents.push(disconnect_button);
+            row_contents.push(vehicle_picker.boxed());
         }
 
         iced::widget::container(
@@ -906,10 +985,9 @@ impl Application {
         .style(shaded_bordered_box)
         .width(Length::Fill)
         .padding(10.0)
-        .into()
     }
 
-    fn view_right_side_panel(&self) -> Element<'_, Message> {
+    fn view_right_side_panel(&self) -> impl Widget<Message> + '_ {
         let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(16);
 
         let mut roll = 0.0;
@@ -983,10 +1061,10 @@ impl Application {
             ]
             .width(Length::Fill)
             .spacing(10.0)
-            .into(),
+            .boxed(),
         );
 
-        row_contents.push(iced::widget::rule::horizontal(1.0).into());
+        row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
 
         row_contents.push(
             iced::widget::row![
@@ -1008,7 +1086,7 @@ impl Application {
             ]
             .width(Length::Fill)
             .spacing(10.0)
-            .into(),
+            .boxed(),
         );
 
         row_contents.push(
@@ -1022,17 +1100,28 @@ impl Application {
             ]
             .width(Length::Fill)
             .spacing(10.0)
-            .into(),
+            .boxed(),
         );
 
         if let Some(mav_id) = self.primary_vehicle {
             if let Some(vehicle) = self.vehicles.get(&mav_id) {
-                let palette = Theme::GruvboxDark.palette();
                 use iced::font;
                 use iced::widget::{rich_text, span};
                 use iced::{Font, never};
 
-                row_contents.push(iced::widget::rule::horizontal(1.0).into());
+                if let Some(MavMessage {
+                    message: DefaultDialect::Heartbeat(heartbeat),
+                    ..
+                }) = vehicle.latest_message.get(&Heartbeat::ID)
+                {
+                    row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
+                    row_contents.push(
+                        iced::widget::container(iced::widget::text(format!("{:?}", heartbeat)))
+                            .boxed(),
+                    );
+                }
+
+                row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
                 row_contents.push(
                     iced::widget::scrollable(row![
                         iced::widget::Column::from_iter(
@@ -1041,6 +1130,7 @@ impl Application {
                                 .iter()
                                 .enumerate()
                                 .map(|(idx, status)| {
+                                    let palette = self.theme.palette();
                                     let color = match status.severity {
                                         MavSeverity::Emergency => palette.danger.base.color,
                                         MavSeverity::Alert => palette.danger.base.color,
@@ -1071,13 +1161,12 @@ impl Application {
                                         list_brighter
                                     })
                                     .padding(5.0)
-                                    .into()
                                 })
                         )
                         .spacing(10.0),
                     ])
                     .anchor_bottom()
-                    .into(),
+                    .boxed(),
                 );
             }
         }
@@ -1091,23 +1180,24 @@ impl Application {
         .style(shaded_bordered_box)
         .width(500.0)
         .padding(10.0)
-        .into()
     }
 
-    fn view_parameter_panel(&self) -> Element<'_, Message> {
+    fn view_parameter_panel(&self) -> impl Widget<Message> + '_ {
         let Some(mav_id) = self.primary_vehicle else {
-            return space::Space::new().into();
+            return space::Space::new().boxed();
         };
 
         let Some(vehicle) = self.vehicles.get(&mav_id) else {
-            return space::Space::new().into();
+            return space::Space::new().boxed();
         };
 
-        let mut entries = Vec::with_capacity(128);
+        let mut entries: Vec<Element<'_, Message>> = Vec::with_capacity(128);
 
+        // Disabled while a parameter list download is in progress
+        let reloading = self.router.is_busy(&mav::LockKey::ParamList(mav_id));
         let reload_button = Button::new("Reload parameters")
             .width(Length::Fill)
-            .on_press(parameter::Message::ListReload(mav_id).into());
+            .on_press_maybe((!reloading).then(|| parameter::Message::ListReload(mav_id).into()));
 
         let upload_button = Button::new("Upload parameters")
             .width(Length::FillPortion(1))
@@ -1121,22 +1211,32 @@ impl Application {
             .width(Length::FillPortion(1))
             .on_press(parameter::Message::LoadDialog(mav_id).into());
 
-        let filter_field = TextInput::new("Filter parameters", &self.parameter_filter)
-            .width(Length::FillPortion(1))
-            .on_input(|buf| parameter::Message::FilterBuf(buf).into());
+        let filter_field =
+            TextInput::new("Filter parameters", &self.parameter_filter.ident_pattern)
+                .width(Length::FillPortion(1))
+                .on_input(|buf| parameter::Message::FilterIdentPattern(buf).into());
 
         entries.push(
             iced::widget::row![reload_button, upload_button]
                 .spacing(5.0)
-                .into(),
+                .boxed(),
         );
         entries.push(
             iced::widget::row![save_button, load_button]
                 .spacing(5.0)
-                .into(),
+                .boxed(),
         );
 
-        entries.push(filter_field.into());
+        entries.push(filter_field.boxed());
+
+        entries.push(
+            iced::widget::checkbox(self.parameter_filter.only_changed)
+                .label("Only changed")
+                .on_toggle(|changed| {
+                    Message::Parameter(parameter::Message::FilterOnlyChanged(changed))
+                })
+                .boxed(),
+        );
 
         let got = vehicle.parameters.loading_state.has_loaded.len();
         let exp = vehicle.parameters.loading_state.expected_count;
@@ -1150,46 +1250,52 @@ impl Application {
         let progress = ProgressBar::new((0.0)..=(exp as f32), got as f32)
             .style(style)
             .girth(10.0)
-            .into();
+            .boxed();
 
         entries.push(progress);
 
         iced::widget::container(
             iced::widget::column![
                 iced::widget::Column::from_iter(entries).spacing(5.0),
-                iced::widget::scrollable(self.view_param_list())
-                    .style(iced::widget::scrollable::default)
-                    .spacing(5.0),
+                self.view_param_list(mav_id, vehicle),
             ]
             .spacing(5.0),
         )
         .padding(10.0)
         .width(500.0)
         .style(shaded_bordered_box)
-        .into()
+        .boxed()
     }
 
-    fn view_param_list(&self) -> Element<'_, Message> {
-        let Some(mav_id) = self.primary_vehicle else {
-            return space::Space::new().into();
-        };
+    fn view_param_list<'a>(
+        &'a self,
+        mav_id: MavlinkId,
+        vehicle: &'a Vehicle,
+    ) -> impl Widget<Message> + 'a {
+        /// Heights must fit the tallest content of each item kind
+        const ROW_HEIGHT: f32 = 32.0;
+        const HEADER_HEIGHT: f32 = 40.0;
+        const SEPARATOR_HEIGHT: f32 = 1.0;
 
-        let Some(vehicle) = self.vehicles.get(&mav_id) else {
-            return space::Space::new().into();
-        };
-
-        let mut entries = Vec::with_capacity(128);
-
-        let mut section = None;
+        enum Item<'a> {
+            /// `first` is the ident following the section, used as its key
+            Section {
+                name: Option<&'a str>,
+                separator: bool,
+                first: &'a Ident,
+            },
+            Param(&'a Ident, &'a Parameter),
+        }
 
         let parameters = self
             .parameter_filtered
             .as_ref()
             .unwrap_or(&vehicle.parameters);
 
-        for (ident, param) in &parameters.map {
-            let type_name = value_type_name(param.value);
+        let mut items = Vec::with_capacity(parameters.map.len() + 64);
+        let mut section = None;
 
+        for (ident, param) in &parameters.map {
             let this_section = ident
                 .as_str()
                 .split_once(self.parameter_namespace_sep)
@@ -1197,88 +1303,141 @@ impl Application {
 
             // Add larger section headers and separators
             if this_section != section {
-                if section.is_some() {
-                    entries.push(rule::horizontal(1.0).into());
-                }
-                if let Some(section) = this_section {
-                    entries.push(
-                        Text::new(format!("[{section}]"))
-                            .size(24.0)
-                            .font(Font::MONOSPACE)
-                            .into(),
-                    );
+                let separator = section.is_some();
+                if separator || this_section.is_some() {
+                    items.push(Item::Section {
+                        name: this_section,
+                        separator,
+                        first: ident,
+                    });
                 }
                 section = this_section;
             }
 
-            let value_string = match param.editing.clone() {
-                Some(buffer) => buffer.clone(),
-                None => value_as_string(param.value),
-            };
-
-            let text_input = iced::widget::TextInput::new("Write value", &value_string)
-                .on_input(move |string| {
-                    parameter::Message::BufferEdit(mav_id, ident.clone(), string).into()
-                })
-                .style(move |theme, status| {
-                    let mut style = iced::widget::text_input::default(theme, status);
-                    match param.state {
-                        ParamState::Unchanged => {}
-                        ParamState::Changed(..) => {
-                            style.background =
-                                iced::Background::Color(Color::from_rgb8(30, 120, 60));
-                        }
-                        ParamState::Uploading(..) => {
-                            style.background =
-                                iced::Background::Color(Color::from_rgb8(180, 150, 0));
-                        }
-                    }
-                    style
-                })
-                .width(Length::Fill);
-
-            let restore_button = Button::new("Restore")
-                .on_press_maybe(match param.state {
-                    ParamState::Changed(..) => {
-                        Some(parameter::Message::ValueReset(mav_id, ident.clone()).into())
-                    }
-                    _ => None,
-                })
-                .width(80.0);
-
-            let upload_button = Button::new("Upload")
-                .on_press_maybe(match param.state {
-                    ParamState::Changed(value) => {
-                        Some(parameter::Message::ValueUpload(mav_id, ident.clone(), value).into())
-                    }
-                    _ => None,
-                })
-                .width(80.0);
-
-            let row = row![
-                Text::new(ident.as_str().to_string())
-                    .width(160.0)
-                    .font(Font::MONOSPACE),
-                Text::new(type_name)
-                    .width(50.0)
-                    .font(Font::MONOSPACE)
-                    .align_x(Alignment::End)
-                    .color(Color::from_rgba8(255, 255, 255, 0.5)),
-                Space::new().width(10.0),
-                text_input,
-                restore_button,
-                upload_button,
-            ]
-            .spacing(5.0)
-            .align_y(Vertical::Center);
-
-            entries.push(row.into());
+            items.push(Item::Param(ident, param));
         }
 
-        Column::from_vec(entries)
+        let list = virtual_list(items, move |item| match item {
+            Item::Section {
+                name, separator, ..
+            } => {
+                let header = name.map(|name| -> Text<'_, iced::Theme> {
+                    Text::new(format!("[{name}]"))
+                        .size(24.0)
+                        .font(Font::MONOSPACE)
+                });
+                Column::<Element<'_, Message>>::new()
+                    .push(separator.then(|| rule::horizontal(1.0)).boxed())
+                    .push(header.boxed())
+                    .spacing(5.0)
+                    .boxed()
+            }
+            Item::Param(ident, param) => self.view_param_row(mav_id, ident, param).boxed(),
+        })
+        .item_height(|item| match item {
+            Item::Section { name: None, .. } => SEPARATOR_HEIGHT,
+            Item::Section { .. } => HEADER_HEIGHT,
+            Item::Param(..) => ROW_HEIGHT,
+        })
+        .key(|item| match item {
+            Item::Section { first, .. } => ((*first).clone(), true),
+            Item::Param(ident, _) => ((*ident).clone(), false),
+        })
+        .spacing(5.0);
+
+        iced::widget::scrollable(list)
+            .style(iced::widget::scrollable::default)
             .spacing(5.0)
-            .width(Length::Fill)
-            .into()
+            .boxed()
+    }
+
+    fn view_param_row<'a>(
+        &'a self,
+        mav_id: MavlinkId,
+        ident: &'a Ident,
+        param: &'a Parameter,
+    ) -> impl Widget<Message> {
+        let type_name = value_type_name(param.value);
+
+        let value_string = match param.editing.clone() {
+            Some(buffer) => buffer.clone(),
+            None => value_as_string(param.value),
+        };
+
+        let text_input = iced::widget::TextInput::new("Write value", value_string)
+            .on_input(move |string| {
+                parameter::Message::BufferEdit(mav_id, ident.clone(), string).into()
+            })
+            .style(move |theme, status| {
+                let mut style = iced::widget::text_input::default(theme, status);
+                let palette = theme.palette();
+                match &param.state {
+                    ParamState::Unchanged => {}
+                    ParamState::Changed { status, .. } => {
+                        style.background = match status {
+                            ChangedStatus::None => palette.success.base.color,
+                            ChangedStatus::Failed => palette.warning.base.color,
+                            ChangedStatus::Rejected => palette.danger.base.color,
+                        }
+                        .into();
+                    }
+                    ParamState::Uploading { .. } => {
+                        style.background = palette.secondary.base.color.into();
+                    }
+                }
+                style
+            })
+            .width(Length::Fill);
+
+        let restore_button = Button::new("Restore")
+            .on_press_maybe(match param.state {
+                ParamState::Changed { .. } => {
+                    Some(parameter::Message::ValueReset(mav_id, ident.clone()).into())
+                }
+                _ => None,
+            })
+            .width(80.0);
+
+        let restore_tooltip = container(Text::new(match param.state {
+            ParamState::Changed { .. } => {
+                format!(
+                    "Restore to: {}",
+                    parameter::base::value_as_string(param.value)
+                )
+            }
+            _ => "Nothing to restore".to_string(),
+        }))
+        .padding(10.0)
+        .style(shaded_bordered_box);
+
+        let restore_button = tooltip(restore_button, restore_tooltip, Default::default())
+            .delay(Duration::from_millis(250));
+
+        let upload_button = Button::new("Upload")
+            .on_press_maybe(match param.state {
+                ParamState::Changed { value, .. } => {
+                    Some(parameter::Message::ValueUpload(mav_id, ident.clone(), value).into())
+                }
+                _ => None,
+            })
+            .width(80.0);
+
+        row![
+            Text::new(ident.as_str().to_string())
+                .width(160.0)
+                .font(Font::MONOSPACE),
+            Text::new(type_name)
+                .width(50.0)
+                .font(Font::MONOSPACE)
+                .align_x(Alignment::End)
+                .color(Color::from_rgba8(255, 255, 255, 0.5)),
+            Space::new().width(10.0),
+            text_input,
+            restore_button,
+            upload_button,
+        ]
+        .spacing(5.0)
+        .align_y(Vertical::Center)
     }
 
     fn subscription(&self) -> Subscription<Message> {
