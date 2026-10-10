@@ -668,12 +668,7 @@ mod tests {
     }
 
     fn param<'a>(fleet: &'a Fleet, id: MavlinkId, key: &Ident) -> &'a Parameter {
-        fleet
-            .vehicle(id)
-            .unwrap()
-            .parameters()
-            .get(key)
-            .unwrap()
+        fleet.vehicle(id).unwrap().parameters().get(key).unwrap()
     }
 
     /// Run one message against the panel with a fresh context, returning any event.
@@ -866,10 +861,7 @@ mod tests {
 
         step(&mut panel, &router, &mut fleet, Message::ListReload(A));
 
-        assert_eq!(
-            fleet.vehicle(A).unwrap().parameters().loading().loaded(),
-            0
-        );
+        assert_eq!(fleet.vehicle(A).unwrap().parameters().loading().loaded(), 0);
     }
 
     #[test]
