@@ -496,11 +496,13 @@ impl Application {
                 .map(Message::Vehicles)
                 .boxed()
             }
-            layout::Panel::Parameters => self
-                .parameter_panel
-                .view(self.fleet.vehicles(), self.fleet.primary())
-                .map(Message::Parameter)
-                .boxed(),
+            layout::Panel::Parameters => {
+                let theme = self.theme();
+                self.parameter_panel
+                    .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                    .map(Message::Parameter)
+                    .boxed()
+            }
             layout::Panel::Links => iced::widget::column![
                 self.link_panel.view_editor().map(Message::Link),
                 self.link_panel.view_status().map(Message::Link),

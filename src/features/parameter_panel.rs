@@ -16,7 +16,7 @@ use std::{
 };
 
 use iced::{
-    Alignment, Color, Element, Font, Length, Task, Widget,
+    Alignment, Color, Element, Font, Length, Task, Theme, Widget,
     alignment::Vertical,
     widget::{
         Button, Column, ProgressBar, Space, Text, TextInput, container, progress_bar, row, rule,
@@ -52,8 +52,20 @@ impl ParameterFilter {
             return false;
         }
 
-        pattern_lower.is_empty() || ident.as_str().to_lowercase().contains(pattern_lower)
+        contains_ignore_ascii_case(ident.as_str(), pattern_lower)
     }
+}
+
+/// Non-allocating ASCII-case-insensitive substring search. MAVLink parameter
+/// names are ASCII, so this is equivalent to lowercasing both sides.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.windows(n.len())
+        .any(|window| window.eq_ignore_ascii_case(n))
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +405,7 @@ impl ParameterPanel {
         &'a self,
         vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
         primary: Option<MavlinkId>,
+        theme: &Theme,
     ) -> Element<'a, Message> {
         let Some(mav_id) = primary else {
             return space::Space::new().boxed();
@@ -465,7 +478,7 @@ impl ParameterPanel {
         container(
             iced::widget::column![
                 iced::widget::Column::from_iter(entries).spacing(5.0),
-                self.view_param_list(mav_id, vehicle),
+                self.view_param_list(mav_id, vehicle, theme),
             ]
             .spacing(5.0),
         )
@@ -478,6 +491,7 @@ impl ParameterPanel {
         &'a self,
         mav_id: MavlinkId,
         vehicle: &'a Vehicle,
+        theme: &Theme,
     ) -> Element<'a, Message> {
         /// Heights must fit the tallest content of each item kind
         const ROW_HEIGHT: f32 = 32.0;
@@ -496,6 +510,8 @@ impl ParameterPanel {
 
         let pattern = self.filter.ident_pattern.to_lowercase();
         let editing = &self.editing;
+        // Copied up front so the draw closure does not borrow the theme.
+        let type_color = theme.palette().secondary.base.color;
 
         let mut items = Vec::with_capacity(vehicle.parameters().len() + 64);
         let mut section = None;
@@ -546,7 +562,7 @@ impl ParameterPanel {
                     .get(&mav_id)
                     .and_then(|entry| entry.get(*ident))
                     .map(String::as_str);
-                view_param_row(mav_id, ident, param, buffer).boxed()
+                view_param_row(mav_id, ident, param, buffer, type_color).boxed()
             }
         })
         .item_height(|item| match item {
@@ -572,6 +588,7 @@ fn view_param_row<'a>(
     ident: &'a Ident,
     param: &'a Parameter,
     editing: Option<&'a str>,
+    type_color: Color,
 ) -> Element<'a, Message> {
     let type_name = value_type_name(param.value());
 
@@ -636,7 +653,7 @@ fn view_param_row<'a>(
             .width(50.0)
             .font(Font::MONOSPACE)
             .align_x(Alignment::End)
-            .color(Color::from_rgba8(255, 255, 255, 0.5)),
+            .color(type_color),
         Space::new().width(10.0),
         text_input,
         restore_button,
@@ -727,6 +744,27 @@ mod tests {
         };
         assert!(!only_changed.matches(&ident("BAT_CAPACITY"), &unchanged, ""));
         assert!(only_changed.matches(&ident("BAT_CAPACITY"), &changed, ""));
+    }
+
+    #[test]
+    fn filter_matches_case_insensitively() {
+        let filter = ParameterFilter::default();
+        let param = Parameter::new(Value::F32(1.0));
+
+        assert!(filter.matches(&ident("BAT_CAPACITY"), &param, "bat"));
+        assert!(filter.matches(&ident("BAT_CAPACITY"), &param, "capacity"));
+        assert!(filter.matches(&ident("BAT_CAPACITY"), &param, ""));
+        assert!(!filter.matches(&ident("BAT_CAPACITY"), &param, "gps"));
+        assert!(!filter.matches(&ident("BAT_CAPACITY"), &param, "capacityx"));
+    }
+
+    #[test]
+    fn contains_ignore_ascii_case_handles_edges() {
+        assert!(contains_ignore_ascii_case("BAT_CAPACITY", "bat"));
+        assert!(contains_ignore_ascii_case("BAT_CAPACITY", "BAT"));
+        assert!(contains_ignore_ascii_case("BAT_CAPACITY", ""));
+        assert!(!contains_ignore_ascii_case("BAT_CAPACITY", "gps"));
+        assert!(!contains_ignore_ascii_case("", "gps"));
     }
 
     #[test]
