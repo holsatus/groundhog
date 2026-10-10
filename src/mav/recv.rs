@@ -9,7 +9,7 @@ use super::{
     matches_target,
     router::{InboundMessage, MavlinkRouter},
 };
-use crate::parameter::base::MavlinkId;
+use crate::foundation::MavlinkId;
 
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(3);
 

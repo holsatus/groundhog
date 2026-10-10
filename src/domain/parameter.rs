@@ -4,12 +4,6 @@ use iced::task::Handle;
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MavlinkId {
-    pub(crate) system: u8,
-    pub(crate) component: u8,
-}
-
 #[derive(Clone, Debug)]
 pub struct Parameter {
     pub(crate) value: Value,
@@ -178,7 +172,7 @@ pub(crate) fn load_parameters_from_ini(
 }
 
 pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option<Value> {
-    use mav_param::{Value, value::from_bytewise};
+    use mav_param::{value::from_bytewise, Value};
     let value = match param_type {
         MavParamType::Uint8 => Value::U8(from_bytewise(param_value)),
         MavParamType::Int8 => Value::I8(from_bytewise(param_value)),
@@ -194,7 +188,7 @@ pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option
 }
 
 pub fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
-    use mav_param::{Value, value::into_bytewise};
+    use mav_param::{value::into_bytewise, Value};
     match value {
         Value::U8(v) => (into_bytewise(v), MavParamType::Uint8),
         Value::I8(v) => (into_bytewise(v), MavParamType::Int8),

@@ -2,7 +2,7 @@ use std::{io::Write as _, path::PathBuf, sync::LazyLock};
 
 use directories::ProjectDirs;
 
-use crate::{BoxError, connection::builder::LinkBuild};
+use crate::{foundation::BoxError, link::LinkBuild};
 
 static PROJECT_DIRS: LazyLock<ProjectDirs> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());

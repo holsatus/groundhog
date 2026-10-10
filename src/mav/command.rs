@@ -14,7 +14,7 @@ use super::{
     recv::MavlinkMessage,
     router::MavlinkRouter,
 };
-use crate::parameter::base::MavlinkId;
+use crate::foundation::MavlinkId;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);

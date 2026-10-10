@@ -12,7 +12,7 @@ use mavio::default_dialect::messages::{
     CommandCancel, CommandInt, CommandLong, ParamRequestList, ParamRequestRead, ParamSet,
 };
 
-use crate::parameter::base::MavlinkId;
+use crate::foundation::MavlinkId;
 
 pub mod cmd;
 mod command;

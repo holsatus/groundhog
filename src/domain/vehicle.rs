@@ -15,7 +15,10 @@ use mavio::{
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use slippery::{Geodetic, Mercator};
 
-use crate::parameter::base::{self, MavlinkId, Parameter, Parameters};
+use crate::{
+    domain::parameter::{self, Parameter, Parameters},
+    foundation::MavlinkId,
+};
 
 pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
 pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
@@ -122,7 +125,7 @@ impl Vehicle {
     pub fn on_param_value(&mut self, message: &messages::ParamValue) {
         let cap = self.capabilities.unwrap_or_default();
 
-        let maybe_value = base::mavio_into_value(cap, message.param_value, message.param_type);
+        let maybe_value = parameter::mavio_into_value(cap, message.param_value, message.param_type);
 
         let Some(new_value) = maybe_value else {
             log::error!("Unsupported type of parameter: {:?}", message.param_type);

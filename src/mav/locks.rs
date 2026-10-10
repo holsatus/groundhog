@@ -8,7 +8,7 @@ use mavio::default_dialect::enums::MavCmd;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use super::lock;
-use crate::parameter::base::MavlinkId;
+use crate::foundation::MavlinkId;
 
 /// Identifies a resource of which only a single transaction may be in flight
 /// at any time, because the responses cannot be told apart.

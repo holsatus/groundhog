@@ -13,11 +13,12 @@
 use std::{collections::HashMap, hash::Hash};
 
 use iced::{
-    Element, Event, Length, Rectangle, Size, Vector,
     advanced::{
-        Layout, Shell, Widget, layout, mouse, overlay, renderer,
-        widget::{Meta, Operation, Tree, tree},
+        layout, mouse, overlay, renderer,
+        widget::{tree, Meta, Operation, Tree},
+        Layout, Shell, Widget,
     },
+    Element, Event, Length, Rectangle, Size, Vector,
 };
 
 /// Visible height assumed until the list has seen its real viewport.

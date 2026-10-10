@@ -15,10 +15,8 @@ use mavio::{
 
 use super::*;
 use crate::{
-    GCS_MAVLINK_ID,
-    connection::builder::{
-        AsyncReceiver, AsyncSender, LinkId, new_async_receiver, new_async_sender,
-    },
+    foundation::{GCS_MAVLINK_ID, LinkId},
+    link::transport::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
 
 const VEHICLE: MavlinkId = MavlinkId {
