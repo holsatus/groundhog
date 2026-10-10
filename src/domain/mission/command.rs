@@ -783,7 +783,7 @@ impl MissionCommand {
 }
 
 /// A single editable field, ready to be rendered generically by the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MissionField {
     Latitude,
     Longitude,

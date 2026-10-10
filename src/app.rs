@@ -14,6 +14,7 @@ use crate::{
     features::link_panel::{self, LinkPanel},
     features::log_panel::{self, LogPanel},
     features::map::{self, Map},
+    features::mission_panel::{self, MissionPanel},
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
@@ -30,6 +31,7 @@ pub struct Application {
     pub(crate) map: Map,
     pub(crate) link_panel: LinkPanel,
     pub(crate) log_panel: LogPanel,
+    pub(crate) mission_panel: MissionPanel,
     pub(crate) parameter_panel: ParameterPanel,
     pub(crate) router: MavlinkRouter,
     pub(crate) configuration: config::Configuration,
@@ -54,6 +56,7 @@ pub enum Message {
     Logs(log_panel::Message),
     /// A batch of MAVLink events, collected at most once per telemetry frame.
     MavEvents(Vec<mav::Event>),
+    Mission(mission_panel::Message),
     Parameter(parameter_panel::Message),
     Vehicles(vehicle_panel::Message),
     Settings(settings_panel::Message),
@@ -73,6 +76,12 @@ pub enum Message {
 impl From<parameter_panel::Message> for Message {
     fn from(value: parameter_panel::Message) -> Self {
         Message::Parameter(value)
+    }
+}
+
+impl From<mission_panel::Message> for Message {
+    fn from(value: mission_panel::Message) -> Self {
+        Message::Mission(value)
     }
 }
 
@@ -162,6 +171,7 @@ impl Application {
             configuration: config.clone(),
             theme: config.settings.theme.theme(),
             fleet: Fleet::default(),
+            mission_panel: MissionPanel::new(),
             parameter_panel: ParameterPanel::new(),
             layout_dirty: false,
             layout_revision: 0,
@@ -206,6 +216,7 @@ impl Application {
             Message::Link(message) => return Some(self.link_message_update(message)),
             Message::Logs(message) => self.log_panel.update(message),
             Message::MavEvents(events) => return Some(self.handle_mav_events(events)),
+            Message::Mission(message) => return Some(self.mission_message_update(message)),
             Message::Parameter(message) => return Some(self.parameter_message_update(message)),
             Message::Vehicles(message) => return Some(self.vehicle_message_update(message)),
             Message::Settings(message) => return Some(self.settings_message_update(message)),
@@ -259,6 +270,17 @@ impl Application {
 
         self.configuration.file_picker_path = Some(file_picker_path.to_path_buf());
         self.save_configuration()
+    }
+
+    fn mission_message_update(&mut self, message: mission_panel::Message) -> Task<Message> {
+        let mut ctx = mission_panel::Context {
+            router: &self.router,
+            fleet: &mut self.fleet,
+        };
+
+        self.mission_panel
+            .update(message, &mut ctx)
+            .map(Message::Mission)
     }
 
     fn parameter_message_update(&mut self, message: parameter_panel::Message) -> Task<Message> {
@@ -514,6 +536,11 @@ impl Application {
                     .map(Message::Parameter)
                     .boxed()
             }
+            layout::Panel::Mission => self
+                .mission_panel
+                .view(self.fleet.vehicles(), self.fleet.primary(), &self.theme)
+                .map(Message::Mission)
+                .boxed(),
             layout::Panel::Links => iced::widget::column![
                 self.link_panel.view_editor().map(Message::Link),
                 self.link_panel.view_status().map(Message::Link),

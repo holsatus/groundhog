@@ -12,6 +12,7 @@ use crate::widget::pane_grid::{self, Axis as PaneAxis, Edge};
 pub enum Panel {
     Map,
     Vehicles,
+    Mission,
     Parameters,
     Links,
     Logs,
@@ -71,8 +72,9 @@ impl LayoutConfig {
 
 impl Panel {
     /// Panels offered on the rail, in order. The map is not one of them.
-    pub const DOCKABLE: [Panel; 5] = [
+    pub const DOCKABLE: [Panel; 6] = [
         Panel::Vehicles,
+        Panel::Mission,
         Panel::Parameters,
         Panel::Links,
         Panel::Logs,
@@ -83,6 +85,7 @@ impl Panel {
         match self {
             Panel::Map => "Map",
             Panel::Vehicles => "Vehicles",
+            Panel::Mission => "Mission",
             Panel::Parameters => "Parameters",
             Panel::Links => "Links",
             Panel::Logs => "Log",
@@ -95,6 +98,7 @@ impl Panel {
         match self {
             Panel::Map => "M",
             Panel::Vehicles => "V",
+            Panel::Mission => "M",
             Panel::Parameters => "P",
             Panel::Links => "C",
             Panel::Logs => "L",
