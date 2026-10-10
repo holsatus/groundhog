@@ -14,7 +14,7 @@ use mavio::{
     prelude::{V2, Versionless},
     protocol::FrameBuilder,
 };
-use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
+use tokio::sync::{Semaphore, SemaphorePermit, broadcast, mpsc};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::{
@@ -33,6 +33,10 @@ use crate::{
 const PARAM_SET_PERMITS: usize = 4;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Bound on buffered application events. When the UI falls behind, the channel
+/// drops the oldest events so the freshest telemetry is what reaches it.
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// A decoded inbound MAVLink message, along with where it came from.
 #[derive(Debug)]
@@ -101,7 +105,7 @@ struct PendingAckMap {
 
 struct MavlinkRouterInner {
     gcs_id: MavlinkId,
-    events: mpsc::UnboundedSender<Event>,
+    events: broadcast::Sender<Event>,
     links: Mutex<BTreeMap<LinkId, Link>>,
     routes: Mutex<MessageRouteMap>,
     filters: Mutex<MessageFilterMap>,
@@ -114,7 +118,7 @@ impl MavlinkRouter {
     /// Create a new router stamping outbound frames with `gcs_id`, along with
     /// the stream of events for the application.
     pub fn new(gcs_id: MavlinkId) -> (Self, impl Stream<Item = Event> + Send + 'static) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
         let router = Self {
             inner: Arc::new(MavlinkRouterInner {
@@ -130,7 +134,16 @@ impl MavlinkRouter {
         };
 
         let events = stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
+            loop {
+                match rx.recv().await {
+                    Ok(event) => return Some((event, rx)),
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        log::warn!("MAVLink event backlog overflowed; dropped {dropped} events");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
         });
 
         (router, events)
@@ -440,6 +453,7 @@ pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
 mod tests {
     use super::*;
     use crate::foundation::DEFAULT_GCS_ID;
+    use iced::futures::StreamExt;
     use mavio::dialects::minimal::messages::Heartbeat;
 
     fn link_with_receiver() -> (Link, mpsc::UnboundedReceiver<Frame<Versionless>>) {
@@ -494,5 +508,38 @@ mod tests {
         }
 
         assert!(router.route(UNKNOWN, &Heartbeat::default()).is_err());
+    }
+
+    #[tokio::test]
+    async fn event_stream_drops_oldest_on_overflow() {
+        let (router, events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+
+        // Overflow the bounded channel without polling the stream.
+        let total = EVENT_CHANNEL_CAPACITY + 10;
+        for i in 0..total {
+            let _ = router
+                .inner
+                .events
+                .send(Event::LinkClosed(LinkId::new(&i.to_string())));
+        }
+
+        // Close the sender so the stream ends once its buffer is drained.
+        drop(router);
+
+        let ids: Vec<String> = events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::LinkClosed(id) => Some(id.str().to_string()),
+                Event::Message(_) => None,
+            })
+            .collect();
+
+        // Exactly `total - EVENT_CHANNEL_CAPACITY` oldest events were dropped,
+        // and the newest event still reaches the stream.
+        assert_eq!(ids.first().map(String::as_str), Some("10"));
+        let newest = (total - 1).to_string();
+        assert_eq!(ids.last().map(String::as_str), Some(newest.as_str()));
     }
 }
