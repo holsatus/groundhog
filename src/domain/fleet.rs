@@ -89,6 +89,13 @@ impl Fleet {
     ) -> Vec<FleetEvent> {
         let mut events = Vec::new();
 
+        // Only a fresh position frame can move the primary vehicle; other
+        // frames (heartbeats, status, ...) leave the stored position untouched.
+        let is_position_frame = matches!(
+            message.as_ref(),
+            Some(DefaultDialect::GlobalPositionInt(_) | DefaultDialect::GlobalPositionIntCov(_))
+        );
+
         if let Entry::Vacant(entry) = self.vehicles.entry(source) {
             entry.insert(Vehicle::new(source));
             events.push(FleetEvent::Registered(source));
@@ -114,7 +121,8 @@ impl Fleet {
             }
         }
 
-        if self.primary == Some(source)
+        if is_position_frame
+            && self.primary == Some(source)
             && let Some(position) = self
                 .vehicles
                 .get(&source)
@@ -156,7 +164,7 @@ impl Fleet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavio::default_dialect::messages::Heartbeat;
+    use mavio::default_dialect::messages::{self, Heartbeat};
 
     const A: MavlinkId = MavlinkId {
         system: 1,
@@ -166,6 +174,20 @@ mod tests {
         system: 2,
         component: 1,
     };
+
+    fn global_position_int(lat: i32, lon: i32) -> DefaultDialect {
+        DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+            time_boot_ms: 0,
+            lat,
+            lon,
+            alt: 0,
+            relative_alt: 0,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            hdg: 0,
+        })
+    }
 
     #[test]
     fn first_vehicle_becomes_primary() {
@@ -327,5 +349,49 @@ mod tests {
                 .any(|event| matches!(event, FleetEvent::LivenessChanged(..)))
         );
         assert!(fleet_events.is_empty());
+    }
+
+    #[test]
+    fn non_position_frame_does_not_emit_primary_moved() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+        // Give the primary vehicle a recorded position.
+        fleet.observe(A, t0, Some(global_position_int(474_000_000, 85_000_000)));
+
+        let events = fleet.observe(
+            A,
+            t0,
+            Some(DefaultDialect::Heartbeat(Heartbeat {
+                custom_mode: 0,
+                ..Default::default()
+            })),
+        );
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::PrimaryMoved(..)))
+        );
+    }
+
+    #[test]
+    fn position_frame_emits_primary_moved() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+        // Register without a message so no position exists yet.
+        fleet.observe(A, t0, None);
+
+        let events = fleet.observe(A, t0, Some(global_position_int(474_000_000, 85_000_000)));
+
+        let moved = events
+            .iter()
+            .find_map(|event| match event {
+                FleetEvent::PrimaryMoved(position) => Some(*position),
+                _ => None,
+            })
+            .expect("a position frame for the primary should emit PrimaryMoved");
+
+        assert!((moved.lat - 47.4).abs() < 1e-7, "lat was {}", moved.lat);
+        assert!((moved.lon - 8.5).abs() < 1e-7, "lon was {}", moved.lon);
     }
 }
