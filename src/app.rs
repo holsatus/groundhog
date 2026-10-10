@@ -369,7 +369,10 @@ impl Application {
                         tasks.push(self.handle_fleet_event(fleet_event));
                     }
                 }
-                mav::Event::LinkClosed(link_id) => log::info!("Link {link_id:?} closed"),
+                mav::Event::LinkClosed(link_id) => {
+                    log::info!("Link {link_id:?} closed");
+                    tasks.push(self.link_message_update(link_panel::Message::Closed(link_id)));
+                }
             }
         }
 

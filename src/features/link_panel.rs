@@ -46,6 +46,10 @@ pub enum Message {
     Save(LinkConfig),
     Connect(LinkId),
     Disconnect(LinkId),
+    /// The router reported that a link died on its own.
+    Closed(LinkId),
+    /// Remove a configured link, dropping any live connection with it.
+    Delete(LinkId),
     Event(link::Event),
 }
 
@@ -193,6 +197,14 @@ impl LinkPanel {
                 if let Some(link) = self.links.get_mut(&id) {
                     drop(link.handle.take())
                 }
+            }
+            Message::Closed(id) => {
+                if let Some(link) = self.links.get_mut(&id) {
+                    link.handle = None;
+                }
+            }
+            Message::Delete(id) => {
+                self.links.remove(&id);
             }
             Message::Event(link::Event::Connected(id, handle)) => {
                 if let Some(link) = self.links.get_mut(&id) {
@@ -402,6 +414,18 @@ impl LinkPanel {
                 .width(100.0)
             };
 
+            let delete = Button::new(
+                container("x")
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .style(button::danger)
+            .on_press_with({
+                let id = id.clone();
+                move || Message::Delete(id.clone())
+            })
+            .width(30.0);
+
             let content = container(iced::widget::row![
                 iced::widget::text(&link.config.name),
                 iced::widget::text(if link.handle.is_some() {
@@ -409,7 +433,8 @@ impl LinkPanel {
                 } else {
                     ": disconnected"
                 }),
-                button
+                button,
+                delete
             ])
             .style(if index % 2 == 0 {
                 style::list_default
@@ -485,6 +510,20 @@ mod tests {
 
         let (_, event) = panel.update(Message::Connect(unknown), &router);
         assert!(event.is_none());
+        assert!(panel.links.is_empty());
+    }
+
+    #[test]
+    fn delete_removes_link_and_unknown_is_noop() {
+        let (mut panel, router) = panel();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        let id = panel.links.keys().next().unwrap().clone();
+
+        let _ = panel.update(Message::Delete(LinkId::new("does-not-exist")), &router);
+        assert_eq!(panel.links.len(), 1);
+
+        let _ = panel.update(Message::Delete(id), &router);
         assert!(panel.links.is_empty());
     }
 }

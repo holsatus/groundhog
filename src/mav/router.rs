@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -62,6 +62,7 @@ struct MessageFilter {
 struct Link {
     sequence: AtomicU8,
     tx: mpsc::UnboundedSender<Frame<Versionless>>,
+    generation: u64,
 }
 
 impl Link {
@@ -107,6 +108,7 @@ struct MavlinkRouterInner {
     gcs_id: MavlinkId,
     events: broadcast::Sender<Event>,
     links: Mutex<BTreeMap<LinkId, Link>>,
+    next_link_generation: AtomicU64,
     routes: Mutex<MessageRouteMap>,
     filters: Mutex<MessageFilterMap>,
     acks: Mutex<PendingAckMap>,
@@ -124,6 +126,7 @@ impl MavlinkRouter {
             inner: Arc::new(MavlinkRouterInner {
                 gcs_id,
                 links: Mutex::default(),
+                next_link_generation: AtomicU64::new(0),
                 routes: Mutex::default(),
                 filters: Mutex::default(),
                 acks: Mutex::default(),
@@ -336,12 +339,21 @@ impl MavlinkRouter {
         }
     }
 
-    fn remove_link(&self, link: LinkId) {
-        lock(&self.inner.links).remove(&link);
-        for links in lock(&self.inner.routes).map.values_mut() {
-            links.remove(&link);
+    fn remove_link(&self, link: &LinkId, generation: u64) {
+        {
+            let mut links = lock(&self.inner.links);
+            match links.get(link) {
+                Some(existing) if existing.generation == generation => {
+                    links.remove(link);
+                }
+                _ => return,
+            }
         }
-        _ = self.inner.events.send(Event::LinkClosed(link));
+
+        for links in lock(&self.inner.routes).map.values_mut() {
+            links.remove(link);
+        }
+        _ = self.inner.events.send(Event::LinkClosed(link.clone()));
     }
 
     /// Attach a new transport. It stays attached until the returned handle is
@@ -355,11 +367,17 @@ impl MavlinkRouter {
         let cancel = CancellationToken::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame<Versionless>>();
 
+        let generation = self
+            .inner
+            .next_link_generation
+            .fetch_add(1, Ordering::Relaxed);
+
         lock(&self.inner.links).insert(
             link_id.clone(),
             Link {
                 tx,
                 sequence: AtomicU8::new(0),
+                generation,
             },
         );
 
@@ -407,7 +425,7 @@ impl MavlinkRouter {
                 .await;
 
             token.cancel();
-            router.remove_link(id);
+            router.remove_link(&id, generation);
         });
 
         // Heartbeat: announces our presence on this link
@@ -462,6 +480,7 @@ mod tests {
             Link {
                 sequence: AtomicU8::new(0),
                 tx,
+                generation: 0,
             },
             rx,
         )
@@ -508,6 +527,29 @@ mod tests {
         }
 
         assert!(router.route(UNKNOWN, &Heartbeat::default()).is_err());
+    }
+
+    #[test]
+    fn stale_remove_link_does_not_evict_newer_attachment() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let (newer, _newer_rx) = link_with_receiver();
+        lock(&router.inner.links).insert(
+            id.clone(),
+            Link {
+                generation: 2,
+                ..newer
+            },
+        );
+
+        // A stale reader (generation 1) must not evict the generation-2 link.
+        router.remove_link(&id, 1);
+        assert!(lock(&router.inner.links).contains_key(&id));
+
+        // The matching generation removes it.
+        router.remove_link(&id, 2);
+        assert!(!lock(&router.inner.links).contains_key(&id));
     }
 
     #[tokio::test]
