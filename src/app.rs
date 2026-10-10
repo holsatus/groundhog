@@ -273,14 +273,24 @@ impl Application {
     }
 
     fn mission_message_update(&mut self, message: mission_panel::Message) -> Task<Message> {
-        let mut ctx = mission_panel::Context {
-            router: &self.router,
-            fleet: &mut self.fleet,
+        let (task, event) = {
+            let mut ctx = mission_panel::Context {
+                router: &self.router,
+                fleet: &mut self.fleet,
+                file_picker_path: self.configuration.file_picker_path.as_deref(),
+            };
+
+            self.mission_panel.update(message, &mut ctx)
         };
 
-        self.mission_panel
-            .update(message, &mut ctx)
-            .map(Message::Mission)
+        let task = task.map(Message::Mission);
+
+        match event {
+            Some(mission_panel::Event::SetFilePickerPath(path)) => {
+                Task::batch([task, self.set_file_picker_path_config(&path)])
+            }
+            None => task,
+        }
     }
 
     fn parameter_message_update(&mut self, message: parameter_panel::Message) -> Task<Message> {

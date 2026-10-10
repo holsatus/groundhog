@@ -12,6 +12,7 @@
 use mavio::default_dialect::{enums::MissionState, messages};
 
 pub mod command;
+pub mod file;
 
 #[allow(unused_imports)] // Facade re-export for the upcoming UI integration.
 pub use command::*;

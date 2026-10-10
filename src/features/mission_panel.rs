@@ -8,7 +8,10 @@
 //! The panel owns only view-local state: which item's editor is open and the
 //! in-progress text buffers, so partial input survives a redraw.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use iced::{
     Element, Length, Task, Theme, Widget,
@@ -18,11 +21,13 @@ use iced::{
     },
 };
 use mavio::default_dialect::{enums::MavFrame, messages::CommandAck};
+use rfd::AsyncFileDialog;
 
 use crate::{
     domain::fleet::Fleet,
     domain::mission::{
         Mission, MissionCommand, MissionCommandKind, MissionField, MissionItem, Position,
+        file::{parse_wpl, write_wpl},
     },
     domain::vehicle::Vehicle,
     foundation::MavlinkId,
@@ -54,6 +59,14 @@ impl Default for MissionPanel {
 pub struct Context<'a> {
     pub router: &'a MavlinkRouter,
     pub fleet: &'a mut Fleet,
+    pub file_picker_path: Option<&'a Path>,
+}
+
+/// A request the root must satisfy, since it owns the configuration file.
+#[derive(Debug)]
+pub enum Event {
+    /// Remember the directory of the last used file dialog.
+    SetFilePickerPath(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +97,19 @@ pub enum Message {
     Cleared(MavlinkId, mav::Result<()>),
     CurrentSet(MavlinkId, mav::Result<()>),
     CommandFinished(MavlinkId, MissionAction, mav::Result<CommandAck>),
+
+    /// Open a file-picker dialog to choose a save location.
+    SaveDialog,
+    /// Write the primary vehicle's mission to the chosen path.
+    SaveToFile(PathBuf),
+    /// The result of writing the mission to disk.
+    SaveFinished(PathBuf, Result<(), String>),
+    /// Open a file-picker dialog to choose a file to load.
+    LoadDialog,
+    /// Parse the chosen file and replace the primary vehicle's mission.
+    LoadFromFile(PathBuf),
+    /// The result of reading a mission file from disk.
+    LoadFinished(PathBuf, Result<Vec<MissionItem>, String>),
 }
 
 impl MissionPanel {
@@ -95,19 +121,32 @@ impl MissionPanel {
         }
     }
 
-    pub fn update(&mut self, message: Message, ctx: &mut Context) -> Task<Message> {
+    pub fn update(
+        &mut self,
+        message: Message,
+        ctx: &mut Context,
+    ) -> (Task<Message>, Option<Event>) {
+        self.apply(message, ctx).unwrap_or((Task::none(), None))
+    }
+
+    fn apply(
+        &mut self,
+        message: Message,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
         match message {
             Message::Download => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
 
                 self.busy = true;
                 let client = VehicleClient::new(ctx.router, id);
-                Task::perform(
-                    async move { client.download_mission().await },
-                    move |result| Message::Downloaded(id, result),
-                )
+                return Some((
+                    Task::perform(
+                        async move { client.download_mission().await },
+                        move |result| Message::Downloaded(id, result),
+                    ),
+                    None,
+                ));
             }
             Message::Downloaded(id, result) => {
                 self.busy = false;
@@ -122,24 +161,21 @@ impl MissionPanel {
                     }
                     Err(error) => log::warn!("Mission download for {id:?} failed: {error}"),
                 }
-
-                Task::none()
             }
             Message::Upload => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
-                let Some(vehicle) = ctx.fleet.vehicle(id) else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle(id)?;
 
                 let mission = vehicle.mission.clone();
                 self.busy = true;
                 let client = VehicleClient::new(ctx.router, id);
-                Task::perform(
-                    async move { client.upload_mission(&mission).await },
-                    move |result| Message::Uploaded(id, result),
-                )
+                return Some((
+                    Task::perform(
+                        async move { client.upload_mission(&mission).await },
+                        move |result| Message::Uploaded(id, result),
+                    ),
+                    None,
+                ));
             }
             Message::Uploaded(id, result) => {
                 self.busy = false;
@@ -152,19 +188,18 @@ impl MissionPanel {
                     }
                     Err(error) => log::warn!("Mission upload to {id:?} failed: {error}"),
                 }
-
-                Task::none()
             }
             Message::Clear => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
 
                 self.busy = true;
                 let client = VehicleClient::new(ctx.router, id);
-                Task::perform(async move { client.clear_mission().await }, move |result| {
-                    Message::Cleared(id, result)
-                })
+                return Some((
+                    Task::perform(async move { client.clear_mission().await }, move |result| {
+                        Message::Cleared(id, result)
+                    }),
+                    None,
+                ));
             }
             Message::Cleared(id, result) => {
                 self.busy = false;
@@ -180,43 +215,36 @@ impl MissionPanel {
                     }
                     Err(error) => log::warn!("Mission clear on {id:?} failed: {error}"),
                 }
-
-                Task::none()
             }
-            Message::Start => self.run_command(MissionAction::Start, ctx),
-            Message::Pause => self.run_command(MissionAction::Pause, ctx),
-            Message::Resume => self.run_command(MissionAction::Resume, ctx),
+            Message::Start => return Some((self.run_command(MissionAction::Start, ctx), None)),
+            Message::Pause => return Some((self.run_command(MissionAction::Pause, ctx), None)),
+            Message::Resume => return Some((self.run_command(MissionAction::Resume, ctx), None)),
             Message::CommandFinished(id, action, result) => {
                 self.busy = false;
                 if let Err(error) = result {
                     log::warn!("Mission {action:?} on {id:?} failed: {error}");
                 }
-                Task::none()
             }
             Message::SetCurrent(index) => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
 
                 let client = VehicleClient::new(ctx.router, id);
-                Task::perform(
-                    async move { client.set_current_mission_item(index as u16).await },
-                    move |result| Message::CurrentSet(id, result),
-                )
+                return Some((
+                    Task::perform(
+                        async move { client.set_current_mission_item(index as u16).await },
+                        move |result| Message::CurrentSet(id, result),
+                    ),
+                    None,
+                ));
             }
             Message::CurrentSet(id, result) => {
                 if let Err(error) = result {
                     log::warn!("Setting the current mission item on {id:?} failed: {error}");
                 }
-                Task::none()
             }
             Message::AddItem => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
-                let Some(vehicle) = ctx.fleet.vehicle_mut(id) else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
 
                 let pos = vehicle
                     .position
@@ -249,19 +277,12 @@ impl MissionPanel {
 
                 self.selected = Some(vehicle.mission.len() - 1);
                 self.edit.clear();
-                Task::none()
             }
             Message::RemoveItem(index) => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
-                let Some(vehicle) = ctx.fleet.vehicle_mut(id) else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
 
-                if vehicle.mission.remove(index).is_none() {
-                    return Task::none();
-                }
+                vehicle.mission.remove(index)?;
 
                 match self.selected {
                     Some(selected) if selected == index => {
@@ -271,36 +292,25 @@ impl MissionPanel {
                     Some(selected) if selected > index => self.selected = Some(selected - 1),
                     _ => {}
                 }
-
-                Task::none()
             }
             Message::MoveUp(index) => {
                 self.move_item(ctx, index, true);
-                Task::none()
             }
             Message::MoveDown(index) => {
                 self.move_item(ctx, index, false);
-                Task::none()
             }
             Message::Select(index) => {
                 // Selection indexes the primary vehicle's mission; meaningless without one.
-                if ctx.fleet.primary().is_none() {
-                    return Task::none();
-                }
+                ctx.fleet.primary()?;
 
                 if self.selected != Some(index) {
                     self.selected = Some(index);
                     self.edit.clear();
                 }
-                Task::none()
             }
             Message::ChangeCommand(index, kind) => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
-                let Some(vehicle) = ctx.fleet.vehicle_mut(id) else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
 
                 let pos = vehicle
                     .mission
@@ -317,16 +327,10 @@ impl MissionPanel {
                 }) {
                     self.edit.clear();
                 }
-
-                Task::none()
             }
             Message::EditField(index, field, text) => {
-                let Some(id) = ctx.fleet.primary() else {
-                    return Task::none();
-                };
-                let Some(vehicle) = ctx.fleet.vehicle_mut(id) else {
-                    return Task::none();
-                };
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
 
                 self.edit.insert(field, text.clone());
 
@@ -335,12 +339,92 @@ impl MissionPanel {
                         .mission
                         .update(index, |item| item.command.set_field(field, value));
                 }
-
-                Task::none()
             }
-        }
-    }
+            Message::SaveDialog => {
+                let file_dialog =
+                    file_dialog(ctx.file_picker_path).set_file_name("mission.waypoints");
 
+                return Some((
+                    Task::future(async move {
+                        file_dialog
+                            .save_file()
+                            .await
+                            .map(|file| file.path().to_owned())
+                    })
+                    .and_then(|path| Task::done(Message::SaveToFile(path))),
+                    None,
+                ));
+            }
+            Message::SaveToFile(path) => {
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle(id)?;
+                let items = vehicle.mission.items().to_vec();
+                log::info!("Saving mission to file: {path:?}");
+
+                let save_path = path.clone();
+                return Some((
+                    iced_runtime::task::blocking(move |mut sender| {
+                        let result = std::fs::write(&save_path, write_wpl(&items))
+                            .map_err(|error| error.to_string());
+                        let _ = sender.try_send(Message::SaveFinished(save_path, result));
+                    }),
+                    None,
+                ));
+            }
+            Message::SaveFinished(path, result) => {
+                if let Err(error) = result {
+                    log::error!("Error saving mission to file: {error}");
+                }
+
+                return Some((Task::none(), Some(Event::SetFilePickerPath(path))));
+            }
+            Message::LoadDialog => {
+                let file_dialog = file_dialog(ctx.file_picker_path);
+
+                return Some((
+                    Task::future(async move {
+                        file_dialog
+                            .pick_file()
+                            .await
+                            .map(|file| file.path().to_owned())
+                    })
+                    .and_then(|path| Task::done(Message::LoadFromFile(path))),
+                    None,
+                ));
+            }
+            Message::LoadFromFile(path) => {
+                log::info!("Loading mission from file: {path:?}");
+
+                let load_path = path.clone();
+                return Some((
+                    iced_runtime::task::blocking(move |mut sender| {
+                        let result = std::fs::read_to_string(&load_path)
+                            .map_err(|error| error.to_string())
+                            .and_then(|text| parse_wpl(&text).map_err(|error| error.to_string()));
+                        let _ = sender.try_send(Message::LoadFinished(load_path, result));
+                    }),
+                    None,
+                ));
+            }
+            Message::LoadFinished(path, result) => match result {
+                Ok(items) => {
+                    if let Some(id) = ctx.fleet.primary()
+                        && let Some(vehicle) = ctx.fleet.vehicle_mut(id)
+                    {
+                        vehicle.mission.set_items(items);
+                        vehicle.mission.mark_dirty();
+                    }
+                    self.selected = None;
+                    self.edit.clear();
+
+                    return Some((Task::none(), Some(Event::SetFilePickerPath(path))));
+                }
+                Err(error) => log::error!("Error loading mission from file: {error}"),
+            },
+        }
+
+        None
+    }
     fn run_command(&mut self, action: MissionAction, ctx: &mut Context) -> Task<Message> {
         let Some(id) = ctx.fleet.primary() else {
             return Task::none();
@@ -406,6 +490,8 @@ impl MissionPanel {
             Button::new("Pause").on_press_maybe(enabled.then_some(Message::Pause)),
             Button::new("Resume").on_press_maybe(enabled.then_some(Message::Resume)),
             Button::new("Add waypoint").on_press_maybe(enabled.then_some(Message::AddItem)),
+            Button::new("Save to file").on_press_maybe(enabled.then_some(Message::SaveDialog)),
+            Button::new("Load from file").on_press_maybe(enabled.then_some(Message::LoadDialog)),
         ]
         .spacing(6.0);
 
@@ -560,6 +646,16 @@ fn command_summary(command: &MissionCommand) -> String {
         .join(", ")
 }
 
+fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
+    let mut file_dialog = AsyncFileDialog::new();
+
+    if let Some(path) = path {
+        file_dialog = file_dialog.set_directory(path);
+    }
+
+    file_dialog
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,8 +684,12 @@ mod tests {
         router: &MavlinkRouter,
         fleet: &mut Fleet,
         message: Message,
-    ) -> Task<Message> {
-        let mut ctx = Context { router, fleet };
+    ) -> (Task<Message>, Option<Event>) {
+        let mut ctx = Context {
+            router,
+            fleet,
+            file_picker_path: None,
+        };
         panel.update(message, &mut ctx)
     }
 

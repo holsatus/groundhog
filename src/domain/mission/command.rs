@@ -932,6 +932,21 @@ fn is_global_int(frame: MavFrame) -> bool {
     )
 }
 
+/// Whether `command` positions the vehicle (its x/y are latitude/longitude).
+pub fn is_positional_command(command: MavCmd) -> bool {
+    matches!(
+        command,
+        MavCmd::NavWaypoint
+            | MavCmd::NavLoiterUnlim
+            | MavCmd::NavLoiterTurns
+            | MavCmd::NavLoiterTime
+            | MavCmd::NavLand
+            | MavCmd::NavTakeoff
+            | MavCmd::NavVtolTakeoff
+            | MavCmd::DoSetRoiLocation
+    )
+}
+
 fn decode_lat(scaled: i32) -> f64 {
     scaled as f64 * LATLON_SCALE
 }
