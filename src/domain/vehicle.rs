@@ -13,10 +13,10 @@ use mavio::{
     protocol::MessageSpec,
 };
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
-use slippery::{Geodetic, Mercator};
 
 use crate::{
     domain::firmware::{self, FlightMode},
+    domain::geo::GeoPosition,
     domain::parameter::{self, Parameters},
     foundation::MavlinkId,
 };
@@ -102,7 +102,7 @@ pub struct GlobalPosition {
     pub at: Instant,
     pub alt_msl: f32,
     pub alt_agl: f32,
-    pub pos: Mercator,
+    pub pos: GeoPosition,
 }
 
 #[derive(Clone, Debug)]
@@ -253,10 +253,16 @@ impl Vehicle {
                     continue;
                 }
 
-                // Shoelace formula triangle area
-                let area = (prev.pos.east_x() * ((eval.pos.south_y() - next.pos.south_y()) * 1e6)
-                    + eval.pos.east_x() * ((next.pos.south_y() - prev.pos.south_y()) * 1e6)
-                    + next.pos.east_x() * ((prev.pos.south_y() - eval.pos.south_y()) * 1e6))
+                // Shoelace formula triangle area, computed on degrees rather
+                // than projected coordinates. Web-Mercator x is a positive
+                // constant times longitude, and locally y is an affine function
+                // of latitude, so this differs from the projected area only by a
+                // constant positive factor: the argmin below — and therefore the
+                // pruned point — is unchanged. (The old `* 1e6` y-scaling was a
+                // constant factor and has been dropped.)
+                let area = (prev.pos.lon * (eval.pos.lat - next.pos.lat)
+                    + eval.pos.lon * (next.pos.lat - prev.pos.lat)
+                    + next.pos.lon * (prev.pos.lat - eval.pos.lat))
                     .abs();
 
                 // Cost is dynamically weighed by the span of time beteen the outer points
@@ -341,7 +347,7 @@ impl Vehicle {
     fn on_global_position_int(&mut self, message: &messages::GlobalPositionInt, time: Instant) {
         self.register_global_position(GlobalPosition {
             at: time,
-            pos: Geodetic::new(message.lon as f64 * 1e-7, message.lat as f64 * 1e-7).as_mercator(),
+            pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
             alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
@@ -360,7 +366,7 @@ impl Vehicle {
     ) {
         self.register_global_position(GlobalPosition {
             at: time,
-            pos: Geodetic::new(message.lon as f64 * 1e-7, message.lat as f64 * 1e-7).as_mercator(),
+            pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
             alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
@@ -464,5 +470,47 @@ impl Vehicle {
             self.mav_id.system,
             self.mav_id.component
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: MavlinkId = MavlinkId {
+        system: 1,
+        component: 1,
+    };
+
+    #[test]
+    fn global_position_int_stores_degrees_without_swapping_lat_lon() {
+        let mut vehicle = Vehicle::new(A);
+
+        let message = messages::GlobalPositionInt {
+            time_boot_ms: 0,
+            // Raw scaled ints: 474_000_000 -> 47.4 deg lat, 85_000_000 -> 8.5 deg lon.
+            lat: 474_000_000,
+            lon: 85_000_000,
+            alt: 150_000,
+            relative_alt: 100_000,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            hdg: 0,
+        };
+
+        vehicle.handle_message(Instant::now(), DefaultDialect::GlobalPositionInt(message));
+
+        let pos = vehicle.global_position.expect("position recorded").pos;
+        assert!(
+            (pos.lat - 47.4).abs() < 1e-7,
+            "lat was {} (expected 47.4)",
+            pos.lat
+        );
+        assert!(
+            (pos.lon - 8.5).abs() < 1e-7,
+            "lon was {} (expected 8.5)",
+            pos.lon
+        );
     }
 }

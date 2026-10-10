@@ -10,9 +10,9 @@ use std::{
 };
 
 use mavio::DefaultDialect;
-use slippery::Mercator;
 
 use crate::{
+    domain::geo::GeoPosition,
     domain::vehicle::{Liveness, Vehicle},
     foundation::MavlinkId,
 };
@@ -34,7 +34,7 @@ pub enum FleetEvent {
     LivenessChanged(MavlinkId, Liveness),
     /// The primary vehicle's latest position, after this frame was applied.
     /// Whether to recenter is the application's policy, not the fleet's.
-    PrimaryMoved(Mercator),
+    PrimaryMoved(GeoPosition),
 }
 
 /// Every vehicle the GCS has seen, and which one is primary.

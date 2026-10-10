@@ -19,10 +19,10 @@ use iced::{
     },
 };
 use slippery::{
-    CacheMessage, MapProgram, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
+    CacheMessage, Geodetic, MapProgram, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
 };
 
-use crate::{domain::vehicle::Vehicle, foundation::MavlinkId};
+use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::MavlinkId};
 
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
@@ -42,7 +42,7 @@ pub enum Message {
     /// The map has moved/zoomed; carries the new projector.
     Projector(Projector),
     /// Recenter the view on a position (used to follow the primary vehicle).
-    SetViewPosition(Mercator),
+    SetViewPosition(GeoPosition),
     /// A tile cache message produced by the map widget.
     Cache(CacheMessage),
     /// Toggle following the primary vehicle.
@@ -73,8 +73,8 @@ impl Map {
                 self.follow = false;
                 self.projector = Some(projector);
             }
-            Message::SetViewPosition(mercator) => {
-                self.viewpoint.position = mercator;
+            Message::SetViewPosition(pos) => {
+                self.viewpoint.position = mercator(pos);
             }
             Message::Cache(message) => {
                 return self.tile_cache.update(message).map(Message::Cache);
@@ -147,7 +147,7 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
         return;
     };
 
-    let center = projector.mercator_into_screen_space(position.pos);
+    let center = projector.mercator_into_screen_space(mercator(position.pos));
 
     let yaw_angle = vehicle
         .attitude
@@ -159,7 +159,7 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
         .global_positions
         .iter()
         .map(|position| ScreenPosition {
-            point: projector.mercator_into_screen_space(position.pos),
+            point: projector.mercator_into_screen_space(mercator(position.pos)),
             dark: altitude_to_color(position.alt_agl, 0.4),
             light: altitude_to_color(position.alt_agl, 0.85),
             time: position.at,
@@ -222,6 +222,13 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
             &*ARROW_HANDLE,
         );
     });
+}
+
+/// Project a geographic position into Web-Mercator map coordinates.
+///
+/// `Geodetic::new` takes `(lon, lat)`, so the argument order is deliberate.
+fn mercator(pos: GeoPosition) -> Mercator {
+    Geodetic::new(pos.lon, pos.lat).as_mercator()
 }
 
 /// Convert an altitude in meters to a corresponding color, for use with position trails.
