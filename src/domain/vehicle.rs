@@ -7,7 +7,9 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavProtocolCapability, MavSeverity, MavState, MavType},
+        enums::{
+            MavAutopilot, MavModeFlag, MavProtocolCapability, MavSeverity, MavState, MavType,
+        },
         messages,
     },
     protocol::MessageSpec,
@@ -16,6 +18,7 @@ use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use slippery::{Geodetic, Mercator};
 
 use crate::{
+    domain::firmware::{self, FlightMode},
     domain::parameter::{self, Parameter, Parameters},
     foundation::MavlinkId,
 };
@@ -28,6 +31,9 @@ pub struct Vehicle {
     pub mav_id: MavlinkId,
     pub mav_state: Option<MavState>,
     pub mav_type: Option<MavType>,
+    pub autopilot: Option<MavAutopilot>,
+    pub custom_mode: u32,
+    pub base_mode: Option<MavModeFlag>,
     pub capabilities: Option<MavProtocolCapability>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
@@ -112,12 +118,12 @@ impl Vehicle {
         if let Some(model_name) = string_from_cstring(&message.model_name)
             && !model_name.is_empty()
         {
-            self.model_name = Some(String::from(model_name))
+            self.model_name = Some(model_name)
         }
         if let Some(vendor_name) = string_from_cstring(&message.vendor_name)
             && !vendor_name.is_empty()
         {
-            self.vendor_name = Some(String::from(vendor_name))
+            self.vendor_name = Some(vendor_name)
         }
         self.set_mav_capability(message.capabilities);
     }
@@ -190,6 +196,26 @@ impl Vehicle {
             );
             self.mav_state = Some(message.system_status);
         }
+
+        self.autopilot = Some(message.autopilot);
+        self.custom_mode = message.custom_mode;
+        self.base_mode = Some(message.base_mode);
+    }
+
+    /// The latest reported flight mode, resolved for the vehicle's firmware.
+    pub fn flight_mode(&self) -> FlightMode {
+        match (self.autopilot, self.mav_type) {
+            (Some(autopilot), Some(mav_type)) => {
+                firmware::flight_mode(autopilot, mav_type, self.custom_mode)
+            }
+            _ => FlightMode::Unknown,
+        }
+    }
+
+    /// Whether the vehicle reports itself as armed, if it has sent a heartbeat.
+    pub fn armed(&self) -> Option<bool> {
+        self.base_mode
+            .map(|mode| mode.intersects(MavModeFlag::SAFETY_ARMED))
     }
 
     fn on_autopilot_version(&mut self, message: &messages::AutopilotVersion) {
@@ -205,7 +231,8 @@ impl Vehicle {
     }
 
     fn prune_one_global_position(&mut self) {
-        iced::debug::time_with("prune_one_global_position", || {
+        // Plain closure so the early `return`s below exit the pruning step.
+        (|| {
             if self.global_positions.len() < 3 {
                 self.global_positions.pop_front();
                 return;
@@ -261,7 +288,7 @@ impl Vehicle {
                 self.last_global_positions_pop_count = 0;
                 self.global_positions.pop_front();
             }
-        });
+        })();
     }
 
     fn on_sys_status(&mut self, message: &messages::SysStatus, time: Instant) {
@@ -281,7 +308,7 @@ impl Vehicle {
                 .iter()
                 .cloned()
                 .filter_map(|v| (v != u16::MAX).then_some(v as f32))
-                .sum::<f32>() as f32
+                .sum::<f32>()
                 * 1e-3,
             current: message.current_battery as f32 * 1e-2,
             charge: message.battery_remaining as f32,
@@ -343,9 +370,9 @@ impl Vehicle {
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
-            message.vx as f32 / 100.,
-            message.vy as f32 / 100.,
-            message.vz as f32 / 100.,
+            message.vx / 100.,
+            message.vy / 100.,
+            message.vz / 100.,
         )); // [cm/s]
         self.altitude_msl = Some(message.alt as f32 / 1000.); // [mm]
     }

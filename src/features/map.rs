@@ -11,15 +11,15 @@ use std::{
 };
 
 use iced::{
+    Color, Element, Point, Rectangle, Vector,
     color::Oklch,
     widget::{
-        canvas::{gradient::Linear, Fill, Frame, Gradient, LineCap, Path, Stroke, Style},
+        canvas::{Fill, Frame, Gradient, LineCap, Path, Stroke, Style, gradient::Linear},
         image::Handle,
     },
-    Color, Element, Point, Rectangle, Vector,
 };
 use slippery::{
-    location, CacheMessage, MapProgram, Mercator, Projector, TileCache, Viewpoint, Zoom,
+    CacheMessage, MapProgram, Mercator, Projector, TileCache, Viewpoint, Zoom, location,
 };
 
 use crate::{domain::vehicle::Vehicle, foundation::MavlinkId};
@@ -164,52 +164,45 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
         })
         .collect::<Vec<_>>();
 
-    let mut points_iterator = screen_points.iter();
-    let Some(mut prev) = points_iterator.next() else {
-        return;
-    };
+    // Trails need at least two points; the heading arrow is drawn regardless.
+    if screen_points.len() >= 2 {
+        // First draw all the dark background sections
+        for pair in screen_points.windows(2) {
+            let (prev, next) = (&pair[0], &pair[1]);
+            let long_time =
+                prev.time.saturating_duration_since(next.time) > Duration::from_secs(30);
 
-    // First draw all the dark background sections
-    for next in points_iterator {
-        let long_time = prev.time.saturating_duration_since(next.time) > Duration::from_secs(30);
-
-        DrawLineSegment {
-            from_point: prev.point,
-            from_color: prev.dark,
-            to_point: next.point,
-            to_color: next.dark,
-            faint: long_time,
-            width: 10.0,
-        }
-        .draw(frame);
-
-        prev = next;
-    }
-
-    let mut points_iterator = screen_points.iter();
-    let Some(mut prev) = points_iterator.next() else {
-        return;
-    };
-
-    // Then draw all the light foreground sections
-    for next in points_iterator {
-        let long_time = prev.time.saturating_duration_since(next.time) > Duration::from_secs(30);
-
-        DrawLineSegment {
-            from_point: prev.point,
-            from_color: prev.light,
-            to_point: next.point,
-            to_color: next.light,
-            faint: long_time,
-            width: 4.0,
-        }
-        .draw(frame);
-
-        if draw_dots {
-            frame.fill(&Path::circle(prev.point, 5.0), Fill::from(Color::WHITE));
+            DrawLineSegment {
+                from_point: prev.point,
+                from_color: prev.dark,
+                to_point: next.point,
+                to_color: next.dark,
+                faint: long_time,
+                width: 10.0,
+            }
+            .draw(frame);
         }
 
-        prev = next;
+        // Then draw all the light foreground sections
+        for pair in screen_points.windows(2) {
+            let (prev, next) = (&pair[0], &pair[1]);
+            let long_time =
+                prev.time.saturating_duration_since(next.time) > Duration::from_secs(30);
+
+            DrawLineSegment {
+                from_point: prev.point,
+                from_color: prev.light,
+                to_point: next.point,
+                to_color: next.light,
+                faint: long_time,
+                width: 4.0,
+            }
+            .draw(frame);
+
+            if draw_dots {
+                frame.fill(&Path::circle(prev.point, 5.0), Fill::from(Color::WHITE));
+            }
+        }
     }
 
     frame.with_save(|frame| {

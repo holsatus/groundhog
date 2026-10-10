@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
 
-use iced::task::Handle;
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
@@ -14,15 +13,8 @@ pub struct Parameter {
 #[derive(Clone, Debug)]
 pub enum ParamState {
     Unchanged,
-    Changed {
-        value: Value,
-        status: ChangedStatus,
-    },
-    Uploading {
-        value: Value,
-        #[allow(unused)]
-        handle: Handle,
-    },
+    Changed { value: Value, status: ChangedStatus },
+    Uploading { value: Value },
 }
 
 #[derive(Clone, Debug)]

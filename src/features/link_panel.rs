@@ -38,6 +38,8 @@ pub enum Message {
     ChangeVariant(LinkVariant),
     UpdateBuilder(LinkBuilder),
     DetectSerialPorts,
+    /// The result of an asynchronous serial-port enumeration.
+    SerialPortsDetected(Result<Vec<String>, String>),
 
     Save(LinkId, LinkConfig),
     Connect(LinkId),
@@ -94,25 +96,41 @@ impl LinkPanel {
                 }
             }
             Message::DetectSerialPorts => {
+                if !matches!(self.configurator.builder, LinkBuilder::Serial { .. }) {
+                    return (Task::none(), None);
+                }
+
+                return (
+                    iced_runtime::task::blocking(move |mut sender| {
+                        let result = serialport::available_ports()
+                            .map(|ports| {
+                                let mut names = ports
+                                    .into_iter()
+                                    .filter(|p| {
+                                        matches!(
+                                            p.port_type,
+                                            serialport::SerialPortType::UsbPort(_)
+                                        )
+                                    })
+                                    .map(|p| p.port_name)
+                                    .collect::<Vec<_>>();
+                                names.sort();
+                                names
+                            })
+                            .map_err(|error| error.to_string());
+                        let _ = sender.try_send(Message::SerialPortsDetected(result));
+                    }),
+                    None,
+                );
+            }
+            Message::SerialPortsDetected(result) => {
                 if let LinkBuilder::Serial {
                     available_ports, ..
                 } = &mut self.configurator.builder
                 {
-                    match serialport::available_ports() {
-                        Ok(ports) => {
-                            *available_ports = ports
-                                .into_iter()
-                                .filter(|p| {
-                                    matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
-                                })
-                                .map(|p| p.port_name)
-                                .collect();
-
-                            available_ports.sort();
-                        }
-                        Err(error) => {
-                            log::error!("Unable to fetch serial ports: {error}");
-                        }
+                    match result {
+                        Ok(ports) => *available_ports = ports,
+                        Err(error) => log::error!("Unable to fetch serial ports: {error}"),
                     }
 
                     self.configurator.build = self.configurator.builder.try_build();
@@ -205,11 +223,7 @@ impl LinkPanel {
         ])
         .spacing(10.0);
 
-        container(contents)
-            .style(style::shaded_bordered_box)
-            .padding(10.0)
-            .width(170.0)
-            .boxed()
+        container(contents).padding(8.0).width(Length::Fill).boxed()
     }
 
     /// The interactive fields for the current [`LinkBuilder`] variant, with
@@ -335,7 +349,7 @@ impl LinkPanel {
     pub fn view_status(&self) -> Element<'_, Message> {
         let mut contents = Vec::new();
 
-        for link in self.links.values() {
+        for (index, link) in self.links.values().enumerate() {
             let button = if link.handle.is_some() {
                 Button::new(
                     container("Disconnect")
@@ -370,11 +384,15 @@ impl LinkPanel {
                 }),
                 button
             ])
-            .style(style::shaded_bordered_box)
-            .padding(10.0);
+            .style(if index % 2 == 0 {
+                style::list_default
+            } else {
+                style::list_brighter
+            })
+            .padding(4.0);
             contents.push(content.boxed());
         }
 
-        Column::from_vec(contents).spacing(10.0).boxed()
+        Column::from_vec(contents).spacing(2.0).boxed()
     }
 }

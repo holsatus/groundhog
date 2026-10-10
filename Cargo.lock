@@ -1825,6 +1825,7 @@ dependencies = [
  "directories",
  "env_logger",
  "iced",
+ "iced_runtime",
  "log",
  "mav-param",
  "mavio",
@@ -5109,7 +5110,6 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slippery"
 version = "0.1.0"
-source = "git+https://github.com/peterkrull/slippery#a666e7438c015932662e1ae4d26e630cf5d37275"
 dependencies = [
  "env_logger",
  "http-cache-reqwest",

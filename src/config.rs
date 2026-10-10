@@ -2,7 +2,7 @@ use std::{io::Write as _, path::PathBuf, sync::LazyLock};
 
 use directories::ProjectDirs;
 
-use crate::{foundation::BoxError, link::LinkBuild};
+use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkBuild};
 
 static PROJECT_DIRS: LazyLock<ProjectDirs> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
@@ -14,6 +14,9 @@ pub struct Configuration {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_picker_path: Option<PathBuf>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutConfig>,
 }
 
 impl Configuration {

@@ -27,7 +27,7 @@ use crate::{
     domain::vehicle::Vehicle,
     foundation::MavlinkId,
     mav::{self, LockKey, MavlinkRouter},
-    style::shaded_bordered_box,
+    style,
     widget::virtualized::virtual_list,
 };
 
@@ -72,11 +72,17 @@ pub enum Message {
     /// Save the parameters to the chosen path
     SaveToFile(PathBuf, Parameters),
 
+    /// The result of writing the parameters to disk
+    SaveFinished(PathBuf, Result<(), String>),
+
     /// Open a file-picker dialog to choose file to load
     LoadDialog(MavlinkId),
 
     /// Load parameters from the chosen path
     LoadFromFile(PathBuf, MavlinkId),
+
+    /// The result of reading a parameter file from disk
+    LoadFinished(PathBuf, MavlinkId, Result<Parameters, String>),
 }
 
 /// Everything the panel needs from the rest of the application to run a
@@ -99,6 +105,9 @@ pub struct ParameterPanel {
     filter: ParameterFilter,
     filtered: Option<Parameters>,
     namespace_sep: char,
+    /// Abort handles for in-flight uploads, dropped (aborting) when an upload
+    /// is superseded by an edit, a reset, or its own completion.
+    uploads: BTreeMap<(MavlinkId, Ident), iced::task::Handle>,
 }
 
 impl ParameterPanel {
@@ -107,6 +116,7 @@ impl ParameterPanel {
             filter: ParameterFilter::default(),
             filtered: None,
             namespace_sep: '_',
+            uploads: BTreeMap::new(),
         }
     }
 
@@ -206,6 +216,9 @@ impl ParameterPanel {
                 return Some((Task::batch(uploads), None));
             }
             Message::BufferEdit(mav_id, ident, buffer) => {
+                // Editing supersedes any upload in flight for this parameter.
+                self.uploads.remove(&(mav_id, ident.clone()));
+
                 let entry = ctx.vehicles.get_mut(&mav_id)?;
                 let param = entry.parameters.map.get_mut(&ident)?;
 
@@ -223,6 +236,8 @@ impl ParameterPanel {
                 param.editing = Some(buffer);
             }
             Message::ValueReset(mav_id, ident) => {
+                self.uploads.remove(&(mav_id, ident.clone()));
+
                 let entry = ctx.vehicles.get_mut(&mav_id)?;
                 let param = entry.parameters.map.get_mut(&ident)?;
 
@@ -236,18 +251,19 @@ impl ParameterPanel {
                 let cap = vehicle.capabilities.unwrap_or_default();
 
                 let ident_cloned = ident.clone();
+                let ident_for_result = ident.clone();
                 let (task, handle) = Task::perform(
                     async move { mav.param_set(mav_id, ident_cloned, value, cap).await },
-                    move |result| Message::ValueUploadResult(mav_id, ident.clone(), value, result),
+                    move |result| {
+                        Message::ValueUploadResult(mav_id, ident_for_result.clone(), value, result)
+                    },
                 )
                 .abortable();
 
-                // Save the value we are currently uploading. Dropping the state
-                // (e.g. by editing the value again) aborts the upload.
-                param.state = ParamState::Uploading {
-                    value,
-                    handle: handle.abort_on_drop(),
-                };
+                // Holding the abort handle lets an edit or reset cancel the
+                // upload by dropping it; completion drops it too.
+                self.uploads.insert((mav_id, ident.clone()), handle.abort_on_drop());
+                param.state = ParamState::Uploading { value };
 
                 return Some((task, None));
             }
@@ -259,6 +275,8 @@ impl ParameterPanel {
                 {
                     return None;
                 }
+
+                self.uploads.remove(&(mav_id, ident.clone()));
 
                 match result {
                     Ok(value) if value == requested => {
@@ -301,8 +319,19 @@ impl ParameterPanel {
             Message::SaveToFile(save_path, parameters) => {
                 log::info!("Saving parameters to file: {save_path:?}");
 
-                if let Err(error) = parameter::save_parameters_to_ini(&save_path, parameters) {
-                    log::error!("Error saving to file: {}", error);
+                let path = save_path.clone();
+                return Some((
+                    iced_runtime::task::blocking(move |mut sender| {
+                        let result = parameter::save_parameters_to_ini(&path, parameters)
+                            .map_err(|error| error.to_string());
+                        let _ = sender.try_send(Message::SaveFinished(save_path, result));
+                    }),
+                    None,
+                ));
+            }
+            Message::SaveFinished(save_path, result) => {
+                if let Err(error) = result {
+                    log::error!("Error saving to file: {error}");
                 }
 
                 self.refresh(ctx.primary, ctx.vehicles);
@@ -324,14 +353,26 @@ impl ParameterPanel {
             Message::LoadFromFile(load_path, mav_id) => {
                 log::info!("Loading parameters from file: {load_path:?}");
 
-                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
-                let loaded_params = match parameter::load_parameters_from_ini(&load_path) {
+                let path = load_path.clone();
+                return Some((
+                    iced_runtime::task::blocking(move |mut sender| {
+                        let result = parameter::load_parameters_from_ini(&path)
+                            .map_err(|error| error.to_string());
+                        let _ = sender.try_send(Message::LoadFinished(load_path, mav_id, result));
+                    }),
+                    None,
+                ));
+            }
+            Message::LoadFinished(load_path, mav_id, loaded_params) => {
+                let loaded_params = match loaded_params {
                     Ok(loaded_params) => loaded_params,
                     Err(error) => {
-                        log::error!("Could not load parameter file: {}", error);
+                        log::error!("Could not load parameter file: {error}");
                         return None;
                     }
                 };
+
+                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
 
                 // Set the parameters of the vehicle as modified if that is the case
                 for (ident, new_param) in loaded_params.map.iter() {
@@ -429,9 +470,8 @@ impl ParameterPanel {
             ]
             .spacing(5.0),
         )
-        .padding(10.0)
-        .width(500.0)
-        .style(shaded_bordered_box)
+        .padding(8.0)
+        .width(Length::Fill)
         .boxed()
     }
 
@@ -564,7 +604,7 @@ fn view_param_row<'a>(
         _ => "Nothing to restore".to_string(),
     }))
     .padding(10.0)
-    .style(shaded_bordered_box);
+    .style(style::tooltip);
 
     let restore_button =
         tooltip(restore_button, restore_tooltip, Default::default()).delay(std::time::Duration::from_millis(250));

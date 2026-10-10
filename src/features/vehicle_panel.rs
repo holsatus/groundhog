@@ -1,32 +1,54 @@
-//! The right-hand panel: primary-vehicle attitude, battery, heartbeat, and
-//! status texts. This is a stateless view over vehicle data, so it lives as a
-//! plain function rather than a component.
+//! The vehicles panel: a header with global controls, then the primary
+//! vehicle's attitude, battery, heartbeat, and status texts. A stateless view
+//! over vehicle data, so it lives as a plain function rather than a component.
 
 use std::collections::BTreeMap;
 
 use iced::{font, never, widget::rich_text, Alignment, Element, Length, Theme, Widget};
 use mavio::{
-    default_dialect::{
-        enums::{MavModeFlag, MavSeverity},
-        messages::Heartbeat,
-    },
+    default_dialect::{enums::MavSeverity, messages::Heartbeat},
     DefaultDialect,
 };
-use num_enum::FromPrimitive;
 
 use crate::{
     app::Message,
     domain::vehicle::{MavMessage, Vehicle},
+    features::map,
     foundation::MavlinkId,
-    style::{list_brighter, list_default, shaded_bordered_box},
+    style::{list_brighter, list_default},
 };
 
 pub fn view<'a>(
     vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
     primary: Option<MavlinkId>,
+    follow: bool,
     theme: &Theme,
 ) -> Element<'a, Message> {
-    let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(16);
+    let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(17);
+
+    // Global controls that used to live in the removed top bar.
+    let mut controls = iced::widget::row![iced::widget::checkbox(follow)
+        .label("Follow primary")
+        .on_toggle(|value| Message::Map(map::Message::Follow(value)))]
+    .spacing(10.0)
+    .align_y(Alignment::Center);
+
+    if vehicles.len() > 1 {
+        // TODO: use vendor and model name here instead of the MAVLink id.
+        let mut vehicle_ids = vehicles.keys().copied().collect::<Vec<_>>();
+        vehicle_ids.sort();
+        let picker = iced::widget::pick_list(primary, vehicle_ids, |id| {
+            vehicles
+                .get(id)
+                .map_or_else(|| "Invalid vehicle".to_string(), |v| v.pretty_name())
+        })
+        .on_select(Message::SetPrimaryVehicle);
+
+        controls = controls.push(picker.boxed());
+    }
+
+    row_contents.push(controls.boxed());
+    row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
 
     let mut roll = 0.0;
     let mut pitch = 0.0;
@@ -51,32 +73,13 @@ pub fn view<'a>(
             charge = battery.charge;
         }
 
-        if let Some(MavMessage {
-            message: DefaultDialect::Heartbeat(hb),
-            ..
-        }) = vehicle.latest_message.get(&Heartbeat::ID)
-        {
-            use mavio::dialects::minimal::enums::{MavAutopilot, MavType};
-
-            if hb.autopilot == MavAutopilot::Ardupilotmega {
-                use crate::domain::firmware::ardupilot::flight_mode;
-
-                match hb.type_ {
-                    MavType::FixedWing | MavType::VtolTiltrotor => {
-                        let mode = flight_mode::Plane::from_primitive(hb.custom_mode as u8);
-                        flight_mode = format!("{mode:?}");
-                    }
-                    MavType::Quadrotor | MavType::Helicopter => {
-                        let mode = flight_mode::Copter::from_primitive(hb.custom_mode as u8);
-                        flight_mode = format!("{mode:?}");
-                    }
-                    _ => (),
-                }
-            }
-
-            mav_state = format!("{:?}", hb.system_status);
-            armed = format!("{}", hb.base_mode.intersects(MavModeFlag::SAFETY_ARMED));
-        }
+        flight_mode = vehicle.flight_mode().to_string();
+        mav_state = vehicle
+            .mav_state
+            .map_or_else(|| "Unknown".to_string(), |state| format!("{state:?}"));
+        armed = vehicle
+            .armed()
+            .map_or_else(|| "Unknown".to_string(), |armed| armed.to_string());
     }
 
     row_contents.push(
@@ -197,8 +200,7 @@ pub fn view<'a>(
             .align_x(Alignment::Start)
             .spacing(10.0),
     )
-    .style(shaded_bordered_box)
-    .width(500.0)
-    .padding(10.0)
+    .width(Length::Fill)
+    .padding(8.0)
     .boxed()
 }
