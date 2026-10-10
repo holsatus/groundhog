@@ -26,6 +26,7 @@ use mavio::{DefaultDialect, default_dialect::messages};
 
 use crate::{
     domain::firmware::FlightMode,
+    domain::mission::Mission,
     domain::parameter::{self, Parameters},
     foundation::MavlinkId,
 };
@@ -47,6 +48,7 @@ pub struct Vehicle {
     pub position: PositionTrack,
     pub battery: Battery,
     pub status: StatusLog,
+    pub mission: Mission,
     parameters: Parameters,
     pub last_seen: Option<Instant>,
     pub liveness: Liveness,
@@ -150,6 +152,10 @@ impl Vehicle {
             DefaultDialect::GlobalPositionIntCov(message) => {
                 self.position.observe_global_position_int_cov(message, time)
             }
+            DefaultDialect::MissionCurrent(message) => self.mission.observe_current(message),
+            DefaultDialect::MissionItemReached(message) => {
+                self.mission.observe_reached(message.seq)
+            }
             DefaultDialect::Statustext(message) => {
                 if let Err(error) = self.status.observe_statustext(message, time) {
                     log::warn!(
@@ -161,5 +167,49 @@ impl Vehicle {
             }
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mavio::default_dialect::enums::MissionState;
+
+    fn vehicle() -> Vehicle {
+        Vehicle::new(MavlinkId {
+            system: 1,
+            component: 1,
+        })
+    }
+
+    #[test]
+    fn mission_current_updates_progress() {
+        let mut vehicle = vehicle();
+
+        vehicle.handle_message(
+            Instant::now(),
+            DefaultDialect::MissionCurrent(messages::MissionCurrent {
+                seq: 2,
+                total: 8,
+                mission_state: MissionState::Active,
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(vehicle.mission.progress.current_seq, Some(2));
+        assert_eq!(vehicle.mission.progress.total, Some(8));
+        assert_eq!(vehicle.mission.progress.state, MissionState::Active);
+    }
+
+    #[test]
+    fn mission_item_reached_updates_current_seq() {
+        let mut vehicle = vehicle();
+
+        vehicle.handle_message(
+            Instant::now(),
+            DefaultDialect::MissionItemReached(messages::MissionItemReached { seq: 5 }),
+        );
+
+        assert_eq!(vehicle.mission.progress.current_seq, Some(5));
     }
 }
