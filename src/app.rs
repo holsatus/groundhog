@@ -272,7 +272,7 @@ impl Application {
     /// Fetch basic information and the parameter list from a newly detected vehicle.
     fn initialize_vehicle(&self, mav_id: MavlinkId) -> Task<Message> {
         let router = self.router.clone();
-        Task::perform(
+        let request = Task::perform(
             async move {
                 if let Err(error) = router
                     .request_message::<ComponentInformationBasic>(mav_id)
@@ -285,7 +285,16 @@ impl Application {
                 router.param_list(mav_id, true).await
             },
             move |result| parameter_panel::Message::ListReloadResult(mav_id, result).into(),
-        )
+        );
+
+        // Mark the implicit list download as running so the reload button is
+        // disabled while the automatic initialisation is in flight.
+        Task::batch([
+            Task::done(Message::Parameter(
+                parameter_panel::Message::ListReloadStarted(mav_id),
+            )),
+            request,
+        ])
     }
 
     fn link_message_update(&mut self, message: link_panel::Message) -> Task<Message> {
@@ -482,7 +491,7 @@ impl Application {
             }
             layout::Panel::Parameters => self
                 .parameter_panel
-                .view(self.fleet.vehicles(), self.fleet.primary(), &self.router)
+                .view(self.fleet.vehicles(), self.fleet.primary())
                 .map(Message::Parameter)
                 .boxed(),
             layout::Panel::Links => iced::widget::column![

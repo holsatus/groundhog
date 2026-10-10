@@ -11,7 +11,7 @@
 //! there is no cached copy to keep in sync when the vehicle or filter changes.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -34,7 +34,7 @@ use crate::{
     },
     domain::vehicle::Vehicle,
     foundation::MavlinkId,
-    mav::{self, LockKey, MavlinkRouter},
+    mav::{self, MavlinkRouter},
     style,
     widget::virtualized::virtual_list,
 };
@@ -66,6 +66,10 @@ pub enum Message {
 
     /// Initiate a parameter list request to the target
     ListReload(MavlinkId),
+
+    /// A parameter list request to the target has started, e.g. the automatic
+    /// initialisation on first sight of a vehicle.
+    ListReloadStarted(MavlinkId),
 
     /// The parameter list request to the target has finished
     ListReloadResult(MavlinkId, mav::Result<mav::ParamListSummary>),
@@ -129,6 +133,9 @@ pub struct ParameterPanel {
     /// Abort handles for in-flight uploads, dropped (aborting) when an upload
     /// is superseded by an edit, a reset, or its own completion.
     uploads: BTreeMap<(MavlinkId, Ident), iced::task::Handle>,
+    /// Vehicles with a parameter list download in flight, so the view can
+    /// disable the reload button without querying the router.
+    reloading: BTreeSet<MavlinkId>,
 }
 
 impl ParameterPanel {
@@ -138,6 +145,7 @@ impl ParameterPanel {
             namespace_sep: '_',
             editing: BTreeMap::new(),
             uploads: BTreeMap::new(),
+            reloading: BTreeSet::new(),
         }
     }
 
@@ -167,6 +175,7 @@ impl ParameterPanel {
 
                 let request_capabilities = vehicle.identity.capabilities.is_none();
                 vehicle.parameters_mut().reset_loading();
+                self.reloading.insert(mav_id);
 
                 let task = Task::perform(
                     async move { mav.param_list(mav_id, request_capabilities).await },
@@ -175,10 +184,16 @@ impl ParameterPanel {
 
                 return Some((task, None));
             }
-            Message::ListReloadResult(mav_id, result) => match result {
-                Ok(summary) => log::info!("Parameters from {mav_id:?}: {summary:?}"),
-                Err(error) => log::warn!("Parameter download from {mav_id:?} failed: {error}"),
-            },
+            Message::ListReloadStarted(mav_id) => {
+                self.reloading.insert(mav_id);
+            }
+            Message::ListReloadResult(mav_id, result) => {
+                self.reloading.remove(&mav_id);
+                match result {
+                    Ok(summary) => log::info!("Parameters from {mav_id:?}: {summary:?}"),
+                    Err(error) => log::warn!("Parameter download from {mav_id:?} failed: {error}"),
+                }
+            }
             Message::UploadAll(mav_id) => {
                 let vehicle = ctx.fleet.vehicle(mav_id)?;
 
@@ -372,11 +387,12 @@ impl ParameterPanel {
         None
     }
 
+    /// Render the parameter panel. A pure function of panel state: whether a
+    /// list download is in flight comes from [`Self::reloading`], not the router.
     pub fn view<'a>(
         &'a self,
         vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
         primary: Option<MavlinkId>,
-        router: &'a MavlinkRouter,
     ) -> Element<'a, Message> {
         let Some(mav_id) = primary else {
             return space::Space::new().boxed();
@@ -389,7 +405,7 @@ impl ParameterPanel {
         let mut entries: Vec<Element<'_, Message>> = Vec::with_capacity(128);
 
         // Disabled while a parameter list download is in progress
-        let reloading = router.is_busy(&LockKey::ParamList(mav_id));
+        let reloading = self.reloading.contains(&mav_id);
         let reload_button = Button::new("Reload parameters")
             .width(Length::Fill)
             .on_press_maybe((!reloading).then(|| Message::ListReload(mav_id)));
@@ -914,5 +930,66 @@ mod tests {
                 .is_some_and(|entry| entry.contains_key(&key))
         );
         assert_eq!(panel.editing[&A][&key], "42");
+    }
+
+    #[test]
+    fn list_reload_tracks_in_flight_download() {
+        let (router, _events) = MavlinkRouter::new();
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        let mut panel = ParameterPanel::new();
+
+        step(&mut panel, &router, &mut fleet, Message::ListReload(A));
+        assert!(panel.reloading.contains(&A));
+    }
+
+    #[test]
+    fn list_reload_started_tracks_in_flight_download() {
+        let (router, _events) = MavlinkRouter::new();
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        let mut panel = ParameterPanel::new();
+
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ListReloadStarted(A),
+        );
+        assert!(panel.reloading.contains(&A));
+    }
+
+    #[test]
+    fn list_reload_result_clears_in_flight_download() {
+        let (router, _events) = MavlinkRouter::new();
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        let mut panel = ParameterPanel::new();
+
+        // A successful download clears the flag.
+        panel.reloading.insert(A);
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ListReloadResult(
+                A,
+                Ok(crate::mav::ParamListSummary {
+                    received: 1,
+                    expected: 1,
+                }),
+            ),
+        );
+        assert!(!panel.reloading.contains(&A));
+
+        // A failed download clears it too.
+        panel.reloading.insert(A);
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ListReloadResult(A, Err(crate::mav::MavError::Timeout)),
+        );
+        assert!(!panel.reloading.contains(&A));
     }
 }
