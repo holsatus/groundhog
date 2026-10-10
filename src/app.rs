@@ -188,31 +188,13 @@ impl Application {
                     log::error!("Unable to save configuration file: {error}");
                 }
             }
-            Message::Layout(message) => {
-                let changed = message.changes_layout();
-                self.layout.update(message);
-                if changed {
-                    self.configuration.layout = self.layout.configuration();
-                    self.layout_dirty = true;
-                }
-            }
+            Message::Layout(message) => self.layout_message_update(message),
             Message::Map(message) => return Some(self.map.update(message).map(Message::Map)),
             Message::Link(message) => return Some(self.link_message_update(message)),
             Message::Logs(message) => self.log_panel.update(message),
             Message::MavEvents(events) => return Some(self.handle_mav_events(events)),
             Message::Parameter(message) => return Some(self.parameter_message_update(message)),
-            Message::Vehicles(message) => match message {
-                vehicle_panel::Message::SetPrimary(mav_id) => {
-                    self.fleet.set_primary(mav_id);
-                }
-                vehicle_panel::Message::Follow(follow) => {
-                    return Some(
-                        self.map
-                            .update(map::Message::Follow(follow))
-                            .map(Message::Map),
-                    );
-                }
-            },
+            Message::Vehicles(message) => return Some(self.vehicle_message_update(message)),
             Message::Settings(message) => return Some(self.settings_message_update(message)),
             Message::Tick => {
                 if self.layout_dirty {
@@ -221,23 +203,39 @@ impl Application {
                 }
             }
             Message::FleetTick(now) => {
-                for event in self.fleet.tick(now) {
-                    match event {
-                        // `tick` only ages vehicles today, so liveness is the
-                        // only event it can produce.
-                        FleetEvent::LivenessChanged(mav_id, liveness) => {
-                            log_liveness(mav_id, liveness);
-                        }
-                        FleetEvent::Registered(mav_id) => {
-                            log::debug!("Fleet tick registered vehicle {mav_id:?}");
-                        }
-                        FleetEvent::PrimaryMoved(..) => {}
-                    }
-                }
+                let events = self.fleet.tick(now);
+                return Some(Task::batch(
+                    events
+                        .into_iter()
+                        .map(|event| self.handle_fleet_event(event))
+                        .collect::<Vec<_>>(),
+                ));
             }
         }
 
         None
+    }
+
+    fn layout_message_update(&mut self, message: layout::Message) {
+        let changed = message.changes_layout();
+        self.layout.update(message);
+        if changed {
+            self.configuration.layout = self.layout.configuration();
+            self.layout_dirty = true;
+        }
+    }
+
+    fn vehicle_message_update(&mut self, message: vehicle_panel::Message) -> Task<Message> {
+        match message {
+            vehicle_panel::Message::SetPrimary(mav_id) => {
+                self.fleet.set_primary(mav_id);
+                Task::none()
+            }
+            vehicle_panel::Message::Follow(follow) => self
+                .map
+                .update(map::Message::Follow(follow))
+                .map(Message::Map),
+        }
     }
 
     pub(crate) fn set_file_picker_path_config(&mut self, path: &Path) -> Task<Message> {
@@ -353,21 +351,7 @@ impl Application {
                     };
 
                     for fleet_event in self.fleet.observe(source, inbound.received_at, decoded) {
-                        match fleet_event {
-                            FleetEvent::Registered(mav_id) => {
-                                log::info!("New vehicle detected: {mav_id:?}");
-                                tasks.push(self.initialize_vehicle(mav_id));
-                            }
-                            FleetEvent::LivenessChanged(mav_id, liveness) => {
-                                log_liveness(mav_id, liveness);
-                            }
-                            FleetEvent::PrimaryMoved(position) if self.map.follow => {
-                                tasks.push(Task::done(Message::Map(
-                                    map::Message::SetViewPosition(position),
-                                )));
-                            }
-                            FleetEvent::PrimaryMoved(..) => {}
-                        }
+                        tasks.push(self.handle_fleet_event(fleet_event));
                     }
                 }
                 mav::Event::LinkClosed(link_id) => log::info!("Link {link_id:?} closed"),
@@ -375,6 +359,29 @@ impl Application {
         }
 
         Task::batch(tasks)
+    }
+
+    /// Translate one [`FleetEvent`] into the application's effects. Both the
+    /// telemetry path and the periodic [`Message::FleetTick`] use this, so an
+    /// event means the same thing regardless of which produced it.
+    fn handle_fleet_event(&self, event: FleetEvent) -> Task<Message> {
+        match event {
+            FleetEvent::Registered(mav_id) => {
+                log::info!("New vehicle detected: {mav_id:?}");
+                self.initialize_vehicle(mav_id)
+            }
+            FleetEvent::LivenessChanged(mav_id, liveness) => {
+                log_liveness(mav_id, liveness);
+                Task::none()
+            }
+            FleetEvent::PrimaryMoved(position) => {
+                if self.map.follow {
+                    Task::done(Message::Map(map::Message::SetViewPosition(position)))
+                } else {
+                    Task::none()
+                }
+            }
+        }
     }
 
     pub fn view(&self) -> impl Widget<Message> + '_ {
