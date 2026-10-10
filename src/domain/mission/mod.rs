@@ -16,8 +16,6 @@ pub mod command;
 #[allow(unused_imports)] // Facade re-export for the upcoming UI integration.
 pub use command::*;
 
-use command::MissionItem;
-
 /// A vehicle's mission: the working plan the user edits, plus execution state.
 #[derive(Debug, Clone, Default)]
 pub struct Mission {

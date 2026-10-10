@@ -2,13 +2,14 @@
 
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
-    enums::MavProtocolCapability,
+    enums::{MavMissionType, MavProtocolCapability},
     messages::{AutopilotVersion, CommandAck, ComponentInformationBasic},
 };
 
 use crate::{
+    domain::mission::{Mission, MissionItem},
     foundation::MavlinkId,
-    mav::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted},
+    mav::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted, cmd},
 };
 
 /// An intent-level handle for operating a single vehicle through the router.
@@ -83,6 +84,67 @@ impl VehicleClient {
     pub fn send<M: Targeted>(&self, message: M) -> mav::Result<()> {
         self.router.send_targeted(self.id, message)
     }
+
+    /// Download the vehicle's flight plan, replacing the caller's copy.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn download_mission(&self) -> mav::Result<Mission> {
+        let downloaded = self
+            .router
+            .mission_download(self.id, MavMissionType::Mission)
+            .await?;
+
+        let items = downloaded
+            .items
+            .iter()
+            .map(MissionItem::from_wire)
+            .collect::<Vec<_>>();
+
+        let mut mission = Mission::default();
+        mission.set_items(items);
+        mission.mark_synced(Some(downloaded.vehicle_id));
+        Ok(mission)
+    }
+
+    /// Upload `mission` to the vehicle; returns the vehicle's opaque plan id.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn upload_mission(&self, mission: &Mission) -> mav::Result<u32> {
+        let wire = mission
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(seq, item)| item.to_wire(seq as u16, MavMissionType::Mission))
+            .collect::<Vec<_>>();
+
+        self.router
+            .mission_upload(self.id, MavMissionType::Mission, &wire)
+            .await
+    }
+
+    /// Clear the flight plan on the vehicle.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn clear_mission(&self) -> mav::Result<()> {
+        self.router
+            .mission_clear(self.id, MavMissionType::Mission)
+            .await
+    }
+
+    /// Ask the vehicle to make item `seq` the current execution point.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn set_current_mission_item(&self, seq: u16) -> mav::Result<()> {
+        self.router.mission_set_current(self.id, seq).await
+    }
+
+    /// Start executing the stored mission.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn start_mission(&self) -> mav::Result<CommandAck> {
+        self.run(cmd::mission_start()).await
+    }
+
+    /// Pause (`true`) or resume (`false`) the running mission.
+    #[allow(dead_code)] // Consumed once the mission UI lands.
+    pub async fn pause_mission(&self, pause: bool) -> mav::Result<CommandAck> {
+        self.run(cmd::pause_continue(pause)).await
+    }
 }
 
 #[cfg(test)]
@@ -119,5 +181,18 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn mission_operations_without_a_link_error() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let client = VehicleClient::new(&router, VEHICLE);
+
+        assert!(client.download_mission().await.is_err());
+        assert!(client.upload_mission(&Mission::default()).await.is_err());
+        assert!(client.clear_mission().await.is_err());
+        assert!(client.set_current_mission_item(0).await.is_err());
+        assert!(client.start_mission().await.is_err());
+        assert!(client.pause_mission(true).await.is_err());
     }
 }
