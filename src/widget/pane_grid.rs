@@ -12,6 +12,14 @@
 //   - `TitleBar::is_over_pick_area` treats the whole bar (apart from controls)
 //     as a pick area
 //
+// Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
+// `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the
+// deltas above. This fork spans `src/widget/pane_grid.rs` + `src/widget/pane_grid/`.
+// Update the pinned rev in this header (and any iced `rev` in `Cargo.toml`) in the
+// same change, so the header never lies about which upstream it was based on.
+// The multi-axis (corner) resize delta is a good upstream candidate; upstreaming it
+// would reduce the fork.
+//
 // `dead_code` is allowed because this is a binary crate: much of the vendored API
 // surface is intentionally unused.
 #![allow(dead_code)]
