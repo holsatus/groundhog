@@ -87,11 +87,11 @@ pub fn view<'a>(
         .map(|vehicle| vehicle.liveness);
 
     if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id)) {
-        if let Some(attitude) = vehicle.attitude.as_ref() {
+        if let Some(attitude) = vehicle.attitude.current.as_ref() {
             (roll, pitch, yaw) = attitude.attitude.euler_angles();
         }
 
-        if let Some(battery) = vehicle.battery_state.as_ref() {
+        if let Some(battery) = vehicle.battery.state.as_ref() {
             voltage = battery.voltage;
             current = battery.current;
             charge = battery.charge;
@@ -99,6 +99,7 @@ pub fn view<'a>(
 
         flight_mode = vehicle.flight_mode().to_string();
         mav_state = vehicle
+            .identity
             .mav_state
             .map_or_else(|| "Unknown".to_string(), |state| format!("{state:?}"));
         armed = vehicle
@@ -186,7 +187,7 @@ pub fn view<'a>(
         row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
         row_contents.push(
             iced::widget::scrollable(iced::widget::row![
-                iced::widget::Column::from_iter(vehicle.status_texts.iter().enumerate().map(
+                iced::widget::Column::from_iter(vehicle.status.texts.iter().enumerate().map(
                     |(idx, status)| {
                         let palette = theme.palette();
                         let color = match status.severity {

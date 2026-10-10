@@ -143,7 +143,7 @@ impl DrawLineSegment {
 }
 
 fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, draw_dots: bool) {
-    let Some(position) = &vehicle.global_position else {
+    let Some(position) = &vehicle.position.current else {
         return;
     };
 
@@ -151,12 +151,14 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
 
     let yaw_angle = vehicle
         .attitude
+        .current
         .as_ref()
         .map(|att| att.attitude.euler_angles().2)
         .unwrap_or_default();
 
     let screen_points = vehicle
-        .global_positions
+        .position
+        .trail
         .iter()
         .map(|position| ScreenPosition {
             point: projector.mercator_into_screen_space(mercator(position.pos)),

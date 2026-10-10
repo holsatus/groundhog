@@ -181,7 +181,7 @@ impl LogPanel {
         let mut entries = Vec::new();
 
         let mut push = |id: MavlinkId, vehicle: &'a Vehicle| {
-            for status in &vehicle.status_texts {
+            for status in &vehicle.status.texts {
                 if (status.severity as u8) <= (self.filter.min_severity as u8) {
                     entries.push((id, status));
                 }

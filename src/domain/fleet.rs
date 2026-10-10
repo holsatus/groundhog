@@ -118,7 +118,7 @@ impl Fleet {
             && let Some(position) = self
                 .vehicles
                 .get(&source)
-                .and_then(|v| v.global_position.as_ref())
+                .and_then(|v| v.position.current.as_ref())
         {
             events.push(FleetEvent::PrimaryMoved(position.pos));
         }
@@ -231,7 +231,7 @@ mod tests {
         });
 
         fleet.observe(A, Instant::now(), Some(heartbeat));
-        assert_eq!(fleet.vehicles()[&A].custom_mode, 7);
+        assert_eq!(fleet.vehicles()[&A].identity.custom_mode, 7);
     }
 
     #[test]

@@ -165,7 +165,7 @@ impl ParameterPanel {
                 let mav = ctx.router.clone();
                 let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
 
-                let request_capabilities = vehicle.capabilities.is_none();
+                let request_capabilities = vehicle.identity.capabilities.is_none();
                 vehicle.parameters_mut().reset_loading();
 
                 let task = Task::perform(
@@ -230,7 +230,7 @@ impl ParameterPanel {
             Message::ValueUpload(mav_id, ident, value) => {
                 let mav = ctx.router.clone();
                 let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
-                let cap = vehicle.capabilities.unwrap_or_default();
+                let cap = vehicle.identity.capabilities.unwrap_or_default();
                 let param = vehicle.parameters_mut().get_mut(&ident)?;
 
                 let ident_cloned = ident.clone();
