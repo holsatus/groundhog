@@ -7,8 +7,8 @@ use directories::ProjectDirs;
 
 use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkBuild, theme::ThemeMode};
 
-static PROJECT_DIRS: LazyLock<ProjectDirs> =
-    LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
+static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
+    LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
 
 /// Current on-disk configuration schema version.
 const CONFIG_VERSION: u32 = 1;
@@ -57,16 +57,19 @@ impl Default for Configuration {
 }
 
 impl Configuration {
-    fn config_path() -> PathBuf {
-        PROJECT_DIRS.config_dir().join("config.ron")
+    fn config_path() -> Result<PathBuf, BoxError> {
+        PROJECT_DIRS
+            .as_ref()
+            .map(|dirs| dirs.config_dir().join("config.ron"))
+            .ok_or_else(|| "no platform configuration directory is available".into())
     }
 
     pub fn initialize() -> Result<Self, BoxError> {
-        Self::initialize_at(&Self::config_path())
+        Self::initialize_at(&Self::config_path()?)
     }
 
     pub fn write_to_file(&self) -> Result<(), BoxError> {
-        self.write_to_file_at(&Self::config_path())
+        self.write_to_file_at(&Self::config_path()?)
     }
 
     /// Load the configuration at `path`.

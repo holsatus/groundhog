@@ -35,6 +35,12 @@ pub struct Application {
     pub(crate) parameter_panel: ParameterPanel,
     pub(crate) router: MavlinkRouter,
     pub(crate) configuration: config::Configuration,
+    /// Cached iced theme, kept in sync with `configuration.settings.theme`.
+    ///
+    /// Regenerating the theme runs real palette colour math and allocates, so
+    /// it is built once at boot and whenever the setting changes rather than
+    /// on every render.
+    pub(crate) theme: Theme,
     pub(crate) fleet: Fleet,
     /// Set when the layout changed and needs to be persisted (debounced).
     pub(crate) layout_dirty: bool,
@@ -154,6 +160,7 @@ impl Application {
             log_panel: LogPanel::new(),
             router: client,
             configuration: config.clone(),
+            theme: config.settings.theme.theme(),
             fleet: Fleet::default(),
             parameter_panel: ParameterPanel::new(),
             layout_dirty: false,
@@ -164,7 +171,7 @@ impl Application {
     }
 
     pub fn theme(&self) -> Theme {
-        self.configuration.settings.theme.theme()
+        self.theme.clone()
     }
 
     pub fn title(&self) -> String {
@@ -319,13 +326,14 @@ impl Application {
         }
     }
 
-    /// Apply an application setting and persist it. The theme takes effect
-    /// immediately because [`Application::theme`] reads it on every render.
+    /// Apply an application setting and persist it. The cached theme is
+    /// refreshed here alongside the setting so it takes effect immediately.
     fn settings_message_update(&mut self, message: settings_panel::Message) -> Task<Message> {
         match message {
             settings_panel::Message::SetTheme(mode) => {
                 if self.configuration.settings.theme != mode {
                     self.configuration.settings.theme = mode;
+                    self.theme = mode.theme();
                     return Task::done(Message::SaveConfigurationToFile);
                 }
             }
@@ -493,20 +501,20 @@ impl Application {
                 .map(Message::Map)
                 .boxed(),
             layout::Panel::Vehicles => {
-                let theme = self.theme();
+                let theme = &self.theme;
                 vehicle_panel::view(
                     self.fleet.vehicles(),
                     self.fleet.primary(),
                     self.map.follow,
-                    &theme,
+                    theme,
                 )
                 .map(Message::Vehicles)
                 .boxed()
             }
             layout::Panel::Parameters => {
-                let theme = self.theme();
+                let theme = &self.theme;
                 self.parameter_panel
-                    .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                    .view(self.fleet.vehicles(), self.fleet.primary(), theme)
                     .map(Message::Parameter)
                     .boxed()
             }
@@ -517,9 +525,9 @@ impl Application {
             .spacing(10.0)
             .boxed(),
             layout::Panel::Logs => {
-                let theme = self.theme();
+                let theme = &self.theme;
                 self.log_panel
-                    .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                    .view(self.fleet.vehicles(), self.fleet.primary(), theme)
                     .map(Message::Logs)
                     .boxed()
             }
