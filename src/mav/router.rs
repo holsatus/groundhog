@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iced::futures::{Stream, stream};
+use futures::{Stream, stream};
 use mavio::{
     Frame,
     default_dialect::{enums::MavCmd, messages::CommandAck},
@@ -483,7 +483,7 @@ pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
 mod tests {
     use super::*;
     use crate::foundation::DEFAULT_GCS_ID;
-    use iced::futures::StreamExt;
+    use futures::StreamExt;
     use mavio::dialects::minimal::messages::Heartbeat;
 
     fn link_with_receiver() -> (Link, mpsc::UnboundedReceiver<Frame<Versionless>>) {

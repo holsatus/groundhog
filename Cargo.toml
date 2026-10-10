@@ -15,6 +15,9 @@ rust-ini = "0.21.3"
 iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "advanced", "canvas", "image"] }
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
+# Direct dependency for the `mav` middleware, which must not depend on the GUI
+# framework. Mirrors iced's own feature set so it stays the same crate/version.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a8115bd1a9ac2779685184c954ee6" }
 mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-common", "tokio"] }

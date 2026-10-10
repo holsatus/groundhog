@@ -1824,6 +1824,7 @@ dependencies = [
  "async-trait",
  "directories",
  "env_logger",
+ "futures",
  "iced",
  "iced_runtime",
  "log",

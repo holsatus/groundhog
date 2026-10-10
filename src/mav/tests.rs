@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use iced::futures::StreamExt;
+use futures::StreamExt;
 use mav_param::{Ident, Value};
 use mavio::{
     DefaultDialect,

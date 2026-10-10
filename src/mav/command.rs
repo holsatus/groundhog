@@ -1,6 +1,6 @@
 use std::{future::IntoFuture, time::Duration};
 
-use iced::futures::future::BoxFuture;
+use futures::future::BoxFuture;
 use mavio::default_dialect::{
     enums::{MavCmd, MavResult},
     messages::{CommandAck, CommandCancel, CommandInt, CommandLong},

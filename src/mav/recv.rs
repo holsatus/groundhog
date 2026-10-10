@@ -1,6 +1,6 @@
 use std::{future::IntoFuture, sync::Arc, time::Duration};
 
-use iced::futures::future::BoxFuture;
+use futures::future::BoxFuture;
 use mavio::{error::SpecError, mavspec::rust::spec::MessageSpecStatic, protocol::Payload};
 use tokio::sync::mpsc;
 
