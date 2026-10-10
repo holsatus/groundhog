@@ -701,6 +701,7 @@ impl MissionCommand {
     }
 
     /// Whether the command carries a WGS-84 position.
+    #[allow(dead_code)] // Part of the command API; exercised by tests.
     pub fn is_positional(&self) -> bool {
         self.position().is_some()
     }

@@ -8,10 +8,6 @@
 //! [`LockKey::Mission`], since the responses carry no transaction id we could
 //! otherwise tell apart.
 
-// The mission transactions are not wired into the application yet; they are
-// exercised by their own tests until the mission UI integration lands.
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use mavio::{

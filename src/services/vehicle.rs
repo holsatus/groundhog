@@ -86,7 +86,6 @@ impl VehicleClient {
     }
 
     /// Download the vehicle's flight plan, replacing the caller's copy.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn download_mission(&self) -> mav::Result<Mission> {
         let downloaded = self
             .router
@@ -106,7 +105,6 @@ impl VehicleClient {
     }
 
     /// Upload `mission` to the vehicle; returns the vehicle's opaque plan id.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn upload_mission(&self, mission: &Mission) -> mav::Result<u32> {
         let wire = mission
             .items()
@@ -121,7 +119,6 @@ impl VehicleClient {
     }
 
     /// Clear the flight plan on the vehicle.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn clear_mission(&self) -> mav::Result<()> {
         self.router
             .mission_clear(self.id, MavMissionType::Mission)
@@ -129,19 +126,16 @@ impl VehicleClient {
     }
 
     /// Ask the vehicle to make item `seq` the current execution point.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn set_current_mission_item(&self, seq: u16) -> mav::Result<()> {
         self.router.mission_set_current(self.id, seq).await
     }
 
     /// Start executing the stored mission.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn start_mission(&self) -> mav::Result<CommandAck> {
         self.run(cmd::mission_start()).await
     }
 
     /// Pause (`true`) or resume (`false`) the running mission.
-    #[allow(dead_code)] // Consumed once the mission UI lands.
     pub async fn pause_mission(&self, pause: bool) -> mav::Result<CommandAck> {
         self.run(cmd::pause_continue(pause)).await
     }

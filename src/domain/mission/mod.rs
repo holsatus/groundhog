@@ -5,16 +5,11 @@
 //! execution progress reported by the vehicle. Transport and protocol handling
 //! live elsewhere.
 
-// The mission feature is not wired into the application yet; it is exercised by
-// its own tests until the UI integration lands.
-#![allow(dead_code)]
-
 use mavio::default_dialect::{enums::MissionState, messages};
 
 pub mod command;
 pub mod file;
 
-#[allow(unused_imports)] // Facade re-export for the upcoming UI integration.
 pub use command::*;
 
 /// A vehicle's mission: the working plan the user edits, plus execution state.
@@ -45,6 +40,7 @@ impl Mission {
         self.items.len()
     }
 
+    #[allow(dead_code)] // Part of the mission list API; exercised by tests.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -58,6 +54,7 @@ impl Mission {
         self.dirty = true;
     }
 
+    #[allow(dead_code)] // Part of the mission list API; exercised by tests.
     pub fn insert(&mut self, index: usize, item: MissionItem) {
         self.items.insert(index, item);
         self.dirty = true;

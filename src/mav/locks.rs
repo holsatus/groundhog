@@ -21,7 +21,6 @@ pub enum LockKey {
     /// Downloading the full parameter list of a specific target
     ParamList(MavlinkId),
     /// A mission transfer (download/upload/clear) with a specific target and mission type.
-    #[allow(dead_code)] // Consumed by tests until the mission UI lands
     Mission(MavlinkId, u8), // u8 = MavMissionType discriminant; the enum is not Eq/Ord
 }
 

@@ -28,8 +28,6 @@ mod router;
 pub use command::Command;
 pub use error::Result;
 pub use locks::LockKey;
-#[allow(unused_imports)] // Facade re-export, consumed once the mission UI lands.
-pub use mission::DownloadedMission;
 pub use param::ParamListSummary;
 pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};
