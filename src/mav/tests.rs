@@ -88,7 +88,7 @@ fn setup() -> (MavlinkRouter, LinkGuard, MockVehicle) {
     let (vehicle_reader, vehicle_writer) = tokio::io::split(vehicle);
 
     let (client, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-    let guard = client.attach_reader_writer(id, gcs_reader, gcs_writer);
+    let guard = client.attach_reader_writer(id, gcs_reader, gcs_writer, false);
 
     let fake = MockVehicle {
         rx: new_async_receiver(vehicle_reader),
@@ -340,6 +340,7 @@ async fn replay_frames_drive_fleet_state() {
         LinkId::new("replay"),
         BytesReader { bytes, pos: 0 },
         tokio::io::sink(),
+        false,
     );
 
     // Fold the replayed frames into a fleet, bounded so the test cannot hang.

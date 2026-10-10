@@ -33,6 +33,17 @@ use crate::{
 const PARAM_SET_PERMITS: usize = 4;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+/// Reduced cadence for high-latency links (as QGroundControl does), to save
+/// bandwidth on expensive links such as satellite.
+const HIGH_LATENCY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+fn heartbeat_interval(high_latency: bool) -> Duration {
+    if high_latency {
+        HIGH_LATENCY_HEARTBEAT_INTERVAL
+    } else {
+        HEARTBEAT_INTERVAL
+    }
+}
 
 /// Bound on buffered application events. When the UI falls behind, the channel
 /// drops the oldest events so the freshest telemetry is what reaches it.
@@ -363,6 +374,7 @@ impl MavlinkRouter {
         link_id: LinkId,
         reader: R,
         writer: W,
+        high_latency: bool,
     ) -> LinkGuard {
         let cancel = CancellationToken::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame<Versionless>>();
@@ -433,7 +445,7 @@ impl MavlinkRouter {
         let token = cancel.clone();
         let id = link_id.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            let mut interval = tokio::time::interval(heartbeat_interval(high_latency));
             token
                 .run_until_cancelled(async {
                     loop {
@@ -490,6 +502,13 @@ mod tests {
         system: 42,
         component: 7,
     };
+
+    #[test]
+    fn heartbeat_interval_slows_for_high_latency() {
+        assert_eq!(heartbeat_interval(false), HEARTBEAT_INTERVAL);
+        assert_eq!(heartbeat_interval(true), HIGH_LATENCY_HEARTBEAT_INTERVAL);
+        assert!(heartbeat_interval(true) > heartbeat_interval(false));
+    }
 
     #[test]
     fn broadcast_succeeds_when_at_least_one_link_delivers() {

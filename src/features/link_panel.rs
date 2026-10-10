@@ -14,7 +14,7 @@ use iced::{
 
 use crate::{
     foundation::LinkId,
-    link::{self, BAUDRATES, LinkBuild, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant},
+    link::{self, BAUDRATES, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant},
     mav::{LinkGuard, MavlinkRouter},
     style,
 };
@@ -56,25 +56,50 @@ pub enum Message {
 /// A request the root must satisfy, since it owns the configuration file.
 #[derive(Debug)]
 pub enum Event {
-    /// Set the in-memory default link configuration, without persisting it.
-    SetConfig(LinkBuild),
-    /// Set and persist the default link configuration.
-    SaveConfig(LinkBuild),
+    /// The configured links changed and should be persisted.
+    LinksChanged(Vec<LinkConfig>),
 }
 
 impl LinkPanel {
-    pub fn new(builder: LinkBuilder, name: String) -> Self {
-        Self {
-            configurator: LinkConfigurator::new(builder, name),
+    /// Build a panel from the persisted links, returning it along with the ids
+    /// of the links marked for auto-connect.
+    pub fn from_config(configs: Vec<LinkConfig>) -> (Self, Vec<LinkId>) {
+        let mut panel = Self {
+            configurator: LinkConfigurator::new(LinkBuilder::default_udp(), "New link".to_owned()),
             links: BTreeMap::new(),
             next_id: 0,
+        };
+
+        let mut auto_connect = Vec::new();
+        for config in configs {
+            let id = panel.fresh_id();
+            if config.auto_connect {
+                auto_connect.push(id.clone());
+            }
+            panel.links.insert(
+                id,
+                Link {
+                    config,
+                    handle: None,
+                },
+            );
         }
+
+        (panel, auto_connect)
     }
 
     /// Mint an opaque link id that does not depend on the display name.
     fn fresh_id(&mut self) -> LinkId {
         self.next_id += 1;
-        LinkId::new(&format!("link-{}", self.next_id))
+        LinkId::new(&format!("link-{:04}", self.next_id))
+    }
+
+    /// The configured links, in display order.
+    fn configs(&self) -> Vec<LinkConfig> {
+        self.links
+            .values()
+            .map(|link| link.config.clone())
+            .collect()
     }
 
     pub fn update(
@@ -91,22 +116,14 @@ impl LinkPanel {
                 self.configurator.auto_connect = auto_connect;
             }
             Message::ChangeVariant(variant) => {
-                if self.configurator.builder.to_variant() == variant {
-                    return (Task::none(), None);
-                }
-
-                self.configurator.builder = variant.to_default_builder();
-                self.configurator.build = self.configurator.builder.try_build();
-                if let Some(build) = self.configurator.build.clone() {
-                    return (Task::none(), Some(Event::SaveConfig(build)));
+                if self.configurator.builder.to_variant() != variant {
+                    self.configurator.builder = variant.to_default_builder();
+                    self.configurator.build = self.configurator.builder.try_build();
                 }
             }
             Message::UpdateBuilder(builder) => {
                 self.configurator.builder = builder;
                 self.configurator.build = self.configurator.builder.try_build();
-                if let Some(build) = self.configurator.build.clone() {
-                    return (Task::none(), Some(Event::SaveConfig(build)));
-                }
             }
             Message::DetectSerialPorts => {
                 if !matches!(self.configurator.builder, LinkBuilder::Serial { .. }) {
@@ -166,11 +183,12 @@ impl LinkPanel {
                         handle: None,
                     },
                 );
-                return (Task::none(), Some(Event::SetConfig(config.build)));
+                return (Task::none(), Some(Event::LinksChanged(self.configs())));
             }
             Message::Connect(id) => {
                 if let Some(link) = self.links.get(&id) {
                     let build = link.config.build.clone();
+                    let high_latency = link.config.high_latency;
                     let router = router.clone();
 
                     return (
@@ -182,6 +200,7 @@ impl LinkPanel {
                                         link_id.clone(),
                                         reader,
                                         writer,
+                                        high_latency,
                                     );
                                     link::Event::Connected(link_id, handle)
                                 }
@@ -205,6 +224,7 @@ impl LinkPanel {
             }
             Message::Delete(id) => {
                 self.links.remove(&id);
+                return (Task::none(), Some(Event::LinksChanged(self.configs())));
             }
             Message::Event(link::Event::Connected(id, handle)) => {
                 if let Some(link) = self.links.get_mut(&id) {
@@ -453,6 +473,7 @@ impl LinkPanel {
 mod tests {
     use super::*;
     use crate::foundation::DEFAULT_GCS_ID;
+    use crate::link::config::LinkBuild;
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {
@@ -468,8 +489,49 @@ mod tests {
 
     fn panel() -> (LinkPanel, MavlinkRouter) {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let panel = LinkPanel::new(LinkBuilder::default_udp(), "Default".to_string());
+        let (panel, _auto_connect) = LinkPanel::from_config(Vec::new());
         (panel, router)
+    }
+
+    #[test]
+    fn from_config_loads_links_and_reports_auto_connect() {
+        let auto = LinkConfig {
+            auto_connect: true,
+            ..config("auto")
+        };
+        let manual = config("manual");
+
+        let (panel, auto_connect) = LinkPanel::from_config(vec![auto, manual]);
+
+        assert_eq!(panel.links.len(), 2);
+        assert_eq!(auto_connect.len(), 1);
+
+        let auto_id = auto_connect[0].clone();
+        let auto_link = panel.links.get(&auto_id).expect("auto link loaded");
+        assert_eq!(auto_link.config.name, "auto");
+        assert!(auto_link.config.auto_connect);
+
+        let manual = panel
+            .links
+            .values()
+            .find(|link| link.config.name == "manual")
+            .expect("manual link loaded");
+        assert!(!manual.config.auto_connect);
+    }
+
+    #[test]
+    fn save_emits_links_changed() {
+        let (mut panel, router) = panel();
+
+        let (_, event) = panel.update(Message::Save(config("A")), &router);
+        let Some(Event::LinksChanged(links)) = event else {
+            panic!("Save should emit LinksChanged");
+        };
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].name, "A");
+
+        let (_, event) = panel.update(Message::ChangeName("B".to_string()), &router);
+        assert!(event.is_none(), "draft edits must not persist");
     }
 
     #[test]

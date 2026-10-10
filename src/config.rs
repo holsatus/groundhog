@@ -5,13 +5,13 @@ use std::{
 
 use directories::ProjectDirs;
 
-use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkBuild, theme::ThemeMode};
+use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkConfig, theme::ThemeMode};
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
 
 /// Current on-disk configuration schema version.
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 
 fn default_config_version() -> u32 {
     CONFIG_VERSION
@@ -31,8 +31,8 @@ pub struct Configuration {
     #[serde(default = "default_config_version")]
     pub version: u32,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_config: Option<LinkBuild>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<LinkConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_picker_path: Option<PathBuf>,
@@ -48,7 +48,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
-            link_config: None,
+            links: Vec::new(),
             file_picker_path: None,
             layout: None,
             settings: Settings::default(),
@@ -200,6 +200,31 @@ mod tests {
         assert!(path.exists(), "a fresh default should be written");
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn links_round_trip_through_serialize() {
+        use crate::link::config::LinkBuild;
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        let mut config = Configuration::default();
+        config.links.push(LinkConfig {
+            name: "Primary".to_string(),
+            auto_connect: true,
+            high_latency: true,
+            build: LinkBuild::Udp {
+                sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 14550),
+            },
+        });
+
+        let text = serialized(&config);
+        let loaded: Configuration = ron::from_str(&text).unwrap();
+
+        assert_eq!(loaded.links.len(), 1);
+        assert_eq!(loaded.links[0].name, "Primary");
+        assert!(loaded.links[0].auto_connect);
+        assert!(loaded.links[0].high_latency);
+        assert_eq!(serialized(&config), serialized(&loaded));
     }
 
     #[test]

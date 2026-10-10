@@ -15,14 +15,13 @@ pub const BAUDRATES: &[u32] = &[
 ];
 
 /// A fully configured link.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LinkConfig {
     pub name: String,
-    /// Reserved: connect this link automatically on startup, once implemented.
-    #[allow(dead_code)]
+    /// Connect this link automatically on startup.
     pub auto_connect: bool,
-    /// Reserved: use a slower heartbeat for this link, once implemented.
-    #[allow(dead_code)]
+    /// Use a slower heartbeat for this link, to save bandwidth on expensive
+    /// links such as satellite.
     pub high_latency: bool,
     pub build: LinkBuild,
 }
@@ -33,26 +32,6 @@ pub enum LinkBuild {
     Tcp { sock_addr: SocketAddrV4 },
     Udp { sock_addr: SocketAddrV4 },
     Serial { port: String, baud: u32 },
-}
-
-impl LinkBuild {
-    pub fn to_builder(&self) -> LinkBuilder {
-        match self {
-            LinkBuild::Tcp { sock_addr } => LinkBuilder::Tcp {
-                addr: sock_addr.ip().to_string(),
-                port: sock_addr.port().to_string(),
-            },
-            LinkBuild::Udp { sock_addr } => LinkBuilder::Udp {
-                addr: sock_addr.ip().to_string(),
-                port: sock_addr.port().to_string(),
-            },
-            LinkBuild::Serial { port, baud } => LinkBuilder::Serial {
-                port: Some(port.clone()),
-                available_ports: Vec::new(),
-                baud: *baud,
-            },
-        }
-    }
 }
 
 /// The editable draft of a link, held as raw text by the link editor.

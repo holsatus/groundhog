@@ -21,7 +21,6 @@ use crate::{
     features::vehicle_panel,
     foundation::{DEFAULT_GCS_ID, MavlinkId},
     layout::{self, Layout},
-    link::LinkBuilder,
     mav,
     mav::MavlinkRouter,
     style,
@@ -139,14 +138,16 @@ impl Application {
             config::Configuration::default()
         });
 
-        let link_builder = config
-            .link_config
-            .as_ref()
-            .map(|cfg| cfg.to_builder())
-            .unwrap_or_else(LinkBuilder::default_udp);
+        let (link_panel, auto_connect) = LinkPanel::from_config(config.links.clone());
 
         let (client, events) = mav::MavlinkRouter::new(DEFAULT_GCS_ID);
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
+
+        let auto_connect = Task::batch(
+            auto_connect
+                .into_iter()
+                .map(|id| Task::done(Message::Link(link_panel::Message::Connect(id)))),
+        );
 
         let layout = config
             .layout
@@ -156,7 +157,7 @@ impl Application {
         let application = Application {
             layout,
             map: Map::new(),
-            link_panel: LinkPanel::new(link_builder, "Default".to_owned()),
+            link_panel,
             log_panel: LogPanel::new(),
             router: client,
             configuration: config.clone(),
@@ -167,7 +168,7 @@ impl Application {
             layout_revision: 0,
         };
 
-        (application, events)
+        (application, Task::batch([events, auto_connect]))
     }
 
     pub fn theme(&self) -> Theme {
@@ -314,12 +315,8 @@ impl Application {
         let task = task.map(Message::Link);
 
         match event {
-            Some(link_panel::Event::SetConfig(build)) => {
-                self.configuration.link_config = Some(build);
-                task
-            }
-            Some(link_panel::Event::SaveConfig(build)) => {
-                self.configuration.link_config = Some(build);
+            Some(link_panel::Event::LinksChanged(links)) => {
+                self.configuration.links = links;
                 Task::batch([task, Task::done(Message::SaveConfigurationToFile)])
             }
             None => task,
