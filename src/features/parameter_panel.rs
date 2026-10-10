@@ -2,9 +2,10 @@
 //! saving/loading a vehicle's parameter set.
 //!
 //! Owns the filter and the per-parameter edit buffers. Parameter data itself
-//! lives on the [`Vehicle`]s, which the root owns and passes in; the router is
-//! passed in for transactions. Writing the remembered file-picker directory
-//! back to the configuration is requested through [`Event`].
+//! lives on the [`Fleet`] (the single owner of vehicle state), which the root
+//! passes in by mutable reference; the router is passed in for transactions.
+//! Writing the remembered file-picker directory back to the configuration is
+//! requested through [`Event`].
 //!
 //! The filtered view is derived on every frame from the live parameter map, so
 //! there is no cached copy to keep in sync when the vehicle or filter changes.
@@ -26,6 +27,7 @@ use mav_param::{Ident, Value};
 use rfd::AsyncFileDialog;
 
 use crate::{
+    domain::fleet::Fleet,
     domain::parameter::{
         self, ChangedStatus, ParamState, Parameter, Parameters, value_as_string, value_parse_as,
         value_type_matches, value_type_name,
@@ -46,7 +48,7 @@ pub struct ParameterFilter {
 impl ParameterFilter {
     /// Whether `param` matches the filter, given the already-lowercased pattern.
     fn matches(&self, ident: &Ident, param: &Parameter, pattern_lower: &str) -> bool {
-        if self.only_changed && matches!(param.state, ParamState::Unchanged) {
+        if self.only_changed && matches!(param.state(), ParamState::Unchanged) {
             return false;
         }
 
@@ -106,7 +108,7 @@ pub enum Message {
 /// parameter transaction.
 pub struct Context<'a> {
     pub router: &'a MavlinkRouter,
-    pub vehicles: &'a mut BTreeMap<MavlinkId, Vehicle>,
+    pub fleet: &'a mut Fleet,
     pub file_picker_path: Option<&'a Path>,
 }
 
@@ -161,10 +163,10 @@ impl ParameterPanel {
             }
             Message::ListReload(mav_id) => {
                 let mav = ctx.router.clone();
-                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
+                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
 
                 let request_capabilities = vehicle.capabilities.is_none();
-                vehicle.parameters.loading_state.has_loaded.clear();
+                vehicle.parameters_mut().reset_loading();
 
                 let task = Task::perform(
                     async move { mav.param_list(mav_id, request_capabilities).await },
@@ -178,16 +180,15 @@ impl ParameterPanel {
                 Err(error) => log::warn!("Parameter download from {mav_id:?} failed: {error}"),
             },
             Message::UploadAll(mav_id) => {
-                let vehicle = ctx.vehicles.get(&mav_id)?;
+                let vehicle = ctx.fleet.vehicle(mav_id)?;
 
                 // The number of concurrent uploads is limited by the middleware
                 let uploads: Vec<_> = vehicle
-                    .parameters
-                    .map
+                    .parameters()
                     .iter()
-                    .filter_map(|(ident, param)| match param.state {
+                    .filter_map(|(ident, param)| match param.state() {
                         ParamState::Changed { value, .. } => Some(Task::done(
-                            Message::ValueUpload(mav_id, ident.clone(), value),
+                            Message::ValueUpload(mav_id, ident.clone(), *value),
                         )),
                         _ => None,
                     })
@@ -201,19 +202,10 @@ impl ParameterPanel {
                 self.uploads.remove(&(mav_id, ident.clone()));
 
                 {
-                    let entry = ctx.vehicles.get_mut(&mav_id)?;
-                    let param = entry.parameters.map.get_mut(&ident)?;
+                    let entry = ctx.fleet.vehicle_mut(mav_id)?;
+                    let param = entry.parameters_mut().get_mut(&ident)?;
 
-                    param.state = ParamState::Unchanged;
-
-                    if let Some(new_value) = value_parse_as(param.value, &buffer)
-                        && new_value != param.value
-                    {
-                        param.state = ParamState::Changed {
-                            value: new_value,
-                            status: ChangedStatus::None,
-                        };
-                    }
+                    param.set_edited(value_parse_as(param.value(), &buffer));
                 }
 
                 self.editing
@@ -225,10 +217,10 @@ impl ParameterPanel {
                 self.uploads.remove(&(mav_id, ident.clone()));
 
                 {
-                    let entry = ctx.vehicles.get_mut(&mav_id)?;
-                    let param = entry.parameters.map.get_mut(&ident)?;
+                    let entry = ctx.fleet.vehicle_mut(mav_id)?;
+                    let param = entry.parameters_mut().get_mut(&ident)?;
 
-                    param.state = ParamState::Unchanged;
+                    param.reset();
                 }
 
                 if let Some(editing) = self.editing.get_mut(&mav_id) {
@@ -237,9 +229,9 @@ impl ParameterPanel {
             }
             Message::ValueUpload(mav_id, ident, value) => {
                 let mav = ctx.router.clone();
-                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
-                let param = vehicle.parameters.map.get_mut(&ident)?;
+                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
                 let cap = vehicle.capabilities.unwrap_or_default();
+                let param = vehicle.parameters_mut().get_mut(&ident)?;
 
                 let ident_cloned = ident.clone();
                 let ident_for_result = ident.clone();
@@ -255,15 +247,15 @@ impl ParameterPanel {
                 // upload by dropping it; completion drops it too.
                 self.uploads
                     .insert((mav_id, ident.clone()), handle.abort_on_drop());
-                param.state = ParamState::Uploading { value };
+                param.begin_upload(value);
 
                 return Some((task, None));
             }
             Message::ValueUploadResult(mav_id, ident, requested, result) => {
-                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
-                let param = vehicle.parameters.map.get_mut(&ident)?;
+                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
+                let param = vehicle.parameters_mut().get_mut(&ident)?;
 
-                if !matches!(param.state, ParamState::Uploading { value, .. } if value == requested)
+                if !matches!(param.state(), ParamState::Uploading { value } if *value == requested)
                 {
                     return None;
                 }
@@ -271,27 +263,17 @@ impl ParameterPanel {
                 self.uploads.remove(&(mav_id, ident.clone()));
 
                 match result {
-                    Ok(value) if value == requested => {
-                        param.value = value;
-                        param.state = ParamState::Unchanged;
-                    }
+                    Ok(value) if value == requested => param.upload_succeeded(value),
                     Ok(value) => {
                         log::warn!(
                             "Parameter '{}' was set to {value:?} instead of {requested:?}",
                             ident.as_str()
                         );
-                        param.value = value;
-                        param.state = ParamState::Changed {
-                            value: requested,
-                            status: ChangedStatus::Rejected,
-                        };
+                        param.upload_rejected(value, requested);
                     }
                     Err(error) => {
                         log::warn!("Parameter upload for '{}' failed: {error}", ident.as_str());
-                        param.state = ParamState::Changed {
-                            value: requested,
-                            status: ChangedStatus::Failed,
-                        };
+                        param.upload_failed(requested);
                     }
                 }
             }
@@ -363,20 +345,23 @@ impl ParameterPanel {
                     }
                 };
 
-                let vehicle = ctx.vehicles.get_mut(&mav_id)?;
+                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
                 let editing = self.editing.entry(mav_id).or_default();
 
                 // Set the parameters of the vehicle as modified if that is the case
-                for (ident, new_param) in loaded_params.map.iter() {
-                    if let Some(old_param) = vehicle.parameters.map.get_mut(ident)
-                        && value_type_matches(old_param.value, new_param.value)
-                        && old_param.value != new_param.value
+                for (ident, new_param) in loaded_params.iter() {
+                    let Some(current) = vehicle.parameters().get(ident) else {
+                        continue;
+                    };
+                    if !value_type_matches(current.value(), new_param.value())
+                        || current.value() == new_param.value()
                     {
-                        old_param.state = ParamState::Changed {
-                            value: new_param.value,
-                            status: ChangedStatus::None,
-                        };
-                        editing.insert(ident.clone(), value_as_string(new_param.value));
+                        continue;
+                    }
+
+                    if let Some(old_param) = vehicle.parameters_mut().get_mut(ident) {
+                        old_param.mark_changed(new_param.value());
+                        editing.insert(ident.clone(), value_as_string(new_param.value()));
                     }
                 }
 
@@ -415,7 +400,7 @@ impl ParameterPanel {
 
         let save_button = Button::new("Save parameters to file")
             .width(Length::FillPortion(1))
-            .on_press_with(|| Message::SaveDialog(vehicle.parameters.clone()));
+            .on_press_with(|| Message::SaveDialog(vehicle.parameters().clone()));
 
         let load_button = Button::new("Load parameters from file")
             .width(Length::FillPortion(1))
@@ -445,8 +430,8 @@ impl ParameterPanel {
                 .boxed(),
         );
 
-        let got = vehicle.parameters.loading_state.has_loaded.len();
-        let exp = vehicle.parameters.loading_state.expected_count;
+        let got = vehicle.parameters().loading().loaded();
+        let exp = vehicle.parameters().loading().expected();
 
         let style = if got < exp as usize {
             progress_bar::primary
@@ -496,10 +481,10 @@ impl ParameterPanel {
         let pattern = self.filter.ident_pattern.to_lowercase();
         let editing = &self.editing;
 
-        let mut items = Vec::with_capacity(vehicle.parameters.map.len() + 64);
+        let mut items = Vec::with_capacity(vehicle.parameters().len() + 64);
         let mut section = None;
 
-        for (ident, param) in &vehicle.parameters.map {
+        for (ident, param) in vehicle.parameters().iter() {
             if !self.filter.matches(ident, param, &pattern) {
                 continue;
             }
@@ -572,18 +557,18 @@ fn view_param_row<'a>(
     param: &'a Parameter,
     editing: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let type_name = value_type_name(param.value);
+    let type_name = value_type_name(param.value());
 
     let value_string = editing
         .map(str::to_owned)
-        .unwrap_or_else(|| value_as_string(param.value));
+        .unwrap_or_else(|| value_as_string(param.value()));
 
     let text_input = iced::widget::TextInput::new("Write value", value_string)
         .on_input(move |string| Message::BufferEdit(mav_id, ident.clone(), string))
         .style(move |theme, status| {
             let mut style = iced::widget::text_input::default(theme, status);
             let palette = theme.palette();
-            match &param.state {
+            match param.state() {
                 ParamState::Unchanged => {}
                 ParamState::Changed { status, .. } => {
                     style.background = match status {
@@ -602,14 +587,14 @@ fn view_param_row<'a>(
         .width(Length::Fill);
 
     let restore_button = Button::new("Restore")
-        .on_press_maybe(match param.state {
+        .on_press_maybe(match param.state() {
             ParamState::Changed { .. } => Some(Message::ValueReset(mav_id, ident.clone())),
             _ => None,
         })
         .width(80.0);
 
-    let restore_tooltip = container(Text::new(match param.state {
-        ParamState::Changed { .. } => format!("Restore to: {}", value_as_string(param.value)),
+    let restore_tooltip = container(Text::new(match param.state() {
+        ParamState::Changed { .. } => format!("Restore to: {}", value_as_string(param.value())),
         _ => "Nothing to restore".to_string(),
     }))
     .padding(10.0)
@@ -619,9 +604,9 @@ fn view_param_row<'a>(
         .delay(std::time::Duration::from_millis(250));
 
     let upload_button = Button::new("Upload")
-        .on_press_maybe(match param.state {
+        .on_press_maybe(match param.state() {
             ParamState::Changed { value, .. } => {
-                Some(Message::ValueUpload(mav_id, ident.clone(), value))
+                Some(Message::ValueUpload(mav_id, ident.clone(), *value))
             }
             _ => None,
         })
@@ -659,10 +644,13 @@ fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::vehicle::Vehicle;
 
     const A: MavlinkId = MavlinkId {
         system: 1,
+        component: 1,
+    };
+    const B: MavlinkId = MavlinkId {
+        system: 2,
         component: 1,
     };
 
@@ -670,34 +658,41 @@ mod tests {
         Ident::from_str_truncated(name)
     }
 
-    fn vehicle(params: &[(&str, Value)]) -> Vehicle {
-        let mut vehicle = Vehicle::new(A);
+    /// Register `id` and seed it with `params`, using only the public domain API.
+    fn add_vehicle(fleet: &mut Fleet, id: MavlinkId, params: &[(&str, Value)]) {
+        fleet.observe(id, std::time::Instant::now(), None);
+        let vehicle = fleet.vehicle_mut(id).unwrap();
         for (name, value) in params {
-            vehicle
-                .parameters
-                .map
-                .insert(ident(name), Parameter::new(*value));
+            vehicle.parameters_mut().insert(ident(name), *value);
         }
-        vehicle
+    }
+
+    fn param<'a>(fleet: &'a Fleet, id: MavlinkId, key: &Ident) -> &'a Parameter {
+        fleet
+            .vehicle(id)
+            .unwrap()
+            .parameters()
+            .get(key)
+            .unwrap()
     }
 
     /// Run one message against the panel with a fresh context, returning any event.
     fn step(
         panel: &mut ParameterPanel,
         router: &MavlinkRouter,
-        vehicles: &mut BTreeMap<MavlinkId, Vehicle>,
+        fleet: &mut Fleet,
         message: Message,
     ) -> Option<Event> {
         let mut ctx = Context {
             router,
-            vehicles,
+            fleet,
             file_picker_path: None,
         };
         panel.update(message, &mut ctx).1
     }
 
     fn changed_state(param: &Parameter) -> Option<&ChangedStatus> {
-        match &param.state {
+        match param.state() {
             ParamState::Changed { status, .. } => Some(status),
             _ => None,
         }
@@ -707,10 +702,7 @@ mod tests {
     fn filter_matches_by_substring_and_only_changed() {
         let unchanged = Parameter::new(Value::F32(1.0));
         let mut changed = Parameter::new(Value::F32(1.0));
-        changed.state = ParamState::Changed {
-            value: Value::F32(2.0),
-            status: ChangedStatus::None,
-        };
+        changed.set_edited(Some(Value::F32(2.0)));
 
         let all = ParameterFilter::default();
         assert!(all.matches(&ident("BAT_CAPACITY"), &unchanged, ""));
@@ -728,19 +720,20 @@ mod tests {
     #[test]
     fn buffer_edit_marks_changed_and_reset_reverts() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([(A, vehicle(&[("PARAM_ONE", Value::F32(1.0))]))]);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
         let key = ident("PARAM_ONE");
 
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::BufferEdit(A, key.clone(), "2.0".to_owned()),
         );
 
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
+            param(&fleet, A, &key).state(),
             ParamState::Changed { .. }
         ));
         assert_eq!(panel.editing[&A][&key], "2.0");
@@ -748,12 +741,12 @@ mod tests {
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueReset(A, key.clone()),
         );
 
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
+            param(&fleet, A, &key).state(),
             ParamState::Unchanged
         ));
         assert!(!panel.editing[&A].contains_key(&key));
@@ -762,7 +755,8 @@ mod tests {
     #[test]
     fn upload_result_transitions_state() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([(A, vehicle(&[("PARAM_ONE", Value::F32(1.0))]))]);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
         let key = ident("PARAM_ONE");
 
@@ -770,11 +764,11 @@ mod tests {
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUpload(A, key.clone(), Value::F32(2.0)),
         );
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
+            param(&fleet, A, &key).state(),
             ParamState::Uploading { .. }
         ));
         assert!(panel.uploads.contains_key(&(A, key.clone())));
@@ -783,31 +777,31 @@ mod tests {
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUploadResult(A, key.clone(), Value::F32(2.0), Ok(Value::F32(2.0))),
         );
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
+            param(&fleet, A, &key).state(),
             ParamState::Unchanged
         ));
-        assert_eq!(vehicles[&A].parameters.map[&key].value, Value::F32(2.0));
+        assert_eq!(param(&fleet, A, &key).value(), Value::F32(2.0));
         assert!(!panel.uploads.contains_key(&(A, key.clone())));
 
         // Clamped by the target: rejected, keeping the requested value.
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUpload(A, key.clone(), Value::F32(5.0)),
         );
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUploadResult(A, key.clone(), Value::F32(5.0), Ok(Value::F32(3.0))),
         );
         assert_eq!(
-            changed_state(&vehicles[&A].parameters.map[&key]),
+            changed_state(param(&fleet, A, &key)),
             Some(&ChangedStatus::Rejected)
         );
 
@@ -815,13 +809,13 @@ mod tests {
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUpload(A, key.clone(), Value::F32(7.0)),
         );
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUploadResult(
                 A,
                 key.clone(),
@@ -830,7 +824,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            changed_state(&vehicles[&A].parameters.map[&key]),
+            changed_state(param(&fleet, A, &key)),
             Some(&ChangedStatus::Failed)
         );
     }
@@ -838,7 +832,8 @@ mod tests {
     #[test]
     fn stale_upload_result_is_ignored() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([(A, vehicle(&[("PARAM_ONE", Value::F32(1.0))]))]);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
         let key = ident("PARAM_ONE");
 
@@ -846,58 +841,59 @@ mod tests {
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::ValueUploadResult(A, key.clone(), Value::F32(9.0), Ok(Value::F32(9.0))),
         );
 
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
+            param(&fleet, A, &key).state(),
             ParamState::Unchanged
         ));
-        assert_eq!(vehicles[&A].parameters.map[&key].value, Value::F32(1.0));
+        assert_eq!(param(&fleet, A, &key).value(), Value::F32(1.0));
     }
 
     #[test]
     fn list_reload_clears_loaded_markers() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([(A, vehicle(&[("PARAM_ONE", Value::F32(1.0))]))]);
-        vehicles
-            .get_mut(&A)
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        fleet
+            .vehicle_mut(A)
             .unwrap()
-            .parameters
-            .loading_state
-            .has_loaded
-            .insert(0);
+            .parameters_mut()
+            .note_loaded_index(0, 5);
         let mut panel = ParameterPanel::new();
 
-        step(&mut panel, &router, &mut vehicles, Message::ListReload(A));
+        step(&mut panel, &router, &mut fleet, Message::ListReload(A));
 
-        assert!(vehicles[&A].parameters.loading_state.has_loaded.is_empty());
+        assert_eq!(
+            fleet.vehicle(A).unwrap().parameters().loading().loaded(),
+            0
+        );
     }
 
     #[test]
     fn load_finished_marks_changed_and_fills_buffer() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([(A, vehicle(&[("PARAM_ONE", Value::F32(1.0))]))]);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
         let key = ident("PARAM_ONE");
 
         let mut loaded = Parameters::default();
-        loaded
-            .map
-            .insert(key.clone(), Parameter::new(Value::F32(3.0)));
+        loaded.insert(key.clone(), Value::F32(3.0));
 
         let event = step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::LoadFinished(PathBuf::from("/tmp/params.ini"), A, Ok(loaded)),
         );
 
         assert!(matches!(event, Some(Event::SetFilePickerPath(_))));
         assert!(matches!(
-            vehicles[&A].parameters.map[&key].state,
-            ParamState::Changed { value: Value::F32(v), .. } if v == 3.0
+            param(&fleet, A, &key).state(),
+            ParamState::Changed { value: Value::F32(v), .. } if *v == 3.0
         ));
         assert_eq!(panel.editing[&A][&key], "3");
     }
@@ -905,27 +901,16 @@ mod tests {
     #[test]
     fn editing_buffers_are_kept_per_vehicle() {
         let (router, _events) = MavlinkRouter::new();
-        let mut vehicles = BTreeMap::from([
-            (A, vehicle(&[("PARAM_ONE", Value::F32(1.0))])),
-            (
-                MavlinkId {
-                    system: 2,
-                    component: 1,
-                },
-                vehicle(&[("PARAM_ONE", Value::F32(1.0))]),
-            ),
-        ]);
-        let other = MavlinkId {
-            system: 2,
-            component: 1,
-        };
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        add_vehicle(&mut fleet, B, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
         let key = ident("PARAM_ONE");
 
         step(
             &mut panel,
             &router,
-            &mut vehicles,
+            &mut fleet,
             Message::BufferEdit(A, key.clone(), "42".to_owned()),
         );
 
@@ -933,7 +918,7 @@ mod tests {
         assert!(
             !panel
                 .editing
-                .get(&other)
+                .get(&B)
                 .is_some_and(|entry| entry.contains_key(&key))
         );
         assert_eq!(panel.editing[&A][&key], "42");

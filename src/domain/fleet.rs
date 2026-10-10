@@ -24,6 +24,11 @@ pub enum FleetEvent {
     PrimaryMoved(Mercator),
 }
 
+/// Every vehicle the GCS has seen, and which one is primary.
+///
+/// `Fleet` is the single owner of [`Vehicle`] state. All mutation flows through
+/// `Fleet`, `Vehicle`, and `Parameter` methods; the underlying vehicles and
+/// their fields are private so no other layer can poke at domain state.
 #[derive(Default)]
 pub struct Fleet {
     vehicles: BTreeMap<MavlinkId, Vehicle>,
@@ -35,8 +40,12 @@ impl Fleet {
         &self.vehicles
     }
 
-    pub fn vehicles_mut(&mut self) -> &mut BTreeMap<MavlinkId, Vehicle> {
-        &mut self.vehicles
+    pub fn vehicle(&self, id: MavlinkId) -> Option<&Vehicle> {
+        self.vehicles.get(&id)
+    }
+
+    pub fn vehicle_mut(&mut self, id: MavlinkId) -> Option<&mut Vehicle> {
+        self.vehicles.get_mut(&id)
     }
 
     pub fn primary(&self) -> Option<MavlinkId> {

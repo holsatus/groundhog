@@ -17,7 +17,7 @@ use slippery::{Geodetic, Mercator};
 
 use crate::{
     domain::firmware::{self, FlightMode},
-    domain::parameter::{self, Parameter, Parameters},
+    domain::parameter::{self, Parameters},
     foundation::MavlinkId,
 };
 
@@ -35,7 +35,7 @@ pub struct Vehicle {
     pub capabilities: Option<MavProtocolCapability>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
-    pub parameters: Parameters,
+    parameters: Parameters,
     pub message_history: VecDeque<MavMessage>,
     pub latest_message: HashMap<u32, MavMessage>,
     pub attitude: Option<Attitude>,
@@ -109,6 +109,14 @@ impl Vehicle {
         }
     }
 
+    pub fn parameters(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    pub fn parameters_mut(&mut self) -> &mut Parameters {
+        &mut self.parameters
+    }
+
     pub fn on_component_information_basic(
         &mut self,
         message: &messages::ComponentInformationBasic,
@@ -141,39 +149,17 @@ impl Vehicle {
             return;
         };
 
-        match self.parameters.map.entry(ident) {
-            std::collections::btree_map::Entry::Vacant(vacant_entry) => {
-                _ = vacant_entry.insert(Parameter::new(new_value))
-            }
-            std::collections::btree_map::Entry::Occupied(mut occupied_entry) => {
-                // Upload results are handled by `parameter::Message::ValueUploaded`
-                occupied_entry.get_mut().value = new_value;
-            }
-        }
+        // Upload results are handled by `parameter::Message::ValueUploaded`: a
+        // reported value only refreshes the stored one, never the edit state.
+        self.parameters.observe_value(ident, new_value);
 
         if message.param_index == u16::MAX {
             return;
         }
 
         // Keep track of how many we expect
-        if message.param_count > 0 {
-            self.parameters
-                .loading_state
-                .has_loaded
-                .insert(message.param_index);
-
-            self.parameters.loading_state.expected_count = message.param_count;
-
-            if message.param_index + 1 == message.param_count {
-                let got = self.parameters.loading_state.has_loaded.len();
-                let exp = message.param_count;
-                if got >= exp as usize {
-                    log::info!("Loaded total of {got} parameters");
-                } else {
-                    log::warn!("Expected {exp} paramaters, got {got}");
-                }
-            }
-        }
+        self.parameters
+            .note_loaded_index(message.param_index, message.param_count);
     }
 
     fn on_heartbeat(&mut self, message: &messages::Heartbeat) {

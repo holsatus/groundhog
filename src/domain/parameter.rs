@@ -5,8 +5,8 @@ use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
 #[derive(Clone, Debug)]
 pub struct Parameter {
-    pub(crate) value: Value,
-    pub(crate) state: ParamState,
+    value: Value,
+    state: ParamState,
 }
 
 #[derive(Clone, Debug)]
@@ -30,20 +30,170 @@ impl Parameter {
             state: ParamState::Unchanged,
         }
     }
+
+    /// The last value reported by (or accepted for) the target.
+    pub fn value(&self) -> Value {
+        self.value
+    }
+
+    /// The local edit state relative to [`Parameter::value`].
+    pub fn state(&self) -> &ParamState {
+        &self.state
+    }
+
+    /// Fold a freshly parsed edit buffer into the state. An unparseable buffer
+    /// or a value equal to the current one clears any pending change.
+    pub fn set_edited(&mut self, parsed: Option<Value>) {
+        match parsed {
+            Some(value) if value != self.value => {
+                self.state = ParamState::Changed {
+                    value,
+                    status: ChangedStatus::None,
+                };
+            }
+            _ => self.state = ParamState::Unchanged,
+        }
+    }
+
+    /// Discard a pending change. The reported value is left untouched.
+    pub fn reset(&mut self) {
+        self.state = ParamState::Unchanged;
+    }
+
+    /// Mark this parameter as being uploaded with `value`.
+    pub fn begin_upload(&mut self, value: Value) {
+        self.state = ParamState::Uploading { value };
+    }
+
+    /// The target accepted the upload and now reports `value`.
+    pub fn upload_succeeded(&mut self, value: Value) {
+        self.value = value;
+        self.state = ParamState::Unchanged;
+    }
+
+    /// The target rejected the upload, reporting `reported`; keep `requested`.
+    pub fn upload_rejected(&mut self, reported: Value, requested: Value) {
+        self.value = reported;
+        self.state = ParamState::Changed {
+            value: requested,
+            status: ChangedStatus::Rejected,
+        };
+    }
+
+    /// The upload transport failed; keep `requested`.
+    pub fn upload_failed(&mut self, requested: Value) {
+        self.state = ParamState::Changed {
+            value: requested,
+            status: ChangedStatus::Failed,
+        };
+    }
+
+    /// Record the value the target currently reports, without touching the
+    /// local edit state.
+    fn observe_value(&mut self, value: Value) {
+        self.value = value;
+    }
+
+    /// Mark a different `value` as pending, leaving the reported value in place.
+    pub fn mark_changed(&mut self, value: Value) {
+        self.state = ParamState::Changed {
+            value,
+            status: ChangedStatus::None,
+        };
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Parameters {
-    pub(crate) map: BTreeMap<Ident, Parameter>,
-    pub(crate) loading_state: LoadingState,
+    map: BTreeMap<Ident, Parameter>,
+    loading_state: LoadingState,
+}
+
+impl Parameters {
+    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &Parameter)> {
+        self.map.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn get(&self, id: &Ident) -> Option<&Parameter> {
+        self.map.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: &Ident) -> Option<&mut Parameter> {
+        self.map.get_mut(id)
+    }
+
+    /// Insert a parameter with an initial value, replacing any existing one.
+    pub fn insert(&mut self, id: Ident, value: Value) -> Option<Parameter> {
+        self.map.insert(id, Parameter::new(value))
+    }
+
+    pub fn loading(&self) -> &LoadingState {
+        &self.loading_state
+    }
+
+    /// Clear the set of received parameter indices, matching the state before a
+    /// fresh list download. The expected count is left in place.
+    pub fn reset_loading(&mut self) {
+        self.loading_state.has_loaded.clear();
+    }
+
+    /// Insert a parameter if it is unseen, otherwise just refresh its reported
+    /// value.
+    pub fn observe_value(&mut self, id: Ident, value: Value) {
+        match self.map.entry(id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                _ = entry.insert(Parameter::new(value));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().observe_value(value);
+            }
+        }
+    }
+
+    /// Record that parameter `index` of an expected `count` has arrived, and log
+    /// completion once the final index is seen.
+    pub fn note_loaded_index(&mut self, index: u16, count: u16) {
+        if count == 0 {
+            return;
+        }
+
+        self.loading_state.has_loaded.insert(index);
+        self.loading_state.expected_count = count;
+
+        if index + 1 == count {
+            let got = self.loading_state.has_loaded.len();
+            let exp = count;
+            if got >= exp as usize {
+                log::info!("Loaded total of {got} parameters");
+            } else {
+                log::warn!("Expected {exp} paramaters, got {got}");
+            }
+        }
+    }
 }
 
 /// Used to track which parameters in a continuous sequence have been received.
 /// Any that are missing can be re-requested afterwards
 #[derive(Debug, Clone, Default)]
 pub struct LoadingState {
-    pub(crate) has_loaded: HashSet<u16>,
-    pub(crate) expected_count: u16,
+    has_loaded: HashSet<u16>,
+    expected_count: u16,
+}
+
+impl LoadingState {
+    /// How many parameters have been received so far.
+    pub fn loaded(&self) -> usize {
+        self.has_loaded.len()
+    }
+
+    /// How many parameters the target advertised.
+    pub fn expected(&self) -> u16 {
+        self.expected_count
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +264,7 @@ pub(crate) fn load_parameters_from_ini(
     path: impl AsRef<std::path::Path>,
 ) -> Result<Parameters, ini::Error> {
     let conf = ini::Ini::load_from_file(path)?;
-    let mut parameter_map = BTreeMap::new();
+    let mut parameters = Parameters::default();
 
     for (section, properties) in conf.iter() {
         for (key, ty_val) in properties.iter() {
@@ -149,20 +299,17 @@ pub(crate) fn load_parameters_from_ini(
             };
 
             match parse() {
-                Some(value) => _ = parameter_map.insert(ident, Parameter::new(value)),
+                Some(value) => _ = parameters.insert(ident, value),
                 None => log::warn!("client: Could not parse value ({val}) as type ({ty})"),
             }
         }
     }
 
-    Ok(Parameters {
-        map: parameter_map,
-        loading_state: LoadingState::default(),
-    })
+    Ok(parameters)
 }
 
 pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option<Value> {
-    use mav_param::{Value, value::from_bytewise};
+    use mav_param::{value::from_bytewise, Value};
     let value = match param_type {
         MavParamType::Uint8 => Value::U8(from_bytewise(param_value)),
         MavParamType::Int8 => Value::I8(from_bytewise(param_value)),
@@ -178,7 +325,7 @@ pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option
 }
 
 pub fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
-    use mav_param::{Value, value::into_bytewise};
+    use mav_param::{value::into_bytewise, Value};
     match value {
         Value::U8(v) => (into_bytewise(v), MavParamType::Uint8),
         Value::I8(v) => (into_bytewise(v), MavParamType::Int8),

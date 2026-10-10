@@ -224,7 +224,7 @@ impl Application {
         let (task, event) = {
             let mut ctx = parameter_panel::Context {
                 router: &self.router,
-                vehicles: self.fleet.vehicles_mut(),
+                fleet: &mut self.fleet,
                 file_picker_path: self.configuration.file_picker_path.as_deref(),
             };
             self.parameter_panel.update(message, &mut ctx)
