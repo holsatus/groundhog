@@ -25,6 +25,7 @@ use rfd::AsyncFileDialog;
 
 use crate::{
     domain::fleet::Fleet,
+    domain::geo::GeoPosition,
     domain::mission::{
         Mission, MissionCommand, MissionCommandKind, MissionField, MissionItem, Position,
         file::{parse_wpl, write_wpl},
@@ -47,6 +48,8 @@ pub struct MissionPanel {
     edit: BTreeMap<MissionField, String>,
     /// A transfer/command is in flight; the toolbar is disabled.
     busy: bool,
+    /// Whether the next map click should place a new waypoint.
+    placing: bool,
 }
 
 impl Default for MissionPanel {
@@ -92,6 +95,14 @@ pub enum Message {
     SetCurrent(usize),
     ChangeCommand(usize, MissionCommandKind),
     EditField(usize, MissionField, String),
+
+    /// Toggle "place waypoint" mode for the next map click.
+    TogglePlacing,
+    /// A map drag moved waypoint `usize` to a new geographic position.
+    MoveWaypointTo(usize, GeoPosition),
+    /// A map click in "place waypoint" mode adds a waypoint at this position.
+    AddWaypointAt(GeoPosition),
+
     Downloaded(MavlinkId, mav::Result<Mission>),
     Uploaded(MavlinkId, mav::Result<u32>),
     Cleared(MavlinkId, mav::Result<()>),
@@ -118,7 +129,13 @@ impl MissionPanel {
             selected: None,
             edit: BTreeMap::new(),
             busy: false,
+            placing: false,
         }
+    }
+
+    /// Whether the map is in "place waypoint" mode.
+    pub fn is_placing(&self) -> bool {
+        self.placing
     }
 
     pub fn update(
@@ -340,6 +357,48 @@ impl MissionPanel {
                         .update(index, |item| item.command.set_field(field, value));
                 }
             }
+            Message::TogglePlacing => {
+                self.placing = !self.placing;
+            }
+            Message::MoveWaypointTo(index, position) => {
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+                vehicle.mission.update(index, |item| {
+                    item.command.set_field(MissionField::Latitude, position.lat);
+                    item.command
+                        .set_field(MissionField::Longitude, position.lon);
+                });
+            }
+            Message::AddWaypointAt(position) => {
+                let id = ctx.fleet.primary()?;
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+                let alt_m = vehicle
+                    .position
+                    .current
+                    .as_ref()
+                    .map(|position| position.alt_agl)
+                    .unwrap_or(50.0);
+
+                let command = MissionCommand::default_for(
+                    MissionCommandKind::Waypoint,
+                    Position {
+                        lat: position.lat,
+                        lon: position.lon,
+                        alt_m,
+                    },
+                );
+
+                vehicle.mission.push(MissionItem {
+                    frame: MavFrame::GlobalRelativeAltInt,
+                    autocontinue: true,
+                    command,
+                });
+
+                self.selected = Some(vehicle.mission.len() - 1);
+                self.edit.clear();
+            }
             Message::SaveDialog => {
                 let file_dialog =
                     file_dialog(ctx.file_picker_path).set_file_name("mission.waypoints");
@@ -490,6 +549,12 @@ impl MissionPanel {
             Button::new("Pause").on_press_maybe(enabled.then_some(Message::Pause)),
             Button::new("Resume").on_press_maybe(enabled.then_some(Message::Resume)),
             Button::new("Add waypoint").on_press_maybe(enabled.then_some(Message::AddItem)),
+            Button::new(if self.placing {
+                "Placing…"
+            } else {
+                "Place waypoint"
+            })
+            .on_press_maybe(enabled.then_some(Message::TogglePlacing)),
             Button::new("Save to file").on_press_maybe(enabled.then_some(Message::SaveDialog)),
             Button::new("Load from file").on_press_maybe(enabled.then_some(Message::LoadDialog)),
         ]
@@ -707,6 +772,20 @@ mod tests {
             .lat
     }
 
+    fn lon(fleet: &Fleet, index: usize) -> f64 {
+        mission(fleet)
+            .get(index)
+            .unwrap()
+            .command
+            .position()
+            .unwrap()
+            .lon
+    }
+
+    fn mission_mark_synced(fleet: &mut Fleet) {
+        fleet.vehicle_mut(A).unwrap().mission.mark_synced(None);
+    }
+
     #[test]
     fn add_item_appends_and_selects_a_waypoint() {
         let (router, mut fleet) = setup();
@@ -914,5 +993,66 @@ mod tests {
 
         assert!(fleet.vehicles().is_empty());
         assert_eq!(panel.selected, None);
+    }
+
+    #[test]
+    fn move_waypoint_to_updates_position_and_dirty() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+        mission_mark_synced(&mut fleet);
+        assert!(!mission(&fleet).dirty);
+
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::MoveWaypointTo(
+                0,
+                GeoPosition {
+                    lat: 12.5,
+                    lon: -3.25,
+                },
+            ),
+        );
+
+        assert!((lat(&fleet, 0) - 12.5).abs() < 1e-9);
+        assert!((lon(&fleet, 0) + 3.25).abs() < 1e-9);
+        assert!(mission(&fleet).dirty);
+    }
+
+    #[test]
+    fn add_waypoint_at_appends_and_selects() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::AddWaypointAt(GeoPosition {
+                lat: 47.0,
+                lon: 8.0,
+            }),
+        );
+
+        assert_eq!(mission(&fleet).len(), 1);
+        assert!(mission(&fleet).dirty);
+        assert_eq!(panel.selected, Some(0));
+        assert!((lat(&fleet, 0) - 47.0).abs() < 1e-9);
+        assert!((lon(&fleet, 0) - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn toggle_placing_flips_is_placing() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        assert!(!panel.is_placing());
+        let _ = step(&mut panel, &router, &mut fleet, Message::TogglePlacing);
+        assert!(panel.is_placing());
+        let _ = step(&mut panel, &router, &mut fleet, Message::TogglePlacing);
+        assert!(!panel.is_placing());
     }
 }

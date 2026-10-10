@@ -212,7 +212,7 @@ impl Application {
                 }
             }
             Message::Layout(message) => self.layout_message_update(message),
-            Message::Map(message) => return Some(self.map.update(message).map(Message::Map)),
+            Message::Map(message) => return Some(self.map_message_update(message)),
             Message::Link(message) => return Some(self.link_message_update(message)),
             Message::Logs(message) => self.log_panel.update(message),
             Message::MavEvents(events) => return Some(self.handle_mav_events(events)),
@@ -270,6 +270,25 @@ impl Application {
 
         self.configuration.file_picker_path = Some(file_picker_path.to_path_buf());
         self.save_configuration()
+    }
+
+    fn map_message_update(&mut self, message: map::Message) -> Task<Message> {
+        let map_task = self.map.update(message.clone()).map(Message::Map);
+
+        let mission_task = match message {
+            map::Message::WaypointPressed(index) => {
+                self.mission_message_update(mission_panel::Message::Select(index))
+            }
+            map::Message::WaypointDragged(index, position) => {
+                self.mission_message_update(mission_panel::Message::MoveWaypointTo(index, position))
+            }
+            map::Message::PlaceAt(position) => {
+                self.mission_message_update(mission_panel::Message::AddWaypointAt(position))
+            }
+            _ => Task::none(),
+        };
+
+        Task::batch([map_task, mission_task])
     }
 
     fn mission_message_update(&mut self, message: mission_panel::Message) -> Task<Message> {
@@ -525,7 +544,11 @@ impl Application {
         match panel {
             layout::Panel::Map => self
                 .map
-                .view(self.fleet.vehicles(), self.fleet.primary())
+                .view(
+                    self.fleet.vehicles(),
+                    self.fleet.primary(),
+                    self.mission_panel.is_placing(),
+                )
                 .map(Message::Map)
                 .boxed(),
             layout::Panel::Vehicles => {
