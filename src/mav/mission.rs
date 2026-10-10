@@ -38,10 +38,11 @@ const MISSION_ITEM_TIMEOUT: Duration = Duration::from_millis(250);
 /// Retries after the first attempt.
 const MISSION_MAX_RETRIES: u8 = 5;
 
-// Message ids of the mission-transaction messages a vehicle may send us. We
-// implement the modern `MISSION_REQUEST_INT` <-> `MISSION_ITEM_INT` transfer
-// only; the legacy float items (`MISSION_ITEM`/`MISSION_REQUEST`) are deprecated
-// by the specification and are not handled.
+// Message ids of the mission-transaction messages a vehicle may send us. An
+// upload may be driven by either request form: `MISSION_REQUEST` (40, the
+// legacy request ArduPilot still sends) or `MISSION_REQUEST_INT` (51). We always
+// answer with `MISSION_ITEM_INT` (73), as the spec directs.
+const MISSION_REQUEST: u32 = 40;
 const MISSION_COUNT: u32 = 44;
 const MISSION_ACK: u32 = 47;
 const MISSION_REQUEST_INT: u32 = 51;
@@ -58,7 +59,12 @@ pub struct DownloadedMission {
 enum MissionMessage {
     Count(MissionCount),
     Item(MissionItemInt),
-    RequestInt(MissionRequestInt),
+    /// An item request, normalised from either `MISSION_REQUEST` or
+    /// `MISSION_REQUEST_INT`.
+    Request {
+        seq: u16,
+        mission_type: MavMissionType,
+    },
     Ack(MissionAck),
 }
 
@@ -99,7 +105,16 @@ impl MissionListener {
                     return Some(MissionMessage::Item(message));
                 }
                 Ok(DefaultDialect::MissionRequestInt(message)) => {
-                    return Some(MissionMessage::RequestInt(message));
+                    return Some(MissionMessage::Request {
+                        seq: message.seq,
+                        mission_type: message.mission_type,
+                    });
+                }
+                Ok(DefaultDialect::MissionRequest(message)) => {
+                    return Some(MissionMessage::Request {
+                        seq: message.seq,
+                        mission_type: message.mission_type,
+                    });
                 }
                 Ok(DefaultDialect::MissionAck(message)) => {
                     return Some(MissionMessage::Ack(message));
@@ -113,7 +128,7 @@ impl MissionListener {
 fn is_mission_message(id: u32) -> bool {
     matches!(
         id,
-        MISSION_COUNT | MISSION_ACK | MISSION_REQUEST_INT | MISSION_ITEM_INT
+        MISSION_REQUEST | MISSION_COUNT | MISSION_ACK | MISSION_REQUEST_INT | MISSION_ITEM_INT
     )
 }
 
@@ -220,10 +235,11 @@ impl MavlinkRouter {
                 let remaining = deadline.saturating_duration_since(Instant::now());
 
                 match listener.next(remaining).await {
-                    Some(MissionMessage::RequestInt(request))
-                        if request.mission_type == mission_type && request.seq < count =>
-                    {
-                        self.send_targeted(target, items[request.seq as usize].clone())?;
+                    Some(MissionMessage::Request {
+                        seq,
+                        mission_type: request_type,
+                    }) if request_type == mission_type && seq < count => {
+                        self.send_targeted(target, items[seq as usize].clone())?;
                         // Serving an item proves progress: give the transfer more time.
                         deadline = Instant::now() + MISSION_ACK_TIMEOUT;
                     }

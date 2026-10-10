@@ -17,7 +17,8 @@ use mavio::{
         },
         messages::{
             CommandAck, GlobalPositionInt, Heartbeat, MissionAck, MissionCount, MissionItemInt,
-            MissionRequestInt, MissionRequestList, ParamValue, Statustext, SysStatus, SystemTime,
+            MissionRequest, MissionRequestInt, MissionRequestList, ParamValue, Statustext,
+            SysStatus, SystemTime,
         },
     },
     prelude::V2,
@@ -362,6 +363,55 @@ async fn mission_upload_sends_items_and_returns_id() {
         .await;
 
     assert_eq!(task.await.unwrap().expect("upload should succeed"), 99);
+}
+
+#[tokio::test]
+async fn mission_upload_answers_legacy_mission_request() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![mission_item(0, 11), mission_item(1, 22)];
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items)
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(count) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    assert_eq!(count.count, 2);
+
+    // ArduPilot requests items with the deprecated MISSION_REQUEST (40).
+    for seq in 0..2u16 {
+        vehicle
+            .send(&MissionRequest {
+                seq,
+                mission_type: MavMissionType::Mission,
+                ..Default::default()
+            })
+            .await;
+
+        let DefaultDialect::MissionItemInt(item) = vehicle.recv().await else {
+            panic!("expected MISSION_ITEM_INT")
+        };
+        assert_eq!(item.seq, seq);
+        assert_eq!(item.x, items[seq as usize].x);
+    }
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 42,
+            ..Default::default()
+        })
+        .await;
+
+    assert_eq!(task.await.unwrap().expect("upload should succeed"), 42);
 }
 
 #[tokio::test]
