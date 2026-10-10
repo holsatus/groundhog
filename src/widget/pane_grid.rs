@@ -79,20 +79,18 @@ pub use split::Split;
 pub use state::State;
 pub use title_bar::TitleBar;
 
-use iced::widget::container;
+use iced::Theme;
 use iced::advanced::layout;
 use iced::advanced::mouse;
 use iced::advanced::overlay;
 use iced::advanced::renderer;
-use iced::touch;
 use iced::advanced::widget;
 use iced::advanced::widget::tree::{self, Tree};
-use iced::window;
 use iced::advanced::{self as core, Layout, Shell, Widget};
-use iced::{
-    Background, Border, Color, Event, Length, Pixels, Point, Rectangle, Size, Vector,
-};
-use iced::Theme;
+use iced::touch;
+use iced::widget::container;
+use iced::window;
+use iced::{Background, Border, Color, Event, Length, Pixels, Point, Rectangle, Size, Vector};
 
 const DRAG_DEADBAND_DISTANCE: f32 = 10.0;
 const THICKNESS_RATIO: f32 = 25.0;
@@ -506,11 +504,8 @@ where
                             position.x - layout.bounds().x,
                             position.y - layout.bounds().y,
                         );
-                        let splits = node.split_regions(
-                            self.spacing,
-                            self.min_size,
-                            layout.bounds().size(),
-                        );
+                        let splits =
+                            node.split_regions(self.spacing, self.min_size, layout.bounds().size());
 
                         hovered_split(splits.iter(), self.spacing + *leeway, relative).is_some()
                     })

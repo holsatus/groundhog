@@ -8,13 +8,13 @@
 use std::collections::BTreeMap;
 
 use iced::{
-    widget::{button, checkbox, container, pick_list, text::Ellipsis, text_input, Button, Column},
     Alignment, Element, Length, Task, Widget,
+    widget::{Button, Column, button, checkbox, container, pick_list, text::Ellipsis, text_input},
 };
 
 use crate::{
     foundation::LinkId,
-    link::{self, LinkBuild, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant, BAUDRATES},
+    link::{self, BAUDRATES, LinkBuild, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant},
     mav::{LinkGuard, MavlinkRouter},
     style,
 };

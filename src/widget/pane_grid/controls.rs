@@ -1,6 +1,6 @@
-use iced::widget::container;
-use iced::advanced::{self as core, Widget};
 use iced::Element;
+use iced::advanced::{self as core, Widget};
+use iced::widget::container;
 
 /// The controls of a [`Pane`].
 ///

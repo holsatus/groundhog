@@ -1,12 +1,12 @@
-use iced::widget::container;
+use crate::widget::pane_grid::controls::Controls;
 use iced::advanced::layout;
 use iced::advanced::mouse;
 use iced::advanced::overlay;
 use iced::advanced::renderer;
 use iced::advanced::widget::{self, Tree};
 use iced::advanced::{self as core, Layout, Shell, Widget};
+use iced::widget::container;
 use iced::{Event, Padding, Point, Rectangle, Size, Vector};
-use crate::widget::pane_grid::controls::Controls;
 
 /// The title bar of a [`Pane`].
 ///

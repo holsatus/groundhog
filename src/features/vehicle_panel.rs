@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use iced::{font, never, widget::rich_text, Alignment, Element, Length, Theme, Widget};
+use iced::{Alignment, Element, Length, Theme, Widget, font, never, widget::rich_text};
 use mavio::{
-    default_dialect::{enums::MavSeverity, messages::Heartbeat},
     DefaultDialect,
+    default_dialect::{enums::MavSeverity, messages::Heartbeat},
 };
 
 use crate::{
@@ -27,9 +27,11 @@ pub fn view<'a>(
     let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(17);
 
     // Global controls that used to live in the removed top bar.
-    let mut controls = iced::widget::row![iced::widget::checkbox(follow)
-        .label("Follow primary")
-        .on_toggle(|value| Message::Map(map::Message::Follow(value)))]
+    let mut controls = iced::widget::row![
+        iced::widget::checkbox(follow)
+            .label("Follow primary")
+            .on_toggle(|value| Message::Map(map::Message::Follow(value)))
+    ]
     .spacing(10.0)
     .align_y(Alignment::Center);
 
@@ -149,12 +151,9 @@ pub fn view<'a>(
 
         row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
         row_contents.push(
-            iced::widget::scrollable(iced::widget::row![iced::widget::Column::from_iter(
-                vehicle
-                    .status_texts
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, status)| {
+            iced::widget::scrollable(iced::widget::row![
+                iced::widget::Column::from_iter(vehicle.status_texts.iter().enumerate().map(
+                    |(idx, status)| {
                         let palette = theme.palette();
                         let color = match status.severity {
                             MavSeverity::Emergency => palette.danger.base.color,
@@ -186,9 +185,10 @@ pub fn view<'a>(
                             list_brighter
                         })
                         .padding(5.0)
-                    })
-            )
-            .spacing(10.0),])
+                    }
+                ))
+                .spacing(10.0),
+            ])
             .anchor_bottom()
             .boxed(),
         );

@@ -1,6 +1,6 @@
-use iced::advanced::widget::Tree;
-use iced::advanced::Layout;
 use iced::Point;
+use iced::advanced::Layout;
+use iced::advanced::widget::Tree;
 
 /// A pane that can be dragged.
 pub trait Draggable {

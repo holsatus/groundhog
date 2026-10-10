@@ -14,7 +14,10 @@ use std::{
 use iced::{
     Alignment, Color, Element, Font, Length, Task, Widget,
     alignment::Vertical,
-    widget::{Button, Column, ProgressBar, Space, Text, TextInput, container, progress_bar, row, rule, space, tooltip},
+    widget::{
+        Button, Column, ProgressBar, Space, Text, TextInput, container, progress_bar, row, rule,
+        space, tooltip,
+    },
 };
 use mav_param::{Ident, Value};
 use rfd::AsyncFileDialog;
@@ -205,9 +208,9 @@ impl ParameterPanel {
                     .map
                     .iter()
                     .filter_map(|(ident, param)| match param.state {
-                        ParamState::Changed { value, .. } => {
-                            Some(Task::done(Message::ValueUpload(mav_id, ident.clone(), value)))
-                        }
+                        ParamState::Changed { value, .. } => Some(Task::done(
+                            Message::ValueUpload(mav_id, ident.clone(), value),
+                        )),
                         _ => None,
                     })
                     .collect();
@@ -262,7 +265,8 @@ impl ParameterPanel {
 
                 // Holding the abort handle lets an edit or reset cancel the
                 // upload by dropping it; completion drops it too.
-                self.uploads.insert((mav_id, ident.clone()), handle.abort_on_drop());
+                self.uploads
+                    .insert((mav_id, ident.clone()), handle.abort_on_drop());
                 param.state = ParamState::Uploading { value };
 
                 return Some((task, None));
@@ -435,8 +439,16 @@ impl ParameterPanel {
             .width(Length::FillPortion(1))
             .on_input(Message::FilterIdentPattern);
 
-        entries.push(iced::widget::row![reload_button, upload_button].spacing(5.0).boxed());
-        entries.push(iced::widget::row![save_button, load_button].spacing(5.0).boxed());
+        entries.push(
+            iced::widget::row![reload_button, upload_button]
+                .spacing(5.0)
+                .boxed(),
+        );
+        entries.push(
+            iced::widget::row![save_button, load_button]
+                .spacing(5.0)
+                .boxed(),
+        );
 
         entries.push(filter_field.boxed());
 
@@ -606,12 +618,14 @@ fn view_param_row<'a>(
     .padding(10.0)
     .style(style::tooltip);
 
-    let restore_button =
-        tooltip(restore_button, restore_tooltip, Default::default()).delay(std::time::Duration::from_millis(250));
+    let restore_button = tooltip(restore_button, restore_tooltip, Default::default())
+        .delay(std::time::Duration::from_millis(250));
 
     let upload_button = Button::new("Upload")
         .on_press_maybe(match param.state {
-            ParamState::Changed { value, .. } => Some(Message::ValueUpload(mav_id, ident.clone(), value)),
+            ParamState::Changed { value, .. } => {
+                Some(Message::ValueUpload(mav_id, ident.clone(), value))
+            }
             _ => None,
         })
         .width(80.0);

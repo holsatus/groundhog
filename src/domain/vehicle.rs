@@ -7,9 +7,7 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{
-            MavAutopilot, MavModeFlag, MavProtocolCapability, MavSeverity, MavState, MavType,
-        },
+        enums::{MavAutopilot, MavModeFlag, MavProtocolCapability, MavSeverity, MavState, MavType},
         messages,
     },
     protocol::MessageSpec,

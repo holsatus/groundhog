@@ -70,7 +70,12 @@ impl LayoutConfig {
 
 impl Panel {
     /// Panels offered on the rail, in order. The map is not one of them.
-    pub const DOCKABLE: [Panel; 4] = [Panel::Vehicles, Panel::Parameters, Panel::Links, Panel::Logs];
+    pub const DOCKABLE: [Panel; 4] = [
+        Panel::Vehicles,
+        Panel::Parameters,
+        Panel::Links,
+        Panel::Logs,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -142,10 +147,7 @@ pub struct Layout {
 impl Layout {
     pub fn new() -> Self {
         let (panes, _) = pane_grid::State::new(Panel::Map);
-        let mut layout = Self {
-            panes,
-            focus: None,
-        };
+        let mut layout = Self { panes, focus: None };
 
         // Start with the vehicle HUD visible alongside the map.
         layout.open(Panel::Vehicles);
@@ -182,7 +184,9 @@ impl Layout {
         panes: &pane_grid::State<Panel>,
     ) -> Option<LayoutConfig> {
         match node {
-            pane_grid::Node::Split { axis, ratio, a, b, .. } => Some(LayoutConfig::Split {
+            pane_grid::Node::Split {
+                axis, ratio, a, b, ..
+            } => Some(LayoutConfig::Split {
                 axis: SplitAxis::from(*axis),
                 ratio: *ratio,
                 a: Box::new(Self::node_to_config(a, panes)?),

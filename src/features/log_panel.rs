@@ -7,9 +7,9 @@
 use std::collections::BTreeMap;
 
 use iced::{
-    theme::Palette,
-    widget::{container, pick_list, row, scrollable, text, Column},
     Alignment, Color, Element, Length, Theme, Widget,
+    theme::Palette,
+    widget::{Column, container, pick_list, row, scrollable, text},
 };
 use mavio::default_dialect::enums::MavSeverity;
 

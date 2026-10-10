@@ -5,8 +5,8 @@
 //! dependency between one another.
 
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
     Arc,
+    atomic::{AtomicU16, Ordering},
 };
 
 pub type ArcError = Arc<dyn std::error::Error + Send + Sync + 'static>;
