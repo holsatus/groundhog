@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::{Element, Length, Subscription, Task, Theme, Widget};
@@ -9,6 +12,7 @@ use mavio::{
 use crate::{
     config,
     domain::fleet::{Fleet, FleetEvent},
+    domain::vehicle::Liveness,
     features::link_panel::{self, LinkPanel},
     features::log_panel::{self, LogPanel},
     features::map::{self, Map},
@@ -52,6 +56,9 @@ pub enum Message {
 
     /// Debounce tick that flushes a pending layout save.
     Tick,
+
+    /// Periodic liveness check for every vehicle in the fleet.
+    FleetTick(Instant),
 
     /// Result of an asynchronous configuration write.
     ConfigurationSaved(Result<(), String>),
@@ -206,6 +213,21 @@ impl Application {
                     return Some(self.save_configuration());
                 }
             }
+            Message::FleetTick(now) => {
+                for event in self.fleet.tick(now) {
+                    match event {
+                        // `tick` only ages vehicles today, so liveness is the
+                        // only event it can produce.
+                        FleetEvent::LivenessChanged(mav_id, liveness) => {
+                            log_liveness(mav_id, liveness);
+                        }
+                        FleetEvent::Registered(mav_id) => {
+                            log::debug!("Fleet tick registered vehicle {mav_id:?}");
+                        }
+                        FleetEvent::PrimaryMoved(..) => {}
+                    }
+                }
+            }
         }
 
         None
@@ -319,6 +341,9 @@ impl Application {
                             FleetEvent::Registered(mav_id) => {
                                 log::info!("New vehicle detected: {mav_id:?}");
                                 tasks.push(self.initialize_vehicle(mav_id));
+                            }
+                            FleetEvent::LivenessChanged(mav_id, liveness) => {
+                                log_liveness(mav_id, liveness);
                             }
                             FleetEvent::PrimaryMoved(position) if self.map.follow => {
                                 tasks.push(Task::done(Message::Map(
@@ -473,11 +498,24 @@ impl Application {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        let fleet_tick = iced::time::every(Duration::from_secs(1)).map(Message::FleetTick);
+
         // While the layout is dirty, tick to debounce a configuration write.
-        if self.layout_dirty {
+        let layout_tick = if self.layout_dirty {
             iced::time::every(Duration::from_millis(800)).map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+
+        Subscription::batch([fleet_tick, layout_tick])
+    }
+}
+
+/// Log a liveness transition, louder the further a vehicle drifts.
+fn log_liveness(mav_id: MavlinkId, liveness: Liveness) {
+    match liveness {
+        Liveness::Lost => log::warn!("Vehicle {mav_id:?} lost"),
+        Liveness::Stale => log::info!("Vehicle {mav_id:?} is stale"),
+        Liveness::Active => log::info!("Vehicle {mav_id:?} is active"),
     }
 }

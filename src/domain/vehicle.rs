@@ -24,6 +24,15 @@ use crate::{
 pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
 pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
 
+/// How recently a vehicle has been heard from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Liveness {
+    #[default]
+    Active,
+    Stale,
+    Lost,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
     pub mav_id: MavlinkId,
@@ -36,6 +45,8 @@ pub struct Vehicle {
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
     parameters: Parameters,
+    pub last_seen: Option<Instant>,
+    pub liveness: Liveness,
     pub message_history: VecDeque<MavMessage>,
     pub latest_message: HashMap<u32, MavMessage>,
     pub attitude: Option<Attitude>,

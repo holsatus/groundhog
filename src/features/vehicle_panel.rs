@@ -11,10 +11,19 @@ use mavio::{
 };
 
 use crate::{
-    domain::vehicle::{MavMessage, Vehicle},
+    domain::vehicle::{Liveness, MavMessage, Vehicle},
     foundation::MavlinkId,
     style::{list_brighter, list_default},
 };
+
+/// A short, legible marker for a vehicle's liveness.
+fn liveness_label(liveness: Liveness) -> &'static str {
+    match liveness {
+        Liveness::Active => "active",
+        Liveness::Stale => "stale",
+        Liveness::Lost => "lost",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -46,9 +55,10 @@ pub fn view<'a>(
         let mut vehicle_ids = vehicles.keys().copied().collect::<Vec<_>>();
         vehicle_ids.sort();
         let picker = iced::widget::pick_list(primary, vehicle_ids, |id| {
-            vehicles
-                .get(id)
-                .map_or_else(|| "Invalid vehicle".to_string(), |v| v.pretty_name())
+            vehicles.get(id).map_or_else(
+                || "Invalid vehicle".to_string(),
+                |v| format!("{} ({})", v.pretty_name(), liveness_label(v.liveness)),
+            )
         })
         .on_select(Message::SetPrimary);
 
@@ -70,6 +80,12 @@ pub fn view<'a>(
     let mut mav_state = "Unknown".to_string();
     let mut armed = "Unknown".to_string();
 
+    // Absent any primary vehicle there is nothing to report, so stay `None`
+    // rather than claiming a healthy link.
+    let liveness = primary
+        .and_then(|id| vehicles.get(&id))
+        .map(|vehicle| vehicle.liveness);
+
     if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id)) {
         if let Some(attitude) = vehicle.attitude.as_ref() {
             (roll, pitch, yaw) = attitude.attitude.euler_angles();
@@ -90,6 +106,14 @@ pub fn view<'a>(
             .map_or_else(|| "Unknown".to_string(), |armed| armed.to_string());
     }
 
+    let palette = theme.palette();
+    let (liveness_text, liveness_color) = match liveness {
+        Some(Liveness::Active) => ("active", palette.success.base.color),
+        Some(Liveness::Stale) => ("stale", palette.warning.base.color),
+        Some(Liveness::Lost) => ("lost", palette.danger.base.color),
+        None => ("unknown", palette.secondary.base.color),
+    };
+
     row_contents.push(
         iced::widget::row![
             iced::widget::container(iced::widget::text(format!("armed: {armed}")),)
@@ -98,6 +122,10 @@ pub fn view<'a>(
                 .width(Length::FillPortion(1)),
             iced::widget::container(iced::widget::text(format!("mode: {flight_mode}")),)
                 .width(Length::FillPortion(1)),
+            iced::widget::container(
+                iced::widget::text(format!("link: {liveness_text}")).color(liveness_color),
+            )
+            .width(Length::FillPortion(1)),
         ]
         .width(Length::Fill)
         .spacing(10.0)
