@@ -94,8 +94,10 @@ impl Map {
             .on_update(Message::Projector)
             .with_draw_layer(move |projector, frame| {
                 // Darken the map background to make overlay stand out more
-                let mut black_fill = Fill::default();
-                black_fill.style = Style::Solid(Color::BLACK.scale_alpha(0.5));
+                let black_fill = Fill {
+                    style: Style::Solid(Color::BLACK.scale_alpha(0.5)),
+                    ..Fill::default()
+                };
                 frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);
 
                 iced::debug::time_with("position_segments_view", || {

@@ -1,4 +1,17 @@
-// Vendored fork of `iced_widget::pane_grid` for local customization.
+// Vendored fork of `iced_widget::pane_grid` (iced 0.15.0-dev, rev a8231fd).
+// Keep edits minimal and list them so the fork can be re-vendored or upstreamed:
+//   - pointer events are gated while a split is resized, and captured on release
+//   - a resize stops when a neighbour reaches its minimum size (`clamp_resize`)
+//   - a split resize only trades space between adjacent leaves (`Node::resize`,
+//     `grow_first_leaf` / `grow_last_leaf`)
+//   - grid chrome is drawn in its own layer, with divider lines between panes
+//   - the picked-pane overlay is clipped to its translated bounds
+//   - `Content`/`TitleBar` take a `resizing` flag and hide controls while resizing
+//   - `TitleBar::is_over_pick_area` treats the whole bar (apart from controls)
+//     as a pick area
+//
+// `dead_code` is allowed because this is a binary crate: much of the vendored API
+// surface is intentionally unused.
 #![allow(dead_code)]
 //! Pane grids let your users split regions of your application and organize layout dynamically.
 //!
@@ -160,6 +173,7 @@ where
     min_size: f32,
     on_click: Option<Box<dyn Fn(Pane) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
+    #[allow(clippy::type_complexity)]
     on_resize: Option<(f32, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     class: <Theme as Catalog>::Class<'a>,
     last_mouse_interaction: Option<mouse::Interaction>,

@@ -149,11 +149,25 @@ impl LinkPanel {
             }
             Message::Connect(id) => {
                 if let Some(link) = self.links.get(id.str()) {
+                    let build = link.config.build.clone();
+                    let router = router.clone();
+
                     return (
-                        link.config
-                            .build
-                            .connect(id.clone(), router.clone())
-                            .map(Message::Event),
+                        Task::future(async move {
+                            let link_id = id.clone();
+                            match build.connect().await {
+                                Ok((reader, writer)) => {
+                                    let handle = router.attach_reader_writer(
+                                        link_id.clone(),
+                                        reader,
+                                        writer,
+                                    );
+                                    link::Event::Connected(link_id, handle)
+                                }
+                                Err(error) => link::Event::Failed(error),
+                            }
+                        })
+                        .map(Message::Event),
                         None,
                     );
                 }

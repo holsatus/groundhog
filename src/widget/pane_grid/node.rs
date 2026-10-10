@@ -1,4 +1,4 @@
-use crate::widget::pane_grid::{Axis, Pane, Split};
+use super::{Axis, Pane, Split};
 use iced::{Rectangle, Size};
 
 use std::collections::BTreeMap;

@@ -1,19 +1,19 @@
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
-use iced::{
-    Element, Length, Subscription, Task, Theme, Widget, futures::channel::mpsc::SendError, theme,
-};
+use iced::futures::{SinkExt, Stream, StreamExt};
+use iced::{Element, Length, Subscription, Task, Theme, Widget};
 use mavio::{
     DefaultDialect, default_dialect::messages::ComponentInformationBasic, error::SpecError,
 };
 
 use crate::{
     config,
-    domain::vehicle::Vehicle,
+    domain::fleet::{Fleet, FleetEvent},
     features::link_panel::{self, LinkPanel},
     features::log_panel::{self, LogPanel},
     features::map::{self, Map},
     features::parameter_panel::{self, ParameterPanel},
+    features::settings_panel,
     features::vehicle_panel,
     foundation::MavlinkId,
     layout::{self, Layout},
@@ -24,7 +24,6 @@ use crate::{
 };
 
 pub struct Application {
-    pub(crate) theme: Theme,
     pub(crate) layout: Layout,
     pub(crate) map: Map,
     pub(crate) link_panel: LinkPanel,
@@ -32,16 +31,9 @@ pub struct Application {
     pub(crate) parameter_panel: ParameterPanel,
     pub(crate) router: MavlinkRouter,
     pub(crate) configuration: config::Configuration,
-    pub(crate) vehicles: BTreeMap<MavlinkId, Vehicle>,
-    pub(crate) primary_vehicle: Option<MavlinkId>,
+    pub(crate) fleet: Fleet,
     /// Set when the layout changed and needs to be persisted (debounced).
     pub(crate) layout_dirty: bool,
-}
-
-impl From<SendError> for Message {
-    fn from(_: SendError) -> Self {
-        unreachable!("Why are we here ya dingus?")
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,15 +42,13 @@ pub enum Message {
     Map(map::Message),
     Link(link_panel::Message),
     Logs(log_panel::Message),
-    MavEvent(mav::Event),
+    /// A batch of MAVLink events, collected at most once per telemetry frame.
+    MavEvents(Vec<mav::Event>),
     Parameter(parameter_panel::Message),
+    Vehicles(vehicle_panel::Message),
+    Settings(settings_panel::Message),
 
     SaveConfigurationToFile,
-
-    #[allow(unused)] // TODO
-    UpdateAndSaveConfiguration(config::Configuration),
-
-    SetPrimaryVehicle(MavlinkId),
 
     /// Debounce tick that flushes a pending layout save.
     Tick,
@@ -71,6 +61,50 @@ impl From<parameter_panel::Message> for Message {
     fn from(value: parameter_panel::Message) -> Self {
         Message::Parameter(value)
     }
+}
+
+impl From<settings_panel::Message> for Message {
+    fn from(value: settings_panel::Message) -> Self {
+        Message::Settings(value)
+    }
+}
+
+/// The most often telemetry is allowed to reach `update` and rebuild the view.
+const TELEMETRY_FRAME: Duration = Duration::from_millis(16);
+
+/// Cap the rate at which inbound MAVLink events reach `update`.
+///
+/// The router emits one event per received frame. Without this, a busy link
+/// would rebuild the whole view once per frame; instead events are collected
+/// and delivered in order in a single batch at most once per `frame`.
+fn coalesce(
+    events: impl Stream<Item = mav::Event> + Send + 'static,
+    frame: Duration,
+) -> impl Stream<Item = Vec<mav::Event>> + Send + 'static {
+    iced::stream::channel(1, async move |mut output| {
+        let mut events = Box::pin(events);
+        let mut tick = tokio::time::interval(frame);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // consume the immediate first tick
+
+        let mut batch = Vec::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = tick.tick() => {
+                    if !batch.is_empty()
+                        && output.send(std::mem::take(&mut batch)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                event = events.next() => match event {
+                    Some(event) => batch.push(event),
+                    None => break,
+                },
+            }
+        }
+    })
 }
 
 impl Application {
@@ -87,7 +121,7 @@ impl Application {
             .unwrap_or_else(LinkBuilder::default_udp);
 
         let (client, events) = mav::MavlinkRouter::new();
-        let events = Task::stream(events).map(Message::MavEvent);
+        let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
 
         let layout = config
             .layout
@@ -95,16 +129,14 @@ impl Application {
             .map_or_else(Layout::new, Layout::from_configuration);
 
         let application = Application {
-            theme: theme::Theme::GruvboxDark,
             layout,
             map: Map::new(),
             link_panel: LinkPanel::new(link_builder, "Default".to_owned()),
             log_panel: LogPanel::new(),
             router: client,
             configuration: config.clone(),
-            vehicles: BTreeMap::new(),
+            fleet: Fleet::default(),
             parameter_panel: ParameterPanel::new(),
-            primary_vehicle: None,
             layout_dirty: false,
         };
 
@@ -112,7 +144,7 @@ impl Application {
     }
 
     pub fn theme(&self) -> Theme {
-        self.theme.clone()
+        self.configuration.settings.theme.theme()
     }
 
     pub fn title(&self) -> String {
@@ -137,10 +169,6 @@ impl Application {
     fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
         match message {
             Message::SaveConfigurationToFile => return Some(self.save_configuration()),
-            Message::UpdateAndSaveConfiguration(config) => {
-                self.configuration = config;
-                return Some(self.save_configuration());
-            }
             Message::ConfigurationSaved(result) => {
                 if let Err(error) = result {
                     log::error!("Unable to save configuration file: {error}");
@@ -157,11 +185,21 @@ impl Application {
             Message::Map(message) => return Some(self.map.update(message).map(Message::Map)),
             Message::Link(message) => return Some(self.link_message_update(message)),
             Message::Logs(message) => self.log_panel.update(message),
-            Message::MavEvent(event) => return Some(self.handle_mav_event(event)),
+            Message::MavEvents(events) => return Some(self.handle_mav_events(events)),
             Message::Parameter(message) => return Some(self.parameter_message_update(message)),
-            Message::SetPrimaryVehicle(mav_id) => {
-                self.primary_vehicle = Some(mav_id);
-            }
+            Message::Vehicles(message) => match message {
+                vehicle_panel::Message::SetPrimary(mav_id) => {
+                    self.fleet.set_primary(mav_id);
+                }
+                vehicle_panel::Message::Follow(follow) => {
+                    return Some(
+                        self.map
+                            .update(map::Message::Follow(follow))
+                            .map(Message::Map),
+                    );
+                }
+            },
+            Message::Settings(message) => return Some(self.settings_message_update(message)),
             Message::Tick => {
                 if self.layout_dirty {
                     self.layout_dirty = false;
@@ -186,8 +224,7 @@ impl Application {
         let (task, event) = {
             let mut ctx = parameter_panel::Context {
                 router: &self.router,
-                vehicles: &mut self.vehicles,
-                primary: self.primary_vehicle,
+                vehicles: self.fleet.vehicles_mut(),
                 file_picker_path: self.configuration.file_picker_path.as_deref(),
             };
             self.parameter_panel.update(message, &mut ctx)
@@ -239,63 +276,64 @@ impl Application {
         }
     }
 
-    /// Handle a MAVLink event from the router: register newly seen vehicles and
-    /// feed inbound messages into their state.
-    fn handle_mav_event(&mut self, event: mav::Event) -> Task<Message> {
-        match event {
-            mav::Event::Message(inbound) => {
-                let mav_id = inbound.source_mav;
-
-                // This will be the first vehicle, set it as the primary
-                if self.vehicles.is_empty() {
-                    self.primary_vehicle = Some(mav_id);
+    /// Apply an application setting and persist it. The theme takes effect
+    /// immediately because [`Application::theme`] reads it on every render.
+    fn settings_message_update(&mut self, message: settings_panel::Message) -> Task<Message> {
+        match message {
+            settings_panel::Message::SetTheme(mode) => {
+                if self.configuration.settings.theme != mode {
+                    self.configuration.settings.theme = mode;
+                    return Task::done(Message::SaveConfigurationToFile);
                 }
-
-                let mut tasks = Vec::new();
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    self.vehicles.entry(mav_id)
-                {
-                    log::info!("New vehicle detected: {mav_id:?}");
-                    entry.insert(Vehicle::new(mav_id));
-                    tasks.push(self.initialize_vehicle(mav_id));
-                }
-
-                if let Some(vehicle) = self.vehicles.get_mut(&mav_id) {
-                    match inbound.frame.decode::<DefaultDialect>() {
-                        Ok(message) => vehicle.handle_message(inbound.received_at, message),
-                        Err(error) => match error {
-                            mavio::Error::Spec(SpecError::NotInDialect(id)) => {
-                                // Downgrade this error to trace to avoid spamming the logs
-                                log::trace!("mavlink message id {id} is not in default dialect")
-                            }
-                            error => {
-                                log::trace!("could not decode mavlink frame: {error}");
-                            }
-                        },
-                    }
-                }
-
-                if self.primary_vehicle.is_some_and(|id| id == mav_id) {
-                    self.parameter_panel
-                        .refresh(self.primary_vehicle, &self.vehicles);
-
-                    if self.map.follow
-                        && let Some(vehicle) = self.vehicles.get(&mav_id)
-                        && let Some(position) = &vehicle.global_position
-                    {
-                        tasks.push(Task::done(Message::Map(map::Message::SetViewPosition(
-                            position.pos,
-                        ))));
-                    }
-                }
-
-                Task::batch(tasks)
-            }
-            mav::Event::LinkClosed(link_id) => {
-                log::info!("Link {link_id:?} closed");
-                Task::none()
             }
         }
+
+        Task::none()
+    }
+
+    /// Feed a batch of MAVLink events into the fleet, in order, and turn what
+    /// the fleet reports back into application effects.
+    fn handle_mav_events(&mut self, events: Vec<mav::Event>) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        for event in events {
+            match event {
+                mav::Event::Message(inbound) => {
+                    let source = inbound.source_mav;
+
+                    let decoded = match inbound.frame.decode::<DefaultDialect>() {
+                        Ok(message) => Some(message),
+                        // Downgrade these to trace to avoid spamming the logs
+                        Err(mavio::Error::Spec(SpecError::NotInDialect(id))) => {
+                            log::trace!("mavlink message id {id} is not in default dialect");
+                            None
+                        }
+                        Err(error) => {
+                            log::trace!("could not decode mavlink frame: {error}");
+                            None
+                        }
+                    };
+
+                    for fleet_event in self.fleet.observe(source, inbound.received_at, decoded) {
+                        match fleet_event {
+                            FleetEvent::Registered(mav_id) => {
+                                log::info!("New vehicle detected: {mav_id:?}");
+                                tasks.push(self.initialize_vehicle(mav_id));
+                            }
+                            FleetEvent::PrimaryMoved(position) if self.map.follow => {
+                                tasks.push(Task::done(Message::Map(
+                                    map::Message::SetViewPosition(position),
+                                )));
+                            }
+                            FleetEvent::PrimaryMoved(..) => {}
+                        }
+                    }
+                }
+                mav::Event::LinkClosed(link_id) => log::info!("Link {link_id:?} closed"),
+            }
+        }
+
+        Task::batch(tasks)
     }
 
     pub fn view(&self) -> impl Widget<Message> + '_ {
@@ -394,16 +432,25 @@ impl Application {
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
         match panel {
-            layout::Panel::Map => self.map.view(&self.vehicles).map(Message::Map).boxed(),
-            layout::Panel::Vehicles => vehicle_panel::view(
-                &self.vehicles,
-                self.primary_vehicle,
-                self.map.follow,
-                &self.theme,
-            ),
+            layout::Panel::Map => self
+                .map
+                .view(self.fleet.vehicles())
+                .map(Message::Map)
+                .boxed(),
+            layout::Panel::Vehicles => {
+                let theme = self.theme();
+                vehicle_panel::view(
+                    self.fleet.vehicles(),
+                    self.fleet.primary(),
+                    self.map.follow,
+                    &theme,
+                )
+                .map(Message::Vehicles)
+                .boxed()
+            }
             layout::Panel::Parameters => self
                 .parameter_panel
-                .view(&self.vehicles, self.primary_vehicle, &self.router)
+                .view(self.fleet.vehicles(), self.fleet.primary(), &self.router)
                 .map(Message::Parameter)
                 .boxed(),
             layout::Panel::Links => iced::widget::column![
@@ -412,10 +459,15 @@ impl Application {
             ]
             .spacing(10.0)
             .boxed(),
-            layout::Panel::Logs => self
-                .log_panel
-                .view(&self.vehicles, self.primary_vehicle, &self.theme)
-                .map(Message::Logs)
+            layout::Panel::Logs => {
+                let theme = self.theme();
+                self.log_panel
+                    .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                    .map(Message::Logs)
+                    .boxed()
+            }
+            layout::Panel::Settings => settings_panel::view(&self.configuration.settings)
+                .map(Message::Settings)
                 .boxed(),
         }
     }

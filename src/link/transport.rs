@@ -3,8 +3,6 @@
 
 use std::sync::{Arc, atomic::AtomicBool};
 
-use iced::Task;
-
 use crate::{
     foundation::{ArcError, LinkId},
     mav,
@@ -19,50 +17,43 @@ pub enum Event {
     Failed(ArcError),
 }
 
+/// Erase an error into the shared error type.
+fn arc<E: std::error::Error + Send + Sync + 'static>(error: E) -> ArcError {
+    Arc::new(error)
+}
+
 impl LinkBuild {
-    /// Open the transport and attach it to the provided `router`.
-    pub fn connect(&self, id: LinkId, router: mav::MavlinkRouter) -> Task<Event> {
-        fn attached(id: &LinkId, handle: mav::LinkGuard) -> Task<Event> {
-            Task::done(Event::Connected(id.clone(), handle))
-        }
-
-        fn error_map<E: std::error::Error + Send + Sync + 'static>(error: E) -> Task<Event> {
-            Task::done(Event::Failed(Arc::new(error)))
-        }
-
-        match self.clone() {
-            LinkBuild::Tcp { sock_addr } => Task::future(tokio::net::TcpStream::connect(sock_addr))
-                .then(move |result| match result {
-                    Ok(stream) => {
-                        let (reader, writer) = stream.into_split();
-                        attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
-                    }
-                    Err(error) => error_map(error),
-                }),
-            LinkBuild::Udp { sock_addr } => Task::future(tokio::net::UdpSocket::bind(sock_addr))
-                .then(move |result| match result {
-                    Ok(socket) => {
-                        let connected = AtomicBool::new(false);
-                        let socket = Arc::new((socket, connected));
-                        let writer = super::udp::UdpWriter::new(socket.clone());
-                        let reader = super::udp::UdpReader::new(socket);
-                        attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
-                    }
-                    Err(error) => error_map(error),
-                }),
+    /// Open the transport, returning the reader and writer to attach to a
+    /// router. Awaiting this performs any blocking work off-thread.
+    pub async fn connect(self) -> Result<(BoxedReader, BoxedWriter), ArcError> {
+        match self {
+            LinkBuild::Tcp { sock_addr } => {
+                let stream = tokio::net::TcpStream::connect(sock_addr)
+                    .await
+                    .map_err(arc)?;
+                let (reader, writer) = stream.into_split();
+                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
+            }
+            LinkBuild::Udp { sock_addr } => {
+                let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
+                let socket = Arc::new((socket, AtomicBool::new(false)));
+                let reader = super::udp::UdpReader::new(socket.clone());
+                let writer = super::udp::UdpWriter::new(socket);
+                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
+            }
             LinkBuild::Serial { port, baud } => {
-                let writer = match serial2_tokio::SerialPort::open(&port, baud) {
-                    Ok(port) => port,
-                    Err(error) => return error_map(error),
-                };
+                // `open` and `try_clone` both block and register with the tokio
+                // reactor; `spawn_blocking` enters the runtime context for us.
+                let (reader, writer) = tokio::task::spawn_blocking(move || {
+                    let writer = serial2_tokio::SerialPort::open(&port, baud)?;
+                    let reader = writer.try_clone()?;
+                    Ok::<_, std::io::Error>((reader, writer))
+                })
+                .await
+                .map_err(arc)?
+                .map_err(arc)?;
 
-                // Not sure why this would ever fail?
-                let reader = match writer.try_clone() {
-                    Ok(rcv) => rcv,
-                    Err(error) => return error_map(error),
-                };
-
-                attached(&id, router.attach_reader_writer(id.clone(), reader, writer))
+                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
             }
         }
     }
@@ -105,6 +96,19 @@ impl<W: tokio::io::AsyncWrite + Unpin + Send> DynAsyncWriter for W {
 
 pub struct BoxedReader(pub Box<dyn DynAsyncReader>);
 
+impl BoxedReader {
+    pub fn new(reader: impl DynAsyncReader + 'static) -> Self {
+        Self(Box::new(reader))
+    }
+}
+
+#[async_trait::async_trait]
+impl DynAsyncReader for BoxedReader {
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf).await
+    }
+}
+
 impl mavio::io::AsyncRead<std::io::Error> for BoxedReader {
     async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.read(buf).await
@@ -112,6 +116,23 @@ impl mavio::io::AsyncRead<std::io::Error> for BoxedReader {
 }
 
 pub struct BoxedWriter(pub Box<dyn DynAsyncWriter>);
+
+impl BoxedWriter {
+    pub fn new(writer: impl DynAsyncWriter + 'static) -> Self {
+        Self(Box::new(writer))
+    }
+}
+
+#[async_trait::async_trait]
+impl DynAsyncWriter for BoxedWriter {
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.0.write_all(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush().await
+    }
+}
 
 impl mavio::io::AsyncWrite<std::io::Error> for BoxedWriter {
     async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {

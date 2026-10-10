@@ -7,6 +7,7 @@ mod layout;
 mod link;
 mod mav;
 mod style;
+mod theme;
 mod widget;
 
 use app::Application;

@@ -78,13 +78,16 @@ impl Drop for FilteredReceiver {
     }
 }
 
+/// A predicate used to select which received messages are accepted.
+type MessageFilter<M> = Box<dyn FnMut(&M) -> bool + Send>;
+
 /// Receives messages of type `M` from a specific source. Created by [`MavlinkRouter::recv`].
 ///
 /// Await it directly to get the next matching message (with a timeout), or call
 /// [`MessageReceiver::next`] repeatedly to process a sequence of messages.
 pub struct MessageReceiver<M> {
     receiver: FilteredReceiver,
-    filter: Option<Box<dyn FnMut(&M) -> bool + Send>>,
+    filter: Option<MessageFilter<M>>,
     timeout: Duration,
 }
 

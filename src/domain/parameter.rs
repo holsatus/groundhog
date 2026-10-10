@@ -7,7 +7,6 @@ use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 pub struct Parameter {
     pub(crate) value: Value,
     pub(crate) state: ParamState,
-    pub(crate) editing: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -17,7 +16,7 @@ pub enum ParamState {
     Uploading { value: Value },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangedStatus {
     None,
     Failed,
@@ -29,7 +28,6 @@ impl Parameter {
         Parameter {
             value,
             state: ParamState::Unchanged,
-            editing: None,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::widget::pane_grid::controls::Controls;
+use super::controls::Controls;
 use iced::advanced::layout;
 use iced::advanced::mouse;
 use iced::advanced::overlay;
@@ -137,6 +137,7 @@ where
     /// Draws the [`TitleBar`] with the provided [`Renderer`] and [`Layout`].
     ///
     /// [`Renderer`]: core::Renderer
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         tree: &Tree,
@@ -354,6 +355,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn update(
         &mut self,
         tree: &mut Tree,

@@ -15,6 +15,7 @@ pub enum Panel {
     Parameters,
     Links,
     Logs,
+    Settings,
 }
 
 /// A serialisable mirror of [`pane_grid::Configuration`] for persistence.
@@ -70,11 +71,12 @@ impl LayoutConfig {
 
 impl Panel {
     /// Panels offered on the rail, in order. The map is not one of them.
-    pub const DOCKABLE: [Panel; 4] = [
+    pub const DOCKABLE: [Panel; 5] = [
         Panel::Vehicles,
         Panel::Parameters,
         Panel::Links,
         Panel::Logs,
+        Panel::Settings,
     ];
 
     pub fn title(self) -> &'static str {
@@ -84,6 +86,7 @@ impl Panel {
             Panel::Parameters => "Parameters",
             Panel::Links => "Links",
             Panel::Logs => "Log",
+            Panel::Settings => "Settings",
         }
     }
 
@@ -95,6 +98,7 @@ impl Panel {
             Panel::Parameters => "P",
             Panel::Links => "C",
             Panel::Logs => "L",
+            Panel::Settings => "S",
         }
     }
 
@@ -102,6 +106,7 @@ impl Panel {
     pub fn default_edge(self) -> Edge {
         match self {
             Panel::Logs => Edge::Bottom,
+            Panel::Settings => Edge::Right,
             _ => Edge::Left,
         }
     }

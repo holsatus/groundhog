@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use iced::{
     Alignment, Color, Element, Length, Theme, Widget,
     theme::Palette,
-    widget::{Column, container, pick_list, row, scrollable, text},
+    widget::{container, pick_list, row, scrollable, text, text::Wrapping},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
@@ -17,6 +17,7 @@ use crate::{
     domain::vehicle::{StatusText, Vehicle},
     foundation::MavlinkId,
     style,
+    widget::virtualized::virtual_list,
 };
 
 /// Which vehicles' messages to show.
@@ -49,6 +50,9 @@ const SEVERITIES: [MavSeverity; 8] = [
 
 /// The largest number of messages rendered at once; older ones are dropped.
 const MAX_ENTRIES: usize = 2000;
+
+/// Height of a single log row: one line of text plus the container padding.
+const LOG_ROW_HEIGHT: f32 = 26.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Filter {
@@ -102,35 +106,42 @@ impl LogPanel {
             entries.drain(..entries.len() - MAX_ENTRIES);
         }
 
-        let palette = theme.palette();
-
-        let rows = entries
-            .iter()
+        let entries = entries
+            .into_iter()
             .enumerate()
-            .map(|(index, (id, status))| {
-                let color = severity_color(palette, status.severity);
+            .map(|(index, (id, status))| (index, id, status))
+            .collect::<Vec<_>>();
 
-                container(
-                    row![
-                        text(format!("{}:{}", id.system, id.component)).width(Length::Fixed(56.0)),
-                        text(format!("{:?}", status.severity))
-                            .color(color)
-                            .width(Length::Fixed(96.0)),
-                        text(&status.text).width(Length::Fill),
-                    ]
-                    .spacing(8.0),
-                )
-                .style(if index % 2 == 0 {
-                    style::list_default
-                } else {
-                    style::list_brighter
-                })
-                .padding(2)
-                .boxed()
+        let palette = *theme.palette();
+
+        let list = virtual_list(entries, move |&(index, id, status)| {
+            let color = severity_color(palette, status.severity);
+
+            container(
+                row![
+                    text(format!("{}:{}", id.system, id.component)).width(Length::Fixed(56.0)),
+                    text(format!("{:?}", status.severity))
+                        .color(color)
+                        .width(Length::Fixed(96.0)),
+                    text(&status.text)
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(8.0),
+            )
+            .style(if index % 2 == 0 {
+                style::list_default
+            } else {
+                style::list_brighter
             })
-            .collect::<Vec<Element<'_, Message>>>();
+            .padding(2)
+            .boxed()
+        })
+        .item_height(|_| LOG_ROW_HEIGHT)
+        .key(|(_, id, status)| (*id, status.at))
+        .spacing(0.0);
 
-        let list = scrollable(Column::from_vec(rows))
+        let list = scrollable(list)
             .anchor_bottom()
             .height(Length::Fill)
             .width(Length::Fill);
@@ -197,7 +208,7 @@ impl LogPanel {
     }
 }
 
-fn severity_color(palette: &Palette, severity: MavSeverity) -> Color {
+fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
     match severity {
         MavSeverity::Emergency
         | MavSeverity::Alert

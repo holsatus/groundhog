@@ -53,10 +53,16 @@ enum Height<'a, T> {
     Measured { estimate: f32 },
 }
 
+/// Builds the element for a single item.
+type View<'a, T, Message> = Box<dyn Fn(&T) -> Element<'a, Message> + 'a>;
+
+/// Builds the stable key identifying a single item.
+type KeyFn<'a, T, K> = Box<dyn Fn(usize, &T) -> K + 'a>;
+
 pub struct VirtualList<'a, T, Message, K = usize> {
     items: Vec<T>,
-    view: Box<dyn Fn(&T) -> Element<'a, Message> + 'a>,
-    key: Box<dyn Fn(usize, &T) -> K + 'a>,
+    view: View<'a, T, Message>,
+    key: KeyFn<'a, T, K>,
     height: Height<'a, T>,
     spacing: f32,
     overscan: f32,

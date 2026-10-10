@@ -11,12 +11,18 @@ use mavio::{
 };
 
 use crate::{
-    app::Message,
     domain::vehicle::{MavMessage, Vehicle},
-    features::map,
     foundation::MavlinkId,
     style::{list_brighter, list_default},
 };
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// Make a vehicle the primary one.
+    SetPrimary(MavlinkId),
+    /// Toggle whether the map follows the primary vehicle.
+    Follow(bool),
+}
 
 pub fn view<'a>(
     vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
@@ -30,7 +36,7 @@ pub fn view<'a>(
     let mut controls = iced::widget::row![
         iced::widget::checkbox(follow)
             .label("Follow primary")
-            .on_toggle(|value| Message::Map(map::Message::Follow(value)))
+            .on_toggle(Message::Follow)
     ]
     .spacing(10.0)
     .align_y(Alignment::Center);
@@ -44,7 +50,7 @@ pub fn view<'a>(
                 .get(id)
                 .map_or_else(|| "Invalid vehicle".to_string(), |v| v.pretty_name())
         })
-        .on_select(Message::SetPrimaryVehicle);
+        .on_select(Message::SetPrimary);
 
         controls = controls.push(picker.boxed());
     }

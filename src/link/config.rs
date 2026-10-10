@@ -18,7 +18,11 @@ pub const BAUDRATES: &[u32] = &[
 #[derive(Debug, Clone)]
 pub struct LinkConfig {
     pub name: String,
+    /// Reserved: connect this link automatically on startup, once implemented.
+    #[allow(dead_code)]
     pub auto_connect: bool,
+    /// Reserved: use a slower heartbeat for this link, once implemented.
+    #[allow(dead_code)]
     pub high_latency: bool,
     pub build: LinkBuild,
 }

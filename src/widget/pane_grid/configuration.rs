@@ -1,4 +1,4 @@
-use crate::widget::pane_grid::Axis;
+use super::Axis;
 
 /// The arrangement of a [`PaneGrid`].
 ///

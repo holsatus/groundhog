@@ -2,10 +2,18 @@ use std::{io::Write as _, path::PathBuf, sync::LazyLock};
 
 use directories::ProjectDirs;
 
-use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkBuild};
+use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkBuild, theme::ThemeMode};
 
 static PROJECT_DIRS: LazyLock<ProjectDirs> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog").unwrap());
+
+/// Persisted application preferences.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Which palette to use.
+    pub theme: ThemeMode,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone)]
 pub struct Configuration {
@@ -17,6 +25,9 @@ pub struct Configuration {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutConfig>,
+
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 impl Configuration {

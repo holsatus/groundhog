@@ -1,9 +1,7 @@
 //! The state of a [`PaneGrid`].
 //!
 //! [`PaneGrid`]: super::PaneGrid
-use crate::widget::pane_grid::{
-    Axis, Configuration, Direction, Edge, Node, Pane, Region, Split, Target,
-};
+use super::{Axis, Configuration, Direction, Edge, Node, Pane, Region, Split, Target};
 use iced::{Point, Size};
 
 use std::borrow::Cow;
