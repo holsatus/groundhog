@@ -20,14 +20,16 @@ use crate::{
 };
 
 struct Link {
-    id: LinkId,
     config: LinkConfig,
     handle: Option<LinkGuard>,
 }
 
 pub struct LinkPanel {
     pub(crate) configurator: LinkConfigurator,
-    links: BTreeMap<String, Link>,
+    /// Configured links, keyed by a stable opaque id independent of the name.
+    links: BTreeMap<LinkId, Link>,
+    /// Source of fresh link ids; never derived from the display name.
+    next_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +43,7 @@ pub enum Message {
     /// The result of an asynchronous serial-port enumeration.
     SerialPortsDetected(Result<Vec<String>, String>),
 
-    Save(LinkId, LinkConfig),
+    Save(LinkConfig),
     Connect(LinkId),
     Disconnect(LinkId),
     Event(link::Event),
@@ -61,7 +63,14 @@ impl LinkPanel {
         Self {
             configurator: LinkConfigurator::new(builder, name),
             links: BTreeMap::new(),
+            next_id: 0,
         }
+    }
+
+    /// Mint an opaque link id that does not depend on the display name.
+    fn fresh_id(&mut self) -> LinkId {
+        self.next_id += 1;
+        LinkId::new(&format!("link-{}", self.next_id))
     }
 
     pub fn update(
@@ -136,11 +145,19 @@ impl LinkPanel {
                     self.configurator.build = self.configurator.builder.try_build();
                 }
             }
-            Message::Save(id, config) => {
+            Message::Save(config) => {
+                // Saving a link with an existing name updates it in place,
+                // keeping its id and dropping any live connection.
+                let existing = self
+                    .links
+                    .iter()
+                    .find(|(_, link)| link.config.name == config.name)
+                    .map(|(id, _)| id.clone());
+                let id = existing.unwrap_or_else(|| self.fresh_id());
+
                 self.links.insert(
-                    config.name.clone(),
+                    id,
                     Link {
-                        id,
                         config: config.clone(),
                         handle: None,
                     },
@@ -148,7 +165,7 @@ impl LinkPanel {
                 return (Task::none(), Some(Event::SetConfig(config.build)));
             }
             Message::Connect(id) => {
-                if let Some(link) = self.links.get(id.str()) {
+                if let Some(link) = self.links.get(&id) {
                     let build = link.config.build.clone();
                     let router = router.clone();
 
@@ -173,12 +190,12 @@ impl LinkPanel {
                 }
             }
             Message::Disconnect(id) => {
-                if let Some(link) = self.links.values_mut().find(|link| link.id == id) {
+                if let Some(link) = self.links.get_mut(&id) {
                     drop(link.handle.take())
                 }
             }
             Message::Event(link::Event::Connected(id, handle)) => {
-                if let Some(link) = self.links.values_mut().find(|link| link.id == id) {
+                if let Some(link) = self.links.get_mut(&id) {
                     link.handle = Some(handle)
                 }
             }
@@ -220,11 +237,7 @@ impl LinkPanel {
                 .align_x(Alignment::Center)
                 .align_y(Alignment::Center),
         )
-        .on_press_maybe(
-            self.configurator
-                .parse()
-                .map(|config| Message::Save(LinkId::new(&self.configurator.name), config)),
-        )
+        .on_press_maybe(self.configurator.parse().map(Message::Save))
         .width(Length::Fill);
 
         let contents = Column::with_children(vec![
@@ -363,7 +376,7 @@ impl LinkPanel {
     pub fn view_status(&self) -> Element<'_, Message> {
         let mut contents = Vec::new();
 
-        for (index, link) in self.links.values().enumerate() {
+        for (index, (id, link)) in self.links.iter().enumerate() {
             let button = if link.handle.is_some() {
                 Button::new(
                     container("Disconnect")
@@ -372,7 +385,7 @@ impl LinkPanel {
                 )
                 .style(button::danger)
                 .on_press_with({
-                    let id = link.id.clone();
+                    let id = id.clone();
                     move || Message::Disconnect(id.clone())
                 })
                 .width(100.0)
@@ -383,7 +396,7 @@ impl LinkPanel {
                         .align_y(Alignment::Center),
                 )
                 .on_press_with({
-                    let id = link.id.clone();
+                    let id = id.clone();
                     move || Message::Connect(id.clone())
                 })
                 .width(100.0)
@@ -408,5 +421,69 @@ impl LinkPanel {
         }
 
         Column::from_vec(contents).spacing(2.0).boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddrV4;
+
+    fn config(name: &str) -> LinkConfig {
+        LinkConfig {
+            name: name.to_string(),
+            auto_connect: false,
+            high_latency: false,
+            build: LinkBuild::Udp {
+                sock_addr: SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 14550),
+            },
+        }
+    }
+
+    fn panel() -> (LinkPanel, MavlinkRouter) {
+        let (router, _events) = MavlinkRouter::new();
+        let panel = LinkPanel::new(LinkBuilder::default_udp(), "Default".to_string());
+        (panel, router)
+    }
+
+    #[test]
+    fn saving_same_name_reuses_link_id() {
+        let (mut panel, router) = panel();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        assert_eq!(panel.links.len(), 1);
+        let first_id = panel.links.keys().next().unwrap().clone();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        assert_eq!(panel.links.len(), 1);
+        let second_id = panel.links.keys().next().unwrap().clone();
+
+        assert_eq!(first_id, second_id);
+    }
+
+    #[test]
+    fn saving_different_name_adds_link_with_new_id() {
+        let (mut panel, router) = panel();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        let _ = panel.update(Message::Save(config("B")), &router);
+
+        assert_eq!(panel.links.len(), 2);
+        let ids = panel.links.keys().cloned().collect::<Vec<_>>();
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn connect_and_disconnect_unknown_ids_are_noops() {
+        let (mut panel, router) = panel();
+        let unknown = LinkId::new("does-not-exist");
+
+        let (_, event) = panel.update(Message::Disconnect(unknown.clone()), &router);
+        assert!(event.is_none());
+        assert!(panel.links.is_empty());
+
+        let (_, event) = panel.update(Message::Connect(unknown), &router);
+        assert!(event.is_none());
+        assert!(panel.links.is_empty());
     }
 }
