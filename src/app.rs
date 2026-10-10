@@ -38,6 +38,8 @@ pub struct Application {
     pub(crate) fleet: Fleet,
     /// Set when the layout changed and needs to be persisted (debounced).
     pub(crate) layout_dirty: bool,
+    /// Bumped on every layout change so the debounce timer is restarted.
+    pub(crate) layout_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,9 @@ impl From<settings_panel::Message> for Message {
 /// rasterisation work compared with 60 Hz. Map panning and zooming are
 /// input-driven inside `slippery` and are not affected by this throttle.
 const TELEMETRY_FRAME: Duration = Duration::from_millis(33);
+
+/// Idle time after the last layout change before the layout is persisted.
+const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 
 /// Cap the rate at which inbound MAVLink events reach `update`.
 ///
@@ -152,6 +157,7 @@ impl Application {
             fleet: Fleet::default(),
             parameter_panel: ParameterPanel::new(),
             layout_dirty: false,
+            layout_revision: 0,
         };
 
         (application, events)
@@ -221,6 +227,7 @@ impl Application {
         self.layout.update(message);
         if changed {
             self.configuration.layout = self.layout.configuration();
+            self.layout_revision = self.layout_revision.wrapping_add(1);
             self.layout_dirty = true;
         }
     }
@@ -525,9 +532,14 @@ impl Application {
     pub fn subscription(&self) -> Subscription<Message> {
         let fleet_tick = iced::time::every(Duration::from_secs(1)).map(Message::FleetTick);
 
-        // While the layout is dirty, tick to debounce a configuration write.
+        // Trailing debounce for layout persistence: the timer is restarted on
+        // every layout change (the revision is part of the subscription
+        // identity), so the write happens `LAYOUT_SAVE_DEBOUNCE` after the last
+        // change rather than repeatedly throughout a drag/resize.
         let layout_tick = if self.layout_dirty {
-            iced::time::every(Duration::from_millis(800)).map(|_| Message::Tick)
+            iced::time::every(LAYOUT_SAVE_DEBOUNCE)
+                .with(self.layout_revision)
+                .map(|_| Message::Tick)
         } else {
             Subscription::none()
         };
