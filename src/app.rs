@@ -19,7 +19,7 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::MavlinkId,
+    foundation::{DEFAULT_GCS_ID, MavlinkId},
     layout::{self, Layout},
     link::LinkBuilder,
     mav,
@@ -134,7 +134,7 @@ impl Application {
             .map(|cfg| cfg.to_builder())
             .unwrap_or_else(LinkBuilder::default_udp);
 
-        let (client, events) = mav::MavlinkRouter::new();
+        let (client, events) = mav::MavlinkRouter::new(DEFAULT_GCS_ID);
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
 
         let layout = config

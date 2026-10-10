@@ -25,7 +25,7 @@ use super::{
     matches_target,
 };
 use crate::{
-    foundation::{GCS_MAVLINK_ID, LinkId, MavlinkId},
+    foundation::{LinkId, MavlinkId},
     link::transport::{DynAsyncReader, DynAsyncWriter, new_async_receiver, new_async_sender},
 };
 
@@ -61,8 +61,7 @@ struct Link {
 }
 
 impl Link {
-    fn send(&self, message: &dyn mavio::Message) -> Result<()> {
-        let gcs = GCS_MAVLINK_ID.load();
+    fn send(&self, gcs: MavlinkId, message: &dyn mavio::Message) -> Result<()> {
         let frame = FrameBuilder::new()
             .system_id(gcs.system)
             .component_id(gcs.component)
@@ -101,6 +100,7 @@ struct PendingAckMap {
 }
 
 struct MavlinkRouterInner {
+    gcs_id: MavlinkId,
     events: mpsc::UnboundedSender<Event>,
     links: Mutex<BTreeMap<LinkId, Link>>,
     routes: Mutex<MessageRouteMap>,
@@ -111,12 +111,14 @@ struct MavlinkRouterInner {
 }
 
 impl MavlinkRouter {
-    /// Create a new router, along with the stream of events for the application.
-    pub fn new() -> (Self, impl Stream<Item = Event> + Send + 'static) {
+    /// Create a new router stamping outbound frames with `gcs_id`, along with
+    /// the stream of events for the application.
+    pub fn new(gcs_id: MavlinkId) -> (Self, impl Stream<Item = Event> + Send + 'static) {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let router = Self {
             inner: Arc::new(MavlinkRouterInner {
+                gcs_id,
                 links: Mutex::default(),
                 routes: Mutex::default(),
                 filters: Mutex::default(),
@@ -217,25 +219,29 @@ impl MavlinkRouter {
 
         // Send on the link that is known to be best for this target
         if let Some(link) = best.and_then(|id| links.get(&id)) {
-            return link.send(message);
+            return link.send(self.inner.gcs_id, message);
         }
 
-        // Send on all links to ensure arrival
-        let mut result = Ok(());
+        // Unknown target: broadcast on all links to ensure arrival. The
+        // broadcast succeeds if at least one link accepted the frame; only when
+        // every link fails is the (last) error reported.
+        let mut delivered = false;
+        let mut last_error = MavError::NoLink;
         for link in links.values() {
-            if let Err(error) = link.send(message) {
-                result = Err(error);
+            match link.send(self.inner.gcs_id, message) {
+                Ok(()) => delivered = true,
+                Err(error) => last_error = error,
             }
         }
 
-        result
+        if delivered { Ok(()) } else { Err(last_error) }
     }
 
     fn send_on_link<M: mavio::Message>(&self, link: &LinkId, message: &M) -> Result<()> {
         lock(&self.inner.links)
             .get(link)
             .ok_or(MavError::NoLink)?
-            .send(message)
+            .send(self.inner.gcs_id, message)
     }
 
     fn best_link_for(&self, target: MavlinkId) -> Option<LinkId> {
@@ -290,7 +296,7 @@ impl MavlinkRouter {
     }
 
     fn route_ack(&self, source: MavlinkId, ack: &CommandAck) {
-        let gcs = GCS_MAVLINK_ID.load();
+        let gcs = self.inner.gcs_id;
 
         // Some systems leave the target fields empty, so accept those as well
         let for_us = (ack.target_system == 0 || ack.target_system == gcs.system)
@@ -429,3 +435,64 @@ impl MavlinkRouter {
 /// when [`LinkHandle::close`] is called.
 #[derive(Debug, Clone)]
 pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::foundation::DEFAULT_GCS_ID;
+    use mavio::dialects::minimal::messages::Heartbeat;
+
+    fn link_with_receiver() -> (Link, mpsc::UnboundedReceiver<Frame<Versionless>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Link {
+                sequence: AtomicU8::new(0),
+                tx,
+            },
+            rx,
+        )
+    }
+
+    const UNKNOWN: MavlinkId = MavlinkId {
+        system: 42,
+        component: 7,
+    };
+
+    #[test]
+    fn broadcast_succeeds_when_at_least_one_link_delivers() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+
+        // One healthy link (receiver kept alive) and one dead link (receiver
+        // dropped, so its `send` fails).
+        let (healthy, _healthy_rx) = link_with_receiver();
+        let (dead, dead_rx) = link_with_receiver();
+        drop(dead_rx);
+
+        {
+            let mut links = lock(&router.inner.links);
+            links.insert(LinkId::new("healthy"), healthy);
+            links.insert(LinkId::new("dead"), dead);
+        }
+
+        // Unknown target: broadcast. A single delivery is enough to succeed.
+        assert!(router.route(UNKNOWN, &Heartbeat::default()).is_ok());
+    }
+
+    #[test]
+    fn broadcast_fails_when_every_link_fails() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+
+        let (a, rx_a) = link_with_receiver();
+        let (b, rx_b) = link_with_receiver();
+        drop(rx_a);
+        drop(rx_b);
+
+        {
+            let mut links = lock(&router.inner.links);
+            links.insert(LinkId::new("a"), a);
+            links.insert(LinkId::new("b"), b);
+        }
+
+        assert!(router.route(UNKNOWN, &Heartbeat::default()).is_err());
+    }
+}

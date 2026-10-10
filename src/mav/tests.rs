@@ -15,7 +15,7 @@ use mavio::{
 
 use super::*;
 use crate::{
-    foundation::{GCS_MAVLINK_ID, LinkId},
+    foundation::{DEFAULT_GCS_ID, LinkId},
     link::transport::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
 
@@ -57,12 +57,11 @@ impl MockVehicle {
     }
 
     async fn ack(&mut self, command: MavCmd, result: MavResult) {
-        let gcs = GCS_MAVLINK_ID.load();
         self.send(&CommandAck {
             command,
             result,
-            target_system: gcs.system,
-            target_component: gcs.component,
+            target_system: DEFAULT_GCS_ID.system,
+            target_component: DEFAULT_GCS_ID.component,
             ..Default::default()
         })
         .await;
@@ -75,7 +74,7 @@ fn setup() -> (MavlinkRouter, LinkGuard, MockVehicle) {
     let (gcs_reader, gcs_writer) = tokio::io::split(gcs);
     let (vehicle_reader, vehicle_writer) = tokio::io::split(vehicle);
 
-    let (client, _events) = MavlinkRouter::new();
+    let (client, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
     let guard = client.attach_reader_writer(id, gcs_reader, gcs_writer);
 
     let fake = MockVehicle {

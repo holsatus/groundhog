@@ -660,6 +660,7 @@ fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::DEFAULT_GCS_ID;
 
     const A: MavlinkId = MavlinkId {
         system: 1,
@@ -730,7 +731,7 @@ mod tests {
 
     #[test]
     fn buffer_edit_marks_changed_and_reset_reverts() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -765,7 +766,7 @@ mod tests {
 
     #[test]
     fn upload_result_transitions_state() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -842,7 +843,7 @@ mod tests {
 
     #[test]
     fn stale_upload_result_is_ignored() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -865,7 +866,7 @@ mod tests {
 
     #[test]
     fn list_reload_clears_loaded_markers() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         fleet
@@ -882,7 +883,7 @@ mod tests {
 
     #[test]
     fn load_finished_marks_changed_and_fills_buffer() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -908,7 +909,7 @@ mod tests {
 
     #[test]
     fn editing_buffers_are_kept_per_vehicle() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         add_vehicle(&mut fleet, B, &[("PARAM_ONE", Value::F32(1.0))]);
@@ -934,7 +935,7 @@ mod tests {
 
     #[test]
     fn list_reload_tracks_in_flight_download() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -945,7 +946,7 @@ mod tests {
 
     #[test]
     fn list_reload_started_tracks_in_flight_download() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
@@ -961,7 +962,7 @@ mod tests {
 
     #[test]
     fn list_reload_result_clears_in_flight_download() {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();

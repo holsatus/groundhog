@@ -427,6 +427,7 @@ impl LinkPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::DEFAULT_GCS_ID;
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {
@@ -441,7 +442,7 @@ mod tests {
     }
 
     fn panel() -> (LinkPanel, MavlinkRouter) {
-        let (router, _events) = MavlinkRouter::new();
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let panel = LinkPanel::new(LinkBuilder::default_udp(), "Default".to_string());
         (panel, router)
     }

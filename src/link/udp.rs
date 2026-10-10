@@ -63,8 +63,11 @@ impl AsyncRead for UdpReader {
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
-                cx.waker().wake_by_ref();
                 if e.kind() == std::io::ErrorKind::WouldBlock {
+                    // `poll_recv_from` signals readiness via `Poll::Pending`
+                    // (never `WouldBlock`), so this arm is defensive only;
+                    // waking self retries rather than stalling.
+                    cx.waker().wake_by_ref();
                     Poll::Pending
                 } else {
                     Poll::Ready(Err(e))
