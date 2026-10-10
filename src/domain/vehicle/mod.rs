@@ -19,13 +19,10 @@ use self::{
     status::StatusLog,
 };
 
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Instant,
-};
+use std::time::Instant;
 
 use mav_param::Ident;
-use mavio::{DefaultDialect, default_dialect::messages, protocol::MessageSpec};
+use mavio::{DefaultDialect, default_dialect::messages};
 
 use crate::{
     domain::firmware::FlightMode,
@@ -42,12 +39,6 @@ pub enum Liveness {
     Lost,
 }
 
-#[derive(Clone, Debug)]
-pub struct MavMessage {
-    pub at: Instant,
-    pub message: DefaultDialect,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
     pub mav_id: MavlinkId,
@@ -59,8 +50,6 @@ pub struct Vehicle {
     parameters: Parameters,
     pub last_seen: Option<Instant>,
     pub liveness: Liveness,
-    pub latest_message: HashMap<u32, MavMessage>,
-    pub message_history: VecDeque<MavMessage>,
 }
 
 impl Vehicle {
@@ -144,16 +133,16 @@ impl Vehicle {
                 self.on_param_value(message);
             }
             DefaultDialect::SysStatus(message) => {
-                self.battery.observe_sys_status(message, time);
+                self.battery.observe_sys_status(message);
             }
             DefaultDialect::BatteryStatus(message) => {
-                self.battery.observe_battery_status(message, time);
+                self.battery.observe_battery_status(message);
             }
             DefaultDialect::Attitude(message) => {
-                self.attitude.observe_attitude(message, time);
+                self.attitude.observe_attitude(message);
             }
             DefaultDialect::AttitudeQuaternion(message) => {
-                self.attitude.observe_attitude_quaternion(message, time);
+                self.attitude.observe_attitude_quaternion(message);
             }
             DefaultDialect::GlobalPositionInt(message) => {
                 self.position.observe_global_position_int(message, time)
@@ -172,17 +161,5 @@ impl Vehicle {
             }
             _ => (),
         }
-
-        while self.message_history.len() >= 1000 {
-            self.message_history.pop_back();
-        }
-
-        self.message_history.push_front(MavMessage {
-            at: time,
-            message: message.clone(),
-        });
-
-        self.latest_message
-            .insert(message.id(), MavMessage { at: time, message });
     }
 }

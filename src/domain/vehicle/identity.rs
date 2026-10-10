@@ -20,10 +20,14 @@ pub struct Identity {
     pub capabilities: Option<MavProtocolCapability>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
+    /// The most recent `HEARTBEAT`, kept for display.
+    pub last_heartbeat: Option<messages::Heartbeat>,
 }
 
 impl Identity {
     pub fn observe_heartbeat(&mut self, mav_id: MavlinkId, message: &messages::Heartbeat) {
+        self.last_heartbeat = Some(message.clone());
+
         if self.mav_type != Some(message.type_) {
             log::debug!(
                 "Received new MAV type for {:?}: {:?}",

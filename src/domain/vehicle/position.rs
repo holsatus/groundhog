@@ -25,7 +25,6 @@ pub struct PositionTrack {
 #[derive(Clone, Debug)]
 pub struct GlobalPosition {
     pub at: Instant,
-    pub alt_msl: f32,
     pub alt_agl: f32,
     pub pos: GeoPosition,
 }
@@ -39,7 +38,6 @@ impl PositionTrack {
         self.register(GlobalPosition {
             at: time,
             pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
-            alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
@@ -58,7 +56,6 @@ impl PositionTrack {
         self.register(GlobalPosition {
             at: time,
             pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
-            alt_msl: message.alt as f32 * 1e-3,
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
@@ -152,7 +149,6 @@ mod tests {
     fn position(at: Instant, lat: f64, lon: f64) -> GlobalPosition {
         GlobalPosition {
             at,
-            alt_msl: 0.0,
             alt_agl: 0.0,
             pos: GeoPosition::new(lat, lon),
         }

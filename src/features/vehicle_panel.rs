@@ -5,13 +5,10 @@
 use std::collections::BTreeMap;
 
 use iced::{Alignment, Element, Length, Theme, Widget, font, never, widget::rich_text};
-use mavio::{
-    DefaultDialect,
-    default_dialect::{enums::MavSeverity, messages::Heartbeat},
-};
+use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
-    domain::vehicle::{Liveness, MavMessage, Vehicle},
+    domain::vehicle::{Liveness, Vehicle},
     foundation::MavlinkId,
     style::{list_brighter, list_default},
 };
@@ -173,11 +170,7 @@ pub fn view<'a>(
     );
 
     if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id)) {
-        if let Some(MavMessage {
-            message: DefaultDialect::Heartbeat(heartbeat),
-            ..
-        }) = vehicle.latest_message.get(&Heartbeat::ID)
-        {
+        if let Some(heartbeat) = &vehicle.identity.last_heartbeat {
             row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
             row_contents.push(
                 iced::widget::container(iced::widget::text(format!("{:?}", heartbeat))).boxed(),
