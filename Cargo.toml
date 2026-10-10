@@ -7,12 +7,17 @@ edition = "2024"
 log = "0.4.29"
 env_logger = "0.11.10"
 rust-ini = "0.21.3"
+# Intentionally not rev-pinned: the `slippery` path dependency also depends on
+# iced via this same bare git URL, and adding a `rev` here would split iced into
+# two sources (incompatible types). The exact revision is fixed by the committed
+# Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
+# dependency first.
 iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "advanced", "canvas", "image"] }
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
 
-mav-param = { git = "https://github.com/holsatus/mav-param" }
-mavio = { git = "https://gitlab.com/peterkrull/mavio", branch = "holsatus-branch", features = ["dlct-common", "tokio"] }
+mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a8115bd1a9ac2779685184c954ee6" }
+mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-common", "tokio"] }
 async-trait = "0.1.89"
 tokio = { version = "1.51.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util = "0.7.18"

@@ -2962,7 +2962,7 @@ dependencies = [
 [[package]]
 name = "mav-param"
 version = "0.2.0"
-source = "git+https://github.com/holsatus/mav-param#04034d9a0c3a8115bd1a9ac2779685184c954ee6"
+source = "git+https://github.com/holsatus/mav-param?rev=04034d9a0c3a8115bd1a9ac2779685184c954ee6#04034d9a0c3a8115bd1a9ac2779685184c954ee6"
 dependencies = [
  "heapless 0.9.3",
  "mav-param-derive",
@@ -2971,7 +2971,7 @@ dependencies = [
 [[package]]
 name = "mav-param-derive"
 version = "0.1.0"
-source = "git+https://github.com/holsatus/mav-param#04034d9a0c3a8115bd1a9ac2779685184c954ee6"
+source = "git+https://github.com/holsatus/mav-param?rev=04034d9a0c3a8115bd1a9ac2779685184c954ee6#04034d9a0c3a8115bd1a9ac2779685184c954ee6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3002,7 +3002,7 @@ dependencies = [
 [[package]]
 name = "mavio"
 version = "0.5.10"
-source = "git+https://gitlab.com/peterkrull/mavio?branch=holsatus-branch#0ad2f7d769fbdeffd88cce9ed45fe3402c991578"
+source = "git+https://gitlab.com/peterkrull/mavio?rev=0ad2f7d769fbdeffd88cce9ed45fe3402c991578#0ad2f7d769fbdeffd88cce9ed45fe3402c991578"
 dependencies = [
  "bitflags 2.13.2",
  "crc-any",
