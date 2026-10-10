@@ -1,20 +1,32 @@
 //! Tests of the middleware against a fake vehicle over an in-memory transport.
 
-use std::time::Duration;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
+use iced::futures::StreamExt;
 use mav_param::{Ident, Value};
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavCmd, MavProtocolCapability, MavResult},
-        messages::{CommandAck, ParamValue, SystemTime},
+        enums::{
+            MavAutopilot, MavCmd, MavModeFlag, MavProtocolCapability, MavResult, MavSeverity,
+            MavType,
+        },
+        messages::{
+            CommandAck, GlobalPositionInt, Heartbeat, ParamValue, Statustext, SysStatus, SystemTime,
+        },
     },
     prelude::V2,
     protocol::FrameBuilder,
 };
+use tokio::io::{AsyncRead, ReadBuf};
 
 use super::*;
 use crate::{
+    domain::fleet::Fleet,
     foundation::{DEFAULT_GCS_ID, LinkId},
     link::transport::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
@@ -221,4 +233,170 @@ async fn param_set_returns_echoed_value() {
 
     let value = task.await.unwrap().expect("echo");
     assert_eq!(value, Value::F32(1.0));
+}
+
+// ----- frame replay harness -----
+
+/// Encode a message into a versionless v2 frame's bytes, as if sent by `vehicle`
+/// with the given sequence number.
+fn encode_frame(vehicle: MavlinkId, sequence: u8, message: &dyn mavio::Message) -> Vec<u8> {
+    let frame = FrameBuilder::new()
+        .system_id(vehicle.system)
+        .component_id(vehicle.component)
+        .version(V2)
+        .sequence(sequence)
+        .message(message)
+        .unwrap()
+        .build()
+        .into_versionless();
+
+    let mut buf = vec![0u8; frame.size()];
+    let written = frame.serialize(&mut buf).unwrap();
+    buf.truncate(written);
+    buf
+}
+
+/// An in-memory reader over concatenated raw frames. Yields everything
+/// eagerly, then EOFs.
+struct BytesReader {
+    bytes: Vec<u8>,
+    pos: usize,
+}
+
+impl AsyncRead for BytesReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos >= self.bytes.len() {
+            return Poll::Ready(Ok(())); // 0 bytes filled => EOF
+        }
+
+        let remaining = &self.bytes[self.pos..];
+        let n = remaining.len().min(buf.remaining());
+        buf.put_slice(&remaining[..n]);
+        self.pos += n;
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn replay_frames_drive_fleet_state() {
+    // A scripted flight: heartbeat, a position fix, battery, and a status text.
+    let heartbeat = Heartbeat {
+        type_: MavType::Quadrotor,
+        autopilot: MavAutopilot::Ardupilotmega,
+        base_mode: MavModeFlag::SAFETY_ARMED,
+        custom_mode: 5,
+        ..Default::default()
+    };
+
+    let position = GlobalPositionInt {
+        time_boot_ms: 0,
+        // Raw scaled ints: 474_000_000 -> 47.4 deg lat, 85_000_000 -> 8.5 deg lon.
+        lat: 474_000_000,
+        lon: 85_000_000,
+        alt: 150_000,
+        relative_alt: 100_000,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        hdg: 0,
+    };
+
+    let battery = SysStatus {
+        voltage_battery: 12_000,
+        current_battery: 500,
+        battery_remaining: 80,
+        ..Default::default()
+    };
+
+    let mut status_bytes = [0u8; 50];
+    status_bytes[..9].copy_from_slice(b"REPLAY_OK");
+    let status = Statustext {
+        severity: MavSeverity::Info,
+        text: status_bytes,
+        ..Default::default()
+    };
+
+    let script: [Box<dyn mavio::Message>; 4] = [
+        Box::new(heartbeat),
+        Box::new(position),
+        Box::new(battery),
+        Box::new(status),
+    ];
+
+    let mut bytes = Vec::new();
+    for (sequence, message) in script.iter().enumerate() {
+        bytes.extend(encode_frame(VEHICLE, sequence as u8, message.as_ref()));
+    }
+
+    let (router, events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+    // `Pin<Box<_>>` is `Unpin`, which `StreamExt::next` needs.
+    let mut events = Box::pin(events);
+    let _guard = router.attach_reader_writer(
+        LinkId::new("replay"),
+        BytesReader { bytes, pos: 0 },
+        tokio::io::sink(),
+    );
+
+    // Fold the replayed frames into a fleet, bounded so the test cannot hang.
+    let mut fleet = Fleet::default();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut folded = 0;
+
+    while folded < script.len() {
+        match tokio::time::timeout_at(deadline, events.as_mut().next()).await {
+            Ok(Some(Event::Message(inbound))) => {
+                let Ok(message) = inbound.frame.decode::<DefaultDialect>() else {
+                    continue;
+                };
+                fleet.observe(inbound.source_mav, inbound.received_at, Some(message));
+                folded += 1;
+            }
+            Ok(Some(Event::LinkClosed(_))) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    assert_eq!(
+        folded,
+        script.len(),
+        "all scripted frames should be observed"
+    );
+
+    let vehicle = fleet
+        .vehicle(VEHICLE)
+        .expect("vehicle should be registered");
+    assert_eq!(vehicle.identity.armed(), Some(true));
+
+    let pos = vehicle
+        .position
+        .current
+        .as_ref()
+        .expect("position should be recorded")
+        .pos;
+    assert!((pos.lat - 47.4).abs() < 1e-7, "lat was {}", pos.lat);
+    assert!((pos.lon - 8.5).abs() < 1e-7, "lon was {}", pos.lon);
+
+    let battery = vehicle
+        .battery
+        .state
+        .as_ref()
+        .expect("battery should be recorded");
+    assert!(
+        (battery.voltage - 12.0).abs() < 1e-6,
+        "voltage was {}",
+        battery.voltage
+    );
+
+    assert!(
+        vehicle
+            .status
+            .texts
+            .iter()
+            .any(|text| text.text == "REPLAY_OK"),
+        "the status text should be recorded"
+    );
 }
