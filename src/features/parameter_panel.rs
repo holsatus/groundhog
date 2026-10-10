@@ -35,6 +35,7 @@ use crate::{
     domain::vehicle::Vehicle,
     foundation::MavlinkId,
     mav::{self, MavlinkRouter},
+    services::vehicle::VehicleClient,
     style,
     widget::virtualized::virtual_list,
 };
@@ -182,7 +183,7 @@ impl ParameterPanel {
                 self.filter.only_changed = changed;
             }
             Message::ListReload(mav_id) => {
-                let mav = ctx.router.clone();
+                let client = VehicleClient::new(ctx.router, mav_id);
                 let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
 
                 let request_capabilities = vehicle.identity.capabilities.is_none();
@@ -190,7 +191,7 @@ impl ParameterPanel {
                 self.reloading.insert(mav_id);
 
                 let task = Task::perform(
-                    async move { mav.param_list(mav_id, request_capabilities).await },
+                    async move { client.fetch_parameters(request_capabilities).await },
                     move |result| Message::ListReloadResult(mav_id, result),
                 );
 
@@ -255,7 +256,7 @@ impl ParameterPanel {
                 }
             }
             Message::ValueUpload(mav_id, ident, value) => {
-                let mav = ctx.router.clone();
+                let client = VehicleClient::new(ctx.router, mav_id);
                 let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
                 let cap = vehicle.identity.capabilities.unwrap_or_default();
                 let param = vehicle.parameters_mut().get_mut(&ident)?;
@@ -263,7 +264,7 @@ impl ParameterPanel {
                 let ident_cloned = ident.clone();
                 let ident_for_result = ident.clone();
                 let (task, handle) = Task::perform(
-                    async move { mav.param_set(mav_id, ident_cloned, value, cap).await },
+                    async move { client.set_parameter(ident_cloned, value, cap).await },
                     move |result| {
                         Message::ValueUploadResult(mav_id, ident_for_result.clone(), value, result)
                     },

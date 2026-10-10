@@ -6,6 +6,7 @@ mod foundation;
 mod layout;
 mod link;
 mod mav;
+mod services;
 mod style;
 mod theme;
 mod widget;

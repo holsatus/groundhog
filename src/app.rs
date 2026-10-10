@@ -5,9 +5,7 @@ use std::{
 
 use iced::futures::{SinkExt, Stream, StreamExt};
 use iced::{Element, Length, Subscription, Task, Theme, Widget};
-use mavio::{
-    DefaultDialect, default_dialect::messages::ComponentInformationBasic, error::SpecError,
-};
+use mavio::{DefaultDialect, error::SpecError};
 
 use crate::{
     config,
@@ -23,6 +21,7 @@ use crate::{
     layout::{self, Layout},
     mav,
     mav::MavlinkRouter,
+    services::vehicle::VehicleClient,
     style,
 };
 
@@ -284,18 +283,15 @@ impl Application {
 
     /// Fetch basic information and the parameter list from a newly detected vehicle.
     fn initialize_vehicle(&self, mav_id: MavlinkId) -> Task<Message> {
-        let router = self.router.clone();
+        let client = VehicleClient::new(&self.router, mav_id);
         let request = Task::perform(
             async move {
-                if let Err(error) = router
-                    .request_message::<ComponentInformationBasic>(mav_id)
-                    .await
-                {
+                if let Err(error) = client.component_information().await {
                     log::warn!("No COMPONENT_INFORMATION_BASIC from {mav_id:?}: {error}");
                 }
 
                 // This requests AUTOPILOT_VERSION to get capabilities for param encoding
-                router.param_list(mav_id, true).await
+                client.fetch_parameters(true).await
             },
             move |result| parameter_panel::Message::ListReloadResult(mav_id, result).into(),
         );

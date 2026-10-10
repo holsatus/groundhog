@@ -1,0 +1,123 @@
+//! Intent-level operations on a single vehicle.
+
+use mav_param::{Ident, Value};
+use mavio::default_dialect::{
+    enums::MavProtocolCapability,
+    messages::{AutopilotVersion, CommandAck, ComponentInformationBasic},
+};
+
+use crate::{
+    foundation::MavlinkId,
+    mav::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted},
+};
+
+/// An intent-level handle for operating a single vehicle through the router.
+///
+/// Cheap to clone: it holds the router (an `Arc`) and the target id, so callers
+/// never thread the target through every call.
+#[derive(Clone)]
+pub struct VehicleClient {
+    router: MavlinkRouter,
+    id: MavlinkId,
+}
+
+impl VehicleClient {
+    /// Wrap `router` as a handle for the vehicle identified by `id`.
+    pub fn new(router: &MavlinkRouter, id: MavlinkId) -> Self {
+        Self {
+            router: router.clone(),
+            id,
+        }
+    }
+
+    /// The target vehicle's MAVLink id.
+    #[allow(dead_code)] // Used by tests and future callers
+    pub fn id(&self) -> MavlinkId {
+        self.id
+    }
+
+    /// Download the vehicle's parameter list, optionally requesting capabilities first.
+    pub async fn fetch_parameters(
+        &self,
+        request_capabilities: bool,
+    ) -> mav::Result<ParamListSummary> {
+        self.router.param_list(self.id, request_capabilities).await
+    }
+
+    /// Set one parameter, returning the value the vehicle accepted.
+    pub async fn set_parameter(
+        &self,
+        ident: Ident,
+        value: Value,
+        capabilities: MavProtocolCapability,
+    ) -> mav::Result<Value> {
+        self.router
+            .param_set(self.id, ident, value, capabilities)
+            .await
+    }
+
+    /// Request the vehicle's `COMPONENT_INFORMATION_BASIC`.
+    pub async fn component_information(&self) -> mav::Result<ComponentInformationBasic> {
+        self.request().await
+    }
+
+    /// Request the vehicle's `AUTOPILOT_VERSION`.
+    #[allow(dead_code)] // Escape hatch retained for future operations
+    pub async fn autopilot_version(&self) -> mav::Result<AutopilotVersion> {
+        self.request().await
+    }
+
+    /// Escape hatch: request and await one message of type `M`.
+    pub async fn request<M: MavlinkMessage>(&self) -> mav::Result<M> {
+        self.router.request_message::<M>(self.id).await
+    }
+
+    /// Escape hatch: run a command and await its final ACK.
+    #[allow(dead_code)] // Escape hatch retained for future operations
+    pub async fn run(&self, command: impl Into<Command>) -> mav::Result<CommandAck> {
+        self.router.command(self.id, command).await
+    }
+
+    /// Escape hatch: send a targeted message without awaiting a response.
+    #[allow(dead_code)] // Escape hatch retained for future operations
+    pub fn send<M: Targeted>(&self, message: M) -> mav::Result<()> {
+        self.router.send_targeted(self.id, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::foundation::DEFAULT_GCS_ID;
+
+    const VEHICLE: MavlinkId = MavlinkId {
+        system: 1,
+        component: 1,
+    };
+
+    #[test]
+    fn id_is_returned() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let client = VehicleClient::new(&router, VEHICLE);
+        assert_eq!(client.id(), VEHICLE);
+    }
+
+    #[tokio::test]
+    async fn operations_without_a_link_error() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let client = VehicleClient::new(&router, VEHICLE);
+
+        assert!(client.fetch_parameters(false).await.is_err());
+        assert!(client.component_information().await.is_err());
+        assert!(
+            client
+                .set_parameter(
+                    Ident::from_str_truncated("PARAM_ONE"),
+                    Value::F32(1.0),
+                    MavProtocolCapability::default(),
+                )
+                .await
+                .is_err()
+        );
+    }
+}
