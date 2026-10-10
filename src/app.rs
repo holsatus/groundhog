@@ -515,7 +515,7 @@ impl Application {
         match panel {
             layout::Panel::Map => self
                 .map
-                .view(self.fleet.vehicles())
+                .view(self.fleet.vehicles(), self.fleet.primary())
                 .map(Message::Map)
                 .boxed(),
             layout::Panel::Vehicles => {

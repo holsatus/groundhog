@@ -11,10 +11,12 @@ use std::{
 };
 
 use iced::{
-    Color, Element, Point, Rectangle, Vector,
+    Color, Element, Pixels, Point, Rectangle, Vector,
+    advanced::text::Alignment as TextAlignment,
+    alignment::Vertical,
     color::Oklch,
     widget::{
-        canvas::{Fill, Frame, Gradient, LineCap, Path, Stroke, Style, gradient::Linear},
+        canvas::{Fill, Frame, Gradient, LineCap, Path, Stroke, Style, Text, gradient::Linear},
         image::Handle,
     },
 };
@@ -86,7 +88,11 @@ impl Map {
         iced::Task::none()
     }
 
-    pub fn view<'a>(&'a self, vehicles: &'a BTreeMap<MavlinkId, Vehicle>) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
+        primary: Option<MavlinkId>,
+    ) -> Element<'a, Message> {
         let draw_dots = self.draw_dots;
 
         MapProgram::new(&self.tile_cache)
@@ -103,6 +109,12 @@ impl Map {
                 iced::debug::time_with("position_segments_view", || {
                     for vehicle in vehicles.values() {
                         draw_vehicle(vehicle, projector, frame, draw_dots);
+                    }
+
+                    if let Some(id) = primary
+                        && let Some(vehicle) = vehicles.get(&id)
+                    {
+                        draw_mission(vehicle, projector, frame);
                     }
                 })
             })
@@ -232,6 +244,64 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
             &*ARROW_HANDLE,
         );
     });
+}
+
+/// Draw the primary vehicle's mission onto the overlay: the route as line
+/// segments between consecutive positioned items, and a numbered marker per
+/// waypoint. The current execution item is highlighted.
+///
+/// A pure function of the mission and the [`Projector`], kept separate from
+/// [`draw_vehicle`] so screen-to-geodetic editing can be layered on later.
+/// Never panics on an empty mission, an `Unknown` command, or a mission with no
+/// positioned items.
+fn draw_mission(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame) {
+    let mission = &vehicle.mission;
+    let current = mission.progress.current_seq;
+
+    // Only positioned commands get a marker or take part in the route.
+    let points: Vec<(usize, Point)> = mission
+        .items()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            item.command.position().map(|pos| {
+                let geo = GeoPosition::new(pos.lat, pos.lon);
+                (index, projector.mercator_into_screen_space(mercator(geo)))
+            })
+        })
+        .collect();
+
+    // Route: a single consistent stroke between consecutive positioned items.
+    for pair in points.windows(2) {
+        let stroke = Stroke {
+            style: Style::Solid(Color::WHITE.scale_alpha(0.6)),
+            width: 2.0,
+            line_cap: LineCap::Round,
+            ..Stroke::default()
+        };
+
+        frame.stroke(&Path::line(pair[0].1, pair[1].1), stroke);
+    }
+
+    // Markers, each numbered with its 1-based mission index.
+    for (index, point) in points {
+        let is_current = current == Some(index as u16);
+        let (radius, color) = if is_current {
+            (7.0, Color::from_rgb(0.3, 0.9, 0.4))
+        } else {
+            (5.0, Color::WHITE.scale_alpha(0.85))
+        };
+
+        frame.fill(&Path::circle(point, radius), Fill::from(color));
+
+        let mut label = Text::from((index + 1).to_string());
+        label.position = point;
+        label.color = Color::BLACK;
+        label.size = Pixels(11.0);
+        label.align_x = TextAlignment::Center;
+        label.align_y = Vertical::Center;
+        frame.fill_text(label);
+    }
 }
 
 /// Project a geographic position into Web-Mercator map coordinates.
