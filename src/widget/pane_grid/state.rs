@@ -412,15 +412,41 @@ pub enum Action {
         /// The starting [`Point`] of the drag interaction.
         origin: Point,
     },
-    /// A [`Split`] in the [`PaneGrid`] is being dragged.
+    /// Seams in the [`PaneGrid`] are being resized. Both axes can be resized at
+    /// once by grabbing the crossing of a horizontal and a vertical split.
     ///
     /// [`PaneGrid`]: super::PaneGrid
-    Resizing {
-        /// The [`Split`] being dragged.
-        split: Split,
-        /// The [`Axis`] of the [`Split`].
-        axis: Axis,
-    },
+    Resizing(ResizeTargets),
+}
+
+/// The seams a resize acts on: at most one per [`Axis`]. Both are set when the
+/// grab is at the crossing of a horizontal and a vertical split.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ResizeTargets {
+    /// A horizontal seam, dragged along the vertical axis.
+    pub horizontal: Option<Split>,
+    /// A vertical seam, dragged along the horizontal axis.
+    pub vertical: Option<Split>,
+}
+
+impl ResizeTargets {
+    /// Whether no seam is being resized.
+    pub fn is_empty(&self) -> bool {
+        self.horizontal.is_none() && self.vertical.is_none()
+    }
+
+    /// Whether a seam on each axis is being resized (a corner grab).
+    pub fn is_corner(&self) -> bool {
+        self.horizontal.is_some() && self.vertical.is_some()
+    }
+
+    /// The seams being resized, each with the axis it runs along.
+    pub fn iter(&self) -> impl Iterator<Item = (Split, Axis)> + '_ {
+        self.horizontal
+            .map(|split| (split, Axis::Horizontal))
+            .into_iter()
+            .chain(self.vertical.map(|split| (split, Axis::Vertical)))
+    }
 }
 
 impl Action {
@@ -432,11 +458,11 @@ impl Action {
         }
     }
 
-    /// Returns the current [`Split`] that is being dragged, if any.
-    pub fn picked_split(&self) -> Option<(Split, Axis)> {
+    /// Returns the seams currently being resized, if any.
+    pub fn picked_targets(&self) -> ResizeTargets {
         match *self {
-            Action::Resizing { split, axis, .. } => Some((split, axis)),
-            _ => None,
+            Action::Resizing(targets) => targets,
+            _ => ResizeTargets::default(),
         }
     }
 }

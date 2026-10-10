@@ -95,7 +95,7 @@ impl Map {
             .with_draw_layer(move |projector, frame| {
                 // Darken the map background to make overlay stand out more
                 let black_fill = Fill {
-                    style: Style::Solid(Color::BLACK.scale_alpha(0.5)),
+                    style: Style::Solid(Color::BLACK.scale_alpha(0.4)),
                     ..Fill::default()
                 };
                 frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);

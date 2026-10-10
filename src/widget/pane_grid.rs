@@ -4,6 +4,8 @@
 //   - a resize stops when a neighbour reaches its minimum size (`clamp_resize`)
 //   - a split resize only trades space between adjacent leaves (`Node::resize`,
 //     `grow_first_leaf` / `grow_last_leaf`)
+//   - a resize can grab the crossing of a horizontal and a vertical seam and
+//     resize both axes at once (`ResizeTargets`, `hovered_splits`)
 //   - grid chrome is drawn in its own layer, with divider lines between panes
 //   - the picked-pane overlay is clipped to its translated bounds
 //   - `Content`/`TitleBar` take a `resizing` flag and hide controls while resizing
@@ -318,32 +320,82 @@ where
             return Some(mouse::Interaction::Grabbing);
         }
 
-        let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
-        let node = self.internal.layout();
+        let mut targets = action.picked_targets();
 
-        let resize_axis = action.picked_split().map(|(_, axis)| axis).or_else(|| {
-            resize_leeway.and_then(|leeway| {
-                let cursor_position = cursor.position()?;
-                let bounds = layout.bounds();
+        if targets.is_empty()
+            && let Some((leeway, _)) = &self.on_resize
+            && let Some(cursor_position) = cursor.position()
+        {
+            let bounds = layout.bounds();
+            let splits =
+                self.internal
+                    .layout()
+                    .split_regions(self.spacing, self.min_size, bounds.size());
 
-                let splits = node.split_regions(self.spacing, self.min_size, bounds.size());
+            let relative_cursor =
+                Point::new(cursor_position.x - bounds.x, cursor_position.y - bounds.y);
 
-                let relative_cursor =
-                    Point::new(cursor_position.x - bounds.x, cursor_position.y - bounds.y);
+            targets = hovered_splits(splits.iter(), self.spacing + leeway, relative_cursor);
+        }
 
-                hovered_split(splits.iter(), self.spacing + leeway, relative_cursor)
-                    .map(|(_, axis, _)| axis)
-            })
-        });
+        // A corner grab moves both seams, so it gets the four-way move cursor.
+        if targets.is_corner() {
+            return Some(mouse::Interaction::AllScroll);
+        }
 
-        if let Some(resize_axis) = resize_axis {
-            return Some(match resize_axis {
-                Axis::Horizontal => mouse::Interaction::ResizingVertically,
-                Axis::Vertical => mouse::Interaction::ResizingHorizontally,
-            });
+        if targets.horizontal.is_some() {
+            return Some(mouse::Interaction::ResizingVertically);
+        }
+
+        if targets.vertical.is_some() {
+            return Some(mouse::Interaction::ResizingHorizontally);
         }
 
         None
+    }
+
+    /// Every seam to highlight: all picked seams while resizing, or the hovered
+    /// seam(s) otherwise. Each entry is `(axis, bounds, is_picked)`.
+    fn split_highlights(
+        &self,
+        action: &state::Action,
+        node: &Node,
+        layout: Layout,
+        cursor: mouse::Cursor,
+        resize_leeway: Option<f32>,
+    ) -> Vec<(Axis, Rectangle, bool)> {
+        let bounds = layout.bounds();
+        let splits = node.split_regions(self.spacing, self.min_size, bounds.size());
+
+        let picked = action.picked_targets();
+
+        let (targets, is_picked) = if !picked.is_empty() {
+            (picked, true)
+        } else if let (Some(leeway), Some(cursor_position)) = (resize_leeway, cursor.position()) {
+            let relative_cursor =
+                Point::new(cursor_position.x - bounds.x, cursor_position.y - bounds.y);
+
+            (
+                hovered_splits(splits.iter(), self.spacing + leeway, relative_cursor),
+                false,
+            )
+        } else {
+            (state::ResizeTargets::default(), false)
+        };
+
+        targets
+            .iter()
+            .filter_map(|(split, axis)| {
+                let (_axis, region, ratio) = splits.get(&split)?;
+
+                // Draw the highlight from the *real* seam, not the widened grab
+                // zone: centring on the leeway-thick strip pushed the hover
+                // indicator past the split.
+                let region = axis.split_line_bounds(*region, *ratio, self.spacing);
+
+                Some((axis, region + Vector::new(bounds.x, bounds.y), is_picked))
+            })
+            .collect()
     }
 }
 
@@ -521,11 +573,11 @@ where
                         let splits =
                             node.split_regions(self.spacing, self.min_size, layout.bounds().size());
 
-                        hovered_split(splits.iter(), self.spacing + *leeway, relative).is_some()
+                        !hovered_splits(splits.iter(), self.spacing + *leeway, relative).is_empty()
                     })
             });
 
-        let resizing = matches!(action, state::Action::Resizing { .. });
+        let resizing = matches!(action, state::Action::Resizing(_));
         let grid_owns_pointer = resizing || starting_resize;
 
         for ((pane, content), (layout, child)) in self
@@ -570,15 +622,15 @@ where
                             let splits =
                                 node.split_regions(self.spacing, self.min_size, bounds.size());
 
-                            let clicked_split = hovered_split(
+                            let clicked_split = hovered_splits(
                                 splits.iter(),
                                 self.spacing + leeway,
                                 relative_cursor,
                             );
 
-                            if let Some((split, axis, _)) = clicked_split {
+                            if !clicked_split.is_empty() {
                                 if action.picked_pane().is_none() {
-                                    *action = state::Action::Resizing { split, axis };
+                                    *action = state::Action::Resizing(clicked_split);
                                 }
                             } else {
                                 click_pane(
@@ -660,7 +712,7 @@ where
                     }
                 }
 
-                if action.picked_split().is_some() {
+                if !action.picked_targets().is_empty() {
                     shell.capture_event();
                 }
 
@@ -668,45 +720,42 @@ where
             }
             Event::Mouse(mouse::Event::CursorMoved { .. })
             | Event::Touch(touch::Event::FingerMoved { .. }) => {
+                let targets = action.picked_targets();
+
                 if let Some((_, on_resize)) = &self.on_resize {
-                    if let Some((split, _)) = action.picked_split() {
+                    if !targets.is_empty() {
                         let bounds = layout.bounds();
 
                         let splits = node.split_regions(self.spacing, self.min_size, bounds.size());
 
-                        if let Some((axis, rectangle, current)) = splits.get(&split)
-                            && let Some(cursor_position) = cursor.position()
-                        {
-                            let ratio = match axis {
-                                Axis::Horizontal => {
-                                    let position = cursor_position.y - bounds.y - rectangle.y;
+                        if let Some(cursor_position) = cursor.position() {
+                            for (split, axis) in targets.iter() {
+                                let Some((_, rectangle, current)) = splits.get(&split) else {
+                                    continue;
+                                };
 
-                                    (position / rectangle.height).clamp(0.0, 1.0)
-                                }
-                                Axis::Vertical => {
-                                    let position = cursor_position.x - bounds.x - rectangle.x;
+                                let ratio = resize_ratio(axis, *rectangle, cursor_position, bounds);
 
-                                    (position / rectangle.width).clamp(0.0, 1.0)
-                                }
-                            };
+                                // Stop the drag once a neighbouring pane reaches its
+                                // minimum, instead of letting the layout clamp spill the
+                                // change onto the next pane. Clamping each axis on its
+                                // own is exact: a vertical seam only affects widths and
+                                // a horizontal one only heights.
+                                let ratio = clamp_resize(
+                                    node.as_ref(),
+                                    split,
+                                    ratio,
+                                    bounds.size(),
+                                    self.spacing,
+                                    self.min_size,
+                                    *current,
+                                );
 
-                            // Stop the drag once a neighbouring pane reaches its
-                            // minimum, instead of letting the layout clamp spill the
-                            // change onto the next pane.
-                            let ratio = clamp_resize(
-                                node.as_ref(),
-                                split,
-                                ratio,
-                                bounds.size(),
-                                self.spacing,
-                                self.min_size,
-                                *current,
-                            );
-
-                            shell.publish(on_resize(ResizeEvent { split, ratio }));
-
-                            shell.capture_event();
+                                shell.publish(on_resize(ResizeEvent { split, ratio }));
+                            }
                         }
+
+                        shell.capture_event();
                     } else if action.picked_pane().is_some() {
                         shell.request_redraw();
                     }
@@ -794,7 +843,7 @@ where
         viewport: &Rectangle,
     ) {
         let Memory { action, .. } = tree.state.downcast_ref();
-        let resizing = matches!(*action, state::Action::Resizing { .. });
+        let resizing = matches!(*action, state::Action::Resizing(_));
         let node = self.internal.layout();
         let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
 
@@ -802,43 +851,13 @@ where
         let dragged_pane = picked_pane
             .filter(|(_, origin)| is_dragging(*origin, cursor.position().unwrap_or_default()));
 
-        let picked_split = action
-            .picked_split()
-            .and_then(|(split, axis)| {
-                let bounds = layout.bounds();
-
-                let splits = node.split_regions(self.spacing, self.min_size, bounds.size());
-
-                let (_axis, region, ratio) = splits.get(&split)?;
-
-                let region = axis.split_line_bounds(*region, *ratio, self.spacing);
-
-                Some((axis, region + Vector::new(bounds.x, bounds.y), true))
-            })
-            .or_else(|| match resize_leeway {
-                Some(leeway) => {
-                    let cursor_position = cursor.position()?;
-                    let bounds = layout.bounds();
-
-                    let relative_cursor =
-                        Point::new(cursor_position.x - bounds.x, cursor_position.y - bounds.y);
-
-                    let splits = node.split_regions(self.spacing, self.min_size, bounds.size());
-
-                    // Hit-test against the widened grab zone, but draw the highlight
-                    // from the *real* seam. Centring it on the leeway-thick strip is
-                    // what pushed the hover indicator a pixel past the split: that
-                    // strip's rounded top biases its centre.
-                    let (split, axis, _) =
-                        hovered_split(splits.iter(), self.spacing + leeway, relative_cursor)?;
-
-                    let (_axis, region, ratio) = splits.get(&split)?;
-                    let region = axis.split_line_bounds(*region, *ratio, self.spacing);
-
-                    Some((axis, region + Vector::new(bounds.x, bounds.y), false))
-                }
-                None => None,
-            });
+        // Every seam to highlight: all picked seams while resizing, or the
+        // hovered seam(s) otherwise. A corner grab highlights both seams.
+        let split_highlights = if dragged_pane.is_none() {
+            self.split_highlights(action, node.as_ref(), layout, cursor, resize_leeway)
+        } else {
+            Vec::new()
+        };
 
         let pane_cursor = if picked_pane.is_some() {
             mouse::Cursor::Unavailable
@@ -962,10 +981,8 @@ where
                 );
             }
 
-            if dragged_pane.is_none()
-                && let Some((axis, split_region, is_picked)) = picked_split
-            {
-                let highlight = if is_picked {
+            for (axis, split_region, is_picked) in &split_highlights {
+                let highlight = if *is_picked {
                     style.picked_split
                 } else {
                     style.hovered_split
@@ -1235,6 +1252,38 @@ mod tests {
             "the split should be resizable, but was clamped to {clamped}"
         );
     }
+
+    #[test]
+    fn hovered_splits_detects_a_corner() {
+        // `[A | [B / C]]`: a vertical seam crossing a horizontal seam in the
+        // right half, so the two seams meet at (100, 50).
+        let node = Node::Split {
+            id: Split(0),
+            axis: Axis::Vertical,
+            ratio: 0.5,
+            a: Box::new(pane(0)),
+            b: Box::new(Node::Split {
+                id: Split(1),
+                axis: Axis::Horizontal,
+                ratio: 0.5,
+                a: Box::new(pane(1)),
+                b: Box::new(pane(2)),
+            }),
+        };
+
+        let splits = node.split_regions(0.0, 0.0, Size::new(200.0, 100.0));
+
+        // On the vertical seam, away from the crossing: only the vertical seam.
+        let vertical = hovered_splits(splits.iter(), 10.0, Point::new(100.0, 10.0));
+        assert_eq!(vertical.vertical, Some(Split(0)));
+        assert_eq!(vertical.horizontal, None);
+
+        // At the crossing: both seams, so a grab resizes both axes at once.
+        let corner = hovered_splits(splits.iter(), 10.0, Point::new(100.0, 50.0));
+        assert!(corner.is_corner());
+        assert_eq!(corner.vertical, Some(Split(0)));
+        assert_eq!(corner.horizontal, Some(Split(1)));
+    }
 }
 
 fn layout_region(layout: Layout, cursor_position: Point) -> Option<Region> {
@@ -1442,20 +1491,48 @@ pub struct ResizeEvent {
 /*
  * Helpers
  */
-fn hovered_split<'a>(
-    mut splits: impl Iterator<Item = (&'a Split, &'a (Axis, Rectangle, f32))>,
+/// All seams whose grab zone contains `cursor_position`, at most one per axis.
+/// Both axes being present means the cursor is on the crossing of a horizontal
+/// and a vertical split, and both can be resized together.
+fn hovered_splits<'a>(
+    splits: impl Iterator<Item = (&'a Split, &'a (Axis, Rectangle, f32))>,
     spacing: f32,
     cursor_position: Point,
-) -> Option<(Split, Axis, Rectangle)> {
-    splits.find_map(|(split, (axis, region, ratio))| {
+) -> state::ResizeTargets {
+    let mut targets = state::ResizeTargets::default();
+
+    for (split, (axis, region, ratio)) in splits {
         let bounds = axis.split_line_bounds(*region, *ratio, spacing);
 
         if bounds.contains(cursor_position) {
-            Some((*split, *axis, bounds))
-        } else {
-            None
+            match axis {
+                Axis::Horizontal => {
+                    targets.horizontal.get_or_insert(*split);
+                }
+                Axis::Vertical => {
+                    targets.vertical.get_or_insert(*split);
+                }
+            }
         }
-    })
+    }
+
+    targets
+}
+
+/// The ratio a seam reaches when the cursor is at `cursor_position`.
+fn resize_ratio(axis: Axis, region: Rectangle, cursor_position: Point, bounds: Rectangle) -> f32 {
+    match axis {
+        Axis::Horizontal => {
+            let position = cursor_position.y - bounds.y - region.y;
+
+            (position / region.height).clamp(0.0, 1.0)
+        }
+        Axis::Vertical => {
+            let position = cursor_position.x - bounds.x - region.x;
+
+            (position / region.width).clamp(0.0, 1.0)
+        }
+    }
 }
 
 /// The appearance of a [`PaneGrid`].

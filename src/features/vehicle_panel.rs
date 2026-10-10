@@ -109,17 +109,17 @@ pub fn view<'a>(
     row_contents.push(
         iced::widget::row![
             iced::widget::container(iced::widget::text(format!(
-                "roll: {:.5} deg",
+                "roll: {:.2} deg",
                 roll.to_degrees()
             )),)
             .width(Length::FillPortion(1)),
             iced::widget::container(iced::widget::text(format!(
-                "pitch: {:.5} deg",
+                "pitch: {:.2} deg",
                 pitch.to_degrees()
             )),)
             .width(Length::FillPortion(1)),
             iced::widget::container(iced::widget::text(format!(
-                "yaw: {:.5} deg",
+                "yaw: {:.2} deg",
                 yaw.to_degrees()
             )),)
             .width(Length::FillPortion(1)),
@@ -131,11 +131,11 @@ pub fn view<'a>(
 
     row_contents.push(
         iced::widget::row![
-            iced::widget::container(iced::widget::text(format!("volt: {voltage:.5} V")),)
+            iced::widget::container(iced::widget::text(format!("volt: {voltage:.2} V")),)
                 .width(Length::FillPortion(1)),
-            iced::widget::container(iced::widget::text(format!("curr: {current:.5} A")),)
+            iced::widget::container(iced::widget::text(format!("curr: {current:.2} A")),)
                 .width(Length::FillPortion(1)),
-            iced::widget::container(iced::widget::text(format!("chrg: {charge:.5} %")),)
+            iced::widget::container(iced::widget::text(format!("chrg: {charge:.2} %")),)
                 .width(Length::FillPortion(1)),
         ]
         .width(Length::Fill)

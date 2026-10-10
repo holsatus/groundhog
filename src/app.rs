@@ -426,7 +426,7 @@ impl Application {
         .spacing(1)
         .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
-        .on_resize(5, |event| Message::Layout(layout::Message::Resized(event)))
+        .on_resize(9, |event| Message::Layout(layout::Message::Resized(event)))
         .boxed()
     }
 
