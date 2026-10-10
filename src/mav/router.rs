@@ -526,20 +526,20 @@ mod tests {
         // Close the sender so the stream ends once its buffer is drained.
         drop(router);
 
-        let ids: Vec<String> = events
+        let ids: Vec<LinkId> = events
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .filter_map(|event| match event {
-                Event::LinkClosed(id) => Some(id.str().to_string()),
+                Event::LinkClosed(id) => Some(id),
                 Event::Message(_) => None,
             })
             .collect();
 
         // Exactly `total - EVENT_CHANNEL_CAPACITY` oldest events were dropped,
         // and the newest event still reaches the stream.
-        assert_eq!(ids.first().map(String::as_str), Some("10"));
+        assert_eq!(ids.first(), Some(&LinkId::new("10")));
         let newest = (total - 1).to_string();
-        assert_eq!(ids.last().map(String::as_str), Some(newest.as_str()));
+        assert_eq!(ids.last(), Some(&LinkId::new(&newest)));
     }
 }

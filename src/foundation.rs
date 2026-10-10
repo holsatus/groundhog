@@ -33,9 +33,4 @@ impl LinkId {
     pub fn new(id: &str) -> Self {
         LinkId(Arc::from(id))
     }
-
-    #[allow(dead_code)] // Retained accessor; links are keyed by id, not name
-    pub fn str(&self) -> &str {
-        &self.0
-    }
 }

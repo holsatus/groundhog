@@ -200,8 +200,6 @@ impl LoadingState {
 pub enum ParamEncoding {
     CCast,
     Bytewise,
-    #[allow(unused)]
-    Unspecified,
 }
 
 impl From<MavProtocolCapability> for ParamEncoding {
@@ -213,7 +211,7 @@ impl From<MavProtocolCapability> for ParamEncoding {
         } else if value.intersects(MavProtocolCapability::PARAM_ENCODE_BYTEWISE) {
             ParamEncoding::Bytewise
         } else {
-            // ParamEncoding::Unspecified
+            // MAVLink's "unspecified" encoding is treated as bytewise.
             ParamEncoding::Bytewise
         }
     }
@@ -353,7 +351,6 @@ pub fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<V
     Some(value)
 }
 
-#[allow(unused)]
 pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
     use mav_param::Value;
     match value {
@@ -371,7 +368,6 @@ pub fn mavio_from_value(cap: MavProtocolCapability, value: Value) -> Option<(f32
     match ParamEncoding::from(cap) {
         ParamEncoding::CCast => Some(value_into_c_cast(value)),
         ParamEncoding::Bytewise => Some(value_into_bytewise(value)),
-        ParamEncoding::Unspecified => None,
     }
 }
 
@@ -383,7 +379,6 @@ pub fn mavio_into_value(
     match ParamEncoding::from(cap) {
         ParamEncoding::CCast => value_from_c_cast(param_value, param_type),
         ParamEncoding::Bytewise => value_from_bytewise(param_value, param_type),
-        ParamEncoding::Unspecified => None,
     }
 }
 

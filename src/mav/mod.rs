@@ -16,7 +16,7 @@ use crate::foundation::MavlinkId;
 
 pub mod cmd;
 mod command;
-mod error;
+pub(crate) mod error;
 mod locks;
 mod param;
 mod recv;
@@ -27,15 +27,6 @@ pub use error::Result;
 pub use locks::LockKey;
 pub use param::ParamListSummary;
 pub use router::{Event, LinkGuard, MavlinkRouter};
-
-// Part of the public API, but not used by the application yet
-#[allow(unused_imports)]
-pub use {
-    command::{Busy, CommandRequest},
-    error::MavError,
-    recv::{FilteredReceiver, MavlinkMessage, MessageReceiver},
-    router::InboundMessage,
-};
 
 #[cfg(test)]
 mod tests;

@@ -870,7 +870,7 @@ mod tests {
                 A,
                 key.clone(),
                 Value::F32(7.0),
-                Err(crate::mav::MavError::Timeout),
+                Err(crate::mav::error::MavError::Timeout),
             ),
         );
         assert_eq!(
@@ -1027,7 +1027,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ListReloadResult(A, Err(crate::mav::MavError::Timeout)),
+            Message::ListReloadResult(A, Err(crate::mav::error::MavError::Timeout)),
         );
         assert!(!panel.reloading.contains(&A));
     }
