@@ -142,6 +142,13 @@ impl DrawLineSegment {
     }
 }
 
+/// Draw one vehicle's trail and heading arrow onto the overlay.
+///
+/// The overlay re-projects every trail point and re-strokes every segment on
+/// each draw, so its cost scales with trail length times redraw frequency. A
+/// projection cache keyed by `(viewpoint, position-revision)` is the known next
+/// step, but it was deferred: profiling shows stroke frequency dominates the
+/// cost, and a cache would add untested staleness risk. Revisit with a profiler.
 fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, draw_dots: bool) {
     let Some(position) = &vehicle.position.current else {
         return;
@@ -156,20 +163,21 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
         .map(|att| att.attitude.euler_angles().2)
         .unwrap_or_default();
 
-    let screen_points = vehicle
-        .position
-        .trail
-        .iter()
-        .map(|position| ScreenPosition {
-            point: projector.mercator_into_screen_space(mercator(position.pos)),
-            dark: altitude_to_color(position.alt_agl, 0.4),
-            light: altitude_to_color(position.alt_agl, 0.85),
-            time: position.at,
-        })
-        .collect::<Vec<_>>();
-
     // Trails need at least two points; the heading arrow is drawn regardless.
-    if screen_points.len() >= 2 {
+    // Only project the trail when there is actually a segment to draw.
+    if vehicle.position.trail.len() >= 2 {
+        let screen_points = vehicle
+            .position
+            .trail
+            .iter()
+            .map(|position| ScreenPosition {
+                point: projector.mercator_into_screen_space(mercator(position.pos)),
+                dark: altitude_to_color(position.alt_agl, 0.4),
+                light: altitude_to_color(position.alt_agl, 0.85),
+                time: position.at,
+            })
+            .collect::<Vec<_>>();
+
         // First draw all the dark background sections
         for pair in screen_points.windows(2) {
             let (prev, next) = (&pair[0], &pair[1]);

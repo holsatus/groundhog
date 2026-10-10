@@ -76,8 +76,15 @@ impl From<settings_panel::Message> for Message {
     }
 }
 
-/// The most often telemetry is allowed to reach `update` and rebuild the view.
-const TELEMETRY_FRAME: Duration = Duration::from_millis(16);
+/// How often telemetry is allowed to reach `update` and rebuild the view/map.
+///
+/// This caps the redraw cadence, not the data rate: the router still folds every
+/// inbound frame into vehicle state, but `update` — and therefore the view and
+/// the map overlay, which re-projects and re-strokes every trail point — runs at
+/// most this often. 30 Hz is smooth for a GCS HUD and roughly halves overlay
+/// rasterisation work compared with 60 Hz. Map panning and zooming are
+/// input-driven inside `slippery` and are not affected by this throttle.
+const TELEMETRY_FRAME: Duration = Duration::from_millis(33);
 
 /// Cap the rate at which inbound MAVLink events reach `update`.
 ///
