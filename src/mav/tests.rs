@@ -12,11 +12,12 @@ use mavio::{
     DefaultDialect,
     default_dialect::{
         enums::{
-            MavAutopilot, MavCmd, MavModeFlag, MavProtocolCapability, MavResult, MavSeverity,
-            MavType,
+            MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
+            MavProtocolCapability, MavResult, MavSeverity, MavType,
         },
         messages::{
-            CommandAck, GlobalPositionInt, Heartbeat, ParamValue, Statustext, SysStatus, SystemTime,
+            CommandAck, GlobalPositionInt, Heartbeat, MissionAck, MissionCount, MissionItemInt,
+            MissionRequestInt, MissionRequestList, ParamValue, Statustext, SysStatus, SystemTime,
         },
     },
     prelude::V2,
@@ -234,6 +235,199 @@ async fn param_set_returns_echoed_value() {
 
     let value = task.await.unwrap().expect("echo");
     assert_eq!(value, Value::F32(1.0));
+}
+
+// ----- mission transfer harness -----
+
+fn mission_item(seq: u16, x: i32) -> MissionItemInt {
+    MissionItemInt {
+        seq,
+        x,
+        y: 0,
+        z: 0.0,
+        frame: MavFrame::GlobalInt,
+        command: MavCmd::NavWaypoint,
+        mission_type: MavMissionType::Mission,
+        ..Default::default()
+    }
+}
+
+async fn recv_request_list(vehicle: &mut MockVehicle) -> MissionRequestList {
+    let DefaultDialect::MissionRequestList(request) = vehicle.recv().await else {
+        panic!("expected MISSION_REQUEST_LIST")
+    };
+    request
+}
+
+async fn recv_request_int(vehicle: &mut MockVehicle) -> u16 {
+    let DefaultDialect::MissionRequestInt(request) = vehicle.recv().await else {
+        panic!("expected MISSION_REQUEST_INT")
+    };
+    request.seq
+}
+
+async fn recv_ack(vehicle: &mut MockVehicle) -> MissionAck {
+    let DefaultDialect::MissionAck(ack) = vehicle.recv().await else {
+        panic!("expected MISSION_ACK")
+    };
+    ack
+}
+
+#[tokio::test]
+async fn mission_download_transfers_all_items() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission)
+                .await
+        }
+    });
+
+    let request = recv_request_list(&mut vehicle).await;
+    assert_eq!(request.mission_type, MavMissionType::Mission);
+
+    vehicle
+        .send(&MissionCount {
+            count: 3,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 7,
+            ..Default::default()
+        })
+        .await;
+
+    for seq in 0..3u16 {
+        assert_eq!(recv_request_int(&mut vehicle).await, seq);
+        vehicle.send(&mission_item(seq, 100 + seq as i32)).await;
+    }
+
+    let ack = recv_ack(&mut vehicle).await;
+    assert_eq!(ack.type_, MavMissionResult::MavMissionAccepted);
+
+    let downloaded = task.await.unwrap().expect("download should succeed");
+    assert_eq!(downloaded.vehicle_id, 7);
+    assert_eq!(downloaded.items.len(), 3);
+    for (seq, item) in downloaded.items.iter().enumerate() {
+        assert_eq!(item.seq, seq as u16);
+        assert_eq!(item.x, 100 + seq as i32);
+    }
+}
+
+#[tokio::test]
+async fn mission_upload_sends_items_and_returns_id() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![mission_item(0, 11), mission_item(1, 22)];
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items)
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(count) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    assert_eq!(count.count, 2);
+
+    for seq in 0..2u16 {
+        vehicle
+            .send(&MissionRequestInt {
+                seq,
+                mission_type: MavMissionType::Mission,
+                ..Default::default()
+            })
+            .await;
+
+        let DefaultDialect::MissionItemInt(item) = vehicle.recv().await else {
+            panic!("expected MISSION_ITEM_INT")
+        };
+        assert_eq!(item.seq, seq);
+        assert_eq!(item.x, items[seq as usize].x);
+        assert_eq!(item.target_system, VEHICLE.system);
+    }
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 99,
+            ..Default::default()
+        })
+        .await;
+
+    assert_eq!(task.await.unwrap().expect("upload should succeed"), 99);
+}
+
+#[tokio::test]
+async fn mission_download_retransmits_a_dropped_item_request() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission)
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    vehicle
+        .send(&MissionCount {
+            count: 1,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 1,
+            ..Default::default()
+        })
+        .await;
+
+    // Drop the first request for item 0 without answering.
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+
+    // The retransmission arrives after MISSION_ITEM_TIMEOUT and is answered.
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+    vehicle.send(&mission_item(0, 5)).await;
+
+    let ack = recv_ack(&mut vehicle).await;
+    assert_eq!(ack.type_, MavMissionResult::MavMissionAccepted);
+
+    let downloaded = task.await.unwrap().expect("download should recover");
+    assert_eq!(downloaded.items.len(), 1);
+    assert_eq!(downloaded.items[0].x, 5);
+}
+
+#[tokio::test]
+async fn mission_clear_reports_nack() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+    });
+
+    let DefaultDialect::MissionClearAll(_) = vehicle.recv().await else {
+        panic!("expected MISSION_CLEAR_ALL")
+    };
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionDenied,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    let result = task.await.unwrap();
+    assert!(matches!(
+        result,
+        Err(MavError::MissionFailed(MavMissionResult::MavMissionDenied))
+    ));
 }
 
 // ----- frame replay harness -----

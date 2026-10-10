@@ -9,7 +9,9 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use mavio::default_dialect::messages::{
-    CommandCancel, CommandInt, CommandLong, ParamRequestList, ParamRequestRead, ParamSet,
+    CommandCancel, CommandInt, CommandLong, MissionAck, MissionClearAll, MissionCount,
+    MissionItemInt, MissionRequestInt, MissionRequestList, MissionSetCurrent, ParamRequestList,
+    ParamRequestRead, ParamSet,
 };
 
 use crate::foundation::MavlinkId;
@@ -18,6 +20,7 @@ pub mod cmd;
 mod command;
 pub(crate) mod error;
 mod locks;
+mod mission;
 mod param;
 mod recv;
 mod router;
@@ -25,6 +28,8 @@ mod router;
 pub use command::Command;
 pub use error::Result;
 pub use locks::LockKey;
+#[allow(unused_imports)] // Facade re-export, consumed once the mission UI lands.
+pub use mission::DownloadedMission;
 pub use param::ParamListSummary;
 pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};
@@ -65,6 +70,13 @@ impl_targeted!(
     CommandCancel,
     CommandInt,
     CommandLong,
+    MissionAck,
+    MissionClearAll,
+    MissionCount,
+    MissionItemInt,
+    MissionRequestInt,
+    MissionRequestList,
+    MissionSetCurrent,
     ParamRequestList,
     ParamRequestRead,
     ParamSet,

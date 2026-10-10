@@ -1,4 +1,4 @@
-use mavio::default_dialect::enums::MavResult;
+use mavio::default_dialect::enums::{MavMissionResult, MavResult};
 
 use super::LockKey;
 
@@ -16,6 +16,9 @@ pub enum MavError {
     Encode(String),
     #[error("parameter value could not be encoded or decoded")]
     ParamEncoding,
+    #[allow(dead_code)] // Consumed by tests until the mission UI lands
+    #[error("mission operation failed: {0:?}")]
+    MissionFailed(MavMissionResult),
     #[error("a required resource was not available")]
     ResourceClosed,
 }
