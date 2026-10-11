@@ -180,381 +180,516 @@ impl MissionPanel {
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
         match message {
-            Message::Download => {
-                let id = ctx.fleet.primary()?;
-
-                self.ui_mut(id).busy = true;
-                let target = ctx.fleet.vehicle(id)?.target();
-                let client = ctx.services.vehicle(target);
-                return Some((
-                    Task::perform(
-                        async move { client.download_mission().await },
-                        move |result| Message::Downloaded(id, result),
-                    ),
-                    None,
-                ));
-            }
-            Message::Downloaded(id, result) => {
-                // Results update the state a transfer already established; they
-                // never create it, so an unsolicited result is a no-op.
-                if let Some(ui) = self.ui.get_mut(&id) {
-                    ui.busy = false;
-                }
-
-                match result {
-                    Ok(mission) => {
-                        if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                            vehicle.mission = mission;
-                        }
-                        if let Some(ui) = self.ui.get_mut(&id) {
-                            ui.selected = None;
-                            ui.edit.clear();
-                        }
-                    }
-                    Err(error) => log::warn!("Mission download for {id:?} failed: {error}"),
-                }
-            }
-            Message::Upload => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle(id)?;
-
-                let mission = vehicle.mission.clone();
-                let target = vehicle.target();
-                let client = ctx.services.vehicle(target);
-                self.ui_mut(id).busy = true;
-                return Some((
-                    Task::perform(
-                        async move { client.upload_mission(&mission).await },
-                        move |result| Message::Uploaded(id, result),
-                    ),
-                    None,
-                ));
-            }
-            Message::Uploaded(id, result) => {
-                if let Some(ui) = self.ui.get_mut(&id) {
-                    ui.busy = false;
-                }
-
-                match result {
-                    Ok(vehicle_id) => {
-                        if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                            vehicle.mission.mark_synced(Some(vehicle_id));
-                        }
-                    }
-                    Err(error) => log::warn!("Mission upload to {id:?} failed: {error}"),
-                }
-            }
-            Message::Clear => {
-                let id = ctx.fleet.primary()?;
-
-                self.ui_mut(id).busy = true;
-                let target = ctx.fleet.vehicle(id)?.target();
-                let client = ctx.services.vehicle(target);
-                return Some((
-                    Task::perform(async move { client.clear_mission().await }, move |result| {
-                        Message::Cleared(id, result)
-                    }),
-                    None,
-                ));
-            }
-            Message::Cleared(id, result) => {
-                if let Some(ui) = self.ui.get_mut(&id) {
-                    ui.busy = false;
-                }
-
-                match result {
-                    Ok(()) => {
-                        if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                            vehicle.mission.clear();
-                            vehicle.mission.mark_synced(None);
-                        }
-                        if let Some(ui) = self.ui.get_mut(&id) {
-                            ui.selected = None;
-                            ui.edit.clear();
-                        }
-                    }
-                    Err(error) => log::warn!("Mission clear on {id:?} failed: {error}"),
-                }
-            }
+            Message::Download => return self.download(ctx),
+            Message::Downloaded(id, result) => self.downloaded(id, result, ctx),
+            Message::Upload => return self.upload(ctx),
+            Message::Uploaded(id, result) => self.uploaded(id, result, ctx),
+            Message::Clear => return self.clear(ctx),
+            Message::Cleared(id, result) => self.cleared(id, result, ctx),
             Message::Start => return Some((self.run_command(MissionAction::Start, ctx), None)),
             Message::Pause => return Some((self.run_command(MissionAction::Pause, ctx), None)),
             Message::Resume => return Some((self.run_command(MissionAction::Resume, ctx), None)),
             Message::CommandFinished(id, action, result) => {
-                if let Some(ui) = self.ui.get_mut(&id) {
-                    ui.busy = false;
-                }
-                if let Err(error) = result {
-                    log::warn!("Mission {action:?} on {id:?} failed: {error}");
-                }
+                self.command_finished(id, action, result)
             }
-            Message::SetCurrent(index) => {
-                let id = ctx.fleet.primary()?;
-
-                let target = ctx.fleet.vehicle(id)?.target();
-                let client = ctx.services.vehicle(target);
-                return Some((
-                    Task::perform(
-                        async move { client.set_current_mission_item(index as u16).await },
-                        move |result| Message::CurrentSet(id, result),
-                    ),
-                    None,
-                ));
-            }
-            Message::CurrentSet(id, result) => {
-                if let Err(error) = result {
-                    log::warn!("Setting the current mission item on {id:?} failed: {error}");
-                }
-            }
-            Message::AddItem => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                let pos = vehicle
-                    .position
-                    .current
-                    .as_ref()
-                    .map(|position| Position {
-                        lat: position.pos.lat,
-                        lon: position.pos.lon,
-                        alt_m: position.alt_agl,
-                    })
-                    .or_else(|| {
-                        vehicle
-                            .mission
-                            .items()
-                            .last()
-                            .and_then(|item| item.command.position())
-                    })
-                    .unwrap_or(Position {
-                        lat: 0.0,
-                        lon: 0.0,
-                        alt_m: 50.0,
-                    });
-
-                let command = MissionCommand::default_for(MissionCommandKind::Waypoint, pos);
-                vehicle.mission.push(MissionItem {
-                    frame: MavFrame::GlobalRelativeAltInt,
-                    autocontinue: true,
-                    command,
-                });
-
-                let ui = self.ui_mut(id);
-                ui.selected = Some(vehicle.mission.len() - 1);
-                ui.edit.clear();
-            }
-            Message::RemoveItem(index) => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                vehicle.mission.remove(index)?;
-
-                let ui = self.ui_mut(id);
-                match ui.selected {
-                    Some(selected) if selected == index => {
-                        ui.selected = None;
-                        ui.edit.clear();
-                    }
-                    Some(selected) if selected > index => ui.selected = Some(selected - 1),
-                    _ => {}
-                }
-            }
-            Message::MoveUp(index) => {
-                self.move_item(ctx, index, true);
-            }
-            Message::MoveDown(index) => {
-                self.move_item(ctx, index, false);
-            }
-            Message::Select(index) => {
-                // Selection indexes the primary vehicle's mission; meaningless without one.
-                let id = ctx.fleet.primary()?;
-
-                let ui = self.ui_mut(id);
-                if ui.selected != Some(index) {
-                    ui.selected = Some(index);
-                    ui.edit.clear();
-                }
-            }
-            Message::BeginDrag(index) => {
-                let id = ctx.fleet.primary()?;
-
-                let ui = self.ui_mut(id);
-                if ui.selected != Some(index) {
-                    ui.selected = Some(index);
-                    ui.edit.clear();
-                }
-                ui.dragging = Some(index);
-            }
-            Message::EndDrag => {
-                let id = ctx.fleet.primary()?;
-
-                self.ui_mut(id).dragging = None;
-            }
-            Message::ChangeCommand(index, kind) => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                let pos = vehicle
-                    .mission
-                    .get(index)
-                    .and_then(|item| item.command.position())
-                    .unwrap_or(Position {
-                        lat: 0.0,
-                        lon: 0.0,
-                        alt_m: 50.0,
-                    });
-
-                if vehicle.mission.update(index, |item| {
-                    item.command = MissionCommand::default_for(kind, pos)
-                }) {
-                    self.ui_mut(id).edit.clear();
-                }
-            }
-            Message::EditField(index, field, text) => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                self.ui_mut(id).edit.insert(field, text.clone());
-
-                if let Some(value) = parse_field_value(&text) {
-                    vehicle
-                        .mission
-                        .update(index, |item| item.command.set_field(field, value));
-                }
-            }
-            Message::TogglePlacing => {
-                let id = ctx.fleet.primary()?;
-
-                let ui = self.ui_mut(id);
-                ui.placing = !ui.placing;
-            }
+            Message::SetCurrent(index) => return self.set_current(index, ctx),
+            Message::CurrentSet(id, result) => self.current_set(id, result),
+            Message::AddItem => self.add_item(ctx)?,
+            Message::RemoveItem(index) => self.remove_item(index, ctx)?,
+            Message::MoveUp(index) => self.move_item(ctx, index, true),
+            Message::MoveDown(index) => self.move_item(ctx, index, false),
+            Message::Select(index) => self.select(index, ctx)?,
+            Message::BeginDrag(index) => self.begin_drag(index, ctx)?,
+            Message::EndDrag => self.end_drag(ctx)?,
+            Message::ChangeCommand(index, kind) => self.change_command(index, kind, ctx)?,
+            Message::EditField(index, field, text) => self.edit_field(index, field, text, ctx)?,
+            Message::TogglePlacing => self.toggle_placing(ctx)?,
             Message::MoveWaypointTo(index, position) => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                vehicle.mission.update(index, |item| {
-                    item.command.set_field(MissionField::Latitude, position.lat);
-                    item.command
-                        .set_field(MissionField::Longitude, position.lon);
-                });
+                self.move_waypoint_to(index, position, ctx)?
             }
-            Message::AddWaypointAt(position) => {
-                let id = ctx.fleet.primary()?;
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-
-                let alt_m = vehicle
-                    .position
-                    .current
-                    .as_ref()
-                    .map(|position| position.alt_agl)
-                    .unwrap_or(50.0);
-
-                let command = MissionCommand::default_for(
-                    MissionCommandKind::Waypoint,
-                    Position {
-                        lat: position.lat,
-                        lon: position.lon,
-                        alt_m,
-                    },
-                );
-
-                vehicle.mission.push(MissionItem {
-                    frame: MavFrame::GlobalRelativeAltInt,
-                    autocontinue: true,
-                    command,
-                });
-
-                let ui = self.ui_mut(id);
-                ui.selected = Some(vehicle.mission.len() - 1);
-                ui.edit.clear();
-            }
-            Message::SaveDialog => {
-                let id = ctx.fleet.primary()?;
-                let file_dialog =
-                    file_dialog(ctx.file_picker_path).set_file_name("mission.waypoints");
-
-                return Some((
-                    Task::future(async move {
-                        file_dialog
-                            .save_file()
-                            .await
-                            .map(|file| file.path().to_owned())
-                    })
-                    .and_then(move |path| Task::done(Message::SaveToFile(id, path))),
-                    None,
-                ));
-            }
-            Message::SaveToFile(id, path) => {
-                let vehicle = ctx.fleet.vehicle(id)?;
-                let items = vehicle.mission.items().to_vec();
-                log::info!("Saving mission to file: {path:?}");
-
-                let save_path = path.clone();
-                return Some((
-                    iced_runtime::task::blocking(move |mut sender| {
-                        let result = std::fs::write(&save_path, write_wpl(&items))
-                            .map_err(|error| error.to_string());
-                        let _ = sender.try_send(Message::SaveFinished(id, save_path, result));
-                    }),
-                    None,
-                ));
-            }
+            Message::AddWaypointAt(position) => self.add_waypoint_at(position, ctx)?,
+            Message::SaveDialog => return self.save_dialog(ctx),
+            Message::SaveToFile(id, path) => return self.save_to_file(id, path, ctx),
             Message::SaveFinished(id, path, result) => {
-                if let Err(error) = result {
-                    log::error!("Error saving mission for {id:?} to file: {error}");
-                }
-
-                return Some((Task::none(), Some(Event::SetFilePickerPath(path))));
+                return Some(self.save_finished(id, path, result));
             }
-            Message::LoadDialog => {
-                let id = ctx.fleet.primary()?;
-                let file_dialog = file_dialog(ctx.file_picker_path);
-
-                return Some((
-                    Task::future(async move {
-                        file_dialog
-                            .pick_file()
-                            .await
-                            .map(|file| file.path().to_owned())
-                    })
-                    .and_then(move |path| Task::done(Message::LoadFromFile(id, path))),
-                    None,
-                ));
+            Message::LoadDialog => return self.load_dialog(ctx),
+            Message::LoadFromFile(id, path) => return Some(self.load_from_file(id, path)),
+            Message::LoadFinished(id, path, result) => {
+                return self.load_finished(id, path, result, ctx);
             }
-            Message::LoadFromFile(id, path) => {
-                log::info!("Loading mission from file: {path:?}");
-
-                let load_path = path.clone();
-                return Some((
-                    iced_runtime::task::blocking(move |mut sender| {
-                        let result = std::fs::read_to_string(&load_path)
-                            .map_err(|error| error.to_string())
-                            .and_then(|text| parse_wpl(&text).map_err(|error| error.to_string()));
-                        let _ = sender.try_send(Message::LoadFinished(id, load_path, result));
-                    }),
-                    None,
-                ));
-            }
-            Message::LoadFinished(id, path, result) => match result {
-                Ok(items) => {
-                    // As with the network results, a file result only updates
-                    // state it already owns, so an unsolicited result is a no-op.
-                    if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                        vehicle.mission.set_items(items);
-                        vehicle.mission.mark_dirty();
-                    }
-                    if let Some(ui) = self.ui.get_mut(&id) {
-                        ui.selected = None;
-                        ui.edit.clear();
-                    }
-
-                    return Some((Task::none(), Some(Event::SetFilePickerPath(path))));
-                }
-                Err(error) => log::error!("Error loading mission from file: {error}"),
-            },
         }
 
         None
     }
+
+    /// Start a mission download from the primary vehicle.
+    fn download(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+
+        self.ui_mut(id).busy = true;
+        let target = ctx.fleet.vehicle(id)?.target();
+        let client = ctx.services.vehicle(target);
+        Some((
+            Task::perform(
+                async move { client.download_mission().await },
+                move |result| Message::Downloaded(id, result),
+            ),
+            None,
+        ))
+    }
+
+    /// Apply a download result to the vehicle it was started against.
+    fn downloaded(&mut self, id: SystemId, result: Result<Mission>, ctx: &mut Context) {
+        // Results update the state a transfer already established; they
+        // never create it, so an unsolicited result is a no-op.
+        if let Some(ui) = self.ui.get_mut(&id) {
+            ui.busy = false;
+        }
+
+        match result {
+            Ok(mission) => {
+                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
+                    vehicle.mission = mission;
+                }
+                if let Some(ui) = self.ui.get_mut(&id) {
+                    ui.selected = None;
+                    ui.edit.clear();
+                }
+            }
+            Err(error) => log::warn!("Mission download for {id:?} failed: {error}"),
+        }
+    }
+
+    /// Upload the primary vehicle's mission.
+    fn upload(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle(id)?;
+
+        let mission = vehicle.mission.clone();
+        let target = vehicle.target();
+        let client = ctx.services.vehicle(target);
+        self.ui_mut(id).busy = true;
+        Some((
+            Task::perform(
+                async move { client.upload_mission(&mission).await },
+                move |result| Message::Uploaded(id, result),
+            ),
+            None,
+        ))
+    }
+
+    /// Apply an upload result to the vehicle it was started against.
+    fn uploaded(&mut self, id: SystemId, result: Result<u32>, ctx: &mut Context) {
+        if let Some(ui) = self.ui.get_mut(&id) {
+            ui.busy = false;
+        }
+
+        match result {
+            Ok(vehicle_id) => {
+                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
+                    vehicle.mission.mark_synced(Some(vehicle_id));
+                }
+            }
+            Err(error) => log::warn!("Mission upload to {id:?} failed: {error}"),
+        }
+    }
+
+    /// Clear the primary vehicle's mission.
+    fn clear(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+
+        self.ui_mut(id).busy = true;
+        let target = ctx.fleet.vehicle(id)?.target();
+        let client = ctx.services.vehicle(target);
+        Some((
+            Task::perform(async move { client.clear_mission().await }, move |result| {
+                Message::Cleared(id, result)
+            }),
+            None,
+        ))
+    }
+
+    /// Apply a clear result to the vehicle it was started against.
+    fn cleared(&mut self, id: SystemId, result: Result<()>, ctx: &mut Context) {
+        if let Some(ui) = self.ui.get_mut(&id) {
+            ui.busy = false;
+        }
+
+        match result {
+            Ok(()) => {
+                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
+                    vehicle.mission.clear();
+                    vehicle.mission.mark_synced(None);
+                }
+                if let Some(ui) = self.ui.get_mut(&id) {
+                    ui.selected = None;
+                    ui.edit.clear();
+                }
+            }
+            Err(error) => log::warn!("Mission clear on {id:?} failed: {error}"),
+        }
+    }
+
+    /// Clear the busy flag once a start/pause/resume command settles.
+    fn command_finished(
+        &mut self,
+        id: SystemId,
+        action: MissionAction,
+        result: Result<CommandAck>,
+    ) {
+        if let Some(ui) = self.ui.get_mut(&id) {
+            ui.busy = false;
+        }
+        if let Err(error) = result {
+            log::warn!("Mission {action:?} on {id:?} failed: {error}");
+        }
+    }
+
+    /// Ask the primary vehicle to jump to mission item `index`.
+    fn set_current(
+        &mut self,
+        index: usize,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+
+        let target = ctx.fleet.vehicle(id)?.target();
+        let client = ctx.services.vehicle(target);
+        Some((
+            Task::perform(
+                async move { client.set_current_mission_item(index as u16).await },
+                move |result| Message::CurrentSet(id, result),
+            ),
+            None,
+        ))
+    }
+
+    /// Log a failed set-current result.
+    fn current_set(&mut self, id: SystemId, result: Result<()>) {
+        if let Err(error) = result {
+            log::warn!("Setting the current mission item on {id:?} failed: {error}");
+        }
+    }
+
+    /// Append a waypoint after the vehicle's current position or last item.
+    fn add_item(&mut self, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        let pos = vehicle
+            .position
+            .current
+            .as_ref()
+            .map(|position| Position {
+                lat: position.pos.lat,
+                lon: position.pos.lon,
+                alt_m: position.alt_agl,
+            })
+            .or_else(|| {
+                vehicle
+                    .mission
+                    .items()
+                    .last()
+                    .and_then(|item| item.command.position())
+            })
+            .unwrap_or(Position {
+                lat: 0.0,
+                lon: 0.0,
+                alt_m: 50.0,
+            });
+
+        let command = MissionCommand::default_for(MissionCommandKind::Waypoint, pos);
+        vehicle.mission.push(MissionItem {
+            frame: MavFrame::GlobalRelativeAltInt,
+            autocontinue: true,
+            command,
+        });
+
+        let ui = self.ui_mut(id);
+        ui.selected = Some(vehicle.mission.len() - 1);
+        ui.edit.clear();
+        Some(())
+    }
+
+    /// Remove an item and reindex the open editor.
+    fn remove_item(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        vehicle.mission.remove(index)?;
+
+        let ui = self.ui_mut(id);
+        match ui.selected {
+            Some(selected) if selected == index => {
+                ui.selected = None;
+                ui.edit.clear();
+            }
+            Some(selected) if selected > index => ui.selected = Some(selected - 1),
+            _ => {}
+        }
+        Some(())
+    }
+
+    /// Open the editor on mission item `index`.
+    fn select(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
+        // Selection indexes the primary vehicle's mission; meaningless without one.
+        let id = ctx.fleet.primary()?;
+
+        let ui = self.ui_mut(id);
+        if ui.selected != Some(index) {
+            ui.selected = Some(index);
+            ui.edit.clear();
+        }
+        Some(())
+    }
+
+    /// Select mission item `index` and begin dragging it on the map.
+    fn begin_drag(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+
+        let ui = self.ui_mut(id);
+        if ui.selected != Some(index) {
+            ui.selected = Some(index);
+            ui.edit.clear();
+        }
+        ui.dragging = Some(index);
+        Some(())
+    }
+
+    /// End the primary vehicle's map drag.
+    fn end_drag(&mut self, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+
+        self.ui_mut(id).dragging = None;
+        Some(())
+    }
+
+    /// Replace mission item `index`'s command with `kind`.
+    fn change_command(
+        &mut self,
+        index: usize,
+        kind: MissionCommandKind,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        let pos = vehicle
+            .mission
+            .get(index)
+            .and_then(|item| item.command.position())
+            .unwrap_or(Position {
+                lat: 0.0,
+                lon: 0.0,
+                alt_m: 50.0,
+            });
+
+        if vehicle.mission.update(index, |item| {
+            item.command = MissionCommand::default_for(kind, pos)
+        }) {
+            self.ui_mut(id).edit.clear();
+        }
+        Some(())
+    }
+
+    /// Buffer an edited field and fold it into the mission when parseable.
+    fn edit_field(
+        &mut self,
+        index: usize,
+        field: MissionField,
+        text: String,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        self.ui_mut(id).edit.insert(field, text.clone());
+
+        if let Some(value) = parse_field_value(&text) {
+            vehicle
+                .mission
+                .update(index, |item| item.command.set_field(field, value));
+        }
+        Some(())
+    }
+
+    /// Toggle "place waypoint" mode for the primary vehicle.
+    fn toggle_placing(&mut self, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+
+        let ui = self.ui_mut(id);
+        ui.placing = !ui.placing;
+        Some(())
+    }
+
+    /// Move a dragged waypoint to a new geographic position.
+    fn move_waypoint_to(
+        &mut self,
+        index: usize,
+        position: GeoPosition,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        vehicle.mission.update(index, |item| {
+            item.command.set_field(MissionField::Latitude, position.lat);
+            item.command
+                .set_field(MissionField::Longitude, position.lon);
+        });
+        Some(())
+    }
+
+    /// Append a waypoint at a map-click position.
+    fn add_waypoint_at(&mut self, position: GeoPosition, ctx: &mut Context) -> Option<()> {
+        let id = ctx.fleet.primary()?;
+        let vehicle = ctx.fleet.vehicle_mut(id)?;
+
+        let alt_m = vehicle
+            .position
+            .current
+            .as_ref()
+            .map(|position| position.alt_agl)
+            .unwrap_or(50.0);
+
+        let command = MissionCommand::default_for(
+            MissionCommandKind::Waypoint,
+            Position {
+                lat: position.lat,
+                lon: position.lon,
+                alt_m,
+            },
+        );
+
+        vehicle.mission.push(MissionItem {
+            frame: MavFrame::GlobalRelativeAltInt,
+            autocontinue: true,
+            command,
+        });
+
+        let ui = self.ui_mut(id);
+        ui.selected = Some(vehicle.mission.len() - 1);
+        ui.edit.clear();
+        Some(())
+    }
+
+    /// Open a file dialog to pick a mission save path.
+    fn save_dialog(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+        let file_dialog = file_dialog(ctx.file_picker_path).set_file_name("mission.waypoints");
+
+        Some((
+            Task::future(async move {
+                file_dialog
+                    .save_file()
+                    .await
+                    .map(|file| file.path().to_owned())
+            })
+            .and_then(move |path| Task::done(Message::SaveToFile(id, path))),
+            None,
+        ))
+    }
+
+    /// Write a vehicle's mission to disk off the UI thread.
+    fn save_to_file(
+        &mut self,
+        id: SystemId,
+        path: PathBuf,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let vehicle = ctx.fleet.vehicle(id)?;
+        let items = vehicle.mission.items().to_vec();
+        log::info!("Saving mission to file: {path:?}");
+
+        let save_path = path.clone();
+        Some((
+            iced_runtime::task::blocking(move |mut sender| {
+                let result = std::fs::write(&save_path, write_wpl(&items))
+                    .map_err(|error| error.to_string());
+                let _ = sender.try_send(Message::SaveFinished(id, save_path, result));
+            }),
+            None,
+        ))
+    }
+
+    /// Log a save failure and remember the chosen directory.
+    fn save_finished(
+        &mut self,
+        id: SystemId,
+        path: PathBuf,
+        result: Result<(), String>,
+    ) -> (Task<Message>, Option<Event>) {
+        if let Err(error) = result {
+            log::error!("Error saving mission for {id:?} to file: {error}");
+        }
+
+        (Task::none(), Some(Event::SetFilePickerPath(path)))
+    }
+
+    /// Open a file dialog to pick a mission file to load.
+    fn load_dialog(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
+        let id = ctx.fleet.primary()?;
+        let file_dialog = file_dialog(ctx.file_picker_path);
+
+        Some((
+            Task::future(async move {
+                file_dialog
+                    .pick_file()
+                    .await
+                    .map(|file| file.path().to_owned())
+            })
+            .and_then(move |path| Task::done(Message::LoadFromFile(id, path))),
+            None,
+        ))
+    }
+
+    /// Read and parse a mission file off the UI thread.
+    fn load_from_file(&mut self, id: SystemId, path: PathBuf) -> (Task<Message>, Option<Event>) {
+        log::info!("Loading mission from file: {path:?}");
+
+        let load_path = path.clone();
+        (
+            iced_runtime::task::blocking(move |mut sender| {
+                let result = std::fs::read_to_string(&load_path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| parse_wpl(&text).map_err(|error| error.to_string()));
+                let _ = sender.try_send(Message::LoadFinished(id, load_path, result));
+            }),
+            None,
+        )
+    }
+
+    /// Apply a loaded mission to the vehicle the dialog was opened for.
+    fn load_finished(
+        &mut self,
+        id: SystemId,
+        path: PathBuf,
+        result: Result<Vec<MissionItem>, String>,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        match result {
+            Ok(items) => {
+                // As with the network results, a file result only updates
+                // state it already owns, so an unsolicited result is a no-op.
+                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
+                    vehicle.mission.set_items(items);
+                    vehicle.mission.mark_dirty();
+                }
+                if let Some(ui) = self.ui.get_mut(&id) {
+                    ui.selected = None;
+                    ui.edit.clear();
+                }
+
+                Some((Task::none(), Some(Event::SetFilePickerPath(path))))
+            }
+            Err(error) => {
+                log::error!("Error loading mission from file: {error}");
+                None
+            }
+        }
+    }
+
     fn run_command(&mut self, action: MissionAction, ctx: &mut Context) -> Task<Message> {
         let Some(id) = ctx.fleet.primary() else {
             return Task::none();

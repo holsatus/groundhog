@@ -192,255 +192,360 @@ impl ParameterPanel {
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
         match message {
-            Message::FilterIdentPattern(buffer) => {
-                self.filter.ident_pattern = buffer;
-            }
-            Message::FilterOnlyChanged(changed) => {
-                self.filter.only_changed = changed;
-            }
-            Message::ListReload(address) => {
-                let system = SystemId::from(address.system);
-                let component = address.component;
-                let client = ctx.services.vehicle(address);
-                let vehicle = ctx.fleet.vehicle_mut(system)?;
-
-                let request_capabilities = vehicle.capabilities(component).is_none();
-                vehicle.parameters_mut(component).reset_loading();
-                self.reloading.insert(address);
-
-                let task = Task::perform(
-                    async move { client.fetch_parameters(request_capabilities).await },
-                    move |result| Message::ListReloadResult(address, result),
-                );
-
-                return Some((task, None));
-            }
+            Message::FilterIdentPattern(buffer) => self.filter.ident_pattern = buffer,
+            Message::FilterOnlyChanged(changed) => self.filter.only_changed = changed,
+            Message::ListReload(address) => return self.list_reload(address, ctx),
             Message::ListReloadStarted(address) => {
                 self.reloading.insert(address);
             }
-            Message::ListReloadResult(address, result) => {
-                self.reloading.remove(&address);
-                match result {
-                    Ok(summary) => log::info!("Parameters from {address:?}: {summary:?}"),
-                    Err(error) => log::warn!("Parameter download from {address:?} failed: {error}"),
-                }
-            }
-            Message::UploadAll(address) => {
-                let system = SystemId::from(address.system);
-                let vehicle = ctx.fleet.vehicle(system)?;
-                let parameters = vehicle.parameters(address.component)?;
-
-                // The number of concurrent uploads is limited by the middleware
-                let uploads: Vec<_> = parameters
-                    .iter()
-                    .filter_map(|(ident, param)| match param.state() {
-                        ParamState::Changed { value, .. } => Some(Task::done(
-                            Message::ValueUpload(address, ident.clone(), *value),
-                        )),
-                        _ => None,
-                    })
-                    .collect();
-
-                log::info!("Uploading {} changed parameters", uploads.len());
-                return Some((Task::batch(uploads), None));
-            }
+            Message::ListReloadResult(address, result) => self.list_reload_result(address, result),
+            Message::UploadAll(address) => return self.upload_all(address, ctx),
             Message::BufferEdit(address, ident, buffer) => {
-                // Editing supersedes any upload in flight for this parameter.
-                self.uploads.remove(&(address, ident.clone()));
-
-                {
-                    let system = SystemId::from(address.system);
-                    let entry = ctx.fleet.vehicle_mut(system)?;
-                    let param = entry.parameters_mut(address.component).get_mut(&ident)?;
-
-                    param.set_edited(value_parse_as(param.value(), &buffer));
-                }
-
-                self.editing
-                    .entry(address)
-                    .or_default()
-                    .insert(ident, buffer);
+                self.buffer_edit(address, ident, buffer, ctx)?
             }
-            Message::ValueReset(address, ident) => {
-                self.uploads.remove(&(address, ident.clone()));
-
-                {
-                    let system = SystemId::from(address.system);
-                    let entry = ctx.fleet.vehicle_mut(system)?;
-                    let param = entry.parameters_mut(address.component).get_mut(&ident)?;
-
-                    param.reset();
-                }
-
-                if let Some(editing) = self.editing.get_mut(&address) {
-                    editing.remove(&ident);
-                }
-            }
+            Message::ValueReset(address, ident) => self.value_reset(address, ident, ctx)?,
             Message::ValueUpload(address, ident, value) => {
-                let system = SystemId::from(address.system);
-                let client = ctx.services.vehicle(address);
-                let vehicle = ctx.fleet.vehicle_mut(system)?;
-                let cap = vehicle.capabilities(address.component).unwrap_or_default();
-                let param = vehicle.parameters_mut(address.component).get_mut(&ident)?;
-
-                let ident_cloned = ident.clone();
-                let ident_for_result = ident.clone();
-                let (task, handle) = Task::perform(
-                    async move { client.set_parameter(ident_cloned, value, cap).await },
-                    move |result| {
-                        Message::ValueUploadResult(address, ident_for_result.clone(), value, result)
-                    },
-                )
-                .abortable();
-
-                // Holding the abort handle lets an edit or reset cancel the
-                // upload by dropping it; completion drops it too.
-                self.uploads
-                    .insert((address, ident.clone()), handle.abort_on_drop());
-                param.begin_upload(value);
-
-                return Some((task, None));
+                return self.value_upload(address, ident, value, ctx);
             }
             Message::ValueUploadResult(address, ident, requested, result) => {
-                let system = SystemId::from(address.system);
-                let component = address.component;
-                let vehicle = ctx.fleet.vehicle_mut(system)?;
-
-                // A result only updates state it already owns; if the component
-                // was never heard from, it is a no-op.
-                vehicle.parameters(component)?;
-
-                let param = vehicle.parameters_mut(component).get_mut(&ident)?;
-
-                if !matches!(param.state(), ParamState::Uploading { value } if *value == requested)
-                {
-                    return None;
-                }
-
-                self.uploads.remove(&(address, ident.clone()));
-
-                match result {
-                    Ok(value) if value == requested => param.upload_succeeded(value),
-                    Ok(value) => {
-                        log::warn!(
-                            "Parameter '{}' was set to {value:?} instead of {requested:?}",
-                            ident.as_str()
-                        );
-                        param.upload_rejected(value, requested);
-                    }
-                    Err(error) => {
-                        log::warn!("Parameter upload for '{}' failed: {error}", ident.as_str());
-                        param.upload_failed(requested);
-                    }
-                }
+                self.value_upload_result(address, ident, requested, result, ctx)?
             }
-            Message::SelectComponent(address) => {
-                self.component
-                    .insert(SystemId::from(address.system), address.component);
-            }
-            Message::SaveDialog(parameters) => {
-                let file_dialog = file_dialog(ctx.file_picker_path);
-
-                return Some((
-                    Task::future(async move {
-                        file_dialog.save_file().await.map(|file| (file, parameters))
-                    })
-                    .and_then(|(file, parameters)| {
-                        Task::done(Message::SaveToFile(file.path().to_owned(), parameters))
-                    }),
-                    None,
-                ));
-            }
+            Message::SelectComponent(address) => self.select_component(address),
+            Message::SaveDialog(parameters) => return Some(self.save_dialog(parameters, ctx)),
             Message::SaveToFile(save_path, parameters) => {
-                log::info!("Saving parameters to file: {save_path:?}");
-
-                let path = save_path.clone();
-                return Some((
-                    iced_runtime::task::blocking(move |mut sender| {
-                        let result =
-                            std::fs::write(&path, parameter::parameters_to_ini_string(&parameters))
-                                .map_err(|error| error.to_string());
-                        let _ = sender.try_send(Message::SaveFinished(save_path, result));
-                    }),
-                    None,
-                ));
+                return Some(self.save_to_file(save_path, parameters));
             }
             Message::SaveFinished(save_path, result) => {
-                if let Err(error) = result {
-                    log::error!("Error saving to file: {error}");
-                }
-
-                return Some((Task::none(), Some(Event::SetFilePickerPath(save_path))));
+                return Some(self.save_finished(save_path, result));
             }
-            Message::LoadDialog(address) => {
-                let file_dialog = file_dialog(ctx.file_picker_path);
-
-                return Some((
-                    Task::future(async move {
-                        file_dialog.pick_file().await.map(|file| (file, address))
-                    })
-                    .and_then(|(file, address)| {
-                        Task::done(Message::LoadFromFile(file.path().to_owned(), address))
-                    }),
-                    None,
-                ));
-            }
+            Message::LoadDialog(address) => return Some(self.load_dialog(address, ctx)),
             Message::LoadFromFile(load_path, address) => {
-                log::info!("Loading parameters from file: {load_path:?}");
-
-                let path = load_path.clone();
-                return Some((
-                    iced_runtime::task::blocking(move |mut sender| {
-                        let result = std::fs::read_to_string(&path)
-                            .map_err(|error| error.to_string())
-                            .and_then(|text| {
-                                parameter::parameters_from_ini_str(&text)
-                                    .map_err(|error| error.to_string())
-                            });
-                        let _ = sender.try_send(Message::LoadFinished(load_path, address, result));
-                    }),
-                    None,
-                ));
+                return Some(self.load_from_file(load_path, address));
             }
             Message::LoadFinished(load_path, address, loaded_params) => {
-                let loaded_params = match loaded_params {
-                    Ok(loaded_params) => loaded_params,
-                    Err(error) => {
-                        log::error!("Could not load parameter file: {error}");
-                        return None;
-                    }
-                };
-
-                let system = SystemId::from(address.system);
-                let component = address.component;
-                let vehicle = ctx.fleet.vehicle_mut(system)?;
-
-                // Mark the loaded values as pending edits on the addressed
-                // component, filling the buffers so the new values are shown.
-                let editing = self.editing.entry(address).or_default();
-                for (ident, new_param) in loaded_params.iter() {
-                    let Some(current) = vehicle.parameters(component).and_then(|p| p.get(ident))
-                    else {
-                        continue;
-                    };
-                    let current_value = current.value();
-                    if !value_type_matches(current_value, new_param.value())
-                        || current_value == new_param.value()
-                    {
-                        continue;
-                    }
-
-                    if let Some(old_param) = vehicle.parameters_mut(component).get_mut(ident) {
-                        old_param.mark_changed(new_param.value());
-                        editing.insert(ident.clone(), value_as_string(new_param.value()));
-                    }
-                }
-
-                return Some((Task::none(), Some(Event::SetFilePickerPath(load_path))));
+                return self.load_finished(load_path, address, loaded_params, ctx);
             }
         }
 
         None
+    }
+
+    /// Request the addressed component's parameter list.
+    fn list_reload(
+        &mut self,
+        address: MavlinkId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let system = SystemId::from(address.system);
+        let component = address.component;
+        let client = ctx.services.vehicle(address);
+        let vehicle = ctx.fleet.vehicle_mut(system)?;
+
+        let request_capabilities = vehicle.capabilities(component).is_none();
+        vehicle.parameters_mut(component).reset_loading();
+        self.reloading.insert(address);
+
+        let task = Task::perform(
+            async move { client.fetch_parameters(request_capabilities).await },
+            move |result| Message::ListReloadResult(address, result),
+        );
+
+        Some((task, None))
+    }
+
+    /// Clear the in-flight flag and log a list-download result.
+    fn list_reload_result(&mut self, address: MavlinkId, result: Result<ParamListSummary>) {
+        self.reloading.remove(&address);
+        match result {
+            Ok(summary) => log::info!("Parameters from {address:?}: {summary:?}"),
+            Err(error) => log::warn!("Parameter download from {address:?} failed: {error}"),
+        }
+    }
+
+    /// Upload every changed parameter on the addressed component.
+    fn upload_all(
+        &mut self,
+        address: MavlinkId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let system = SystemId::from(address.system);
+        let vehicle = ctx.fleet.vehicle(system)?;
+        let parameters = vehicle.parameters(address.component)?;
+
+        // The number of concurrent uploads is limited by the middleware
+        let uploads: Vec<_> = parameters
+            .iter()
+            .filter_map(|(ident, param)| match param.state() {
+                ParamState::Changed { value, .. } => Some(Task::done(Message::ValueUpload(
+                    address,
+                    ident.clone(),
+                    *value,
+                ))),
+                _ => None,
+            })
+            .collect();
+
+        log::info!("Uploading {} changed parameters", uploads.len());
+        Some((Task::batch(uploads), None))
+    }
+
+    /// Buffer an edited value and fold it into the parameter.
+    fn buffer_edit(
+        &mut self,
+        address: MavlinkId,
+        ident: Ident,
+        buffer: String,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        // Editing supersedes any upload in flight for this parameter.
+        self.uploads.remove(&(address, ident.clone()));
+
+        {
+            let system = SystemId::from(address.system);
+            let entry = ctx.fleet.vehicle_mut(system)?;
+            let param = entry.parameters_mut(address.component).get_mut(&ident)?;
+
+            param.set_edited(value_parse_as(param.value(), &buffer));
+        }
+
+        self.editing
+            .entry(address)
+            .or_default()
+            .insert(ident, buffer);
+        Some(())
+    }
+
+    /// Reset a pending edit and drop its buffer.
+    fn value_reset(&mut self, address: MavlinkId, ident: Ident, ctx: &mut Context) -> Option<()> {
+        self.uploads.remove(&(address, ident.clone()));
+
+        {
+            let system = SystemId::from(address.system);
+            let entry = ctx.fleet.vehicle_mut(system)?;
+            let param = entry.parameters_mut(address.component).get_mut(&ident)?;
+
+            param.reset();
+        }
+
+        if let Some(editing) = self.editing.get_mut(&address) {
+            editing.remove(&ident);
+        }
+        Some(())
+    }
+
+    /// Upload one parameter to the addressed component.
+    fn value_upload(
+        &mut self,
+        address: MavlinkId,
+        ident: Ident,
+        value: Value,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let system = SystemId::from(address.system);
+        let client = ctx.services.vehicle(address);
+        let vehicle = ctx.fleet.vehicle_mut(system)?;
+        let cap = vehicle.capabilities(address.component).unwrap_or_default();
+        let param = vehicle.parameters_mut(address.component).get_mut(&ident)?;
+
+        let ident_cloned = ident.clone();
+        let ident_for_result = ident.clone();
+        let (task, handle) = Task::perform(
+            async move { client.set_parameter(ident_cloned, value, cap).await },
+            move |result| {
+                Message::ValueUploadResult(address, ident_for_result.clone(), value, result)
+            },
+        )
+        .abortable();
+
+        // Holding the abort handle lets an edit or reset cancel the
+        // upload by dropping it; completion drops it too.
+        self.uploads
+            .insert((address, ident.clone()), handle.abort_on_drop());
+        param.begin_upload(value);
+
+        Some((task, None))
+    }
+
+    /// Fold a parameter upload result into the addressed component.
+    fn value_upload_result(
+        &mut self,
+        address: MavlinkId,
+        ident: Ident,
+        requested: Value,
+        result: Result<Value>,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        let system = SystemId::from(address.system);
+        let component = address.component;
+        let vehicle = ctx.fleet.vehicle_mut(system)?;
+
+        // A result only updates state it already owns; if the component
+        // was never heard from, it is a no-op.
+        vehicle.parameters(component)?;
+
+        let param = vehicle.parameters_mut(component).get_mut(&ident)?;
+
+        if !matches!(param.state(), ParamState::Uploading { value } if *value == requested) {
+            return None;
+        }
+
+        self.uploads.remove(&(address, ident.clone()));
+
+        match result {
+            Ok(value) if value == requested => param.upload_succeeded(value),
+            Ok(value) => {
+                log::warn!(
+                    "Parameter '{}' was set to {value:?} instead of {requested:?}",
+                    ident.as_str()
+                );
+                param.upload_rejected(value, requested);
+            }
+            Err(error) => {
+                log::warn!("Parameter upload for '{}' failed: {error}", ident.as_str());
+                param.upload_failed(requested);
+            }
+        }
+        Some(())
+    }
+
+    /// Remember which component's parameters the panel should show.
+    fn select_component(&mut self, address: MavlinkId) {
+        self.component
+            .insert(SystemId::from(address.system), address.component);
+    }
+
+    /// Open a file dialog to pick a parameter save path.
+    fn save_dialog(
+        &mut self,
+        parameters: Parameters,
+        ctx: &mut Context,
+    ) -> (Task<Message>, Option<Event>) {
+        let file_dialog = file_dialog(ctx.file_picker_path);
+
+        (
+            Task::future(
+                async move { file_dialog.save_file().await.map(|file| (file, parameters)) },
+            )
+            .and_then(|(file, parameters)| {
+                Task::done(Message::SaveToFile(file.path().to_owned(), parameters))
+            }),
+            None,
+        )
+    }
+
+    /// Write a parameter set to disk off the UI thread.
+    fn save_to_file(
+        &mut self,
+        save_path: PathBuf,
+        parameters: Parameters,
+    ) -> (Task<Message>, Option<Event>) {
+        log::info!("Saving parameters to file: {save_path:?}");
+
+        let path = save_path.clone();
+        (
+            iced_runtime::task::blocking(move |mut sender| {
+                let result =
+                    std::fs::write(&path, parameter::parameters_to_ini_string(&parameters))
+                        .map_err(|error| error.to_string());
+                let _ = sender.try_send(Message::SaveFinished(save_path, result));
+            }),
+            None,
+        )
+    }
+
+    /// Log a save failure and remember the chosen directory.
+    fn save_finished(
+        &mut self,
+        save_path: PathBuf,
+        result: Result<(), String>,
+    ) -> (Task<Message>, Option<Event>) {
+        if let Err(error) = result {
+            log::error!("Error saving to file: {error}");
+        }
+
+        (Task::none(), Some(Event::SetFilePickerPath(save_path)))
+    }
+
+    /// Open a file dialog to pick a parameter file to load.
+    fn load_dialog(
+        &mut self,
+        address: MavlinkId,
+        ctx: &mut Context,
+    ) -> (Task<Message>, Option<Event>) {
+        let file_dialog = file_dialog(ctx.file_picker_path);
+
+        (
+            Task::future(async move { file_dialog.pick_file().await.map(|file| (file, address)) })
+                .and_then(|(file, address)| {
+                    Task::done(Message::LoadFromFile(file.path().to_owned(), address))
+                }),
+            None,
+        )
+    }
+
+    /// Read and parse a parameter file off the UI thread.
+    fn load_from_file(
+        &mut self,
+        load_path: PathBuf,
+        address: MavlinkId,
+    ) -> (Task<Message>, Option<Event>) {
+        log::info!("Loading parameters from file: {load_path:?}");
+
+        let path = load_path.clone();
+        (
+            iced_runtime::task::blocking(move |mut sender| {
+                let result = std::fs::read_to_string(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| {
+                        parameter::parameters_from_ini_str(&text).map_err(|error| error.to_string())
+                    });
+                let _ = sender.try_send(Message::LoadFinished(load_path, address, result));
+            }),
+            None,
+        )
+    }
+
+    /// Apply loaded values as pending edits on the addressed component.
+    fn load_finished(
+        &mut self,
+        load_path: PathBuf,
+        address: MavlinkId,
+        loaded_params: Result<Parameters, String>,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let loaded_params = match loaded_params {
+            Ok(loaded_params) => loaded_params,
+            Err(error) => {
+                log::error!("Could not load parameter file: {error}");
+                return None;
+            }
+        };
+
+        let system = SystemId::from(address.system);
+        let component = address.component;
+        let vehicle = ctx.fleet.vehicle_mut(system)?;
+
+        // Mark the loaded values as pending edits on the addressed
+        // component, filling the buffers so the new values are shown.
+        let editing = self.editing.entry(address).or_default();
+        for (ident, new_param) in loaded_params.iter() {
+            let Some(current) = vehicle.parameters(component).and_then(|p| p.get(ident)) else {
+                continue;
+            };
+            let current_value = current.value();
+            if !value_type_matches(current_value, new_param.value())
+                || current_value == new_param.value()
+            {
+                continue;
+            }
+
+            if let Some(old_param) = vehicle.parameters_mut(component).get_mut(ident) {
+                old_param.mark_changed(new_param.value());
+                editing.insert(ident.clone(), value_as_string(new_param.value()));
+            }
+        }
+
+        Some((Task::none(), Some(Event::SetFilePickerPath(load_path))))
     }
 
     /// Render the parameter panel. A pure function of panel state: whether a
