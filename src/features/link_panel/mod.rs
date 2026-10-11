@@ -198,7 +198,7 @@ impl LinkPanel {
                     return (
                         Task::future(async move {
                             let link_id = id.clone();
-                            match build.connect().await {
+                            match link::open(build).await {
                                 Ok((reader, writer)) => {
                                     let handle = router.attach_reader_writer(
                                         link_id.clone(),

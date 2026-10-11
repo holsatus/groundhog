@@ -22,39 +22,37 @@ fn arc<E: std::error::Error + Send + Sync + 'static>(error: E) -> ArcError {
     Arc::new(error)
 }
 
-impl LinkBuild {
-    /// Open the transport, returning the reader and writer to attach to a
-    /// router. Awaiting this performs any blocking work off-thread.
-    pub async fn connect(self) -> Result<(BoxedReader, BoxedWriter), ArcError> {
-        match self {
-            LinkBuild::Tcp { sock_addr } => {
-                let stream = tokio::net::TcpStream::connect(sock_addr)
-                    .await
-                    .map_err(arc)?;
-                let (reader, writer) = stream.into_split();
-                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
-            }
-            LinkBuild::Udp { sock_addr } => {
-                let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
-                let socket = Arc::new((socket, AtomicBool::new(false)));
-                let reader = super::udp::UdpReader::new(socket.clone());
-                let writer = super::udp::UdpWriter::new(socket);
-                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
-            }
-            LinkBuild::Serial { port, baud } => {
-                // `open` and `try_clone` both block and register with the tokio
-                // reactor; `spawn_blocking` enters the runtime context for us.
-                let (reader, writer) = tokio::task::spawn_blocking(move || {
-                    let writer = serial2_tokio::SerialPort::open(&port, baud)?;
-                    let reader = writer.try_clone()?;
-                    Ok::<_, std::io::Error>((reader, writer))
-                })
+/// Open the transport described by `build`, returning the reader and writer to
+/// attach to a router. Awaiting this performs any blocking work off-thread.
+pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcError> {
+    match build {
+        LinkBuild::Tcp { sock_addr } => {
+            let stream = tokio::net::TcpStream::connect(sock_addr)
                 .await
-                .map_err(arc)?
                 .map_err(arc)?;
+            let (reader, writer) = stream.into_split();
+            Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
+        }
+        LinkBuild::Udp { sock_addr } => {
+            let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
+            let socket = Arc::new((socket, AtomicBool::new(false)));
+            let reader = super::udp::UdpReader::new(socket.clone());
+            let writer = super::udp::UdpWriter::new(socket);
+            Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
+        }
+        LinkBuild::Serial { port, baud } => {
+            // `open` and `try_clone` both block and register with the tokio
+            // reactor; `spawn_blocking` enters the runtime context for us.
+            let (reader, writer) = tokio::task::spawn_blocking(move || {
+                let writer = serial2_tokio::SerialPort::open(&port, baud)?;
+                let reader = writer.try_clone()?;
+                Ok::<_, std::io::Error>((reader, writer))
+            })
+            .await
+            .map_err(arc)?
+            .map_err(arc)?;
 
-                Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
-            }
+            Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
         }
     }
 }
