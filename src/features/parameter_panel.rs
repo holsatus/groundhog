@@ -106,8 +106,9 @@ pub enum Message {
     /// Select which component's parameters the panel shows.
     SelectComponent(MavlinkId),
 
-    /// Open a file-picker dialog to choose a save location
-    SaveDialog(Parameters),
+    /// Open a file-picker dialog to choose a save location for the addressed
+    /// component.
+    SaveDialog(MavlinkId),
 
     /// Save the parameters to the chosen path
     SaveToFile(PathBuf, Parameters),
@@ -211,7 +212,7 @@ impl ParameterPanel {
                 self.value_upload_result(address, ident, requested, result, ctx)?
             }
             Message::SelectComponent(address) => self.select_component(address),
-            Message::SaveDialog(parameters) => return Some(self.save_dialog(parameters, ctx)),
+            Message::SaveDialog(address) => return Some(self.save_dialog(address, ctx)),
             Message::SaveToFile(save_path, parameters) => {
                 return Some(self.save_to_file(save_path, parameters));
             }
@@ -415,11 +416,23 @@ impl ParameterPanel {
     }
 
     /// Open a file dialog to pick a parameter save path.
+    ///
+    /// The component's parameter set is snapshotted here, when the dialog is
+    /// opened, rather than in `view`.
     fn save_dialog(
         &mut self,
-        parameters: Parameters,
+        address: MavlinkId,
         ctx: &mut Context,
     ) -> (Task<Message>, Option<Event>) {
+        let Some(parameters) = ctx
+            .fleet
+            .vehicle(SystemId::from(address.system))
+            .and_then(|vehicle| vehicle.parameters(address.component))
+            .cloned()
+        else {
+            return (Task::none(), None);
+        };
+
         let file_dialog = file_dialog(ctx.file_picker_path);
 
         (
@@ -601,10 +614,9 @@ impl ParameterPanel {
             .width(Length::FillPortion(1))
             .on_press(Message::UploadAll(address));
 
-        let save_parameters = parameters.cloned().unwrap_or_default();
         let save_button = Button::new("Save parameters to file")
             .width(Length::FillPortion(1))
-            .on_press_with(move || Message::SaveDialog(save_parameters.clone()));
+            .on_press(Message::SaveDialog(address));
 
         let load_button = Button::new("Load parameters from file")
             .width(Length::FillPortion(1))
