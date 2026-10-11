@@ -10,8 +10,11 @@
 //! [`MissionItem::frame`]; non-positional commands decode regardless of frame so
 //! that missions from other planners (which often tag `DO_*`/`CONDITION_*` items
 //! with `Global` or `GlobalRelativeAlt`) keep their typed meaning. Positional
-//! commands are stricter: they decode only for the global-INT frames, and a
-//! positional command in any other frame is kept as [`MissionCommand::Unknown`].
+//! commands decode for any global frame, INT or not: vehicles commonly return the
+//! non-INT frames in `MISSION_ITEM_INT` (ArduPilot, for one) while still using
+//! the scaled integer x/y, so all six global frames carry a usable position. Any
+//! unrecognised command, or a positional command in a non-global frame, is kept
+//! as [`MissionCommand::Unknown`].
 
 use mavio::default_dialect::{
     enums::{MavCmd, MavFrame, MavMissionType},
@@ -836,45 +839,51 @@ fn position_fields(pos: &Position) -> Vec<FieldSpec> {
     ]
 }
 
+/// Decode a wire item into a typed command where recognised.
+///
+/// Positional commands decode for any global frame (INT or not), since the x/y
+/// are scaled integers in all of them. Anything unrecognised — an unsupported
+/// command, or a positional command in a non-global frame — falls back to
+/// [`MissionCommand::Unknown`] so the item still round-trips exactly.
 fn decode_command(msg: &MissionItemInt) -> MissionCommand {
     let p = [msg.param1, msg.param2, msg.param3, msg.param4];
 
     match msg.command {
-        MavCmd::NavWaypoint if is_global_int(msg.frame) => MissionCommand::Waypoint {
+        MavCmd::NavWaypoint if is_global_frame(msg.frame) => MissionCommand::Waypoint {
             pos: decode_position(msg),
             hold_s: p[0],
             accept_radius_m: p[1],
             pass_radius_m: p[2],
             yaw_deg: decode_yaw(p[3]),
         },
-        MavCmd::NavLoiterUnlim if is_global_int(msg.frame) => MissionCommand::LoiterUnlim {
+        MavCmd::NavLoiterUnlim if is_global_frame(msg.frame) => MissionCommand::LoiterUnlim {
             pos: decode_position(msg),
             radius_m: p[2],
             yaw_deg: decode_yaw(p[3]),
         },
-        MavCmd::NavLoiterTurns if is_global_int(msg.frame) => MissionCommand::LoiterTurns {
+        MavCmd::NavLoiterTurns if is_global_frame(msg.frame) => MissionCommand::LoiterTurns {
             pos: decode_position(msg),
             turns: p[0],
             radius_m: p[2],
         },
-        MavCmd::NavLoiterTime if is_global_int(msg.frame) => MissionCommand::LoiterTime {
+        MavCmd::NavLoiterTime if is_global_frame(msg.frame) => MissionCommand::LoiterTime {
             pos: decode_position(msg),
             time_s: p[0],
             radius_m: p[2],
         },
         MavCmd::NavReturnToLaunch => MissionCommand::ReturnToLaunch,
-        MavCmd::NavLand if is_global_int(msg.frame) => MissionCommand::Land {
+        MavCmd::NavLand if is_global_frame(msg.frame) => MissionCommand::Land {
             pos: decode_position(msg),
             abort_alt_m: p[0],
             precision_land_mode: p[1] as u8,
             yaw_deg: decode_yaw(p[3]),
         },
-        MavCmd::NavTakeoff if is_global_int(msg.frame) => MissionCommand::Takeoff {
+        MavCmd::NavTakeoff if is_global_frame(msg.frame) => MissionCommand::Takeoff {
             pos: decode_position(msg),
             pitch_deg: p[0],
             yaw_deg: decode_yaw(p[3]),
         },
-        MavCmd::NavVtolTakeoff if is_global_int(msg.frame) => MissionCommand::VtolTakeoff {
+        MavCmd::NavVtolTakeoff if is_global_frame(msg.frame) => MissionCommand::VtolTakeoff {
             pos: decode_position(msg),
             yaw_deg: decode_yaw(p[3]),
         },
@@ -904,7 +913,7 @@ fn decode_command(msg: &MissionItemInt) -> MissionCommand {
             target_seq: p[0] as u16,
             repeat: p[1] as u16,
         },
-        MavCmd::DoSetRoiLocation if is_global_int(msg.frame) => MissionCommand::SetRoiLocation {
+        MavCmd::DoSetRoiLocation if is_global_frame(msg.frame) => MissionCommand::SetRoiLocation {
             pos: decode_position(msg),
         },
         other => MissionCommand::Unknown {
@@ -926,10 +935,21 @@ fn decode_position(msg: &MissionItemInt) -> Position {
     }
 }
 
-fn is_global_int(frame: MavFrame) -> bool {
+/// Whether `frame` is one of the global frames whose x/y are latitude/longitude.
+///
+/// This deliberately accepts both the non-INT (`Global`, `GlobalRelativeAlt`,
+/// `GlobalTerrainAlt`) and INT (`*Int`) variants: in a `MISSION_ITEM_INT` the
+/// x/y are scaled integers regardless of which of these frames the vehicle used,
+/// and autopilots (ArduPilot included) commonly report the non-INT frames.
+fn is_global_frame(frame: MavFrame) -> bool {
     matches!(
         frame,
-        MavFrame::GlobalInt | MavFrame::GlobalRelativeAltInt | MavFrame::GlobalTerrainAltInt
+        MavFrame::Global
+            | MavFrame::GlobalRelativeAlt
+            | MavFrame::GlobalInt
+            | MavFrame::GlobalRelativeAltInt
+            | MavFrame::GlobalTerrainAlt
+            | MavFrame::GlobalTerrainAltInt
     )
 }
 
@@ -1176,15 +1196,15 @@ mod tests {
                 command: MissionCommand::SetRoiLocation { pos: p },
             },
             MissionItem {
-                frame: MavFrame::Global,
+                frame: MavFrame::Mission,
                 autocontinue: false,
                 command: MissionCommand::Unknown {
-                    command: MavCmd::NavWaypoint,
+                    command: MavCmd::DoSetServo,
                     params: [1.0, 2.0, 3.0, 4.0],
                     x: 474_000_000,
                     y: 85_000_000,
                     z: 78.0,
-                    frame: MavFrame::Global,
+                    frame: MavFrame::Mission,
                 },
             },
         ]
@@ -1200,7 +1220,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_round_trips_verbatim() {
+    fn positional_command_in_non_int_global_frame_decodes_typed() {
+        // ArduPilot answers downloads with the non-INT global frame (0 here),
+        // but the x/y are still scaled integers, so this must decode typed.
         let wire = wire_item(
             MavFrame::Global,
             MavCmd::NavWaypoint,
@@ -1213,21 +1235,73 @@ mod tests {
         let item = MissionItem::from_wire(&wire);
 
         assert_eq!(item.frame, MavFrame::Global);
+        let MissionCommand::Waypoint { pos, .. } = item.command else {
+            panic!("expected a waypoint, got {:?}", item.command);
+        };
+        assert!((pos.lat - 47.4).abs() < 1e-6, "lat was {}", pos.lat);
+        assert!((pos.lon - 8.5).abs() < 1e-6, "lon was {}", pos.lon);
+
+        let encoded = item.to_wire(9, MavMissionType::Mission);
+        assert_eq!(encoded.frame, MavFrame::Global);
+        assert_eq!(MissionItem::from_wire(&encoded), item);
+    }
+
+    #[test]
+    fn positional_command_in_global_relative_alt_decodes_typed() {
+        // The relative-altitude case ArduPilot uses for `relative_alt` items.
+        let wire = wire_item(
+            MavFrame::GlobalRelativeAlt,
+            MavCmd::NavWaypoint,
+            [0.0; 4],
+            474_000_000,
+            85_000_000,
+            120.0,
+        );
+
+        let item = MissionItem::from_wire(&wire);
+
+        assert_eq!(item.frame, MavFrame::GlobalRelativeAlt);
+        let MissionCommand::Waypoint { pos, .. } = item.command else {
+            panic!("expected a waypoint, got {:?}", item.command);
+        };
+        assert!((pos.lat - 47.4).abs() < 1e-6, "lat was {}", pos.lat);
+        assert!((pos.lon - 8.5).abs() < 1e-6, "lon was {}", pos.lon);
+        assert!((pos.alt_m - 120.0).abs() < 1e-6, "alt was {}", pos.alt_m);
+
+        let encoded = item.to_wire(9, MavMissionType::Mission);
+        assert_eq!(encoded.frame, MavFrame::GlobalRelativeAlt);
+        assert_eq!(MissionItem::from_wire(&encoded), item);
+    }
+
+    #[test]
+    fn unknown_round_trips_verbatim() {
+        let wire = wire_item(
+            MavFrame::Mission,
+            MavCmd::DoSetServo,
+            [11.0, 22.0, 33.0, 44.0],
+            474_000_000,
+            85_000_000,
+            99.0,
+        );
+
+        let item = MissionItem::from_wire(&wire);
+
+        assert_eq!(item.frame, MavFrame::Mission);
         assert_eq!(
             item.command,
             MissionCommand::Unknown {
-                command: MavCmd::NavWaypoint,
+                command: MavCmd::DoSetServo,
                 params: [11.0, 22.0, 33.0, 44.0],
                 x: 474_000_000,
                 y: 85_000_000,
                 z: 99.0,
-                frame: MavFrame::Global,
+                frame: MavFrame::Mission,
             }
         );
 
         let encoded = item.to_wire(9, MavMissionType::Mission);
-        assert_eq!(encoded.command, MavCmd::NavWaypoint);
-        assert_eq!(encoded.frame, MavFrame::Global);
+        assert_eq!(encoded.command, MavCmd::DoSetServo);
+        assert_eq!(encoded.frame, MavFrame::Mission);
         assert_eq!(encoded.param1, 11.0);
         assert_eq!(encoded.param2, 22.0);
         assert_eq!(encoded.param3, 33.0);
