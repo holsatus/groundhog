@@ -61,9 +61,27 @@ pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcErr
             let (reader, writer) = stream.into_split();
             Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
         }
-        LinkBuild::Udp { sock_addr } => {
+        LinkBuild::Udp { sock_addr, peer } => {
             let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
-            let socket = Arc::new((socket, AtomicBool::new(false)));
+
+            if let Some(peer) = peer {
+                // GCS-initiated: connect to the fixed peer at open, so
+                // outbound frames are delivered before the peer has spoken. A
+                // failed connect fails the open, like a failed TCP connect.
+                socket.connect(peer).await.map_err(arc)?;
+            } else {
+                // Listen mode: multi-peer sourced reads stay deferred — the
+                // first datagram locks the socket to its sender.
+                log::info!(
+                    "UDP link at {sock_addr:?} is listening: outbound frames are discarded \
+                     until a peer sends the first datagram"
+                );
+            }
+
+            // The connected flag matches reality from the start: in peer mode
+            // the connected socket sends and receives immediately, so the
+            // writer never pretends to deliver frames it cannot deliver.
+            let socket = Arc::new((socket, AtomicBool::new(peer.is_some())));
             let reader = super::udp::UdpReader::new(socket.clone());
             let writer = super::udp::UdpWriter::new(socket);
             Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
@@ -265,4 +283,64 @@ pub type AsyncSender =
 /// Construct a new [`AsyncSender`]
 pub fn new_async_sender<W: DynAsyncWriter + 'static>(writer: W) -> AsyncSender {
     mavio::io::AsyncSender::new(BoxedWriter(Box::new(writer)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mavio::dialects::minimal::messages::Heartbeat;
+    use mavio::prelude::V2;
+    use mavio::protocol::FrameBuilder;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
+
+    /// A peer-addressed UDP link transmits at open: the first frame reaches
+    /// its peer while the peer has never spoken.
+    #[tokio::test]
+    async fn peer_connected_udp_transmits_before_the_peer_speaks() {
+        // The peer listens but says nothing.
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, peer.local_addr().unwrap().port());
+
+        // The link binds its own ephemeral local port and connects at open.
+        let (_reader, writer) = open(LinkBuild::Udp {
+            sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            peer: Some(peer_addr),
+        })
+        .await
+        .expect("connecting to a live peer succeeds the open");
+
+        let frame = FrameBuilder::new()
+            .system_id(1)
+            .component_id(1)
+            .version(V2)
+            .sequence(0)
+            .message(&Heartbeat::default())
+            .unwrap()
+            .build()
+            .into_versionless();
+
+        let mut sender = new_async_sender(writer);
+        sender
+            .send(&frame)
+            .await
+            .expect("the connected socket delivers outbound frames");
+
+        // The silent peer receives the heartbeat bytes.
+        let mut buffer = [0u8; 64];
+        let received = tokio::time::timeout(Duration::from_millis(250), peer.recv(&mut buffer))
+            .await
+            .expect("bytes arrive without any inbound datagram first")
+            .expect("the datagram arrives without error");
+
+        // Sanity parse of the MAVLink 2 header: STX, then the dynamic payload
+        // length at offset 1; the full datagram must be exactly the 10-byte
+        // MAVLink 2 header + payload + 2-byte checksum. ( mavio may truncate
+        // trailing zero fields, so no fixed length is pinned.) The message id
+        // low byte (offset 7) is the minimal dialect's Heartbeat.
+        assert_eq!(buffer[0], 0xfd, "MAVLink 2 magic byte");
+        let payload_len = usize::from(buffer[1]);
+        assert_eq!(received, 10 + payload_len + 2, "an exact frame arrived");
+        assert_eq!(buffer[7], 0, "HEARTBEAT message id low byte");
+    }
 }

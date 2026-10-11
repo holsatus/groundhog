@@ -226,6 +226,7 @@ mod tests {
             high_latency: true,
             build: LinkBuild::Udp {
                 sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 14550),
+                peer: Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 14551)),
             },
         });
 
@@ -237,6 +238,30 @@ mod tests {
         assert!(loaded.links[0].auto_connect);
         assert!(loaded.links[0].high_latency);
         assert_eq!(serialized(&config), serialized(&loaded));
+
+        // The peer survives the round trip.
+        let Some(LinkBuild::Udp { peer, .. }) = Some(loaded.links[0].build.clone()) else {
+            panic!("the link is a UDP build")
+        };
+        assert_eq!(
+            peer,
+            Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 14551))
+        );
+
+        // A config written before peers existed loads as a listening link.
+        let text_without_peer = r#"(
+            links: [(
+                name: "Old",
+                auto_connect: false,
+                high_latency: false,
+                build: Udp(sock_addr: "127.0.0.1:14550"),
+            )],
+        )"#;
+        let loaded: Configuration = ron::from_str(text_without_peer).unwrap();
+        let Some(LinkBuild::Udp { peer, .. }) = Some(loaded.links[0].build.clone()) else {
+            panic!("the old link is a UDP build")
+        };
+        assert_eq!(peer, None, "an absent peer defaults to a listening link");
     }
 
     #[test]

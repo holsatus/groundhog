@@ -27,6 +27,9 @@ pub enum LinkBuilder {
     Udp {
         addr: String,
         port: String,
+        /// The fixed peer to connect to at open, as raw text. Empty means the
+        /// link listens and locks onto the first inbound datagram.
+        peer: String,
     },
     Serial {
         port: Option<String>,
@@ -47,6 +50,7 @@ impl LinkBuilder {
         LinkBuilder::Udp {
             addr: "0.0.0.0".into(),
             port: "14550".into(),
+            peer: String::new(),
         }
     }
 
@@ -74,11 +78,22 @@ impl LinkBuilder {
                 let sock = SocketAddrV4::new(addr, port);
                 LinkBuild::Tcp { sock_addr: sock }
             }
-            LinkBuilder::Udp { addr, port } => {
+            LinkBuilder::Udp { addr, port, peer } => {
                 let addr = Ipv4Addr::from_str(addr).ok()?;
                 let port = u16::from_str(port).ok()?;
                 let sock = SocketAddrV4::new(addr, port);
-                LinkBuild::Udp { sock_addr: sock }
+
+                // An empty peer means a listening link; anything else must
+                // parse as an `IPv4:port` pair.
+                let peer = match peer.trim() {
+                    "" => None,
+                    peer => Some(SocketAddrV4::from_str(peer).ok()?),
+                };
+
+                LinkBuild::Udp {
+                    sock_addr: sock,
+                    peer,
+                }
             }
             LinkBuilder::Serial { port, baud, .. } => {
                 let port = port.to_owned()?;
@@ -149,5 +164,57 @@ impl LinkConfigurator {
             high_latency: self.high_latency,
             build: build.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_udp_parses_with_an_empty_peer() {
+        let Some(LinkBuild::Udp { sock_addr, peer }) = LinkBuilder::default_udp().try_build()
+        else {
+            panic!("the default UDP draft must parse")
+        };
+
+        assert_eq!(sock_addr, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 14550));
+        assert_eq!(peer, None, "an empty draft peer is a listening link");
+    }
+
+    #[test]
+    fn udp_peer_must_parse_or_the_build_fails() {
+        let valid = LinkBuilder::Udp {
+            addr: "0.0.0.0".into(),
+            port: "14550".into(),
+            peer: "192.168.1.2:14551".into(),
+        };
+        let Some(LinkBuild::Udp { peer, .. }) = valid.try_build() else {
+            panic!("a parseable peer must build")
+        };
+        assert_eq!(
+            peer,
+            Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 14551))
+        );
+
+        // Surrounding whitespace is trimmed away before parsing.
+        let padded = LinkBuilder::Udp {
+            addr: "0.0.0.0".into(),
+            port: "14550".into(),
+            peer: " 192.168.1.2:14551 ".into(),
+        };
+        assert!(padded.try_build().is_some());
+
+        // An unparseable peer makes the whole build fail, exactly like a
+        // malformed address or port does.
+        let malformed = LinkBuilder::Udp {
+            addr: "0.0.0.0".into(),
+            port: "14550".into(),
+            peer: "nonsense".into(),
+        };
+        assert!(
+            malformed.try_build().is_none(),
+            "an unparseable peer must invalidate the build"
+        );
     }
 }

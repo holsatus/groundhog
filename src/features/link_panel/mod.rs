@@ -293,7 +293,8 @@ impl LinkPanel {
         .on_select(Message::ChangeVariant);
 
         let fields =
-            Column::from_vec(self.builder_fields(Length::Fill, Length::Fill)).spacing(10.0);
+            Column::from_vec(self.builder_fields(Length::Fill, Length::Fill, Length::Fill))
+                .spacing(10.0);
 
         let button = Button::new(
             container("Save link")
@@ -317,9 +318,15 @@ impl LinkPanel {
     }
 
     /// The interactive fields for the current [`LinkBuilder`] variant, with
-    /// per-call widths so the editor and the top bar can share them.
-    pub fn builder_fields(&self, addr: Length, port: Length) -> Vec<Element<'_, Message>> {
-        let mut children = Vec::with_capacity(2);
+    /// per-call widths so the editor and the top bar can share them. For UDP
+    /// the third width sizes the optional peer field.
+    pub fn builder_fields(
+        &self,
+        addr: Length,
+        port: Length,
+        peer: Length,
+    ) -> Vec<Element<'_, Message>> {
+        let mut children = Vec::with_capacity(3);
 
         match &self.configurator.builder {
             LinkBuilder::Tcp { addr: a, port: p } => {
@@ -353,15 +360,21 @@ impl LinkPanel {
                         .boxed(),
                 );
             }
-            LinkBuilder::Udp { addr: a, port: p } => {
+            LinkBuilder::Udp {
+                addr: a,
+                port: p,
+                peer: d,
+            } => {
                 children.push(
                     text_input("address", a)
                         .on_input({
                             let port = p.clone();
+                            let peer = d.clone();
                             move |addr| {
                                 Message::UpdateBuilder(LinkBuilder::Udp {
                                     addr,
                                     port: port.clone(),
+                                    peer: peer.clone(),
                                 })
                             }
                         })
@@ -373,14 +386,36 @@ impl LinkPanel {
                     text_input("port", p)
                         .on_input({
                             let addr = a.clone();
+                            let peer = d.clone();
                             move |port| {
                                 Message::UpdateBuilder(LinkBuilder::Udp {
                                     addr: addr.clone(),
                                     port,
+                                    peer: peer.clone(),
                                 })
                             }
                         })
                         .width(port)
+                        .boxed(),
+                );
+
+                // The peer is optional: empty means the link listens and locks
+                // onto its first inbound datagram. (This iced has no separate
+                // placeholder setter, so the example lives in the label.)
+                children.push(
+                    text_input("Peer (optional), e.g. 192.168.1.2:14550", d)
+                        .on_input({
+                            let addr = a.clone();
+                            let port = p.clone();
+                            move |peer| {
+                                Message::UpdateBuilder(LinkBuilder::Udp {
+                                    addr: addr.clone(),
+                                    port: port.clone(),
+                                    peer,
+                                })
+                            }
+                        })
+                        .width(peer)
                         .boxed(),
                 );
             }
@@ -511,6 +546,7 @@ mod tests {
             high_latency: false,
             build: LinkBuild::Udp {
                 sock_addr: SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 14550),
+                peer: None,
             },
         }
     }
