@@ -335,6 +335,10 @@ impl ParameterPanel {
     }
 
     /// Upload one parameter to the addressed component.
+    ///
+    /// Dropping the abort handle cancels the GCS-side task, but a `PARAM_SET`
+    /// already on the wire may still be accepted by the vehicle; the stored
+    /// state converges on the next reported value (echo, list download).
     fn value_upload(
         &mut self,
         address: MavlinkId,

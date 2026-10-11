@@ -177,6 +177,14 @@ impl Vehicle {
         }
     }
 
+    /// Whether frames from `component` may refresh the vehicle's liveness:
+    /// any component until the autopilot resolves, then the authoritative
+    /// autopilot's frames only.
+    pub(crate) fn is_liveness_source(&self, component: u8) -> bool {
+        self.autopilot
+            .is_none_or(|autopilot| autopilot == component)
+    }
+
     /// Whether `component` is the vehicle's authoritative (autopilot) source.
     ///
     /// Vehicle-scoped telemetry (attitude, position, battery, mission progress)

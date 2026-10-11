@@ -4,14 +4,21 @@
 
 use std::collections::BTreeMap;
 
-use iced::{Alignment, Element, Length, Theme, Widget, font, never, widget::rich_text};
-use mavio::default_dialect::enums::MavSeverity;
+use iced::{
+    Alignment, Element, Length, Theme, Widget,
+    widget::{container, row, scrollable, text, text::Wrapping},
+};
 
 use crate::{
     domain::vehicle::{Liveness, Vehicle},
+    features::log_panel,
     foundation::SystemId,
-    style::{list_brighter, list_default},
+    style,
+    widget::virtualized::virtual_list,
 };
+
+/// Height of a single status row: one line of text plus the container padding.
+const STATUS_ROW_HEIGHT: f32 = 26.0;
 
 /// A short, legible marker for a vehicle's liveness.
 fn liveness_label(liveness: Liveness) -> &'static str {
@@ -178,48 +185,45 @@ pub fn view<'a>(
         }
 
         row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
+
+        // The status list is virtualized like the log panel's list:
+        // rebuilding up to a thousand rows per frame otherwise.
+        let palette = *theme.palette();
+        let entries = vehicle.status.texts.iter().enumerate().collect::<Vec<_>>();
+
+        let list = virtual_list(entries, move |&(index, status)| {
+            let color = log_panel::severity_color(palette, status.severity);
+
+            container(
+                row![
+                    text(format!("{:?}", status.severity))
+                        .color(color)
+                        .width(Length::Fixed(96.0)),
+                    text(format!("[c{}]", status.component)).width(Length::Fixed(72.0)),
+                    text(&status.text)
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(8.0),
+            )
+            .style(if index % 2 == 0 {
+                style::list_default
+            } else {
+                style::list_brighter
+            })
+            .padding(2)
+            .boxed()
+        })
+        .item_height(|_| STATUS_ROW_HEIGHT)
+        .key(|(_, status)| (status.component, status.at))
+        .spacing(0.0);
+
         row_contents.push(
-            iced::widget::scrollable(iced::widget::row![
-                iced::widget::Column::from_iter(vehicle.status.texts.iter().enumerate().map(
-                    |(idx, status)| {
-                        let palette = theme.palette();
-                        let color = match status.severity {
-                            MavSeverity::Emergency => palette.danger.base.color,
-                            MavSeverity::Alert => palette.danger.base.color,
-                            MavSeverity::Critical => palette.danger.base.color,
-                            MavSeverity::Error => palette.danger.base.color,
-                            MavSeverity::Warning => palette.warning.base.color,
-                            MavSeverity::Notice => palette.warning.base.color,
-                            MavSeverity::Info => palette.primary.base.color,
-                            MavSeverity::Debug => palette.secondary.base.color,
-                        };
-                        iced::widget::container(iced::widget::row![
-                            rich_text![
-                                iced::widget::span(format!("[{:?}]", status.severity))
-                                    .color(color)
-                                    .font(iced::Font {
-                                        weight: font::Weight::Bold,
-                                        ..iced::Font::default()
-                                    }),
-                                iced::widget::span(format!("[c{}]", status.component)),
-                                iced::widget::span(" "),
-                                iced::widget::span(&status.text),
-                            ]
-                            .on_link_click(never),
-                            iced::widget::Space::new().width(Length::Fill)
-                        ])
-                        .style(if idx % 2 == 0 {
-                            list_default
-                        } else {
-                            list_brighter
-                        })
-                        .padding(5.0)
-                    }
-                ))
-                .spacing(10.0),
-            ])
-            .anchor_bottom()
-            .boxed(),
+            scrollable(list)
+                .anchor_bottom()
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .boxed(),
         );
     }
 

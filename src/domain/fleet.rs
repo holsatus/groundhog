@@ -121,14 +121,22 @@ impl Fleet {
         }
 
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
-            vehicle.last_seen = Some(received_at);
+            // Liveness follows the command path: commands go to the resolved
+            // autopilot, so once it is resolved only its frames keep the
+            // vehicle alive. The gate is evaluated *before* `handle_message`
+            // below: a frame from a component that establishes the autopilot
+            // (autopilot still `None` here) still refreshes — the frame that
+            // names the authority is itself on the command path.
+            if vehicle.is_liveness_source(source.component) {
+                vehicle.last_seen = Some(received_at);
 
-            // A previously stale or lost vehicle is back as soon as any frame
-            // arrives; a brand-new vehicle is already `Active`, so it does not
-            // emit a recovery here.
-            if vehicle.liveness != Liveness::Active {
-                vehicle.liveness = Liveness::Active;
-                events.push(FleetEvent::LivenessChanged(id, Liveness::Active));
+                // A previously stale or lost vehicle is back as soon as a
+                // frame from the liveness source arrives; a brand-new vehicle
+                // is already `Active`, so it does not emit a recovery here.
+                if vehicle.liveness != Liveness::Active {
+                    vehicle.liveness = Liveness::Active;
+                    events.push(FleetEvent::LivenessChanged(id, Liveness::Active));
+                }
             }
 
             if let Some(message) = message {
@@ -584,6 +592,72 @@ mod tests {
 
         let events = fleet.observe(source(A), t0 + Duration::from_secs(11), None);
 
+        assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::LivenessChanged(A, Liveness::Active)))
+        );
+    }
+
+    #[test]
+    fn companion_frames_do_not_restore_a_resolved_vehicle() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        // Resolve the autopilot with a heartbeat naming a real autopilot.
+        fleet.observe(source(A), t0, Some(heartbeat(MavAutopilot::Ardupilotmega)));
+        assert_eq!(fleet.vehicle(A).unwrap().autopilot_component(), Some(1));
+        assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
+
+        fleet.tick(t0 + Duration::from_secs(5));
+        assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Stale);
+
+        // A companion's frames cannot restore it: commands would go to the
+        // autopilot, so its silence still means lost contact.
+        let companion = MavlinkId {
+            system: 1,
+            component: 191,
+        };
+        let events = fleet.observe(companion, t0 + Duration::from_secs(6), None);
+        assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Stale);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::LivenessChanged(A, Liveness::Active)))
+        );
+
+        // The autopilot's own frame recovers it.
+        let events = fleet.observe(source(A), t0 + Duration::from_secs(7), None);
+        assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::LivenessChanged(A, Liveness::Active)))
+        );
+    }
+
+    #[test]
+    fn companion_frames_keep_an_unresolved_system_alive() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        // Only a companion has been heard, naming no valid autopilot: the
+        // system is not resolved yet, so any component keeps it alive.
+        let companion = MavlinkId {
+            system: 1,
+            component: 191,
+        };
+        fleet.observe(companion, t0, Some(heartbeat(MavAutopilot::Invalid)));
+        assert_eq!(fleet.vehicle(A).unwrap().autopilot_component(), None);
+
+        let stale = fleet.tick(t0 + Duration::from_secs(5));
+        assert!(matches!(
+            stale.as_slice(),
+            [FleetEvent::LivenessChanged(A, Liveness::Stale)]
+        ));
+
+        let events = fleet.observe(companion, t0 + Duration::from_secs(6), None);
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
         assert!(
             events

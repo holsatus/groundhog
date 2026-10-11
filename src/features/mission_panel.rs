@@ -807,7 +807,11 @@ impl MissionPanel {
         };
 
         if moved {
-            self.ui_mut(id).selected = Some(if up { index - 1 } else { index + 1 });
+            let ui = self.ui_mut(id);
+            // The selection follows the moved item; the previous open
+            // editor's in-progress values must not fold into it.
+            ui.selected = Some(if up { index - 1 } else { index + 1 });
+            ui.edit.clear();
         }
     }
 
@@ -1562,6 +1566,43 @@ mod tests {
             .lon;
         assert!((b_lon - 8.0).abs() < 1e-9);
         assert!(mission(&fleet).dirty);
+    }
+
+    #[test]
+    fn moving_items_clears_the_stale_editor_buffer() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        for _ in 0..3 {
+            let _ = step(
+                &mut panel,
+                &router,
+                &mut fleet,
+                message(A, MessageKind::AddItem),
+            );
+        }
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::EditField(2, MissionField::Latitude, "47.5".to_string()),
+            ),
+        );
+        assert!(!ui(&panel, A).edit.is_empty());
+
+        // Moving the edited item opens it at a new index; the stale in-progress
+        // values must not reappear there (or fold into the wrong item).
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::MoveUp(2)),
+        );
+
+        assert!(ui(&panel, A).edit.is_empty());
+        assert_eq!(ui(&panel, A).selected, Some(1));
     }
 
     #[test]

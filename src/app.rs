@@ -140,12 +140,14 @@ impl From<mavlink::Event> for Telemetry {
 
 /// How often telemetry is allowed to reach `update` and rebuild the view/map.
 ///
-/// This caps the redraw cadence, not the data rate: the router still folds every
-/// inbound frame into vehicle state, but `update` — and therefore the view and
-/// the map overlay, which re-projects and re-strokes every trail point — runs at
-/// most this often. 30 Hz is smooth for a GCS HUD and roughly halves overlay
-/// rasterisation work compared with 60 Hz. Map panning and zooming are
-/// input-driven inside `slippery` and are not affected by this throttle.
+/// This caps the redraw cadence, not the data rate: the router still dispatches
+/// every frame, the coalescing task only decodes off the UI thread, and
+/// `handle_mav_events` folds each batch into vehicle state inside `update`.
+/// So `update` — and therefore the view and the map overlay, which re-project
+/// and re-stroke every trail point — runs at most this often. 30 Hz is smooth
+/// for a GCS HUD and roughly halves overlay rasterisation work compared with
+/// 60 Hz. Map panning and zooming are input-driven inside `slippery` and are
+/// not affected by this throttle.
 const TELEMETRY_FRAME: Duration = Duration::from_millis(33);
 
 /// Idle time after the last layout change before the layout is persisted.
@@ -305,8 +307,31 @@ impl Application {
     fn vehicle_message_update(&mut self, message: vehicle_panel::Message) -> Task<Message> {
         match message {
             vehicle_panel::Message::SetPrimary(system) => {
-                self.fleet.set_primary(system);
-                Task::none()
+                let previous = self.fleet.primary();
+
+                if self.fleet.set_primary(system) {
+                    // The map's mission interaction derives from the displayed
+                    // vehicle: mid-drag, the outgoing vehicle's editor keeps
+                    // its drag armed, so a later switch back would teleport the
+                    // dragged waypoint on free mouse movement. Ending the
+                    // outgoing vehicle's drag keeps the state self-consistent.
+                    let drag_end =
+                        previous
+                            .filter(|previous| previous != &system)
+                            .map(|previous| {
+                                self.mission_message_update(mission_panel::Message {
+                                    system: previous,
+                                    kind: mission_panel::MessageKind::EndDrag,
+                                })
+                            });
+
+                    match drag_end {
+                        Some(drag_end) => Task::batch([drag_end]),
+                        None => Task::none(),
+                    }
+                } else {
+                    Task::none()
+                }
             }
             vehicle_panel::Message::Follow(follow) => self
                 .map

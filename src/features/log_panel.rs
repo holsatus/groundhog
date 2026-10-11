@@ -208,7 +208,8 @@ impl LogPanel {
     }
 }
 
-fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
+/// The palette color a severity maps to.
+pub(crate) fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
     match severity {
         MavSeverity::Emergency
         | MavSeverity::Alert
