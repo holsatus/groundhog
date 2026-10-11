@@ -2,7 +2,10 @@
 //! vehicle position trails and heading arrows.
 //!
 //! Owns the viewpoint, projector, and tile cache. It is given the current set
-//! of vehicles purely for drawing; it does not own vehicle state.
+//! of vehicles purely for drawing; it does not own vehicle state. Mission
+//! interaction intents carry the [`SystemId`] of the vehicle whose mission is
+//! *displayed* (the primary), captured at emission: the map is a display
+//! surface, and its emitted edits stay addressed to the mission they drew.
 
 use std::{
     collections::BTreeMap,
@@ -70,13 +73,15 @@ pub enum Message {
     #[allow(dead_code)] // UI control is currently commented out
     DrawDots(bool),
     /// A mission waypoint was pressed on the map (select it, begin a drag).
-    WaypointPressed(usize),
-    /// A dragged waypoint's new geographic position.
-    WaypointDragged(usize, GeoPosition),
-    /// A waypoint drag ended.
-    WaypointReleased,
+    /// Carries the vehicle whose mission is displayed, captured at emission.
+    WaypointPressed(SystemId, usize),
+    /// A dragged waypoint's new geographic position, for the displayed vehicle.
+    WaypointDragged(SystemId, usize, GeoPosition),
+    /// A waypoint drag ended, for the displayed vehicle.
+    WaypointReleased(SystemId),
     /// The map was clicked in "place waypoint" mode.
-    PlaceAt(GeoPosition),
+    /// Carries the vehicle whose mission is displayed, captured at emission.
+    PlaceAt(SystemId, GeoPosition),
 }
 
 impl Map {
@@ -110,10 +115,10 @@ impl Map {
             Message::DrawDots(value) => self.draw_dots = value,
             // Waypoint messages are intents the mission feature owns; the map
             // tracks no interaction state, so they are no-ops here.
-            Message::WaypointPressed(_)
+            Message::WaypointPressed(..)
             | Message::WaypointDragged(..)
-            | Message::WaypointReleased
-            | Message::PlaceAt(_) => {}
+            | Message::WaypointReleased(_)
+            | Message::PlaceAt(..) => {}
         }
 
         iced::Task::none()
@@ -183,15 +188,20 @@ fn interact(
             let Some(point) = point else {
                 return Action::None;
             };
+            // Both click actions below need the displayed vehicle; without one
+            // nothing is emitted.
+            let Some(id) = primary else {
+                return Action::None;
+            };
 
-            if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id))
+            if let Some(vehicle) = vehicles.get(&id)
                 && let Some(index) = waypoint_at(vehicle, projector, point)
             {
-                return Action::Capture(Message::WaypointPressed(index));
+                return Action::Capture(Message::WaypointPressed(id, index));
             }
 
-            if interaction.placing && primary.is_some() {
-                return Action::Capture(Message::PlaceAt(cursor_geo(projector, point)));
+            if interaction.placing {
+                return Action::Capture(Message::PlaceAt(id, cursor_geo(projector, point)));
             }
 
             Action::None
@@ -203,15 +213,25 @@ fn interact(
             let Some(point) = point else {
                 return Action::None;
             };
+            // Emission is gated on `interaction.dragging`, which the root seeds
+            // from the displayed vehicle; stamping the current primary is
+            // therefore the drag's vehicle.
+            let Some(id) = primary else {
+                return Action::None;
+            };
 
             Action::Capture(Message::WaypointDragged(
+                id,
                 index,
                 cursor_geo(projector, point),
             ))
         }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
             if interaction.dragging.is_some() {
-                Action::Capture(Message::WaypointReleased)
+                let Some(id) = primary else {
+                    return Action::None;
+                };
+                Action::Capture(Message::WaypointReleased(id))
             } else {
                 Action::None
             }
@@ -566,7 +586,8 @@ mod tests {
 
         let pressed = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
 
-        // The waypoint's absolute screen point must hit the marker.
+        // The waypoint's absolute screen point must hit the marker, and the
+        // emitted intent is stamped with the displayed vehicle's id.
         let absolute = projector.geodetic_into_screen_space(Geodetic::new(8.5, 47.4));
         assert!(matches!(
             interact(
@@ -577,7 +598,7 @@ mod tests {
                 Some(id),
                 Interaction::default(),
             ),
-            Action::Capture(Message::WaypointPressed(0))
+            Action::Capture(Message::WaypointPressed(stamped, 0)) if stamped == id
         ));
 
         // A press far from any marker is ignored when not placing...
@@ -594,7 +615,8 @@ mod tests {
             Action::None
         ));
 
-        // ...and places a waypoint when placing.
+        // ...and places a waypoint on the displayed vehicle's mission when
+        // placing.
         assert!(matches!(
             interact(
                 &projector,
@@ -607,7 +629,41 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            Action::Capture(Message::PlaceAt(_))
+            Action::Capture(Message::PlaceAt(stamped, _)) if stamped == id
+        ));
+
+        // A drag move on the displayed vehicle's mission is stamped with its
+        // id, as is the release that ends the drag.
+        let dragged = Event::Mouse(mouse::Event::CursorMoved { position: absolute });
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(absolute),
+                &dragged,
+                &vehicles,
+                Some(id),
+                Interaction {
+                    dragging: Some(0),
+                    ..Default::default()
+                },
+            ),
+            Action::Capture(Message::WaypointDragged(stamped, 0, _)) if stamped == id
+        ));
+
+        let released = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(absolute),
+                &released,
+                &vehicles,
+                Some(id),
+                Interaction {
+                    dragging: Some(0),
+                    ..Default::default()
+                },
+            ),
+            Action::Capture(Message::WaypointReleased(stamped)) if stamped == id
         ));
     }
 }

@@ -328,17 +328,29 @@ impl Application {
         let map_task = self.map.update(message.clone()).map(Message::Map);
 
         let mission_task = match message {
-            map::Message::WaypointPressed(index) => {
-                self.mission_message_update(mission_panel::Message::BeginDrag(index))
+            map::Message::WaypointPressed(id, index) => {
+                self.mission_message_update(mission_panel::Message {
+                    system: id,
+                    kind: mission_panel::MessageKind::BeginDrag(index),
+                })
             }
-            map::Message::WaypointDragged(index, position) => {
-                self.mission_message_update(mission_panel::Message::MoveWaypointTo(index, position))
+            map::Message::WaypointDragged(id, index, position) => {
+                self.mission_message_update(mission_panel::Message {
+                    system: id,
+                    kind: mission_panel::MessageKind::MoveWaypointTo(index, position),
+                })
             }
-            map::Message::WaypointReleased => {
-                self.mission_message_update(mission_panel::Message::EndDrag)
+            map::Message::WaypointReleased(id) => {
+                self.mission_message_update(mission_panel::Message {
+                    system: id,
+                    kind: mission_panel::MessageKind::EndDrag,
+                })
             }
-            map::Message::PlaceAt(position) => {
-                self.mission_message_update(mission_panel::Message::AddWaypointAt(position))
+            map::Message::PlaceAt(id, position) => {
+                self.mission_message_update(mission_panel::Message {
+                    system: id,
+                    kind: mission_panel::MessageKind::AddWaypointAt(position),
+                })
             }
             _ => Task::none(),
         };

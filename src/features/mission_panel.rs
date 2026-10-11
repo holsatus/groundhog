@@ -1,9 +1,13 @@
 //! The mission feature: editing a vehicle's flight plan and driving the
-//! MAVLink mission transactions against the primary vehicle.
+//! MAVLink mission transactions for the addressed vehicle.
 //!
 //! Mission data itself lives on the [`Fleet`] (the single owner of vehicle
 //! state), which the root passes in by mutable reference; the fleet services
-//! are passed in for transactions. All operations target the primary vehicle.
+//! are passed in for transactions. Every message is a [`Message`] envelope
+//! carrying the [`SystemId`] it concerns, so an operation is not redirected
+//! when the primary — the vehicle the panel *renders* — changes underneath it.
+//! Handlers are silent no-ops for a vehicle the fleet does not know; view
+//! state is only ever created for a known vehicle.
 //!
 //! The panel owns only view-local state: which item's editor is open, the
 //! in-progress text buffers, and the mission-on-map interaction (placement mode
@@ -87,8 +91,23 @@ pub enum MissionAction {
     Resume,
 }
 
+/// A message the mission feature handles: an intent or a result, always
+/// addressed to one vehicle.
+///
+/// `system` scopes the whole message: for operating intents (`Download`,
+/// `AddItem`, `EditField`, ...) it is the vehicle the operation drives; for
+/// result- and file-operation kinds it is the vehicle the transfer or file
+/// concerns. The panel renders the primary vehicle, but messages are never
+/// *implicitly* addressed to it.
 #[derive(Debug, Clone)]
-pub enum Message {
+pub struct Message {
+    /// The vehicle the message concerns.
+    pub system: SystemId,
+    pub kind: MessageKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum MessageKind {
     Download,
     Upload,
     Clear,
@@ -115,24 +134,25 @@ pub enum Message {
     /// A map click in "place waypoint" mode adds a waypoint at this position.
     AddWaypointAt(GeoPosition),
 
-    Downloaded(SystemId, Result<Mission>),
-    Uploaded(SystemId, Result<u32>),
-    Cleared(SystemId, Result<()>),
-    CurrentSet(SystemId, Result<()>),
-    CommandFinished(SystemId, MissionAction, Result<CommandAck>),
+    // Results, for the envelope's vehicle.
+    Downloaded(Result<Mission>),
+    Uploaded(Result<u32>),
+    Cleared(Result<()>),
+    CurrentSet(Result<()>),
+    CommandFinished(MissionAction, Result<CommandAck>),
 
     /// Open a file-picker dialog to choose a save location.
     SaveDialog,
     /// Write the given vehicle's mission to the chosen path.
-    SaveToFile(SystemId, PathBuf),
+    SaveToFile(PathBuf),
     /// The result of writing the mission to disk.
-    SaveFinished(SystemId, PathBuf, Result<(), String>),
+    SaveFinished(PathBuf, Result<(), String>),
     /// Open a file-picker dialog to choose a file to load.
     LoadDialog,
     /// Parse the chosen file and replace the given vehicle's mission.
-    LoadFromFile(SystemId, PathBuf),
+    LoadFromFile(PathBuf),
     /// The result of reading a mission file from disk.
-    LoadFinished(SystemId, PathBuf, Result<Vec<MissionItem>, String>),
+    LoadFinished(PathBuf, Result<Vec<MissionItem>, String>),
 }
 
 impl MissionPanel {
@@ -146,20 +166,23 @@ impl MissionPanel {
     }
 
     /// `id`'s view-local state, created on demand. Mission intents are only
-    /// meaningful for an existing vehicle, which callers already validate via
-    /// `ctx.fleet.primary()`.
+    /// meaningful for an existing vehicle: handlers resolve
+    /// `ctx.fleet.vehicle(id)` (or `vehicle_mut`) first and only then call
+    /// this, so state is never created for a vehicle the fleet does not know.
     fn ui_mut(&mut self, id: SystemId) -> &mut MissionUi {
         self.ui.entry(id).or_default()
     }
 
-    /// Whether the primary vehicle's panel is in "place waypoint" mode.
+    /// Whether the displayed (primary) vehicle's panel is in "place waypoint"
+    /// mode.
     pub fn is_placing(&self, primary: Option<SystemId>) -> bool {
         primary
             .and_then(|id| self.ui(id))
             .is_some_and(|ui| ui.placing)
     }
 
-    /// The mission item the primary vehicle is currently dragging on the map, if any.
+    /// The mission item the displayed (primary) vehicle is currently dragging
+    /// on the map, if any.
     pub fn dragging(&self, primary: Option<SystemId>) -> Option<usize> {
         primary
             .and_then(|id| self.ui(id))
@@ -179,43 +202,55 @@ impl MissionPanel {
         message: Message,
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
-        match message {
-            Message::Download => return self.download(ctx),
-            Message::Downloaded(id, result) => self.downloaded(id, result, ctx),
-            Message::Upload => return self.upload(ctx),
-            Message::Uploaded(id, result) => self.uploaded(id, result, ctx),
-            Message::Clear => return self.clear(ctx),
-            Message::Cleared(id, result) => self.cleared(id, result, ctx),
-            Message::Start => return Some((self.run_command(MissionAction::Start, ctx), None)),
-            Message::Pause => return Some((self.run_command(MissionAction::Pause, ctx), None)),
-            Message::Resume => return Some((self.run_command(MissionAction::Resume, ctx), None)),
-            Message::CommandFinished(id, action, result) => {
+        let Message { system: id, kind } = message;
+
+        match kind {
+            MessageKind::Download => return self.download(id, ctx),
+            MessageKind::Downloaded(result) => self.downloaded(id, result, ctx),
+            MessageKind::Upload => return self.upload(id, ctx),
+            MessageKind::Uploaded(result) => self.uploaded(id, result, ctx),
+            MessageKind::Clear => return self.clear(id, ctx),
+            MessageKind::Cleared(result) => self.cleared(id, result, ctx),
+            MessageKind::Start => {
+                return Some((self.run_command(id, MissionAction::Start, ctx), None));
+            }
+            MessageKind::Pause => {
+                return Some((self.run_command(id, MissionAction::Pause, ctx), None));
+            }
+            MessageKind::Resume => {
+                return Some((self.run_command(id, MissionAction::Resume, ctx), None));
+            }
+            MessageKind::CommandFinished(action, result) => {
                 self.command_finished(id, action, result)
             }
-            Message::SetCurrent(index) => return self.set_current(index, ctx),
-            Message::CurrentSet(id, result) => self.current_set(id, result),
-            Message::AddItem => self.add_item(ctx)?,
-            Message::RemoveItem(index) => self.remove_item(index, ctx)?,
-            Message::MoveUp(index) => self.move_item(ctx, index, true),
-            Message::MoveDown(index) => self.move_item(ctx, index, false),
-            Message::Select(index) => self.select(index, ctx)?,
-            Message::BeginDrag(index) => self.begin_drag(index, ctx)?,
-            Message::EndDrag => self.end_drag(ctx)?,
-            Message::ChangeCommand(index, kind) => self.change_command(index, kind, ctx)?,
-            Message::EditField(index, field, text) => self.edit_field(index, field, text, ctx)?,
-            Message::TogglePlacing => self.toggle_placing(ctx)?,
-            Message::MoveWaypointTo(index, position) => {
-                self.move_waypoint_to(index, position, ctx)?
+            MessageKind::SetCurrent(index) => return self.set_current(id, index, ctx),
+            MessageKind::CurrentSet(result) => self.current_set(id, result),
+            MessageKind::AddItem => self.add_item(id, ctx)?,
+            MessageKind::RemoveItem(index) => self.remove_item(id, index, ctx)?,
+            MessageKind::MoveUp(index) => self.move_item(id, index, true, ctx),
+            MessageKind::MoveDown(index) => self.move_item(id, index, false, ctx),
+            MessageKind::Select(index) => self.select(id, index, ctx)?,
+            MessageKind::BeginDrag(index) => self.begin_drag(id, index, ctx)?,
+            MessageKind::EndDrag => self.end_drag(id)?,
+            MessageKind::ChangeCommand(index, command) => {
+                self.change_command(id, index, command, ctx)?
             }
-            Message::AddWaypointAt(position) => self.add_waypoint_at(position, ctx)?,
-            Message::SaveDialog => return self.save_dialog(ctx),
-            Message::SaveToFile(id, path) => return self.save_to_file(id, path, ctx),
-            Message::SaveFinished(id, path, result) => {
+            MessageKind::EditField(index, field, text) => {
+                self.edit_field(id, index, field, text, ctx)?
+            }
+            MessageKind::TogglePlacing => self.toggle_placing(id, ctx)?,
+            MessageKind::MoveWaypointTo(index, position) => {
+                self.move_waypoint_to(id, index, position, ctx)?
+            }
+            MessageKind::AddWaypointAt(position) => self.add_waypoint_at(id, position, ctx)?,
+            MessageKind::SaveDialog => return self.save_dialog(id, ctx),
+            MessageKind::SaveToFile(path) => return self.save_to_file(id, path, ctx),
+            MessageKind::SaveFinished(path, result) => {
                 return Some(self.save_finished(id, path, result));
             }
-            Message::LoadDialog => return self.load_dialog(ctx),
-            Message::LoadFromFile(id, path) => return Some(self.load_from_file(id, path)),
-            Message::LoadFinished(id, path, result) => {
+            MessageKind::LoadDialog => return self.load_dialog(id, ctx),
+            MessageKind::LoadFromFile(path) => return Some(self.load_from_file(id, path)),
+            MessageKind::LoadFinished(path, result) => {
                 return self.load_finished(id, path, result, ctx);
             }
         }
@@ -223,17 +258,23 @@ impl MissionPanel {
         None
     }
 
-    /// Start a mission download from the primary vehicle.
-    fn download(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
-
-        self.ui_mut(id).busy = true;
+    /// Start a mission download from the addressed vehicle.
+    fn download(
+        &mut self,
+        id: SystemId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
         let target = ctx.fleet.vehicle(id)?.target();
+
         let client = ctx.services.vehicle(target);
+        self.ui_mut(id).busy = true;
         Some((
             Task::perform(
                 async move { client.download_mission().await },
-                move |result| Message::Downloaded(id, result),
+                move |result| Message {
+                    system: id,
+                    kind: MessageKind::Downloaded(result),
+                },
             ),
             None,
         ))
@@ -261,9 +302,12 @@ impl MissionPanel {
         }
     }
 
-    /// Upload the primary vehicle's mission.
-    fn upload(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
+    /// Upload the addressed vehicle's mission.
+    fn upload(
+        &mut self,
+        id: SystemId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
         let vehicle = ctx.fleet.vehicle(id)?;
 
         let mission = vehicle.mission.clone();
@@ -273,7 +317,10 @@ impl MissionPanel {
         Some((
             Task::perform(
                 async move { client.upload_mission(&mission).await },
-                move |result| Message::Uploaded(id, result),
+                move |result| Message {
+                    system: id,
+                    kind: MessageKind::Uploaded(result),
+                },
             ),
             None,
         ))
@@ -295,16 +342,18 @@ impl MissionPanel {
         }
     }
 
-    /// Clear the primary vehicle's mission.
-    fn clear(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
-
-        self.ui_mut(id).busy = true;
+    /// Clear the addressed vehicle's mission.
+    fn clear(&mut self, id: SystemId, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
         let target = ctx.fleet.vehicle(id)?.target();
+
         let client = ctx.services.vehicle(target);
+        self.ui_mut(id).busy = true;
         Some((
             Task::perform(async move { client.clear_mission().await }, move |result| {
-                Message::Cleared(id, result)
+                Message {
+                    system: id,
+                    kind: MessageKind::Cleared(result),
+                }
             }),
             None,
         ))
@@ -346,20 +395,22 @@ impl MissionPanel {
         }
     }
 
-    /// Ask the primary vehicle to jump to mission item `index`.
+    /// Ask the addressed vehicle to jump to mission item `index`.
     fn set_current(
         &mut self,
+        id: SystemId,
         index: usize,
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
-
         let target = ctx.fleet.vehicle(id)?.target();
         let client = ctx.services.vehicle(target);
         Some((
             Task::perform(
                 async move { client.set_current_mission_item(index as u16).await },
-                move |result| Message::CurrentSet(id, result),
+                move |result| Message {
+                    system: id,
+                    kind: MessageKind::CurrentSet(result),
+                },
             ),
             None,
         ))
@@ -373,8 +424,7 @@ impl MissionPanel {
     }
 
     /// Append a waypoint after the vehicle's current position or last item.
-    fn add_item(&mut self, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
+    fn add_item(&mut self, id: SystemId, ctx: &mut Context) -> Option<()> {
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         let pos = vehicle
@@ -413,8 +463,7 @@ impl MissionPanel {
     }
 
     /// Remove an item and reindex the open editor.
-    fn remove_item(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
+    fn remove_item(&mut self, id: SystemId, index: usize, ctx: &mut Context) -> Option<()> {
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         vehicle.mission.remove(index)?;
@@ -432,9 +481,10 @@ impl MissionPanel {
     }
 
     /// Open the editor on mission item `index`.
-    fn select(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
-        // Selection indexes the primary vehicle's mission; meaningless without one.
-        let id = ctx.fleet.primary()?;
+    fn select(&mut self, id: SystemId, index: usize, ctx: &mut Context) -> Option<()> {
+        // Selection indexes the addressed vehicle's mission; meaningless
+        // without one, and it must not create view state for an unknown one.
+        ctx.fleet.vehicle(id)?;
 
         let ui = self.ui_mut(id);
         if ui.selected != Some(index) {
@@ -445,8 +495,9 @@ impl MissionPanel {
     }
 
     /// Select mission item `index` and begin dragging it on the map.
-    fn begin_drag(&mut self, index: usize, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
+    fn begin_drag(&mut self, id: SystemId, index: usize, ctx: &mut Context) -> Option<()> {
+        // As with `select`, only known vehicles get view state.
+        ctx.fleet.vehicle(id)?;
 
         let ui = self.ui_mut(id);
         if ui.selected != Some(index) {
@@ -457,22 +508,22 @@ impl MissionPanel {
         Some(())
     }
 
-    /// End the primary vehicle's map drag.
-    fn end_drag(&mut self, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
-
-        self.ui_mut(id).dragging = None;
+    /// End the addressed vehicle's map drag. Clearing only touches state that
+    /// already exists: a vehicle without view state has no drag to end, so no
+    /// entry is created here.
+    fn end_drag(&mut self, id: SystemId) -> Option<()> {
+        self.ui.get_mut(&id)?.dragging = None;
         Some(())
     }
 
     /// Replace mission item `index`'s command with `kind`.
     fn change_command(
         &mut self,
+        id: SystemId,
         index: usize,
         kind: MissionCommandKind,
         ctx: &mut Context,
     ) -> Option<()> {
-        let id = ctx.fleet.primary()?;
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         let pos = vehicle
@@ -496,12 +547,12 @@ impl MissionPanel {
     /// Buffer an edited field and fold it into the mission when parseable.
     fn edit_field(
         &mut self,
+        id: SystemId,
         index: usize,
         field: MissionField,
         text: String,
         ctx: &mut Context,
     ) -> Option<()> {
-        let id = ctx.fleet.primary()?;
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         self.ui_mut(id).edit.insert(field, text.clone());
@@ -514,9 +565,9 @@ impl MissionPanel {
         Some(())
     }
 
-    /// Toggle "place waypoint" mode for the primary vehicle.
-    fn toggle_placing(&mut self, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
+    /// Toggle "place waypoint" mode for the addressed vehicle.
+    fn toggle_placing(&mut self, id: SystemId, ctx: &mut Context) -> Option<()> {
+        let _vehicle = ctx.fleet.vehicle(id)?;
 
         let ui = self.ui_mut(id);
         ui.placing = !ui.placing;
@@ -526,11 +577,11 @@ impl MissionPanel {
     /// Move a dragged waypoint to a new geographic position.
     fn move_waypoint_to(
         &mut self,
+        id: SystemId,
         index: usize,
         position: GeoPosition,
         ctx: &mut Context,
     ) -> Option<()> {
-        let id = ctx.fleet.primary()?;
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         vehicle.mission.update(index, |item| {
@@ -542,8 +593,12 @@ impl MissionPanel {
     }
 
     /// Append a waypoint at a map-click position.
-    fn add_waypoint_at(&mut self, position: GeoPosition, ctx: &mut Context) -> Option<()> {
-        let id = ctx.fleet.primary()?;
+    fn add_waypoint_at(
+        &mut self,
+        id: SystemId,
+        position: GeoPosition,
+        ctx: &mut Context,
+    ) -> Option<()> {
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         let alt_m = vehicle
@@ -575,8 +630,13 @@ impl MissionPanel {
     }
 
     /// Open a file dialog to pick a mission save path.
-    fn save_dialog(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
+    fn save_dialog(
+        &mut self,
+        id: SystemId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        // The dialog is opened for a vehicle; gate on its existence.
+        ctx.fleet.vehicle(id)?;
         let file_dialog = file_dialog(ctx.file_picker_path).set_file_name("mission.waypoints");
 
         Some((
@@ -586,7 +646,12 @@ impl MissionPanel {
                     .await
                     .map(|file| file.path().to_owned())
             })
-            .and_then(move |path| Task::done(Message::SaveToFile(id, path))),
+            .and_then(move |path| {
+                Task::done(Message {
+                    system: id,
+                    kind: MessageKind::SaveToFile(path),
+                })
+            }),
             None,
         ))
     }
@@ -607,7 +672,10 @@ impl MissionPanel {
             iced_runtime::task::blocking(move |mut sender| {
                 let result = std::fs::write(&save_path, write_wpl(&items))
                     .map_err(|error| error.to_string());
-                let _ = sender.try_send(Message::SaveFinished(id, save_path, result));
+                let _ = sender.try_send(Message {
+                    system: id,
+                    kind: MessageKind::SaveFinished(save_path, result),
+                });
             }),
             None,
         ))
@@ -628,8 +696,13 @@ impl MissionPanel {
     }
 
     /// Open a file dialog to pick a mission file to load.
-    fn load_dialog(&mut self, ctx: &mut Context) -> Option<(Task<Message>, Option<Event>)> {
-        let id = ctx.fleet.primary()?;
+    fn load_dialog(
+        &mut self,
+        id: SystemId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        // The dialog is opened for a vehicle; gate on its existence.
+        ctx.fleet.vehicle(id)?;
         let file_dialog = file_dialog(ctx.file_picker_path);
 
         Some((
@@ -639,7 +712,12 @@ impl MissionPanel {
                     .await
                     .map(|file| file.path().to_owned())
             })
-            .and_then(move |path| Task::done(Message::LoadFromFile(id, path))),
+            .and_then(move |path| {
+                Task::done(Message {
+                    system: id,
+                    kind: MessageKind::LoadFromFile(path),
+                })
+            }),
             None,
         ))
     }
@@ -654,7 +732,10 @@ impl MissionPanel {
                 let result = std::fs::read_to_string(&load_path)
                     .map_err(|error| error.to_string())
                     .and_then(|text| parse_wpl(&text).map_err(|error| error.to_string()));
-                let _ = sender.try_send(Message::LoadFinished(id, load_path, result));
+                let _ = sender.try_send(Message {
+                    system: id,
+                    kind: MessageKind::LoadFinished(load_path, result),
+                });
             }),
             None,
         )
@@ -690,10 +771,12 @@ impl MissionPanel {
         }
     }
 
-    fn run_command(&mut self, action: MissionAction, ctx: &mut Context) -> Task<Message> {
-        let Some(id) = ctx.fleet.primary() else {
-            return Task::none();
-        };
+    fn run_command(
+        &mut self,
+        id: SystemId,
+        action: MissionAction,
+        ctx: &mut Context,
+    ) -> Task<Message> {
         let Some(target) = ctx.fleet.vehicle(id).map(Vehicle::target) else {
             return Task::none();
         };
@@ -708,14 +791,14 @@ impl MissionPanel {
                     MissionAction::Resume => client.pause_mission(false).await,
                 }
             },
-            move |result| Message::CommandFinished(id, action, result),
+            move |result| Message {
+                system: id,
+                kind: MessageKind::CommandFinished(action, result),
+            },
         )
     }
 
-    fn move_item(&mut self, ctx: &mut Context, index: usize, up: bool) {
-        let Some(id) = ctx.fleet.primary() else {
-            return;
-        };
+    fn move_item(&mut self, id: SystemId, index: usize, up: bool, ctx: &mut Context) {
         let Some(vehicle) = ctx.fleet.vehicle_mut(id) else {
             return;
         };
@@ -732,7 +815,8 @@ impl MissionPanel {
     }
 
     /// Render the mission panel. A pure function of panel state and the primary
-    /// vehicle's mission.
+    /// vehicle's mission. Every message constructed here is addressed to the
+    /// displayed vehicle.
     pub fn view<'a>(
         &'a self,
         vehicles: &'a BTreeMap<SystemId, Vehicle>,
@@ -752,21 +836,51 @@ impl MissionPanel {
 
         let enabled = !ui.is_some_and(|ui| ui.busy);
         let toolbar = row![
-            Button::new("Download").on_press_maybe(enabled.then_some(Message::Download)),
-            Button::new("Upload").on_press_maybe(enabled.then_some(Message::Upload)),
-            Button::new("Clear").on_press_maybe(enabled.then_some(Message::Clear)),
-            Button::new("Start").on_press_maybe(enabled.then_some(Message::Start)),
-            Button::new("Pause").on_press_maybe(enabled.then_some(Message::Pause)),
-            Button::new("Resume").on_press_maybe(enabled.then_some(Message::Resume)),
-            Button::new("Add waypoint").on_press_maybe(enabled.then_some(Message::AddItem)),
+            Button::new("Download").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Download,
+            })),
+            Button::new("Upload").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Upload,
+            })),
+            Button::new("Clear").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Clear,
+            })),
+            Button::new("Start").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Start,
+            })),
+            Button::new("Pause").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Pause,
+            })),
+            Button::new("Resume").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::Resume,
+            })),
+            Button::new("Add waypoint").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::AddItem,
+            })),
             Button::new(if ui.is_some_and(|ui| ui.placing) {
                 "Placing…"
             } else {
                 "Place waypoint"
             })
-            .on_press_maybe(enabled.then_some(Message::TogglePlacing)),
-            Button::new("Save to file").on_press_maybe(enabled.then_some(Message::SaveDialog)),
-            Button::new("Load from file").on_press_maybe(enabled.then_some(Message::LoadDialog)),
+            .on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::TogglePlacing,
+            })),
+            Button::new("Save to file").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::SaveDialog,
+            })),
+            Button::new("Load from file").on_press_maybe(enabled.then_some(Message {
+                system: id,
+                kind: MessageKind::LoadDialog,
+            })),
         ]
         .spacing(6.0);
 
@@ -795,7 +909,10 @@ impl MissionPanel {
                 text(if is_current { "current" } else { "" })
                     .color(current_color)
                     .width(Length::Fixed(64.0)),
-                Button::new("Edit").on_press(Message::Select(index)),
+                Button::new("Edit").on_press(Message {
+                    system: id,
+                    kind: MessageKind::Select(index),
+                }),
             ]
             .spacing(8.0)
             .align_y(Vertical::Center);
@@ -818,7 +935,7 @@ impl MissionPanel {
         let editor: Element<'_, Message> = match ui {
             Some(ui) => match ui.selected {
                 Some(index) if index < mission.len() => {
-                    self.view_editor(ui, index, mission.get(index).expect("index checked"))
+                    self.view_editor(id, ui, index, mission.get(index).expect("index checked"))
                 }
                 _ => Space::new().boxed(),
             },
@@ -834,6 +951,7 @@ impl MissionPanel {
 
     fn view_editor<'a>(
         &'a self,
+        id: SystemId,
         ui: &'a MissionUi,
         index: usize,
         item: &'a MissionItem,
@@ -843,7 +961,10 @@ impl MissionPanel {
             MissionCommandKind::ALL,
             |kind: &MissionCommandKind| kind.name().to_string(),
         )
-        .on_select(move |kind| Message::ChangeCommand(index, kind));
+        .on_select(move |command| Message {
+            system: id,
+            kind: MessageKind::ChangeCommand(index, command),
+        });
 
         let mut fields = Column::<Element<'a, Message>>::new().spacing(4.0);
 
@@ -855,7 +976,10 @@ impl MissionPanel {
                 .unwrap_or_else(|| format_field_value(spec.value));
 
             let input = TextInput::new("", value)
-                .on_input(move |text| Message::EditField(index, spec.field, text))
+                .on_input(move |text| Message {
+                    system: id,
+                    kind: MessageKind::EditField(index, spec.field, text),
+                })
                 .width(Length::Fill);
 
             fields = fields.push(
@@ -871,10 +995,22 @@ impl MissionPanel {
         }
 
         let actions = row![
-            Button::new("Remove").on_press(Message::RemoveItem(index)),
-            Button::new("Move up").on_press(Message::MoveUp(index)),
-            Button::new("Move down").on_press(Message::MoveDown(index)),
-            Button::new("Set current").on_press(Message::SetCurrent(index)),
+            Button::new("Remove").on_press(Message {
+                system: id,
+                kind: MessageKind::RemoveItem(index),
+            }),
+            Button::new("Move up").on_press(Message {
+                system: id,
+                kind: MessageKind::MoveUp(index),
+            }),
+            Button::new("Move down").on_press(Message {
+                system: id,
+                kind: MessageKind::MoveDown(index),
+            }),
+            Button::new("Set current").on_press(Message {
+                system: id,
+                kind: MessageKind::SetCurrent(index),
+            }),
         ]
         .spacing(6.0);
 
@@ -950,6 +1086,9 @@ mod tests {
     const A: SystemId = SystemId(1);
     const B: SystemId = SystemId(2);
 
+    /// An id that is not registered in the test fleet.
+    const UNKNOWN: SystemId = SystemId(9);
+
     /// The address of `id`'s autopilot endpoint, for feeding `observe`.
     fn source(id: SystemId) -> MavlinkId {
         MavlinkId {
@@ -961,6 +1100,11 @@ mod tests {
     /// The view-local mission state for `id`.
     fn ui(panel: &MissionPanel, id: SystemId) -> &MissionUi {
         panel.ui.get(&id).expect("vehicle has mission ui")
+    }
+
+    /// Wrap `kind` in the envelope addressed to `system`.
+    fn message(system: SystemId, kind: MessageKind) -> Message {
+        Message { system, kind }
     }
 
     fn setup() -> (MavlinkRouter, Fleet) {
@@ -1018,7 +1162,12 @@ mod tests {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
 
         assert_eq!(mission(&fleet).len(), 1);
         assert!(mission(&fleet).dirty);
@@ -1034,12 +1183,20 @@ mod tests {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
         let _ = step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::EditField(0, MissionField::Latitude, "47.5".to_string()),
+            message(A, MessageKind::AddItem),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::EditField(0, MissionField::Latitude, "47.5".to_string()),
+            ),
         );
 
         assert!((lat(&fleet, 0) - 47.5).abs() < 1e-9);
@@ -1050,7 +1207,10 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::EditField(0, MissionField::Latitude, "abc".to_string()),
+            message(
+                A,
+                MessageKind::EditField(0, MissionField::Latitude, "abc".to_string()),
+            ),
         );
         assert_eq!(ui(&panel, A).edit[&MissionField::Latitude], "abc");
         assert!((lat(&fleet, 0) - 47.5).abs() < 1e-9);
@@ -1061,12 +1221,20 @@ mod tests {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
         let _ = step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ChangeCommand(0, MissionCommandKind::ConditionDelay),
+            message(A, MessageKind::AddItem),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::ChangeCommand(0, MissionCommandKind::ConditionDelay),
+            ),
         );
 
         assert_eq!(
@@ -1082,32 +1250,60 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         for _ in 0..3 {
-            let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+            let _ = step(
+                &mut panel,
+                &router,
+                &mut fleet,
+                message(A, MessageKind::AddItem),
+            );
         }
         for (index, value) in ["1.0", "2.0", "3.0"].iter().enumerate() {
             let _ = step(
                 &mut panel,
                 &router,
                 &mut fleet,
-                Message::EditField(index, MissionField::Latitude, (*value).to_string()),
+                message(
+                    A,
+                    MessageKind::EditField(index, MissionField::Latitude, (*value).to_string()),
+                ),
             );
         }
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::MoveUp(2));
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::MoveUp(2)),
+        );
         assert_eq!(
             [lat(&fleet, 0), lat(&fleet, 1), lat(&fleet, 2)],
             [1.0, 3.0, 2.0]
         );
         assert_eq!(ui(&panel, A).selected, Some(1));
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::RemoveItem(1));
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::RemoveItem(1)),
+        );
         assert_eq!(mission(&fleet).len(), 2);
         assert_eq!([lat(&fleet, 0), lat(&fleet, 1)], [1.0, 2.0]);
         assert_eq!(ui(&panel, A).selected, None);
 
         // Out-of-range moves are no-ops.
-        let _ = step(&mut panel, &router, &mut fleet, Message::MoveDown(1));
-        let _ = step(&mut panel, &router, &mut fleet, Message::MoveUp(0));
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::MoveDown(1)),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::MoveUp(0)),
+        );
     }
 
     #[test]
@@ -1131,14 +1327,19 @@ mod tests {
         downloaded.mark_synced(Some(5));
 
         // Open an editor first, so the download has view state to reset.
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
         assert_eq!(ui(&panel, A).selected, Some(0));
 
         let _ = step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::Downloaded(A, Ok(downloaded)),
+            message(A, MessageKind::Downloaded(Ok(downloaded))),
         );
 
         assert_eq!(mission(&fleet).len(), 1);
@@ -1173,7 +1374,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::Downloaded(B, Ok(downloaded)),
+            message(B, MessageKind::Downloaded(Ok(downloaded))),
         );
 
         // The result lands on `B`, the vehicle it was started against...
@@ -1210,7 +1411,10 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::LoadFinished(B, PathBuf::from("/tmp/mission.waypoints"), Ok(items)),
+            message(
+                B,
+                MessageKind::LoadFinished(PathBuf::from("/tmp/mission.waypoints"), Ok(items)),
+            ),
         );
 
         // The loaded mission lands on `B`, the vehicle the dialog was opened for...
@@ -1229,32 +1433,63 @@ mod tests {
         let mut fleet = Fleet::default();
         let mut panel = MissionPanel::new();
 
+        // Every acting intent carries the id of a vehicle the fleet has never
+        // heard of: each must be a silent no-op that creates no view state.
         let messages = [
-            Message::Download,
-            Message::Upload,
-            Message::Clear,
-            Message::Start,
-            Message::Pause,
-            Message::Resume,
-            Message::AddItem,
-            Message::RemoveItem(0),
-            Message::MoveUp(0),
-            Message::MoveDown(0),
-            Message::Select(0),
-            Message::BeginDrag(0),
-            Message::EndDrag,
-            Message::SetCurrent(0),
-            Message::ChangeCommand(0, MissionCommandKind::Waypoint),
-            Message::EditField(0, MissionField::Latitude, "1.0".to_string()),
-            Message::Downloaded(A, Err(MavError::Timeout)),
-            Message::Uploaded(A, Err(MavError::Timeout)),
-            Message::Cleared(A, Err(MavError::Timeout)),
-            Message::CurrentSet(A, Err(MavError::Timeout)),
-            Message::CommandFinished(A, MissionAction::Start, Err(MavError::Timeout)),
+            message(UNKNOWN, MessageKind::Download),
+            message(UNKNOWN, MessageKind::Upload),
+            message(UNKNOWN, MessageKind::Clear),
+            message(UNKNOWN, MessageKind::Start),
+            message(UNKNOWN, MessageKind::Pause),
+            message(UNKNOWN, MessageKind::Resume),
+            message(UNKNOWN, MessageKind::AddItem),
+            message(UNKNOWN, MessageKind::RemoveItem(0)),
+            message(UNKNOWN, MessageKind::MoveUp(0)),
+            message(UNKNOWN, MessageKind::MoveDown(0)),
+            message(UNKNOWN, MessageKind::Select(0)),
+            message(UNKNOWN, MessageKind::BeginDrag(0)),
+            message(UNKNOWN, MessageKind::EndDrag),
+            message(UNKNOWN, MessageKind::SetCurrent(0)),
+            message(
+                UNKNOWN,
+                MessageKind::ChangeCommand(0, MissionCommandKind::Waypoint),
+            ),
+            message(
+                UNKNOWN,
+                MessageKind::EditField(0, MissionField::Latitude, "1.0".to_string()),
+            ),
+            message(UNKNOWN, MessageKind::TogglePlacing),
+            message(
+                UNKNOWN,
+                MessageKind::MoveWaypointTo(
+                    0,
+                    GeoPosition {
+                        lat: 12.0,
+                        lon: 34.0,
+                    },
+                ),
+            ),
+            message(
+                UNKNOWN,
+                MessageKind::AddWaypointAt(GeoPosition {
+                    lat: 12.0,
+                    lon: 34.0,
+                }),
+            ),
+            message(UNKNOWN, MessageKind::SaveDialog),
+            message(UNKNOWN, MessageKind::LoadDialog),
+            message(UNKNOWN, MessageKind::Downloaded(Err(MavError::Timeout))),
+            message(UNKNOWN, MessageKind::Uploaded(Err(MavError::Timeout))),
+            message(UNKNOWN, MessageKind::Cleared(Err(MavError::Timeout))),
+            message(UNKNOWN, MessageKind::CurrentSet(Err(MavError::Timeout))),
+            message(
+                UNKNOWN,
+                MessageKind::CommandFinished(MissionAction::Start, Err(MavError::Timeout)),
+            ),
         ];
 
-        for message in messages {
-            let _ = step(&mut panel, &router, &mut fleet, message);
+        for envelope in messages {
+            let _ = step(&mut panel, &router, &mut fleet, envelope);
         }
 
         assert!(fleet.vehicles().is_empty());
@@ -1262,11 +1497,87 @@ mod tests {
     }
 
     #[test]
+    fn operations_target_the_addressed_vehicle() {
+        let (router, mut fleet) = setup();
+        fleet.observe(source(B), Instant::now(), None);
+        assert_eq!(fleet.primary(), Some(A));
+        let mut panel = MissionPanel::new();
+
+        // Both intents are addressed to `B` while `A` is the primary display.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(B, MessageKind::AddItem),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                B,
+                MessageKind::EditField(0, MissionField::Latitude, "47.5".to_string()),
+            ),
+        );
+
+        // `B`'s mission got the item and the value...
+        let b = &fleet.vehicle(B).unwrap().mission;
+        assert_eq!(b.len(), 1);
+        let b_lat = b.get(0).unwrap().command.position().unwrap().lat;
+        assert!((b_lat - 47.5).abs() < 1e-9);
+        assert_eq!(ui(&panel, B).edit[&MissionField::Latitude], "47.5");
+
+        // ...while the displayed `A` got neither mission content...
+        assert!(mission(&fleet).is_empty());
+
+        // ...nor view state: `ui_mut` is only reachable through an existing
+        // vehicle.
+        assert!(!panel.ui.contains_key(&A));
+
+        // And now that address-only state exists for `A`, it is not disturbed
+        // by intents that stay addressed to `B`.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                B,
+                MessageKind::EditField(0, MissionField::Longitude, "8.0".to_string()),
+            ),
+        );
+        assert_eq!(ui(&panel, A).selected, Some(0));
+        assert!(ui(&panel, A).edit.is_empty());
+        let b_lon = fleet
+            .vehicle(B)
+            .unwrap()
+            .mission
+            .get(0)
+            .unwrap()
+            .command
+            .position()
+            .unwrap()
+            .lon;
+        assert!((b_lon - 8.0).abs() < 1e-9);
+        assert!(mission(&fleet).dirty);
+    }
+
+    #[test]
     fn move_waypoint_to_updates_position_and_dirty() {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
         mission_mark_synced(&mut fleet);
         assert!(!mission(&fleet).dirty);
 
@@ -1274,12 +1585,15 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::MoveWaypointTo(
-                0,
-                GeoPosition {
-                    lat: 12.5,
-                    lon: -3.25,
-                },
+            message(
+                A,
+                MessageKind::MoveWaypointTo(
+                    0,
+                    GeoPosition {
+                        lat: 12.5,
+                        lon: -3.25,
+                    },
+                ),
             ),
         );
 
@@ -1297,10 +1611,13 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::AddWaypointAt(GeoPosition {
-                lat: 47.0,
-                lon: 8.0,
-            }),
+            message(
+                A,
+                MessageKind::AddWaypointAt(GeoPosition {
+                    lat: 47.0,
+                    lon: 8.0,
+                }),
+            ),
         );
 
         assert_eq!(mission(&fleet).len(), 1);
@@ -1316,9 +1633,19 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         assert!(!panel.is_placing(Some(A)));
-        let _ = step(&mut panel, &router, &mut fleet, Message::TogglePlacing);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::TogglePlacing),
+        );
         assert!(panel.is_placing(Some(A)));
-        let _ = step(&mut panel, &router, &mut fleet, Message::TogglePlacing);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::TogglePlacing),
+        );
         assert!(!panel.is_placing(Some(A)));
     }
 
@@ -1329,15 +1656,33 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         // Populate A's editor, placement mode, and an in-flight transfer.
-        let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
         let _ = step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::EditField(0, MissionField::Latitude, "1.5".to_string()),
+            message(A, MessageKind::AddItem),
         );
-        let _ = step(&mut panel, &router, &mut fleet, Message::TogglePlacing);
-        let _ = step(&mut panel, &router, &mut fleet, Message::Download);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::EditField(0, MissionField::Latitude, "1.5".to_string()),
+            ),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::TogglePlacing),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::Download),
+        );
         assert_eq!(ui(&panel, A).selected, Some(0));
         assert_eq!(ui(&panel, A).edit[&MissionField::Latitude], "1.5");
         assert!(ui(&panel, A).busy);
@@ -1363,22 +1708,42 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         for _ in 0..3 {
-            let _ = step(&mut panel, &router, &mut fleet, Message::AddItem);
+            let _ = step(
+                &mut panel,
+                &router,
+                &mut fleet,
+                message(A, MessageKind::AddItem),
+            );
         }
 
         // The list's Edit button selects without starting a drag.
-        let _ = step(&mut panel, &router, &mut fleet, Message::Select(1));
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::Select(1)),
+        );
         assert_eq!(ui(&panel, A).selected, Some(1));
         assert_eq!(ui(&panel, A).dragging, None);
 
         // A map press selects and drags the waypoint.
-        let _ = step(&mut panel, &router, &mut fleet, Message::BeginDrag(2));
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::BeginDrag(2)),
+        );
         assert_eq!(ui(&panel, A).selected, Some(2));
         assert_eq!(ui(&panel, A).dragging, Some(2));
         assert_eq!(panel.dragging(Some(A)), Some(2));
 
         // Releasing the drag keeps the selection.
-        let _ = step(&mut panel, &router, &mut fleet, Message::EndDrag);
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::EndDrag),
+        );
         assert_eq!(ui(&panel, A).selected, Some(2));
         assert_eq!(ui(&panel, A).dragging, None);
         assert_eq!(panel.dragging(Some(A)), None);
