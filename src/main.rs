@@ -13,7 +13,7 @@ mod widget;
 
 use app::Application;
 
-fn main() -> Result<(), impl std::error::Error> {
+fn main() -> iced::Result {
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Error)
         .filter_module("groundhog", log::LevelFilter::Debug)

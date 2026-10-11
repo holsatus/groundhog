@@ -16,6 +16,10 @@ use crate::{
 ///
 /// Cheap to clone: it holds the router (an `Arc`) and the target id, so callers
 /// never thread the target through every call.
+///
+/// Some entry points are retained ahead of upcoming vehicle operations; they
+/// are marked with `#[allow(dead_code)] // Escape hatch: unused yet` and will
+/// lose the marker when their callers arrive.
 #[derive(Clone)]
 pub struct VehicleClient {
     router: MavlinkRouter,
@@ -32,7 +36,7 @@ impl VehicleClient {
     }
 
     /// The target vehicle's MAVLink id.
-    #[allow(dead_code)] // Used by tests and future callers
+    #[allow(dead_code)] // Escape hatch: unused yet
     pub fn id(&self) -> MavlinkId {
         self.id
     }
@@ -63,7 +67,7 @@ impl VehicleClient {
     }
 
     /// Request the vehicle's `AUTOPILOT_VERSION`.
-    #[allow(dead_code)] // Escape hatch retained for future operations
+    #[allow(dead_code)] // Escape hatch: unused yet
     pub async fn autopilot_version(&self) -> mavlink::Result<AutopilotVersion> {
         self.request().await
     }
@@ -74,13 +78,13 @@ impl VehicleClient {
     }
 
     /// Escape hatch: run a command and await its final ACK.
-    #[allow(dead_code)] // Escape hatch retained for future operations
+    #[allow(dead_code)] // Escape hatch: unused yet
     pub async fn run(&self, command: impl Into<Command>) -> mavlink::Result<CommandAck> {
         self.router.command(self.id, command).await
     }
 
     /// Escape hatch: send a targeted message without awaiting a response.
-    #[allow(dead_code)] // Escape hatch retained for future operations
+    #[allow(dead_code)] // Escape hatch: unused yet
     pub fn send<M: Targeted>(&self, message: M) -> mavlink::Result<()> {
         self.router.send_targeted(self.id, message)
     }

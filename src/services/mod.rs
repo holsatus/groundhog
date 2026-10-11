@@ -2,7 +2,7 @@
 //! middleware.
 //!
 //! Features name their result types and vehicle operations through this module
-//! rather than [`crate::mav`], so the middleware stays an implementation detail
+//! rather than [`crate::mavlink`], so the middleware stays an implementation detail
 //! of the services layer.
 
 pub mod fleet;

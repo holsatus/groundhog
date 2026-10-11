@@ -54,7 +54,9 @@ pub enum Message {
     Closed(LinkId),
     /// Remove a configured link, dropping any live connection with it.
     Delete(LinkId),
-    Event(link::Event),
+    /// The result of an attempted link attach: a connected guard or the
+    /// transport failure.
+    Opened(link::OpenResult),
 }
 
 /// A request the root must satisfy, since it owns the configuration file.
@@ -190,7 +192,11 @@ impl LinkPanel {
                 return (Task::none(), Some(Event::LinksChanged(self.configs())));
             }
             Message::Connect(id) => {
-                if let Some(link) = self.links.get(&id) {
+                // Refuse a second attach on a live link: double-clicking
+                // Connect would attach a duplicate reader/writer pair.
+                if let Some(link) = self.links.get(&id)
+                    && link.handle.is_none()
+                {
                     let build = link.config.build.clone();
                     let high_latency = link.config.high_latency;
                     let router = router.clone();
@@ -206,12 +212,12 @@ impl LinkPanel {
                                         writer,
                                         high_latency,
                                     );
-                                    link::Event::Connected(link_id, handle)
+                                    link::OpenResult::Connected(link_id, handle)
                                 }
-                                Err(error) => link::Event::Failed(error),
+                                Err(error) => link::OpenResult::Failed(error),
                             }
                         })
-                        .map(Message::Event),
+                        .map(Message::Opened),
                         None,
                     );
                 }
@@ -230,12 +236,12 @@ impl LinkPanel {
                 self.links.remove(&id);
                 return (Task::none(), Some(Event::LinksChanged(self.configs())));
             }
-            Message::Event(link::Event::Connected(id, handle)) => {
+            Message::Opened(link::OpenResult::Connected(id, handle)) => {
                 if let Some(link) = self.links.get_mut(&id) {
                     link.handle = Some(handle)
                 }
             }
-            Message::Event(link::Event::Failed(error)) => {
+            Message::Opened(link::OpenResult::Failed(error)) => {
                 log::error!("Connect failed: {error:?}");
             }
         }
@@ -431,10 +437,7 @@ impl LinkPanel {
                         .align_x(Alignment::Center)
                         .align_y(Alignment::Center),
                 )
-                .on_press_with({
-                    let id = id.clone();
-                    move || Message::Connect(id.clone())
-                })
+                .on_press_maybe((link.handle.is_none()).then(|| Message::Connect(id.clone())))
                 .width(100.0)
             };
 
@@ -577,6 +580,36 @@ mod tests {
         let (_, event) = panel.update(Message::Connect(unknown), &router);
         assert!(event.is_none());
         assert!(panel.links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_is_refused_while_a_link_is_live() {
+        let (mut panel, router) = panel();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        let id = panel.links.keys().next().unwrap().clone();
+
+        // Attach a real guard to a live transport, as a landed OpenResult
+        // would. The silent duplex peer is held open for the router's
+        // reader/writer pair.
+        let (_peer, gcs) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(gcs);
+        let guard = router.attach_reader_writer(LinkId::new("t"), reader, writer, false);
+        panel.links.get_mut(&id).unwrap().handle = Some(guard);
+
+        // The update must refuse outright: no task is spawned at all, so no
+        // second attach could take place, and the existing handle stays.
+        let (task, event) = panel.update(Message::Connect(id.clone()), &router);
+        assert_eq!(
+            task.units(),
+            0,
+            "a live link must refuse a re-connect without spawning a task"
+        );
+        assert!(event.is_none());
+        assert!(
+            panel.links.get(&id).unwrap().handle.is_some(),
+            "the live connection must not be disturbed"
+        );
     }
 
     #[test]

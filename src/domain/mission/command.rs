@@ -21,8 +21,7 @@ use mavio::default_dialect::{
     messages::MissionItemInt,
 };
 
-/// Scale between WGS-84 degrees and the integer coordinates of `MISSION_ITEM_INT`.
-const LATLON_SCALE: f64 = 1e-7;
+use super::LATLON_SCALE;
 
 /// A WGS-84 position with altitude, in degrees and metres.
 #[derive(Debug, Clone, Copy, PartialEq)]

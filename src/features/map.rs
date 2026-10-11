@@ -56,7 +56,6 @@ pub struct Map {
     tile_cache: TileCache,
     /// Whether the viewpoint follows the primary vehicle's position.
     pub(crate) follow: bool,
-    draw_dots: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,9 +68,6 @@ pub enum Message {
     Cache(CacheMessage),
     /// Toggle following the primary vehicle.
     Follow(bool),
-    /// Toggle drawing dots on the position trail (debug).
-    #[allow(dead_code)] // UI control is currently commented out
-    DrawDots(bool),
     /// A mission waypoint was pressed on the map (select it, begin a drag).
     /// Carries the vehicle whose mission is displayed, captured at emission.
     WaypointPressed(SystemId, usize),
@@ -94,7 +90,6 @@ impl Map {
             projector: None,
             tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
             follow: false,
-            draw_dots: false,
         }
     }
 
@@ -112,7 +107,6 @@ impl Map {
                 return self.tile_cache.update(message).map(Message::Cache);
             }
             Message::Follow(value) => self.follow = value,
-            Message::DrawDots(value) => self.draw_dots = value,
             // Waypoint messages are intents the mission feature owns; the map
             // tracks no interaction state, so they are no-ops here.
             Message::WaypointPressed(..)
@@ -130,8 +124,6 @@ impl Map {
         primary: Option<SystemId>,
         interaction: Interaction,
     ) -> Element<'a, Message> {
-        let draw_dots = self.draw_dots;
-
         MapProgram::new(&self.tile_cache)
             .on_cache(Message::Cache)
             .on_update(Message::Projector)
@@ -145,7 +137,7 @@ impl Map {
 
                 iced::debug::time_with("position_segments_view", || {
                     for vehicle in vehicles.values() {
-                        draw_vehicle(vehicle, projector, frame, draw_dots);
+                        draw_vehicle(vehicle, projector, frame);
                     }
 
                     if let Some(id) = primary
@@ -279,7 +271,7 @@ impl DrawLineSegment {
 /// projection cache keyed by `(viewpoint, position-revision)` is the known next
 /// step, but it was deferred: profiling shows stroke frequency dominates the
 /// cost, and a cache would add untested staleness risk. Revisit with a profiler.
-fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, draw_dots: bool) {
+fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame) {
     let Some(position) = &vehicle.position.current else {
         return;
     };
@@ -340,10 +332,6 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, dra
                 width: 4.0,
             }
             .draw(frame);
-
-            if draw_dots {
-                frame.fill(&Path::circle(prev.point, 5.0), Fill::from(Color::WHITE));
-            }
         }
     }
 

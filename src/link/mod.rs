@@ -5,4 +5,4 @@ pub mod transport;
 pub mod udp;
 
 pub use config::LinkConfig;
-pub use transport::{Event, open};
+pub use transport::{OpenResult, open};

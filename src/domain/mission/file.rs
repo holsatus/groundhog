@@ -10,10 +10,7 @@ use mavio::default_dialect::{
     messages::MissionItemInt,
 };
 
-use super::{MissionItem, is_positional_command};
-
-/// Scale between WGS-84 degrees and the integer coordinates of `MISSION_ITEM_INT`.
-const LATLON_SCALE: f64 = 1e-7;
+use super::{LATLON_SCALE, MissionItem, is_positional_command};
 
 const HEADER: &str = "QGC WPL 110";
 

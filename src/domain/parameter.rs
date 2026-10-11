@@ -185,7 +185,7 @@ impl Parameters {
             if got >= exp as usize {
                 log::info!("Loaded total of {got} parameters");
             } else {
-                log::warn!("Expected {exp} paramaters, got {got}");
+                log::warn!("Expected {exp} parameters, got {got}");
             }
         }
     }

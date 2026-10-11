@@ -19,7 +19,7 @@ pub enum Copter {
     Autotune = 15,
     Poshold = 16,
     Brake = 17,
-    Thriw = 18,
+    Throw = 18,
     AvoidAdsb = 19,
     GuidedNogps = 20,
     SmartRtl = 21,

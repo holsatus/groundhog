@@ -15,7 +15,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// This is transport-level addressing, not identity: every command, mission
 /// transfer, and parameter operation is addressed to a specific component of a
 /// system. A component of `0` is treated as a wildcard in the direction of a
-/// target (see `mav::matches_target`). For the identity of a *vehicle*, use
+/// target (see `crate::mavlink::matches_target`). For the identity of a *vehicle*, use
 /// [`SystemId`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MavlinkId {

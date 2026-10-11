@@ -11,8 +11,11 @@ use crate::{
 use super::config::LinkBuild;
 
 /// The result of opening a link transport.
+///
+/// Named for what it is, not when it fires: this value is the outcome of a
+/// `Connect`, not a stream event like [`mavlink::router::Event`].
 #[derive(Debug, Clone)]
-pub enum Event {
+pub enum OpenResult {
     Connected(LinkId, mavlink::LinkGuard),
     Failed(ArcError),
 }

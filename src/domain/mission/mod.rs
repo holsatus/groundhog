@@ -12,6 +12,9 @@ pub mod file;
 
 pub use command::*;
 
+/// Scale between WGS-84 degrees and the integer coordinates of `MISSION_ITEM_INT`.
+pub(crate) const LATLON_SCALE: f64 = 1e-7;
+
 /// A vehicle's mission: the working plan the user edits, plus execution state.
 #[derive(Debug, Clone, Default)]
 pub struct Mission {
