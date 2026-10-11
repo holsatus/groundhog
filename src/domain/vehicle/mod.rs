@@ -29,7 +29,7 @@ use self::{
 
 use std::{collections::BTreeMap, time::Instant};
 
-use mav_param::Ident;
+use mav_param::{Ident, Value};
 use mavio::{
     DefaultDialect,
     default_dialect::{
@@ -42,7 +42,7 @@ use crate::{
     domain::firmware::FlightMode,
     domain::mission::Mission,
     domain::parameter::{self, Parameters},
-    foundation::{MavlinkId, SystemId},
+    foundation::{BoxError, MavlinkId, SystemId},
 };
 
 /// How recently a vehicle has been heard from.
@@ -126,6 +126,27 @@ impl Vehicle {
     /// The component's parameter set, created on demand.
     pub fn parameters_mut(&mut self, component: u8) -> &mut Parameters {
         self.component_mut(component).parameters_mut()
+    }
+
+    /// Fold an upload result onto the component's in-flight upload of `ident`.
+    ///
+    /// A result only updates parameter state the component already has: if the
+    /// component was never heard from, the outcome is
+    /// [`UploadOutcome::Ignored`] and nothing is touched. The result is only
+    /// read; the caller keeps ownership for diagnostics.
+    pub fn apply_parameter_upload(
+        &mut self,
+        component: u8,
+        ident: Ident,
+        requested: Value,
+        result: &Result<Value, BoxError>,
+    ) -> parameter::UploadOutcome {
+        if self.parameters(component).is_none() {
+            return parameter::UploadOutcome::Ignored;
+        }
+
+        self.parameters_mut(component)
+            .apply_upload_result(&ident, requested, result)
     }
 
     pub fn capabilities(&self, component: u8) -> Option<MavProtocolCapability> {
@@ -391,6 +412,18 @@ mod tests {
         assert_eq!(vehicle.mission.progress.current_seq, Some(2));
         assert_eq!(vehicle.mission.progress.total, Some(8));
         assert_eq!(vehicle.mission.progress.state, MissionState::Active);
+    }
+
+    #[test]
+    fn parameter_upload_result_for_an_unheard_component_is_ignored() {
+        let mut vehicle = vehicle();
+
+        let ident = Ident::from_str_truncated("PARAM_ONE");
+        let outcome =
+            vehicle.apply_parameter_upload(1, ident, Value::F32(2.0), &Ok(Value::F32(2.0)));
+
+        assert_eq!(outcome, parameter::UploadOutcome::Ignored);
+        assert!(vehicle.parameters(1).is_none(), "no state was created");
     }
 
     #[test]

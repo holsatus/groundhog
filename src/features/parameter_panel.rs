@@ -31,11 +31,11 @@ use rfd::AsyncFileDialog;
 use crate::{
     domain::fleet::Fleet,
     domain::parameter::{
-        self, ChangedStatus, ParamState, Parameter, Parameters, value_as_string, value_parse_as,
-        value_type_matches, value_type_name,
+        self, ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, value_as_string,
+        value_parse_as, value_type_matches, value_type_name,
     },
     domain::vehicle::Vehicle,
-    foundation::{MavlinkId, SystemId},
+    foundation::{BoxError, MavlinkId, SystemId},
     services::{FleetServices, ParamListSummary, Result},
     style,
     widget::virtualized::virtual_list,
@@ -376,36 +376,37 @@ impl ParameterPanel {
         result: Result<Value>,
         ctx: &mut Context,
     ) -> Option<()> {
-        let system = SystemId::from(address.system);
-        let component = address.component;
-        let vehicle = ctx.fleet.vehicle_mut(system)?;
+        let vehicle = ctx.fleet.vehicle_mut(SystemId::from(address.system))?;
 
-        // A result only updates state it already owns; if the component
-        // was never heard from, it is a no-op.
-        vehicle.parameters(component)?;
+        // Convert the transport error to the domain's error carrier once, at
+        // the boundary; the feature keeps ownership for the failed-upload log.
+        let result = result.map_err(|error| Box::new(error) as BoxError);
 
-        let param = vehicle.parameters_mut(component).get_mut(&ident)?;
+        let outcome =
+            vehicle.apply_parameter_upload(address.component, ident.clone(), requested, &result);
 
-        if !matches!(param.state(), ParamState::Uploading { value } if *value == requested) {
-            return None;
-        }
-
-        self.uploads.remove(&(address, ident.clone()));
-
-        match result {
-            Ok(value) if value == requested => param.upload_succeeded(value),
-            Ok(value) => {
+        match outcome {
+            // A stale result must not cancel the in-flight upload: leave the
+            // abort handle so an edit or reset can still cancel it, and log
+            // nothing.
+            UploadOutcome::Ignored => return None,
+            UploadOutcome::Accepted => {}
+            UploadOutcome::Clamped(reported) => {
                 log::warn!(
-                    "Parameter '{}' was set to {value:?} instead of {requested:?}",
+                    "Parameter '{}' was set to {reported:?} instead of {requested:?}",
                     ident.as_str()
                 );
-                param.upload_rejected(value, requested);
             }
-            Err(error) => {
-                log::warn!("Parameter upload for '{}' failed: {error}", ident.as_str());
-                param.upload_failed(requested);
+            UploadOutcome::Failed => {
+                if let Err(error) = &result {
+                    log::warn!("Parameter upload for '{}' failed: {error}", ident.as_str());
+                }
             }
         }
+
+        // A landed fold means the transfer settled; its handle goes with it.
+        self.uploads.remove(&(address, ident));
+
         Some(())
     }
 

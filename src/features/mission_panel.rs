@@ -290,10 +290,9 @@ impl MissionPanel {
 
         match result {
             Ok(mission) => {
-                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                    vehicle.mission = mission;
-                }
-                if let Some(ui) = self.ui.get_mut(&id) {
+                if ctx.fleet.apply_mission_download(id, mission)
+                    && let Some(ui) = self.ui.get_mut(&id)
+                {
                     ui.selected = None;
                     ui.edit.clear();
                 }
@@ -334,9 +333,9 @@ impl MissionPanel {
 
         match result {
             Ok(vehicle_id) => {
-                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                    vehicle.mission.mark_synced(Some(vehicle_id));
-                }
+                // The fold landing is all this result implies for stored
+                // state; an unknown vehicle silently ignores it.
+                ctx.fleet.apply_mission_upload(id, vehicle_id);
             }
             Err(error) => log::warn!("Mission upload to {id:?} failed: {error}"),
         }
@@ -367,11 +366,9 @@ impl MissionPanel {
 
         match result {
             Ok(()) => {
-                if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
-                    vehicle.mission.clear();
-                    vehicle.mission.mark_synced(None);
-                }
-                if let Some(ui) = self.ui.get_mut(&id) {
+                if ctx.fleet.apply_mission_clear(id)
+                    && let Some(ui) = self.ui.get_mut(&id)
+                {
                     ui.selected = None;
                     ui.edit.clear();
                 }

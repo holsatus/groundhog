@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
 
+use crate::foundation::BoxError;
+
 #[derive(Clone, Debug)]
 pub struct Parameter {
     value: Value,
@@ -103,6 +105,19 @@ impl Parameter {
     }
 }
 
+/// The outcome of folding an upload result onto a parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UploadOutcome {
+    /// No upload of the same requested value was in flight; ignored.
+    Ignored,
+    /// The target reports the requested value: accepted.
+    Accepted,
+    /// The target set a different value than requested (clamped/rejected).
+    Clamped(Value),
+    /// The transport did not deliver a verdict.
+    Failed,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Parameters {
     map: BTreeMap<Ident, Parameter>,
@@ -171,6 +186,43 @@ impl Parameters {
                 log::info!("Loaded total of {got} parameters");
             } else {
                 log::warn!("Expected {exp} paramaters, got {got}");
+            }
+        }
+    }
+
+    /// Fold an upload result onto the in-flight upload of `ident`.
+    ///
+    /// Only an upload that is in flight with the *same* `requested` value may
+    /// land: a result for an unknown ident or a stale, mismatched, or absent
+    /// upload returns [`UploadOutcome::Ignored`] and touches nothing. The
+    /// result is only read: the caller keeps ownership, so diagnostics can
+    /// still inspect the error.
+    pub fn apply_upload_result(
+        &mut self,
+        ident: &Ident,
+        requested: Value,
+        result: &Result<Value, BoxError>,
+    ) -> UploadOutcome {
+        let Some(param) = self.map.get_mut(ident) else {
+            return UploadOutcome::Ignored;
+        };
+
+        if !matches!(param.state(), ParamState::Uploading { value } if *value == requested) {
+            return UploadOutcome::Ignored;
+        }
+
+        match result {
+            Ok(value) if *value == requested => {
+                param.upload_succeeded(*value);
+                UploadOutcome::Accepted
+            }
+            Ok(reported) => {
+                param.upload_rejected(*reported, requested);
+                UploadOutcome::Clamped(*reported)
+            }
+            Err(_) => {
+                param.upload_failed(requested);
+                UploadOutcome::Failed
             }
         }
     }
@@ -433,5 +485,126 @@ pub fn value_as_string(value: Value) -> String {
         Value::U32(v) => v.to_string(),
         Value::I32(v) => v.to_string(),
         Value::F32(v) => v.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ident every test below uses for its in-flight parameter.
+    fn ident() -> Ident {
+        Ident::from_str_truncated("PARAM_ONE")
+    }
+
+    /// A set holding one parameter registered at `initial`, left `Uploading`
+    /// the given `requested` value.
+    fn uploading(requested: Value) -> (Parameters, Ident) {
+        let ident = ident();
+        let mut parameters = Parameters::default();
+        parameters.insert(ident.clone(), Value::F32(1.0));
+        parameters
+            .get_mut(&ident)
+            .expect("just inserted")
+            .begin_upload(requested);
+        (parameters, ident)
+    }
+
+    #[test]
+    fn upload_result_echoed_is_accepted() {
+        let (mut parameters, ident) = uploading(Value::F32(2.0));
+
+        let outcome = parameters.apply_upload_result(&ident, Value::F32(2.0), &Ok(Value::F32(2.0)));
+
+        assert_eq!(outcome, UploadOutcome::Accepted);
+        let param = parameters.get(&ident).unwrap();
+        assert_eq!(param.value(), Value::F32(2.0));
+        assert!(matches!(param.state(), ParamState::Unchanged));
+    }
+
+    #[test]
+    fn upload_result_reported_value_clamped_is_rejected() {
+        let (mut parameters, ident) = uploading(Value::F32(5.0));
+
+        // The target clamped the request to `3.0`.
+        let outcome = parameters.apply_upload_result(&ident, Value::F32(5.0), &Ok(Value::F32(3.0)));
+
+        assert_eq!(outcome, UploadOutcome::Clamped(Value::F32(3.0)));
+        let param = parameters.get(&ident).unwrap();
+        assert_eq!(param.value(), Value::F32(3.0), "the reported value is kept");
+        match param.state() {
+            ParamState::Changed { value, status } => {
+                assert_eq!(*value, Value::F32(5.0), "the request stays pending");
+                assert_eq!(*status, ChangedStatus::Rejected);
+            }
+            state => panic!("expected Changed(Rejected), got {state:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_result_transport_error_fails() {
+        let (mut parameters, ident) = uploading(Value::F32(7.0));
+
+        let outcome =
+            parameters.apply_upload_result(&ident, Value::F32(7.0), &Err("timeout".into()));
+
+        assert_eq!(outcome, UploadOutcome::Failed);
+        let param = parameters.get(&ident).unwrap();
+        assert_eq!(param.value(), Value::F32(1.0), "the target set nothing");
+        match param.state() {
+            ParamState::Changed { value, status } => {
+                assert_eq!(*value, Value::F32(7.0), "the request stays pending");
+                assert_eq!(*status, ChangedStatus::Failed);
+            }
+            state => panic!("expected Changed(Failed), got {state:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_result_without_an_in_flight_upload_is_ignored() {
+        let mut parameters = Parameters::default();
+        let ident = ident();
+        parameters.insert(ident.clone(), Value::F32(1.0));
+
+        let outcome = parameters.apply_upload_result(&ident, Value::F32(9.0), &Ok(Value::F32(9.0)));
+
+        assert_eq!(outcome, UploadOutcome::Ignored);
+        // Ignored means untouched: no verdict may be recorded.
+        let param = parameters.get(&ident).unwrap();
+        assert_eq!(param.value(), Value::F32(1.0));
+        assert!(matches!(param.state(), ParamState::Unchanged));
+    }
+
+    #[test]
+    fn upload_result_for_a_mismatched_in_flight_value_is_ignored() {
+        let (mut parameters, ident) = uploading(Value::F32(5.0));
+
+        // Only `5.0` is in flight; a result claimed for `9.0` is stale.
+        let outcome = parameters.apply_upload_result(&ident, Value::F32(9.0), &Ok(Value::F32(9.0)));
+
+        assert_eq!(outcome, UploadOutcome::Ignored);
+        let param = parameters.get(&ident).unwrap();
+        assert_eq!(param.value(), Value::F32(1.0));
+        assert!(matches!(
+            param.state(),
+            ParamState::Uploading { value } if *value == Value::F32(5.0)
+        ));
+    }
+
+    #[test]
+    fn upload_result_for_an_unknown_ident_is_ignored() {
+        let (mut parameters, word) = uploading(Value::F32(2.0));
+
+        let missing = Ident::from_str_truncated("PARAM_MISSING");
+        let outcome =
+            parameters.apply_upload_result(&missing, Value::F32(2.0), &Ok(Value::F32(2.0)));
+
+        assert_eq!(outcome, UploadOutcome::Ignored);
+        // The in-flight upload of the known ident keeps its state.
+        let param = parameters.get(&word).unwrap();
+        assert!(matches!(
+            param.state(),
+            ParamState::Uploading { value } if *value == Value::F32(2.0)
+        ));
     }
 }
