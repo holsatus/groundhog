@@ -281,10 +281,13 @@ impl Application {
 
         let mission_task = match message {
             map::Message::WaypointPressed(index) => {
-                self.mission_message_update(mission_panel::Message::Select(index))
+                self.mission_message_update(mission_panel::Message::BeginDrag(index))
             }
             map::Message::WaypointDragged(index, position) => {
                 self.mission_message_update(mission_panel::Message::MoveWaypointTo(index, position))
+            }
+            map::Message::WaypointReleased => {
+                self.mission_message_update(mission_panel::Message::EndDrag)
             }
             map::Message::PlaceAt(position) => {
                 self.mission_message_update(mission_panel::Message::AddWaypointAt(position))
@@ -549,15 +552,17 @@ impl Application {
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
         match panel {
-            layout::Panel::Map => self
-                .map
-                .view(
-                    self.fleet.vehicles(),
-                    self.fleet.primary(),
-                    self.mission_panel.is_placing(),
-                )
-                .map(Message::Map)
-                .boxed(),
+            layout::Panel::Map => {
+                let primary = self.fleet.primary();
+                let interaction = map::Interaction {
+                    placing: self.mission_panel.is_placing(primary),
+                    dragging: self.mission_panel.dragging(primary),
+                };
+                self.map
+                    .view(self.fleet.vehicles(), primary, interaction)
+                    .map(Message::Map)
+                    .boxed()
+            }
             layout::Panel::Vehicles => {
                 let theme = &self.theme;
                 vehicle_panel::view(

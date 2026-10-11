@@ -33,7 +33,20 @@ use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::Syst
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
 
+/// Mission-overlay interaction state supplied by the mission feature.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Interaction {
+    /// The next click places a waypoint.
+    pub placing: bool,
+    /// The mission item currently being dragged, if any.
+    pub dragging: Option<usize>,
+}
+
 /// The map layer's own state.
+///
+/// It renders the mission overlay and translates raw map input into mission
+/// intents, but owns no mission interaction state: placement mode and the
+/// dragged waypoint are supplied by the mission feature via [`Interaction`].
 pub struct Map {
     viewpoint: Viewpoint,
     projector: Option<Projector>,
@@ -41,8 +54,6 @@ pub struct Map {
     /// Whether the viewpoint follows the primary vehicle's position.
     pub(crate) follow: bool,
     draw_dots: bool,
-    /// The mission item currently being dragged, if any.
-    drag: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +90,6 @@ impl Map {
             tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
             follow: false,
             draw_dots: false,
-            drag: None,
         }
     }
 
@@ -98,9 +108,12 @@ impl Map {
             }
             Message::Follow(value) => self.follow = value,
             Message::DrawDots(value) => self.draw_dots = value,
-            Message::WaypointPressed(index) => self.drag = Some(index),
-            Message::WaypointReleased => self.drag = None,
-            Message::WaypointDragged(..) | Message::PlaceAt(_) => {}
+            // Waypoint messages are intents the mission feature owns; the map
+            // tracks no interaction state, so they are no-ops here.
+            Message::WaypointPressed(_)
+            | Message::WaypointDragged(..)
+            | Message::WaypointReleased
+            | Message::PlaceAt(_) => {}
         }
 
         iced::Task::none()
@@ -110,10 +123,9 @@ impl Map {
         &'a self,
         vehicles: &'a BTreeMap<SystemId, Vehicle>,
         primary: Option<SystemId>,
-        placing: bool,
+        interaction: Interaction,
     ) -> Element<'a, Message> {
         let draw_dots = self.draw_dots;
-        let drag = self.drag;
 
         MapProgram::new(&self.tile_cache)
             .on_cache(Message::Cache)
@@ -134,7 +146,7 @@ impl Map {
                     if let Some(id) = primary
                         && let Some(vehicle) = vehicles.get(&id)
                     {
-                        draw_mission(vehicle, projector, frame, drag);
+                        draw_mission(vehicle, projector, frame, interaction.dragging);
                     }
                 })
             })
@@ -145,7 +157,7 @@ impl Map {
                 // therefore read with `position_over`; unlike the draw layer,
                 // whose projector normalises bounds to the origin, we must NOT
                 // use `position_in`.
-                interact(projector, cursor, event, vehicles, primary, placing, drag)
+                interact(projector, cursor, event, vehicles, primary, interaction)
             })
             .build(self.viewpoint)
     }
@@ -162,8 +174,7 @@ fn interact(
     event: &Event,
     vehicles: &BTreeMap<SystemId, Vehicle>,
     primary: Option<SystemId>,
-    placing: bool,
-    drag: Option<usize>,
+    interaction: Interaction,
 ) -> Action<Message> {
     let point = cursor.position_over(projector.bounds);
 
@@ -179,14 +190,14 @@ fn interact(
                 return Action::Capture(Message::WaypointPressed(index));
             }
 
-            if placing && primary.is_some() {
+            if interaction.placing && primary.is_some() {
                 return Action::Capture(Message::PlaceAt(cursor_geo(projector, point)));
             }
 
             Action::None
         }
         Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-            let Some(index) = drag else {
+            let Some(index) = interaction.dragging else {
                 return Action::None;
             };
             let Some(point) = point else {
@@ -199,7 +210,7 @@ fn interact(
             ))
         }
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-            if drag.is_some() {
+            if interaction.dragging.is_some() {
                 Action::Capture(Message::WaypointReleased)
             } else {
                 Action::None
@@ -564,8 +575,7 @@ mod tests {
                 &pressed,
                 &vehicles,
                 Some(id),
-                false,
-                None,
+                Interaction::default(),
             ),
             Action::Capture(Message::WaypointPressed(0))
         ));
@@ -579,8 +589,7 @@ mod tests {
                 &pressed,
                 &vehicles,
                 Some(id),
-                false,
-                None,
+                Interaction::default(),
             ),
             Action::None
         ));
@@ -593,8 +602,10 @@ mod tests {
                 &pressed,
                 &vehicles,
                 Some(id),
-                true,
-                None,
+                Interaction {
+                    placing: true,
+                    ..Default::default()
+                },
             ),
             Action::Capture(Message::PlaceAt(_))
         ));
