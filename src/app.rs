@@ -20,8 +20,8 @@ use crate::{
     features::vehicle_panel,
     foundation::{DEFAULT_GCS_ID, LinkId, MavlinkId, SystemId},
     layout::{self, Layout},
-    mav,
-    mav::MavlinkRouter,
+    mavlink,
+    mavlink::MavlinkRouter,
     services::FleetServices,
     style,
 };
@@ -110,10 +110,10 @@ pub(crate) enum Telemetry {
     LinkClosed(LinkId),
 }
 
-impl From<mav::Event> for Telemetry {
-    fn from(event: mav::Event) -> Self {
+impl From<mavlink::Event> for Telemetry {
+    fn from(event: mavlink::Event) -> Self {
         match event {
-            mav::Event::Message(inbound) => {
+            mavlink::Event::Message(inbound) => {
                 let decoded = match inbound.frame.decode::<DefaultDialect>() {
                     Ok(message) => Some(message),
                     // Downgrade these to trace to avoid spamming the logs
@@ -133,7 +133,7 @@ impl From<mav::Event> for Telemetry {
                     decoded,
                 }
             }
-            mav::Event::LinkClosed(link_id) => Telemetry::LinkClosed(link_id),
+            mavlink::Event::LinkClosed(link_id) => Telemetry::LinkClosed(link_id),
         }
     }
 }
@@ -157,7 +157,7 @@ const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 /// would rebuild the whole view once per frame; instead events are collected
 /// and delivered in order in a single batch at most once per `frame`.
 fn coalesce(
-    events: impl Stream<Item = mav::Event> + Send + 'static,
+    events: impl Stream<Item = mavlink::Event> + Send + 'static,
     frame: Duration,
 ) -> impl Stream<Item = Vec<Telemetry>> + Send + 'static {
     iced::stream::channel(1, async move |mut output| {
@@ -195,7 +195,7 @@ impl Application {
 
         let (link_panel, auto_connect) = LinkPanel::from_config(config.links.clone());
 
-        let (client, events) = mav::MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (client, events) = mavlink::MavlinkRouter::new(DEFAULT_GCS_ID);
         let services = FleetServices::new(&client);
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
 

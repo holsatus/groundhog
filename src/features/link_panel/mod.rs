@@ -19,7 +19,7 @@ pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkVariant};
 use crate::{
     foundation::LinkId,
     link::{self, LinkConfig},
-    mav::{LinkGuard, MavlinkRouter},
+    mavlink::{LinkGuard, MavlinkRouter},
     style,
 };
 

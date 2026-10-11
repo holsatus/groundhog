@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::{
     foundation::{ArcError, LinkId},
-    mav,
+    mavlink,
 };
 
 use super::config::LinkBuild;
@@ -13,7 +13,7 @@ use super::config::LinkBuild;
 /// The result of opening a link transport.
 #[derive(Debug, Clone)]
 pub enum Event {
-    Connected(LinkId, mav::LinkGuard),
+    Connected(LinkId, mavlink::LinkGuard),
     Failed(ArcError),
 }
 

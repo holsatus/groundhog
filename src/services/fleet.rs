@@ -3,7 +3,7 @@
 //! The application owns one [`MavlinkRouter`] and wraps it here, so features can
 //! start transactions against any vehicle without naming the middleware.
 
-use crate::{foundation::MavlinkId, mav::MavlinkRouter};
+use crate::{foundation::MavlinkId, mavlink::MavlinkRouter};
 
 use super::VehicleClient;
 

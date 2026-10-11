@@ -11,11 +11,11 @@ pub mod vehicle;
 pub use fleet::FleetServices;
 pub use vehicle::VehicleClient;
 
-pub use crate::mav::{ParamListSummary, Result};
+pub use crate::mavlink::{ParamListSummary, Result};
 
 // Tests build routers and error values directly; expose the underlying types
 // through the services layer so feature test modules stay off `crate::mav`.
 #[cfg(test)]
-pub use crate::mav::MavlinkRouter;
+pub use crate::mavlink::MavlinkRouter;
 #[cfg(test)]
-pub use crate::mav::error::MavError;
+pub use crate::mavlink::error::MavError;
