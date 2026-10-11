@@ -50,7 +50,9 @@ pub enum Message {
     Save(LinkConfig),
     Connect(LinkId),
     Disconnect(LinkId),
-    /// The router reported that a link died on its own.
+    /// The router reported that a link died on its own. Lifecycle events ride
+    /// a lossy ring, so every update also reconciles the pane's handles
+    /// against the router, covering events that never arrived.
     Closed(LinkId),
     /// Remove a configured link, dropping any live connection with it.
     Delete(LinkId),
@@ -108,11 +110,30 @@ impl LinkPanel {
             .collect()
     }
 
+    /// Drop pane handles the router no longer knows about.
+    ///
+    /// `LinkClosed` rides the lossy telemetry ring, so a pane handle can
+    /// outlive the attachment it names. A handle to a link the router has
+    /// detached — however that detach happened — is nonsense, and keeping it
+    /// would block a re-attach forever; this reconciles within one message.
+    fn reconcile_closed(&mut self, router: &MavlinkRouter) {
+        self.links.retain(|id, link| {
+            if link.handle.is_some() && !router.is_attached(id) {
+                log::info!("link {id:?} was lost by the router; reconciling");
+                link.handle = None;
+            }
+
+            true
+        });
+    }
+
     pub fn update(
         &mut self,
         message: Message,
         router: &MavlinkRouter,
     ) -> (Task<Message>, Option<Event>) {
+        self.reconcile_closed(router);
+
         match message {
             Message::ChangeName(name) => self.configurator.name = name,
             Message::SetHighLatency(high_latency) => {
@@ -590,11 +611,12 @@ mod tests {
         let id = panel.links.keys().next().unwrap().clone();
 
         // Attach a real guard to a live transport, as a landed OpenResult
-        // would. The silent duplex peer is held open for the router's
-        // reader/writer pair.
+        // would — under the link's own id, like the production connect path.
+        // (The silent duplex peer is held open for the router's reader/writer
+        // pair.)
         let (_peer, gcs) = tokio::io::duplex(4096);
         let (reader, writer) = tokio::io::split(gcs);
-        let guard = router.attach_reader_writer(LinkId::new("t"), reader, writer, false);
+        let guard = router.attach_reader_writer(id.clone(), reader, writer, false);
         panel.links.get_mut(&id).unwrap().handle = Some(guard);
 
         // The update must refuse outright: no task is spawned at all, so no
@@ -610,6 +632,28 @@ mod tests {
             panel.links.get(&id).unwrap().handle.is_some(),
             "the live connection must not be disturbed"
         );
+    }
+
+    #[tokio::test]
+    async fn ghost_handle_is_reconciled_to_the_attached_reality() {
+        let (mut panel, router) = panel();
+
+        let _ = panel.update(Message::Save(config("A")), &router);
+        let id = panel.links.keys().next().unwrap().clone();
+
+        // A guard from a *different* router: the pane claims a live connection
+        // the router it talks to never attached. Such a handle can only be a
+        // ghost (for example a LinkClosed lost to the lossy telemetry ring).
+        let (other, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (_peer, gcs) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(gcs);
+        let guard = other.attach_reader_writer(LinkId::new("other"), reader, writer, false);
+        panel.links.get_mut(&id).unwrap().handle = Some(guard);
+
+        // One update reconciles the pane with the router's reality, and the
+        // Connect button becomes available again.
+        let _ = panel.update(Message::ChangeName("B".to_string()), &router);
+        assert!(panel.links.get(&id).unwrap().handle.is_none());
     }
 
     #[test]

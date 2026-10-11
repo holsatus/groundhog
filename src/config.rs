@@ -1,6 +1,9 @@
 use std::{
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use directories::ProjectDirs;
@@ -9,6 +12,10 @@ use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkConfig, theme:
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
+
+/// Uniquifies the temp sidecar of each config save, so two concurrent
+/// writers never serialize into the same intermediate file.
+static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk configuration schema version.
 const CONFIG_VERSION: u32 = 2;
@@ -124,7 +131,9 @@ impl Configuration {
     }
 
     /// Write the configuration at `path` atomically: serialize to a sibling
-    /// temp file, then rename it over the target.
+    /// temp file, then rename it over the target. The temp file is unique per
+    /// call, so concurrent saves cannot interleavingly corrupt one shared
+    /// sidecar.
     fn write_to_file_at(&self, path: &Path) -> Result<(), BoxError> {
         if let Some(parent) = path
             .parent()
@@ -135,7 +144,10 @@ impl Configuration {
 
         let serialized = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())?;
 
-        let tmp_path = path.with_extension("ron.tmp");
+        let tmp_path = path.with_extension(format!(
+            "ron.tmp-{}",
+            WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&tmp_path, serialized.as_bytes())?;
         std::fs::rename(&tmp_path, path)?;
 

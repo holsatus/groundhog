@@ -1,7 +1,10 @@
 //! Opening transports and attaching them to the MAVLink router, plus the
 //! type-erased async I/O adapters the router works with.
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use crate::{
     foundation::{ArcError, LinkId},
@@ -9,6 +12,16 @@ use crate::{
 };
 
 use super::config::LinkBuild;
+
+/// TCP connect timeout for a transport open: a dead address must fail the
+/// open in bounded time, not hang the pane's connect task.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// TCP keepalive tuning applied best effort to connected transports: a silent
+/// TCP death is otherwise undetectable on the reader half of a link.
+const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(15);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
 /// The result of opening a link transport.
 ///
@@ -30,9 +43,21 @@ fn arc<E: std::error::Error + Send + Sync + 'static>(error: E) -> ArcError {
 pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcError> {
     match build {
         LinkBuild::Tcp { sock_addr } => {
-            let stream = tokio::net::TcpStream::connect(sock_addr)
-                .await
-                .map_err(arc)?;
+            let stream = tokio::time::timeout(
+                TCP_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect(sock_addr),
+            )
+            .await
+            .map_err(|_| {
+                arc(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TCP connect timed out",
+                ))
+            })?
+            .map_err(arc)?;
+
+            let stream = tune_tcp(stream).map_err(arc)?;
+
             let (reader, writer) = stream.into_split();
             Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
         }
@@ -58,6 +83,81 @@ pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcErr
             Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
         }
     }
+}
+
+/// Tune an established TCP transport for robustness: TCP keepalive (so a
+/// silently dead network becomes detectable on the reader) and `TCP_NODELAY`
+/// (so control exchanges stay fresh).
+///
+/// Tuning is best effort: an option the socket refuses is logged and ignored
+/// and the open still succeeds, returning the — possibly untuned — halves in
+/// the usual way.
+fn tune_tcp(stream: tokio::net::TcpStream) -> Result<tokio::net::TcpStream, ArcError> {
+    // Round-trip through the std socket for the socket2 options; tokio's
+    // `into_std` deregisters from the reactor and `from_std` re-registers.
+    let socket = socket2::Socket::from(stream.into_std().map_err(arc)?);
+
+    if let Err(error) = socket.set_tcp_keepalive(&tcp_keepalive()) {
+        log::warn!("Could not set TCP keepalive on transport: {error}");
+    }
+
+    if let Err(error) = socket.set_tcp_nodelay(true) {
+        log::warn!("Could not set TCP_NODELAY on transport: {error}");
+    }
+
+    tokio::net::TcpStream::from_std(socket.into()).map_err(arc)
+}
+
+/// The keepalive settings this platform supports: the idle time is everywhere,
+/// interval and retries exist on fewer systems (socket2 gates them per OS).
+fn tcp_keepalive() -> socket2::TcpKeepalive {
+    let keepalive = socket2::TcpKeepalive::new().with_time(TCP_KEEPALIVE_TIME);
+
+    // `with_interval` and `with_retries` are not offered on every platform
+    // socket2 supports; apply them where the target has them.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "visionos",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "illumos",
+        target_os = "emscripten",
+        target_os = "fuchsia",
+        target_os = "cygwin",
+        target_os = "windows",
+        target_os = "nuttx",
+    ))]
+    let keepalive = keepalive.with_interval(TCP_KEEPALIVE_INTERVAL);
+
+    // `with_retries` additionally needs socket2's `all` feature, enabled for
+    // this dependency.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "visionos",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "illumos",
+        target_os = "emscripten",
+        target_os = "fuchsia",
+        target_os = "cygwin",
+        target_os = "windows",
+        target_os = "nuttx",
+    ))]
+    let keepalive = keepalive.with_retries(TCP_KEEPALIVE_RETRIES);
+
+    keepalive
 }
 
 // ----- dyn-compatible trait definition -----

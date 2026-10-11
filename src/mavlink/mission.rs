@@ -31,10 +31,6 @@ use super::{
 };
 use crate::foundation::MavlinkId;
 
-/// How long to wait for a `MISSION_ACK` (or `MISSION_COUNT`) before retrying.
-const MISSION_ACK_TIMEOUT: Duration = Duration::from_millis(1500);
-/// How long to wait for a requested mission item before re-requesting it.
-const MISSION_ITEM_TIMEOUT: Duration = Duration::from_millis(250);
 /// Retries after the first attempt.
 const MISSION_MAX_RETRIES: u8 = 5;
 
@@ -141,6 +137,7 @@ impl MavlinkRouter {
     ) -> Result<()> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
         let mut listener = MissionListener::new(self, target);
+        let (_, ack_timeout) = self.transfer_timeouts(target);
 
         for attempt in 0..=MISSION_MAX_RETRIES {
             if attempt > 0 {
@@ -155,7 +152,7 @@ impl MavlinkRouter {
                 },
             )?;
 
-            let deadline = Instant::now() + MISSION_ACK_TIMEOUT;
+            let deadline = Instant::now() + ack_timeout;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
 
@@ -179,15 +176,16 @@ impl MavlinkRouter {
     ) -> Result<DownloadedMission> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
         let mut listener = MissionListener::new(self, target);
+        let (item_timeout, ack_timeout) = self.transfer_timeouts(target);
 
         let (count, vehicle_id) = self
-            .request_mission_list(&mut listener, target, mission_type)
+            .request_mission_list(&mut listener, target, mission_type, ack_timeout)
             .await?;
 
         let mut items = Vec::with_capacity(count as usize);
         for seq in 0..count {
             items.push(
-                self.request_mission_item(&mut listener, target, mission_type, seq)
+                self.request_mission_item(&mut listener, target, mission_type, seq, item_timeout)
                     .await?,
             );
         }
@@ -214,6 +212,7 @@ impl MavlinkRouter {
     ) -> Result<u32> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
         let mut listener = MissionListener::new(self, target);
+        let (_, ack_timeout) = self.transfer_timeouts(target);
         let count = items.len() as u16;
 
         for attempt in 0..=MISSION_MAX_RETRIES {
@@ -230,7 +229,7 @@ impl MavlinkRouter {
                 },
             )?;
 
-            let mut deadline = Instant::now() + MISSION_ACK_TIMEOUT;
+            let mut deadline = Instant::now() + ack_timeout;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
 
@@ -241,7 +240,7 @@ impl MavlinkRouter {
                     }) if request_type == mission_type && seq < count => {
                         self.send_targeted(target, items[seq as usize].clone())?;
                         // Serving an item proves progress: give the transfer more time.
-                        deadline = Instant::now() + MISSION_ACK_TIMEOUT;
+                        deadline = Instant::now() + ack_timeout;
                     }
                     Some(MissionMessage::Ack(ack)) => {
                         return accept(ack.type_).map(|()| ack.opaque_id);
@@ -273,6 +272,7 @@ impl MavlinkRouter {
         listener: &mut MissionListener,
         target: MavlinkId,
         mission_type: MavMissionType,
+        ack_timeout: Duration,
     ) -> Result<(u16, u32)> {
         for attempt in 0..=MISSION_MAX_RETRIES {
             if attempt > 0 {
@@ -287,7 +287,7 @@ impl MavlinkRouter {
                 },
             )?;
 
-            let deadline = Instant::now() + MISSION_ACK_TIMEOUT;
+            let deadline = Instant::now() + ack_timeout;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
 
@@ -314,6 +314,7 @@ impl MavlinkRouter {
         target: MavlinkId,
         mission_type: MavMissionType,
         seq: u16,
+        item_timeout: Duration,
     ) -> Result<MissionItemInt> {
         for attempt in 0..=MISSION_MAX_RETRIES {
             if attempt > 0 {
@@ -329,7 +330,7 @@ impl MavlinkRouter {
                 },
             )?;
 
-            let deadline = Instant::now() + MISSION_ITEM_TIMEOUT;
+            let deadline = Instant::now() + item_timeout;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
 

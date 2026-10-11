@@ -34,13 +34,25 @@ impl MavlinkRouter {
             progress_timeout: PROGRESS_TIMEOUT,
             on_busy: Busy::default(),
             retries: RETRY_ATTEMPTS,
+            locks: true,
         }
     }
 
     /// Request a single message using `MAV_CMD_REQUEST_MESSAGE` and wait for it.
+    ///
+    /// Concurrent requests for the same message queue behind each other via
+    /// the command lock, so each request holds the pending-ACK registration
+    /// (and its own reply filter) for the whole operation.
     pub async fn request_message<M: MavlinkMessage>(&self, target: MavlinkId) -> Result<M> {
+        let command = commands::request_message::<M>();
+        let _lock = self
+            .lock_key(LockKey::command(target, command.kind()))
+            .await;
+
+        // The inner transaction must not re-acquire the same lock (it would
+        // deadlock on itself); the outer key already serializes it.
         let mut reply = self.receive_message::<M>(target);
-        let command = self.command(target, commands::request_message::<M>());
+        let command = self.command(target, command).without_lock();
 
         // Some systems send the message before (or without) the ACK
         tokio::select! {
@@ -122,6 +134,10 @@ pub struct CommandRequest {
     progress_timeout: Duration,
     on_busy: Busy,
     retries: u8,
+    /// Whether `run` acquires the command lock itself; `false` only for a
+    /// caller that already holds the command lock (it would deadlock on
+    /// the same key otherwise).
+    locks: bool,
 }
 
 #[allow(dead_code)] // Builder options not used by the UI yet
@@ -149,15 +165,26 @@ impl CommandRequest {
         self
     }
 
+    /// Skip acquiring the command lock in `run`: a caller that already holds
+    /// the command lock must not deadlock on itself.
+    fn without_lock(mut self) -> Self {
+        self.locks = false;
+        self
+    }
+
     async fn run(self) -> Result<CommandAck> {
         let kind = self.command.kind();
         let key = LockKey::command(self.target, kind);
-        let _lock = match self.on_busy {
-            Busy::Queue => self.router.lock_key(key).await,
-            Busy::Fail => self
-                .router
-                .try_lock_key(key.clone())
-                .ok_or(MavError::Busy(key))?,
+        let _lock = if !self.locks {
+            None
+        } else {
+            Some(match self.on_busy {
+                Busy::Queue => self.router.lock_key(key).await,
+                Busy::Fail => self
+                    .router
+                    .try_lock_key(key.clone())
+                    .ok_or(MavError::Busy(key))?,
+            })
         };
 
         let mut pending = Pending::register(self.router.clone(), self.target, kind);

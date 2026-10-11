@@ -24,6 +24,10 @@ mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd8
 async-trait = "0.1.89"
 tokio = { version = "1.51.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util = "0.7.18"
+# TCP keepalive tuning on connected transports: silent TCP death is otherwise
+# undetectable on the reader half of a link. `all` unlocks TCP_KEEPCNT
+# (`with_retries`).
+socket2 = { version = "0.6.5", features = ["all"] }
 serialport = "4.9.0"
 serial2-tokio = { version = "0.1.22", features = ["unix"] }
 slippery = { git = "https://github.com/peterkrull/slippery" }

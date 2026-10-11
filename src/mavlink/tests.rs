@@ -197,6 +197,50 @@ async fn request_message_returns_reply() {
     assert_eq!(reply.time_unix_usec, 42);
 }
 
+/// Two concurrent message requests of the same kind to one vehicle: they must
+/// queue behind the command lock (each request owns its pending-ACK sender and
+/// its reply filter for the whole operation), not starve the first arrival.
+#[tokio::test]
+async fn concurrent_request_messages_queue_instead_of_starving() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let first = tokio::spawn({
+        let router = router.clone();
+        async move { router.request_message::<SystemTime>(VEHICLE).await }
+    });
+    let second = tokio::spawn({
+        let router = router.clone();
+        async move { router.request_message::<SystemTime>(VEHICLE).await }
+    });
+
+    // The mock answers each completed COMMAND_LONG with its ACK and the
+    // message, in sequence: the replies arrive one round apart.
+    for _ in 0..2 {
+        let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
+            panic!("expected COMMAND_LONG")
+        };
+        vehicle.ack(long.command, MavResult::Accepted).await;
+        vehicle
+            .send(&SystemTime {
+                time_unix_usec: 42,
+                ..Default::default()
+            })
+            .await;
+    }
+
+    let first = first
+        .await
+        .unwrap()
+        .expect("the queued first request must resolve");
+    let second = second
+        .await
+        .unwrap()
+        .expect("the queued second request must resolve");
+    assert_eq!(first.time_unix_usec, 42);
+    assert_eq!(second.time_unix_usec, 42);
+    assert_eq!(first.time_unix_usec, second.time_unix_usec);
+}
+
 #[tokio::test]
 async fn param_set_returns_echoed_value() {
     let (router, _guard, mut vehicle) = setup();
