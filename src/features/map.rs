@@ -28,7 +28,7 @@ use slippery::{
     location,
 };
 
-use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::MavlinkId};
+use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::SystemId};
 
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
@@ -108,8 +108,8 @@ impl Map {
 
     pub fn view<'a>(
         &'a self,
-        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-        primary: Option<MavlinkId>,
+        vehicles: &'a BTreeMap<SystemId, Vehicle>,
+        primary: Option<SystemId>,
         placing: bool,
     ) -> Element<'a, Message> {
         let draw_dots = self.draw_dots;
@@ -160,8 +160,8 @@ fn interact(
     projector: &Projector,
     cursor: &mouse::Cursor,
     event: &Event,
-    vehicles: &BTreeMap<MavlinkId, Vehicle>,
-    primary: Option<MavlinkId>,
+    vehicles: &BTreeMap<SystemId, Vehicle>,
+    primary: Option<SystemId>,
     placing: bool,
     drag: Option<usize>,
 ) -> Action<Message> {
@@ -478,10 +478,7 @@ mod tests {
     }
 
     fn vehicle_with_waypoint(lat: f64, lon: f64) -> Vehicle {
-        let mut vehicle = Vehicle::new(MavlinkId {
-            system: 1,
-            component: 1,
-        });
+        let mut vehicle = Vehicle::new(SystemId(1));
 
         vehicle.mission.push(MissionItem {
             frame: MavFrame::GlobalRelativeAltInt,
@@ -552,10 +549,7 @@ mod tests {
             },
         };
 
-        let id = MavlinkId {
-            system: 1,
-            component: 1,
-        };
+        let id = SystemId(1);
         let mut vehicles = BTreeMap::new();
         vehicles.insert(id, vehicle_with_waypoint(47.4, 8.5));
 

@@ -3,6 +3,13 @@
 //! This is the single owner of vehicle state. The UI layer feeds inbound
 //! messages in through [`Fleet::observe`] and turns the resulting
 //! [`FleetEvent`]s into effects (initialising a vehicle, recentering the map).
+//!
+//! Identity is per MAVLink *system* ([`SystemId`]), not per address: a system
+//! is a vehicle, and the several components that may heartbeat under it
+//! (autopilot, gimbal, companion computer, ...) are endpoints of that one
+//! vehicle rather than vehicles of their own. Inbound frames still arrive
+//! addressed to a `(system, component)` pair, so [`Fleet::observe`] keys on the
+//! system while preserving each frame's source component for targeting.
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -14,7 +21,7 @@ use mavio::DefaultDialect;
 use crate::{
     domain::geo::GeoPosition,
     domain::vehicle::{Liveness, Vehicle},
-    foundation::MavlinkId,
+    foundation::{MavlinkId, SystemId},
 };
 
 /// A vehicle still counts as active while it has been heard from within this
@@ -29,9 +36,9 @@ const LOST_AFTER: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub enum FleetEvent {
     /// A vehicle was seen for the first time.
-    Registered(MavlinkId),
+    Registered(SystemId),
     /// A vehicle's liveness changed, as of a [`Fleet::tick`] or a fresh frame.
-    LivenessChanged(MavlinkId, Liveness),
+    LivenessChanged(SystemId, Liveness),
     /// The primary vehicle's latest position, after this frame was applied.
     /// Whether to recenter is the application's policy, not the fleet's.
     PrimaryMoved(GeoPosition),
@@ -45,29 +52,29 @@ pub enum FleetEvent {
 /// many read-only fields for the view layer to render.
 #[derive(Default)]
 pub struct Fleet {
-    vehicles: BTreeMap<MavlinkId, Vehicle>,
-    primary: Option<MavlinkId>,
+    vehicles: BTreeMap<SystemId, Vehicle>,
+    primary: Option<SystemId>,
 }
 
 impl Fleet {
-    pub fn vehicles(&self) -> &BTreeMap<MavlinkId, Vehicle> {
+    pub fn vehicles(&self) -> &BTreeMap<SystemId, Vehicle> {
         &self.vehicles
     }
 
-    pub fn vehicle(&self, id: MavlinkId) -> Option<&Vehicle> {
+    pub fn vehicle(&self, id: SystemId) -> Option<&Vehicle> {
         self.vehicles.get(&id)
     }
 
-    pub fn vehicle_mut(&mut self, id: MavlinkId) -> Option<&mut Vehicle> {
+    pub fn vehicle_mut(&mut self, id: SystemId) -> Option<&mut Vehicle> {
         self.vehicles.get_mut(&id)
     }
 
-    pub fn primary(&self) -> Option<MavlinkId> {
+    pub fn primary(&self) -> Option<SystemId> {
         self.primary
     }
 
     /// Make `id` the primary vehicle, if it is known. Returns whether it changed.
-    pub fn set_primary(&mut self, id: MavlinkId) -> bool {
+    pub fn set_primary(&mut self, id: SystemId) -> bool {
         if self.vehicles.contains_key(&id) && self.primary != Some(id) {
             self.primary = Some(id);
             true
@@ -81,6 +88,9 @@ impl Fleet {
     /// A vehicle is registered as soon as any frame is seen from it, even if
     /// the frame does not decode (`message` is `None`). The first vehicle seen
     /// becomes the primary.
+    ///
+    /// `source.component` is the endpoint that sent this frame; it is passed
+    /// through so the vehicle can resolve which component is its autopilot.
     pub fn observe(
         &mut self,
         source: MavlinkId,
@@ -89,6 +99,10 @@ impl Fleet {
     ) -> Vec<FleetEvent> {
         let mut events = Vec::new();
 
+        // A vehicle is a system: frames from any of its components fold into
+        // one entry keyed by the system.
+        let id = SystemId::from(source.system);
+
         // Only a fresh position frame can move the primary vehicle; other
         // frames (heartbeats, status, ...) leave the stored position untouched.
         let is_position_frame = matches!(
@@ -96,16 +110,16 @@ impl Fleet {
             Some(DefaultDialect::GlobalPositionInt(_) | DefaultDialect::GlobalPositionIntCov(_))
         );
 
-        if let Entry::Vacant(entry) = self.vehicles.entry(source) {
-            entry.insert(Vehicle::new(source));
-            events.push(FleetEvent::Registered(source));
+        if let Entry::Vacant(entry) = self.vehicles.entry(id) {
+            entry.insert(Vehicle::new(id));
+            events.push(FleetEvent::Registered(id));
 
             if self.primary.is_none() {
-                self.primary = Some(source);
+                self.primary = Some(id);
             }
         }
 
-        if let Some(vehicle) = self.vehicles.get_mut(&source) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.last_seen = Some(received_at);
 
             // A previously stale or lost vehicle is back as soon as any frame
@@ -113,19 +127,19 @@ impl Fleet {
             // emit a recovery here.
             if vehicle.liveness != Liveness::Active {
                 vehicle.liveness = Liveness::Active;
-                events.push(FleetEvent::LivenessChanged(source, Liveness::Active));
+                events.push(FleetEvent::LivenessChanged(id, Liveness::Active));
             }
 
             if let Some(message) = message {
-                vehicle.handle_message(received_at, message);
+                vehicle.handle_message(received_at, source.component, message);
             }
         }
 
         if is_position_frame
-            && self.primary == Some(source)
+            && self.primary == Some(id)
             && let Some(position) = self
                 .vehicles
-                .get(&source)
+                .get(&id)
                 .and_then(|v| v.position.current.as_ref())
         {
             events.push(FleetEvent::PrimaryMoved(position.pos));
@@ -164,16 +178,28 @@ impl Fleet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavio::default_dialect::messages::{self, Heartbeat};
+    use mavio::default_dialect::{
+        enums::MavAutopilot,
+        messages::{self, Heartbeat},
+    };
 
-    const A: MavlinkId = MavlinkId {
-        system: 1,
-        component: 1,
-    };
-    const B: MavlinkId = MavlinkId {
-        system: 2,
-        component: 1,
-    };
+    const A: SystemId = SystemId(1);
+    const B: SystemId = SystemId(2);
+
+    /// The address of `id`'s autopilot endpoint, for feeding `observe`.
+    fn source(id: SystemId) -> MavlinkId {
+        MavlinkId {
+            system: id.0,
+            component: 1,
+        }
+    }
+
+    fn heartbeat(autopilot: MavAutopilot) -> DefaultDialect {
+        DefaultDialect::Heartbeat(Heartbeat {
+            autopilot,
+            ..Default::default()
+        })
+    }
 
     fn global_position_int(lat: i32, lon: i32) -> DefaultDialect {
         DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
@@ -192,7 +218,7 @@ mod tests {
     #[test]
     fn first_vehicle_becomes_primary() {
         let mut fleet = Fleet::default();
-        let events = fleet.observe(A, Instant::now(), None);
+        let events = fleet.observe(source(A), Instant::now(), None);
 
         assert!(fleet.vehicles().contains_key(&A));
         assert_eq!(fleet.primary(), Some(A));
@@ -202,7 +228,7 @@ mod tests {
     #[test]
     fn unknown_message_still_registers() {
         let mut fleet = Fleet::default();
-        let events = fleet.observe(B, Instant::now(), None);
+        let events = fleet.observe(source(B), Instant::now(), None);
 
         assert!(fleet.vehicles().contains_key(&B));
         assert!(
@@ -215,8 +241,8 @@ mod tests {
     #[test]
     fn second_vehicle_does_not_become_primary() {
         let mut fleet = Fleet::default();
-        fleet.observe(A, Instant::now(), None);
-        let events = fleet.observe(B, Instant::now(), None);
+        fleet.observe(source(A), Instant::now(), None);
+        let events = fleet.observe(source(B), Instant::now(), None);
 
         assert_eq!(fleet.primary(), Some(A));
         assert_eq!(events.len(), 1);
@@ -226,8 +252,8 @@ mod tests {
     #[test]
     fn set_primary_switches_once() {
         let mut fleet = Fleet::default();
-        fleet.observe(A, Instant::now(), None);
-        fleet.observe(B, Instant::now(), None);
+        fleet.observe(source(A), Instant::now(), None);
+        fleet.observe(source(B), Instant::now(), None);
 
         assert!(fleet.set_primary(B));
         assert_eq!(fleet.primary(), Some(B));
@@ -238,7 +264,7 @@ mod tests {
     #[test]
     fn set_primary_ignores_unknown_vehicle() {
         let mut fleet = Fleet::default();
-        fleet.observe(A, Instant::now(), None);
+        fleet.observe(source(A), Instant::now(), None);
 
         assert!(!fleet.set_primary(B));
         assert_eq!(fleet.primary(), Some(A));
@@ -252,15 +278,71 @@ mod tests {
             ..Default::default()
         });
 
-        fleet.observe(A, Instant::now(), Some(heartbeat));
+        fleet.observe(source(A), Instant::now(), Some(heartbeat));
         assert_eq!(fleet.vehicles()[&A].identity.custom_mode, 7);
+    }
+
+    #[test]
+    fn components_of_one_system_share_a_vehicle() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        // Autopilot and companion computer heartbeat under the same system.
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 1,
+            },
+            t0,
+            None,
+        );
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 191,
+            },
+            t0,
+            None,
+        );
+
+        assert_eq!(fleet.vehicles().len(), 1);
+        assert!(fleet.vehicles().contains_key(&SystemId(1)));
+    }
+
+    #[test]
+    fn heartbeat_resolves_the_autopilot_component_for_targeting() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        // A companion endpoint that reports no valid autopilot must not become
+        // the target; the fallback autopilot component is used instead.
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 191,
+            },
+            t0,
+            Some(heartbeat(MavAutopilot::Invalid)),
+        );
+        assert_eq!(fleet.vehicle(SystemId(1)).unwrap().target().component, 1);
+
+        // The autopilot's own heartbeat resolves the target.
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 1,
+            },
+            t0,
+            Some(heartbeat(MavAutopilot::Ardupilotmega)),
+        );
+        assert_eq!(fleet.vehicle(SystemId(1)).unwrap().target().component, 1);
     }
 
     #[test]
     fn newly_seen_vehicle_is_active() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
-        let events = fleet.observe(A, t0, None);
+        let events = fleet.observe(source(A), t0, None);
 
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
         assert_eq!(fleet.vehicles()[&A].last_seen, Some(t0));
@@ -271,7 +353,7 @@ mod tests {
     fn tick_transitions_stale_then_lost_edge_triggered() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
-        fleet.observe(A, t0, None);
+        fleet.observe(source(A), t0, None);
 
         // Within the active window: nothing changes.
         assert!(fleet.tick(t0 + Duration::from_secs(1)).is_empty());
@@ -303,11 +385,11 @@ mod tests {
     fn observing_stale_vehicle_recovers_to_active() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
-        fleet.observe(A, t0, None);
+        fleet.observe(source(A), t0, None);
         fleet.tick(t0 + Duration::from_secs(5));
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Stale);
 
-        let events = fleet.observe(A, t0 + Duration::from_secs(5), None);
+        let events = fleet.observe(source(A), t0 + Duration::from_secs(5), None);
 
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
         assert!(
@@ -321,11 +403,11 @@ mod tests {
     fn observing_lost_vehicle_recovers_to_active() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
-        fleet.observe(A, t0, None);
+        fleet.observe(source(A), t0, None);
         fleet.tick(t0 + Duration::from_secs(11));
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Lost);
 
-        let events = fleet.observe(A, t0 + Duration::from_secs(11), None);
+        let events = fleet.observe(source(A), t0 + Duration::from_secs(11), None);
 
         assert_eq!(fleet.vehicles()[&A].liveness, Liveness::Active);
         assert!(
@@ -340,7 +422,7 @@ mod tests {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
 
-        let events = fleet.observe(A, t0, None);
+        let events = fleet.observe(source(A), t0, None);
         let fleet_events = fleet.tick(t0);
 
         assert!(
@@ -356,10 +438,14 @@ mod tests {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
         // Give the primary vehicle a recorded position.
-        fleet.observe(A, t0, Some(global_position_int(474_000_000, 85_000_000)));
+        fleet.observe(
+            source(A),
+            t0,
+            Some(global_position_int(474_000_000, 85_000_000)),
+        );
 
         let events = fleet.observe(
-            A,
+            source(A),
             t0,
             Some(DefaultDialect::Heartbeat(Heartbeat {
                 custom_mode: 0,
@@ -379,9 +465,13 @@ mod tests {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
         // Register without a message so no position exists yet.
-        fleet.observe(A, t0, None);
+        fleet.observe(source(A), t0, None);
 
-        let events = fleet.observe(A, t0, Some(global_position_int(474_000_000, 85_000_000)));
+        let events = fleet.observe(
+            source(A),
+            t0,
+            Some(global_position_int(474_000_000, 85_000_000)),
+        );
 
         let moved = events
             .iter()

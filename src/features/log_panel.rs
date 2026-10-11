@@ -15,7 +15,7 @@ use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
     domain::vehicle::{StatusText, Vehicle},
-    foundation::MavlinkId,
+    foundation::SystemId,
     style,
     widget::virtualized::virtual_list,
 };
@@ -96,8 +96,8 @@ impl LogPanel {
 
     pub fn view<'a>(
         &'a self,
-        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-        focused: Option<MavlinkId>,
+        vehicles: &'a BTreeMap<SystemId, Vehicle>,
+        focused: Option<SystemId>,
         theme: &Theme,
     ) -> Element<'a, Message> {
         let mut entries = self.entries(vehicles, focused);
@@ -119,7 +119,7 @@ impl LogPanel {
 
             container(
                 row![
-                    text(format!("{}:{}", id.system, id.component)).width(Length::Fixed(56.0)),
+                    text(format!("{id}")).width(Length::Fixed(56.0)),
                     text(format!("{:?}", status.severity))
                         .color(color)
                         .width(Length::Fixed(96.0)),
@@ -175,12 +175,12 @@ impl LogPanel {
     /// Collect the messages matching the current filter, oldest first.
     fn entries<'a>(
         &self,
-        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-        focused: Option<MavlinkId>,
-    ) -> Vec<(MavlinkId, &'a StatusText)> {
+        vehicles: &'a BTreeMap<SystemId, Vehicle>,
+        focused: Option<SystemId>,
+    ) -> Vec<(SystemId, &'a StatusText)> {
         let mut entries = Vec::new();
 
-        let mut push = |id: MavlinkId, vehicle: &'a Vehicle| {
+        let mut push = |id: SystemId, vehicle: &'a Vehicle| {
             for status in &vehicle.status.texts {
                 if (status.severity as u8) <= (self.filter.min_severity as u8) {
                     entries.push((id, status));

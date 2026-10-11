@@ -18,11 +18,11 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::{DEFAULT_GCS_ID, MavlinkId},
+    foundation::{DEFAULT_GCS_ID, SystemId},
     layout::{self, Layout},
     mav,
     mav::MavlinkRouter,
-    services::vehicle::VehicleClient,
+    services::FleetServices,
     style,
 };
 
@@ -34,6 +34,8 @@ pub struct Application {
     pub(crate) mission_panel: MissionPanel,
     pub(crate) parameter_panel: ParameterPanel,
     pub(crate) router: MavlinkRouter,
+    /// Handle to the vehicle operations the feature panels drive.
+    pub(crate) services: FleetServices,
     pub(crate) configuration: config::Configuration,
     /// Cached iced theme, kept in sync with `configuration.settings.theme`.
     ///
@@ -149,6 +151,7 @@ impl Application {
         let (link_panel, auto_connect) = LinkPanel::from_config(config.links.clone());
 
         let (client, events) = mav::MavlinkRouter::new(DEFAULT_GCS_ID);
+        let services = FleetServices::new(&client);
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
 
         let auto_connect = Task::batch(
@@ -168,6 +171,7 @@ impl Application {
             link_panel,
             log_panel: LogPanel::new(),
             router: client,
+            services,
             configuration: config.clone(),
             theme: config.settings.theme.theme(),
             fleet: Fleet::default(),
@@ -252,8 +256,8 @@ impl Application {
 
     fn vehicle_message_update(&mut self, message: vehicle_panel::Message) -> Task<Message> {
         match message {
-            vehicle_panel::Message::SetPrimary(mav_id) => {
-                self.fleet.set_primary(mav_id);
+            vehicle_panel::Message::SetPrimary(system) => {
+                self.fleet.set_primary(system);
                 Task::none()
             }
             vehicle_panel::Message::Follow(follow) => self
@@ -294,7 +298,7 @@ impl Application {
     fn mission_message_update(&mut self, message: mission_panel::Message) -> Task<Message> {
         let (task, event) = {
             let mut ctx = mission_panel::Context {
-                router: &self.router,
+                services: &self.services,
                 fleet: &mut self.fleet,
                 file_picker_path: self.configuration.file_picker_path.as_deref(),
             };
@@ -315,7 +319,7 @@ impl Application {
     fn parameter_message_update(&mut self, message: parameter_panel::Message) -> Task<Message> {
         let (task, event) = {
             let mut ctx = parameter_panel::Context {
-                router: &self.router,
+                services: &self.services,
                 fleet: &mut self.fleet,
                 file_picker_path: self.configuration.file_picker_path.as_deref(),
             };
@@ -333,25 +337,28 @@ impl Application {
     }
 
     /// Fetch basic information and the parameter list from a newly detected vehicle.
-    fn initialize_vehicle(&self, mav_id: MavlinkId) -> Task<Message> {
-        let client = VehicleClient::new(&self.router, mav_id);
+    fn initialize_vehicle(&self, system: SystemId) -> Task<Message> {
+        let Some(target) = self.fleet.vehicle(system).map(|vehicle| vehicle.target()) else {
+            return Task::none();
+        };
+        let client = self.services.vehicle(target);
         let request = Task::perform(
             async move {
                 if let Err(error) = client.component_information().await {
-                    log::warn!("No COMPONENT_INFORMATION_BASIC from {mav_id:?}: {error}");
+                    log::warn!("No COMPONENT_INFORMATION_BASIC from {system:?}: {error}");
                 }
 
                 // This requests AUTOPILOT_VERSION to get capabilities for param encoding
                 client.fetch_parameters(true).await
             },
-            move |result| parameter_panel::Message::ListReloadResult(mav_id, result).into(),
+            move |result| parameter_panel::Message::ListReloadResult(system, result).into(),
         );
 
         // Mark the implicit list download as running so the reload button is
         // disabled while the automatic initialisation is in flight.
         Task::batch([
             Task::done(Message::Parameter(
-                parameter_panel::Message::ListReloadStarted(mav_id),
+                parameter_panel::Message::ListReloadStarted(system),
             )),
             request,
         ])
@@ -428,12 +435,12 @@ impl Application {
     /// event means the same thing regardless of which produced it.
     fn handle_fleet_event(&self, event: FleetEvent) -> Task<Message> {
         match event {
-            FleetEvent::Registered(mav_id) => {
-                log::info!("New vehicle detected: {mav_id:?}");
-                self.initialize_vehicle(mav_id)
+            FleetEvent::Registered(system) => {
+                log::info!("New vehicle detected: {system:?}");
+                self.initialize_vehicle(system)
             }
-            FleetEvent::LivenessChanged(mav_id, liveness) => {
-                log_liveness(mav_id, liveness);
+            FleetEvent::LivenessChanged(system, liveness) => {
+                log_liveness(system, liveness);
                 Task::none()
             }
             FleetEvent::PrimaryMoved(position) => {
@@ -613,10 +620,10 @@ impl Application {
 }
 
 /// Log a liveness transition, louder the further a vehicle drifts.
-fn log_liveness(mav_id: MavlinkId, liveness: Liveness) {
+fn log_liveness(system: SystemId, liveness: Liveness) {
     match liveness {
-        Liveness::Lost => log::warn!("Vehicle {mav_id:?} lost"),
-        Liveness::Stale => log::info!("Vehicle {mav_id:?} is stale"),
-        Liveness::Active => log::info!("Vehicle {mav_id:?} is active"),
+        Liveness::Lost => log::warn!("Vehicle {system:?} lost"),
+        Liveness::Stale => log::info!("Vehicle {system:?} is stale"),
+        Liveness::Active => log::info!("Vehicle {system:?} is active"),
     }
 }

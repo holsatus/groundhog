@@ -3,9 +3,9 @@
 //!
 //! Owns the filter and the per-parameter edit buffers. Parameter data itself
 //! lives on the [`Fleet`] (the single owner of vehicle state), which the root
-//! passes in by mutable reference; the router is passed in for transactions.
-//! Writing the remembered file-picker directory back to the configuration is
-//! requested through [`Event`].
+//! passes in by mutable reference; the fleet services are passed in for
+//! transactions. Writing the remembered file-picker directory back to the
+//! configuration is requested through [`Event`].
 //!
 //! The filtered view is derived on every frame from the live parameter map, so
 //! there is no cached copy to keep in sync when the vehicle or filter changes.
@@ -33,9 +33,8 @@ use crate::{
         value_type_matches, value_type_name,
     },
     domain::vehicle::Vehicle,
-    foundation::MavlinkId,
-    mav::{self, MavlinkRouter},
-    services::vehicle::VehicleClient,
+    foundation::SystemId,
+    services::{FleetServices, ParamListSummary, Result},
     style,
     widget::virtualized::virtual_list,
 };
@@ -78,29 +77,29 @@ pub enum Message {
     FilterOnlyChanged(bool),
 
     /// Initiate a parameter list request to the target
-    ListReload(MavlinkId),
+    ListReload(SystemId),
 
     /// A parameter list request to the target has started, e.g. the automatic
     /// initialisation on first sight of a vehicle.
-    ListReloadStarted(MavlinkId),
+    ListReloadStarted(SystemId),
 
     /// The parameter list request to the target has finished
-    ListReloadResult(MavlinkId, mav::Result<mav::ParamListSummary>),
+    ListReloadResult(SystemId, Result<ParamListSummary>),
 
     /// Upload all modified parameters to the target
-    UploadAll(MavlinkId),
+    UploadAll(SystemId),
 
     /// Reset a local parameter to its target-default
-    ValueReset(MavlinkId, Ident),
+    ValueReset(SystemId, Ident),
 
     /// Upload a local parameter to the target
-    ValueUpload(MavlinkId, Ident, Value),
+    ValueUpload(SystemId, Ident, Value),
 
     /// The result of uploading a local parameter to the target
-    ValueUploadResult(MavlinkId, Ident, Value, mav::Result<Value>),
+    ValueUploadResult(SystemId, Ident, Value, Result<Value>),
 
     /// Edit the text-value buffer of the local parameter
-    BufferEdit(MavlinkId, Ident, String),
+    BufferEdit(SystemId, Ident, String),
 
     /// Open a file-picker dialog to choose a save location
     SaveDialog(Parameters),
@@ -112,19 +111,19 @@ pub enum Message {
     SaveFinished(PathBuf, Result<(), String>),
 
     /// Open a file-picker dialog to choose file to load
-    LoadDialog(MavlinkId),
+    LoadDialog(SystemId),
 
     /// Load parameters from the chosen path
-    LoadFromFile(PathBuf, MavlinkId),
+    LoadFromFile(PathBuf, SystemId),
 
     /// The result of reading a parameter file from disk
-    LoadFinished(PathBuf, MavlinkId, Result<Parameters, String>),
+    LoadFinished(PathBuf, SystemId, Result<Parameters, String>),
 }
 
 /// Everything the panel needs from the rest of the application to run a
 /// parameter transaction.
 pub struct Context<'a> {
-    pub router: &'a MavlinkRouter,
+    pub services: &'a FleetServices,
     pub fleet: &'a mut Fleet,
     pub file_picker_path: Option<&'a Path>,
 }
@@ -140,15 +139,15 @@ pub struct ParameterPanel {
     filter: ParameterFilter,
     namespace_sep: char,
     /// Text currently typed into each parameter's value field, keyed by the
-    /// parameter it belongs to. Kept here (not on the domain `Parameter`) so
+    /// vehicle it belongs to. Kept here (not on the domain `Parameter`) so
     /// that switching vehicles and back restores the in-progress edit.
-    editing: BTreeMap<MavlinkId, BTreeMap<Ident, String>>,
+    editing: BTreeMap<SystemId, BTreeMap<Ident, String>>,
     /// Abort handles for in-flight uploads, dropped (aborting) when an upload
     /// is superseded by an edit, a reset, or its own completion.
-    uploads: BTreeMap<(MavlinkId, Ident), iced::task::Handle>,
+    uploads: BTreeMap<(SystemId, Ident), iced::task::Handle>,
     /// Vehicles with a parameter list download in flight, so the view can
     /// disable the reload button without querying the router.
-    reloading: BTreeSet<MavlinkId>,
+    reloading: BTreeSet<SystemId>,
 }
 
 impl ParameterPanel {
@@ -182,42 +181,44 @@ impl ParameterPanel {
             Message::FilterOnlyChanged(changed) => {
                 self.filter.only_changed = changed;
             }
-            Message::ListReload(mav_id) => {
-                let client = VehicleClient::new(ctx.router, mav_id);
-                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
+            Message::ListReload(id) => {
+                // Resolve the addressing target before taking the mutable borrow.
+                let target = ctx.fleet.vehicle(id)?.target();
+                let client = ctx.services.vehicle(target);
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
 
                 let request_capabilities = vehicle.identity.capabilities.is_none();
                 vehicle.parameters_mut().reset_loading();
-                self.reloading.insert(mav_id);
+                self.reloading.insert(id);
 
                 let task = Task::perform(
                     async move { client.fetch_parameters(request_capabilities).await },
-                    move |result| Message::ListReloadResult(mav_id, result),
+                    move |result| Message::ListReloadResult(id, result),
                 );
 
                 return Some((task, None));
             }
-            Message::ListReloadStarted(mav_id) => {
-                self.reloading.insert(mav_id);
+            Message::ListReloadStarted(id) => {
+                self.reloading.insert(id);
             }
-            Message::ListReloadResult(mav_id, result) => {
-                self.reloading.remove(&mav_id);
+            Message::ListReloadResult(id, result) => {
+                self.reloading.remove(&id);
                 match result {
-                    Ok(summary) => log::info!("Parameters from {mav_id:?}: {summary:?}"),
-                    Err(error) => log::warn!("Parameter download from {mav_id:?} failed: {error}"),
+                    Ok(summary) => log::info!("Parameters from {id:?}: {summary:?}"),
+                    Err(error) => log::warn!("Parameter download from {id:?} failed: {error}"),
                 }
             }
-            Message::UploadAll(mav_id) => {
-                let vehicle = ctx.fleet.vehicle(mav_id)?;
+            Message::UploadAll(id) => {
+                let vehicle = ctx.fleet.vehicle(id)?;
 
                 // The number of concurrent uploads is limited by the middleware
                 let uploads: Vec<_> = vehicle
                     .parameters()
                     .iter()
                     .filter_map(|(ident, param)| match param.state() {
-                        ParamState::Changed { value, .. } => Some(Task::done(
-                            Message::ValueUpload(mav_id, ident.clone(), *value),
-                        )),
+                        ParamState::Changed { value, .. } => {
+                            Some(Task::done(Message::ValueUpload(id, ident.clone(), *value)))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -225,39 +226,38 @@ impl ParameterPanel {
                 log::info!("Uploading {} changed parameters", uploads.len());
                 return Some((Task::batch(uploads), None));
             }
-            Message::BufferEdit(mav_id, ident, buffer) => {
+            Message::BufferEdit(id, ident, buffer) => {
                 // Editing supersedes any upload in flight for this parameter.
-                self.uploads.remove(&(mav_id, ident.clone()));
+                self.uploads.remove(&(id, ident.clone()));
 
                 {
-                    let entry = ctx.fleet.vehicle_mut(mav_id)?;
+                    let entry = ctx.fleet.vehicle_mut(id)?;
                     let param = entry.parameters_mut().get_mut(&ident)?;
 
                     param.set_edited(value_parse_as(param.value(), &buffer));
                 }
 
-                self.editing
-                    .entry(mav_id)
-                    .or_default()
-                    .insert(ident, buffer);
+                self.editing.entry(id).or_default().insert(ident, buffer);
             }
-            Message::ValueReset(mav_id, ident) => {
-                self.uploads.remove(&(mav_id, ident.clone()));
+            Message::ValueReset(id, ident) => {
+                self.uploads.remove(&(id, ident.clone()));
 
                 {
-                    let entry = ctx.fleet.vehicle_mut(mav_id)?;
+                    let entry = ctx.fleet.vehicle_mut(id)?;
                     let param = entry.parameters_mut().get_mut(&ident)?;
 
                     param.reset();
                 }
 
-                if let Some(editing) = self.editing.get_mut(&mav_id) {
+                if let Some(editing) = self.editing.get_mut(&id) {
                     editing.remove(&ident);
                 }
             }
-            Message::ValueUpload(mav_id, ident, value) => {
-                let client = VehicleClient::new(ctx.router, mav_id);
-                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
+            Message::ValueUpload(id, ident, value) => {
+                // Resolve the addressing target before taking the mutable borrow.
+                let target = ctx.fleet.vehicle(id)?.target();
+                let client = ctx.services.vehicle(target);
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
                 let cap = vehicle.identity.capabilities.unwrap_or_default();
                 let param = vehicle.parameters_mut().get_mut(&ident)?;
 
@@ -266,7 +266,7 @@ impl ParameterPanel {
                 let (task, handle) = Task::perform(
                     async move { client.set_parameter(ident_cloned, value, cap).await },
                     move |result| {
-                        Message::ValueUploadResult(mav_id, ident_for_result.clone(), value, result)
+                        Message::ValueUploadResult(id, ident_for_result.clone(), value, result)
                     },
                 )
                 .abortable();
@@ -274,13 +274,13 @@ impl ParameterPanel {
                 // Holding the abort handle lets an edit or reset cancel the
                 // upload by dropping it; completion drops it too.
                 self.uploads
-                    .insert((mav_id, ident.clone()), handle.abort_on_drop());
+                    .insert((id, ident.clone()), handle.abort_on_drop());
                 param.begin_upload(value);
 
                 return Some((task, None));
             }
-            Message::ValueUploadResult(mav_id, ident, requested, result) => {
-                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
+            Message::ValueUploadResult(id, ident, requested, result) => {
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
                 let param = vehicle.parameters_mut().get_mut(&ident)?;
 
                 if !matches!(param.state(), ParamState::Uploading { value } if *value == requested)
@@ -288,7 +288,7 @@ impl ParameterPanel {
                     return None;
                 }
 
-                self.uploads.remove(&(mav_id, ident.clone()));
+                self.uploads.remove(&(id, ident.clone()));
 
                 match result {
                     Ok(value) if value == requested => param.upload_succeeded(value),
@@ -338,20 +338,20 @@ impl ParameterPanel {
 
                 return Some((Task::none(), Some(Event::SetFilePickerPath(save_path))));
             }
-            Message::LoadDialog(mav_id) => {
+            Message::LoadDialog(id) => {
                 let file_dialog = file_dialog(ctx.file_picker_path);
 
                 return Some((
-                    Task::future(async move {
-                        file_dialog.pick_file().await.map(|file| (file, mav_id))
-                    })
-                    .and_then(|(file, mav_id)| {
-                        Task::done(Message::LoadFromFile(file.path().to_owned(), mav_id))
+                    Task::future(
+                        async move { file_dialog.pick_file().await.map(|file| (file, id)) },
+                    )
+                    .and_then(|(file, id)| {
+                        Task::done(Message::LoadFromFile(file.path().to_owned(), id))
                     }),
                     None,
                 ));
             }
-            Message::LoadFromFile(load_path, mav_id) => {
+            Message::LoadFromFile(load_path, id) => {
                 log::info!("Loading parameters from file: {load_path:?}");
 
                 let path = load_path.clone();
@@ -359,12 +359,12 @@ impl ParameterPanel {
                     iced_runtime::task::blocking(move |mut sender| {
                         let result = parameter::load_parameters_from_ini(&path)
                             .map_err(|error| error.to_string());
-                        let _ = sender.try_send(Message::LoadFinished(load_path, mav_id, result));
+                        let _ = sender.try_send(Message::LoadFinished(load_path, id, result));
                     }),
                     None,
                 ));
             }
-            Message::LoadFinished(load_path, mav_id, loaded_params) => {
+            Message::LoadFinished(load_path, id, loaded_params) => {
                 let loaded_params = match loaded_params {
                     Ok(loaded_params) => loaded_params,
                     Err(error) => {
@@ -373,8 +373,8 @@ impl ParameterPanel {
                     }
                 };
 
-                let vehicle = ctx.fleet.vehicle_mut(mav_id)?;
-                let editing = self.editing.entry(mav_id).or_default();
+                let vehicle = ctx.fleet.vehicle_mut(id)?;
+                let editing = self.editing.entry(id).or_default();
 
                 // Set the parameters of the vehicle as modified if that is the case
                 for (ident, new_param) in loaded_params.iter() {
@@ -404,29 +404,29 @@ impl ParameterPanel {
     /// list download is in flight comes from [`Self::reloading`], not the router.
     pub fn view<'a>(
         &'a self,
-        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-        primary: Option<MavlinkId>,
+        vehicles: &'a BTreeMap<SystemId, Vehicle>,
+        primary: Option<SystemId>,
         theme: &Theme,
     ) -> Element<'a, Message> {
-        let Some(mav_id) = primary else {
+        let Some(id) = primary else {
             return space::Space::new().boxed();
         };
 
-        let Some(vehicle) = vehicles.get(&mav_id) else {
+        let Some(vehicle) = vehicles.get(&id) else {
             return space::Space::new().boxed();
         };
 
         let mut entries: Vec<Element<'_, Message>> = Vec::with_capacity(128);
 
         // Disabled while a parameter list download is in progress
-        let reloading = self.reloading.contains(&mav_id);
+        let reloading = self.reloading.contains(&id);
         let reload_button = Button::new("Reload parameters")
             .width(Length::Fill)
-            .on_press_maybe((!reloading).then(|| Message::ListReload(mav_id)));
+            .on_press_maybe((!reloading).then(|| Message::ListReload(id)));
 
         let upload_button = Button::new("Upload parameters")
             .width(Length::FillPortion(1))
-            .on_press(Message::UploadAll(mav_id));
+            .on_press(Message::UploadAll(id));
 
         let save_button = Button::new("Save parameters to file")
             .width(Length::FillPortion(1))
@@ -434,7 +434,7 @@ impl ParameterPanel {
 
         let load_button = Button::new("Load parameters from file")
             .width(Length::FillPortion(1))
-            .on_press(Message::LoadDialog(mav_id));
+            .on_press(Message::LoadDialog(id));
 
         let filter_field = TextInput::new("Filter parameters", &self.filter.ident_pattern)
             .width(Length::FillPortion(1))
@@ -479,7 +479,7 @@ impl ParameterPanel {
         container(
             iced::widget::column![
                 iced::widget::Column::from_iter(entries).spacing(5.0),
-                self.view_param_list(mav_id, vehicle, theme),
+                self.view_param_list(id, vehicle, theme),
             ]
             .spacing(5.0),
         )
@@ -490,7 +490,7 @@ impl ParameterPanel {
 
     fn view_param_list<'a>(
         &'a self,
-        mav_id: MavlinkId,
+        id: SystemId,
         vehicle: &'a Vehicle,
         theme: &Theme,
     ) -> Element<'a, Message> {
@@ -560,10 +560,10 @@ impl ParameterPanel {
             }
             Item::Param(ident, param) => {
                 let buffer = editing
-                    .get(&mav_id)
+                    .get(&id)
                     .and_then(|entry| entry.get(*ident))
                     .map(String::as_str);
-                view_param_row(mav_id, ident, param, buffer, type_color).boxed()
+                view_param_row(id, ident, param, buffer, type_color).boxed()
             }
         })
         .item_height(|item| match item {
@@ -572,8 +572,8 @@ impl ParameterPanel {
             Item::Param(..) => ROW_HEIGHT,
         })
         .key(move |item| match item {
-            Item::Section { first, .. } => ((mav_id, (*first).clone()), true),
-            Item::Param(ident, _) => ((mav_id, (*ident).clone()), false),
+            Item::Section { first, .. } => ((id, (*first).clone()), true),
+            Item::Param(ident, _) => ((id, (*ident).clone()), false),
         })
         .spacing(5.0);
 
@@ -585,7 +585,7 @@ impl ParameterPanel {
 }
 
 fn view_param_row<'a>(
-    mav_id: MavlinkId,
+    id: SystemId,
     ident: &'a Ident,
     param: &'a Parameter,
     editing: Option<&'a str>,
@@ -598,7 +598,7 @@ fn view_param_row<'a>(
         .unwrap_or_else(|| value_as_string(param.value()));
 
     let text_input = iced::widget::TextInput::new("Write value", value_string)
-        .on_input(move |string| Message::BufferEdit(mav_id, ident.clone(), string))
+        .on_input(move |string| Message::BufferEdit(id, ident.clone(), string))
         .style(move |theme, status| {
             let mut style = iced::widget::text_input::default(theme, status);
             let palette = theme.palette();
@@ -622,7 +622,7 @@ fn view_param_row<'a>(
 
     let restore_button = Button::new("Restore")
         .on_press_maybe(match param.state() {
-            ParamState::Changed { .. } => Some(Message::ValueReset(mav_id, ident.clone())),
+            ParamState::Changed { .. } => Some(Message::ValueReset(id, ident.clone())),
             _ => None,
         })
         .width(80.0);
@@ -640,7 +640,7 @@ fn view_param_row<'a>(
     let upload_button = Button::new("Upload")
         .on_press_maybe(match param.state() {
             ParamState::Changed { value, .. } => {
-                Some(Message::ValueUpload(mav_id, ident.clone(), *value))
+                Some(Message::ValueUpload(id, ident.clone(), *value))
             }
             _ => None,
         })
@@ -678,31 +678,34 @@ fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::DEFAULT_GCS_ID;
+    use crate::foundation::{DEFAULT_GCS_ID, MavlinkId};
+    use crate::services::{MavError, MavlinkRouter};
 
-    const A: MavlinkId = MavlinkId {
-        system: 1,
-        component: 1,
-    };
-    const B: MavlinkId = MavlinkId {
-        system: 2,
-        component: 1,
-    };
+    const A: SystemId = SystemId(1);
+    const B: SystemId = SystemId(2);
 
     fn ident(name: &str) -> Ident {
         Ident::from_str_truncated(name)
     }
 
+    /// The address of `id`'s autopilot endpoint, for feeding `observe`.
+    fn source(id: SystemId) -> MavlinkId {
+        MavlinkId {
+            system: id.0,
+            component: 1,
+        }
+    }
+
     /// Register `id` and seed it with `params`, using only the public domain API.
-    fn add_vehicle(fleet: &mut Fleet, id: MavlinkId, params: &[(&str, Value)]) {
-        fleet.observe(id, std::time::Instant::now(), None);
+    fn add_vehicle(fleet: &mut Fleet, id: SystemId, params: &[(&str, Value)]) {
+        fleet.observe(source(id), std::time::Instant::now(), None);
         let vehicle = fleet.vehicle_mut(id).unwrap();
         for (name, value) in params {
             vehicle.parameters_mut().insert(ident(name), *value);
         }
     }
 
-    fn param<'a>(fleet: &'a Fleet, id: MavlinkId, key: &Ident) -> &'a Parameter {
+    fn param<'a>(fleet: &'a Fleet, id: SystemId, key: &Ident) -> &'a Parameter {
         fleet.vehicle(id).unwrap().parameters().get(key).unwrap()
     }
 
@@ -713,8 +716,9 @@ mod tests {
         fleet: &mut Fleet,
         message: Message,
     ) -> Option<Event> {
+        let services = FleetServices::new(router);
         let mut ctx = Context {
-            router,
+            services: &services,
             fleet,
             file_picker_path: None,
         };
@@ -867,12 +871,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(
-                A,
-                key.clone(),
-                Value::F32(7.0),
-                Err(crate::mav::error::MavError::Timeout),
-            ),
+            Message::ValueUploadResult(A, key.clone(), Value::F32(7.0), Err(MavError::Timeout)),
         );
         assert_eq!(
             changed_state(param(&fleet, A, &key)),
@@ -1014,7 +1013,7 @@ mod tests {
             &mut fleet,
             Message::ListReloadResult(
                 A,
-                Ok(crate::mav::ParamListSummary {
+                Ok(ParamListSummary {
                     received: 1,
                     expected: 1,
                 }),
@@ -1028,7 +1027,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ListReloadResult(A, Err(crate::mav::error::MavError::Timeout)),
+            Message::ListReloadResult(A, Err(MavError::Timeout)),
         );
         assert!(!panel.reloading.contains(&A));
     }

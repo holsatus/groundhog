@@ -9,7 +9,7 @@ use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
     domain::vehicle::{Liveness, Vehicle},
-    foundation::MavlinkId,
+    foundation::SystemId,
     style::{list_brighter, list_default},
 };
 
@@ -25,14 +25,14 @@ fn liveness_label(liveness: Liveness) -> &'static str {
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Make a vehicle the primary one.
-    SetPrimary(MavlinkId),
+    SetPrimary(SystemId),
     /// Toggle whether the map follows the primary vehicle.
     Follow(bool),
 }
 
 pub fn view<'a>(
-    vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-    primary: Option<MavlinkId>,
+    vehicles: &'a BTreeMap<SystemId, Vehicle>,
+    primary: Option<SystemId>,
     follow: bool,
     theme: &Theme,
 ) -> Element<'a, Message> {

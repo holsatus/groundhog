@@ -7,7 +7,7 @@ use mavio::default_dialect::{
 
 use crate::{
     domain::firmware::{self, FlightMode},
-    foundation::MavlinkId,
+    foundation::SystemId,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -25,13 +25,13 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub fn observe_heartbeat(&mut self, mav_id: MavlinkId, message: &messages::Heartbeat) {
+    pub fn observe_heartbeat(&mut self, system: SystemId, message: &messages::Heartbeat) {
         self.last_heartbeat = Some(message.clone());
 
         if self.mav_type != Some(message.type_) {
             log::debug!(
                 "Received new MAV type for {:?}: {:?}",
-                mav_id,
+                system,
                 message.type_
             );
             self.mav_type = Some(message.type_);
@@ -40,7 +40,7 @@ impl Identity {
         if self.mav_state != Some(message.system_status) {
             log::debug!(
                 "Received new MAV state for {:?}: {:?}",
-                mav_id,
+                system,
                 message.system_status
             );
             self.mav_state = Some(message.system_status);
@@ -53,15 +53,15 @@ impl Identity {
 
     pub fn observe_autopilot_version(
         &mut self,
-        mav_id: MavlinkId,
+        system: SystemId,
         message: &messages::AutopilotVersion,
     ) {
-        self.set_capability(mav_id, message.capabilities);
+        self.set_capability(system, message.capabilities);
     }
 
     pub fn observe_component_information_basic(
         &mut self,
-        mav_id: MavlinkId,
+        system: SystemId,
         message: &messages::ComponentInformationBasic,
     ) {
         if let Some(model_name) = string_from_cstring(&message.model_name)
@@ -74,12 +74,12 @@ impl Identity {
         {
             self.vendor_name = Some(vendor_name)
         }
-        self.set_capability(mav_id, message.capabilities);
+        self.set_capability(system, message.capabilities);
     }
 
-    pub fn set_capability(&mut self, mav_id: MavlinkId, capab: MavProtocolCapability) {
+    pub fn set_capability(&mut self, system: SystemId, capab: MavProtocolCapability) {
         if self.capabilities != Some(capab) {
-            log::debug!("Received capabilities for {:?}: {:b}", mav_id, capab);
+            log::debug!("Received capabilities for {:?}: {:b}", system, capab);
             self.capabilities = Some(capab);
         }
     }
@@ -116,10 +116,7 @@ fn string_from_cstring(cstring: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    const A: MavlinkId = MavlinkId {
-        system: 1,
-        component: 1,
-    };
+    const A: SystemId = SystemId(1);
 
     #[test]
     fn heartbeat_sets_armed_and_resolves_flight_mode() {

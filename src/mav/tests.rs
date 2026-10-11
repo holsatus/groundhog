@@ -30,7 +30,7 @@ use super::*;
 use super::{command::Busy, error::MavError};
 use crate::{
     domain::fleet::Fleet,
-    foundation::{DEFAULT_GCS_ID, LinkId},
+    foundation::{DEFAULT_GCS_ID, LinkId, SystemId},
     link::transport::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
 
@@ -613,7 +613,7 @@ async fn replay_frames_drive_fleet_state() {
     );
 
     let vehicle = fleet
-        .vehicle(VEHICLE)
+        .vehicle(SystemId::from(VEHICLE.system))
         .expect("vehicle should be registered");
     assert_eq!(vehicle.identity.armed(), Some(true));
 

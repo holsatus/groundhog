@@ -2,8 +2,8 @@
 //! MAVLink mission transactions against the primary vehicle.
 //!
 //! Mission data itself lives on the [`Fleet`] (the single owner of vehicle
-//! state), which the root passes in by mutable reference; the router is passed
-//! in for transactions. All operations target the primary vehicle.
+//! state), which the root passes in by mutable reference; the fleet services
+//! are passed in for transactions. All operations target the primary vehicle.
 //!
 //! The panel owns only view-local state: which item's editor is open and the
 //! in-progress text buffers, so partial input survives a redraw.
@@ -31,9 +31,8 @@ use crate::{
         file::{parse_wpl, write_wpl},
     },
     domain::vehicle::Vehicle,
-    foundation::MavlinkId,
-    mav::{self, MavlinkRouter},
-    services::vehicle::VehicleClient,
+    foundation::SystemId,
+    services::{FleetServices, Result},
     style,
     widget::virtualized::virtual_list,
 };
@@ -60,7 +59,7 @@ impl Default for MissionPanel {
 
 /// Everything the panel needs from the rest of the application.
 pub struct Context<'a> {
-    pub router: &'a MavlinkRouter,
+    pub services: &'a FleetServices,
     pub fleet: &'a mut Fleet,
     pub file_picker_path: Option<&'a Path>,
 }
@@ -103,11 +102,11 @@ pub enum Message {
     /// A map click in "place waypoint" mode adds a waypoint at this position.
     AddWaypointAt(GeoPosition),
 
-    Downloaded(MavlinkId, mav::Result<Mission>),
-    Uploaded(MavlinkId, mav::Result<u32>),
-    Cleared(MavlinkId, mav::Result<()>),
-    CurrentSet(MavlinkId, mav::Result<()>),
-    CommandFinished(MavlinkId, MissionAction, mav::Result<CommandAck>),
+    Downloaded(SystemId, Result<Mission>),
+    Uploaded(SystemId, Result<u32>),
+    Cleared(SystemId, Result<()>),
+    CurrentSet(SystemId, Result<()>),
+    CommandFinished(SystemId, MissionAction, Result<CommandAck>),
 
     /// Open a file-picker dialog to choose a save location.
     SaveDialog,
@@ -156,7 +155,8 @@ impl MissionPanel {
                 let id = ctx.fleet.primary()?;
 
                 self.busy = true;
-                let client = VehicleClient::new(ctx.router, id);
+                let target = ctx.fleet.vehicle(id)?.target();
+                let client = ctx.services.vehicle(target);
                 return Some((
                     Task::perform(
                         async move { client.download_mission().await },
@@ -184,8 +184,9 @@ impl MissionPanel {
                 let vehicle = ctx.fleet.vehicle(id)?;
 
                 let mission = vehicle.mission.clone();
+                let target = vehicle.target();
                 self.busy = true;
-                let client = VehicleClient::new(ctx.router, id);
+                let client = ctx.services.vehicle(target);
                 return Some((
                     Task::perform(
                         async move { client.upload_mission(&mission).await },
@@ -210,7 +211,8 @@ impl MissionPanel {
                 let id = ctx.fleet.primary()?;
 
                 self.busy = true;
-                let client = VehicleClient::new(ctx.router, id);
+                let target = ctx.fleet.vehicle(id)?.target();
+                let client = ctx.services.vehicle(target);
                 return Some((
                     Task::perform(async move { client.clear_mission().await }, move |result| {
                         Message::Cleared(id, result)
@@ -245,7 +247,8 @@ impl MissionPanel {
             Message::SetCurrent(index) => {
                 let id = ctx.fleet.primary()?;
 
-                let client = VehicleClient::new(ctx.router, id);
+                let target = ctx.fleet.vehicle(id)?.target();
+                let client = ctx.services.vehicle(target);
                 return Some((
                     Task::perform(
                         async move { client.set_current_mission_item(index as u16).await },
@@ -488,9 +491,12 @@ impl MissionPanel {
         let Some(id) = ctx.fleet.primary() else {
             return Task::none();
         };
+        let Some(target) = ctx.fleet.vehicle(id).map(Vehicle::target) else {
+            return Task::none();
+        };
 
         self.busy = true;
-        let client = VehicleClient::new(ctx.router, id);
+        let client = ctx.services.vehicle(target);
         Task::perform(
             async move {
                 match action {
@@ -526,15 +532,15 @@ impl MissionPanel {
     /// vehicle's mission.
     pub fn view<'a>(
         &'a self,
-        vehicles: &'a BTreeMap<MavlinkId, Vehicle>,
-        primary: Option<MavlinkId>,
+        vehicles: &'a BTreeMap<SystemId, Vehicle>,
+        primary: Option<SystemId>,
         theme: &Theme,
     ) -> Element<'a, Message> {
-        let Some(mav_id) = primary else {
+        let Some(id) = primary else {
             return Space::new().boxed();
         };
 
-        let Some(vehicle) = vehicles.get(&mav_id) else {
+        let Some(vehicle) = vehicles.get(&id) else {
             return Space::new().boxed();
         };
 
@@ -726,21 +732,24 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    use crate::foundation::DEFAULT_GCS_ID;
+    use crate::foundation::{DEFAULT_GCS_ID, MavlinkId};
+    use crate::services::{MavError, MavlinkRouter};
 
-    const A: MavlinkId = MavlinkId {
-        system: 1,
-        component: 1,
-    };
-    const B: MavlinkId = MavlinkId {
-        system: 2,
-        component: 1,
-    };
+    const A: SystemId = SystemId(1);
+    const B: SystemId = SystemId(2);
+
+    /// The address of `id`'s autopilot endpoint, for feeding `observe`.
+    fn source(id: SystemId) -> MavlinkId {
+        MavlinkId {
+            system: id.0,
+            component: 1,
+        }
+    }
 
     fn setup() -> (MavlinkRouter, Fleet) {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let mut fleet = Fleet::default();
-        fleet.observe(A, Instant::now(), None);
+        fleet.observe(source(A), Instant::now(), None);
         (router, fleet)
     }
 
@@ -750,8 +759,9 @@ mod tests {
         fleet: &mut Fleet,
         message: Message,
     ) -> (Task<Message>, Option<Event>) {
+        let services = FleetServices::new(router);
         let mut ctx = Context {
-            router,
+            services: &services,
             fleet,
             file_picker_path: None,
         };
@@ -919,7 +929,7 @@ mod tests {
     #[test]
     fn downloaded_result_targets_the_named_vehicle() {
         let (router, mut fleet) = setup();
-        fleet.observe(B, Instant::now(), None);
+        fleet.observe(source(B), Instant::now(), None);
         assert_eq!(fleet.primary(), Some(A));
         let mut panel = MissionPanel::new();
 
@@ -976,15 +986,11 @@ mod tests {
             Message::SetCurrent(0),
             Message::ChangeCommand(0, MissionCommandKind::Waypoint),
             Message::EditField(0, MissionField::Latitude, "1.0".to_string()),
-            Message::Downloaded(A, Err(crate::mav::error::MavError::Timeout)),
-            Message::Uploaded(A, Err(crate::mav::error::MavError::Timeout)),
-            Message::Cleared(A, Err(crate::mav::error::MavError::Timeout)),
-            Message::CurrentSet(A, Err(crate::mav::error::MavError::Timeout)),
-            Message::CommandFinished(
-                A,
-                MissionAction::Start,
-                Err(crate::mav::error::MavError::Timeout),
-            ),
+            Message::Downloaded(A, Err(MavError::Timeout)),
+            Message::Uploaded(A, Err(MavError::Timeout)),
+            Message::Cleared(A, Err(MavError::Timeout)),
+            Message::CurrentSet(A, Err(MavError::Timeout)),
+            Message::CommandFinished(A, MissionAction::Start, Err(MavError::Timeout)),
         ];
 
         for message in messages {

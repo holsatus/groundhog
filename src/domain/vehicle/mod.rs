@@ -22,13 +22,16 @@ use self::{
 use std::time::Instant;
 
 use mav_param::Ident;
-use mavio::{DefaultDialect, default_dialect::messages};
+use mavio::{
+    DefaultDialect,
+    default_dialect::{enums::MavAutopilot, messages},
+};
 
 use crate::{
     domain::firmware::FlightMode,
     domain::mission::Mission,
     domain::parameter::{self, Parameters},
-    foundation::MavlinkId,
+    foundation::{MavlinkId, SystemId},
 };
 
 /// How recently a vehicle has been heard from.
@@ -42,7 +45,11 @@ pub enum Liveness {
 
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
-    pub mav_id: MavlinkId,
+    /// The system this vehicle represents: its identity in the fleet.
+    pub system: SystemId,
+    /// The component resolved as this system's autopilot, if a heartbeat has
+    /// named one. Used to address autopilot transactions via [`Self::target`].
+    autopilot: Option<u8>,
     pub identity: Identity,
     pub attitude: AttitudeState,
     pub position: PositionTrack,
@@ -55,9 +62,9 @@ pub struct Vehicle {
 }
 
 impl Vehicle {
-    pub fn new(mav_id: MavlinkId) -> Self {
+    pub fn new(system: SystemId) -> Self {
         Self {
-            mav_id,
+            system,
             ..Vehicle::default()
         }
     }
@@ -68,6 +75,14 @@ impl Vehicle {
 
     pub fn parameters_mut(&mut self) -> &mut Parameters {
         &mut self.parameters
+    }
+
+    /// The MAVLink address to target this vehicle's autopilot transactions at.
+    pub fn target(&self) -> MavlinkId {
+        MavlinkId {
+            system: self.system.0,
+            component: self.autopilot.unwrap_or(1),
+        }
     }
 
     /// The latest reported flight mode, resolved for the vehicle's firmware.
@@ -110,26 +125,28 @@ impl Vehicle {
 
     pub fn pretty_name(&self) -> String {
         format!(
-            "{} {} (mav {}:{})",
+            "{} {} (mav {})",
             self.identity.vendor_name.as_deref().unwrap_or("Unknown"),
             self.identity.model_name.as_deref().unwrap_or("Unknown"),
-            self.mav_id.system,
-            self.mav_id.component
+            self.system.0
         )
     }
 
-    pub fn handle_message(&mut self, time: Instant, message: DefaultDialect) {
+    pub fn handle_message(&mut self, time: Instant, component: u8, message: DefaultDialect) {
         match &message {
             DefaultDialect::Heartbeat(message) => {
-                self.identity.observe_heartbeat(self.mav_id, message);
+                if message.autopilot != MavAutopilot::Invalid {
+                    self.autopilot = Some(component);
+                }
+                self.identity.observe_heartbeat(self.system, message);
             }
             DefaultDialect::AutopilotVersion(message) => {
                 self.identity
-                    .observe_autopilot_version(self.mav_id, message);
+                    .observe_autopilot_version(self.system, message);
             }
             DefaultDialect::ComponentInformationBasic(message) => {
                 self.identity
-                    .observe_component_information_basic(self.mav_id, message);
+                    .observe_component_information_basic(self.system, message);
             }
             DefaultDialect::ParamValue(message) => {
                 self.on_param_value(message);
@@ -176,10 +193,7 @@ mod tests {
     use mavio::default_dialect::enums::MissionState;
 
     fn vehicle() -> Vehicle {
-        Vehicle::new(MavlinkId {
-            system: 1,
-            component: 1,
-        })
+        Vehicle::new(SystemId(1))
     }
 
     #[test]
@@ -188,6 +202,7 @@ mod tests {
 
         vehicle.handle_message(
             Instant::now(),
+            1,
             DefaultDialect::MissionCurrent(messages::MissionCurrent {
                 seq: 2,
                 total: 8,
@@ -207,6 +222,7 @@ mod tests {
 
         vehicle.handle_message(
             Instant::now(),
+            1,
             DefaultDialect::MissionItemReached(messages::MissionItemReached { seq: 5 }),
         );
 
