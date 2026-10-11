@@ -117,14 +117,12 @@ impl LinkPanel {
     /// detached — however that detach happened — is nonsense, and keeping it
     /// would block a re-attach forever; this reconciles within one message.
     fn reconcile_closed(&mut self, router: &MavlinkRouter) {
-        self.links.retain(|id, link| {
+        for (id, link) in &mut self.links {
             if link.handle.is_some() && !router.is_attached(id) {
                 log::info!("link {id:?} was lost by the router; reconciling");
                 link.handle = None;
             }
-
-            true
-        });
+        }
     }
 
     pub fn update(
@@ -471,11 +469,18 @@ impl LinkPanel {
     }
 
     /// The list of configured links with connect/disconnect buttons.
-    pub fn view_status(&self) -> Element<'_, Message> {
+    ///
+    /// "Connected" here means a live guard on an attachment the router still
+    /// holds, checked against the router itself on every frame: the update-
+    /// time reconciliation repairs the stored state, and between messages the
+    /// view cannot lie about a connection whose attachment has gone.
+    pub fn view_status(&self, router: &MavlinkRouter) -> Element<'_, Message> {
         let mut contents = Vec::new();
 
         for (index, (id, link)) in self.links.iter().enumerate() {
-            let button = if link.handle.is_some() {
+            let connected = link.handle.is_some() && router.is_attached(id);
+
+            let button = if connected {
                 Button::new(
                     container("Disconnect")
                         .align_x(Alignment::Center)
@@ -493,7 +498,7 @@ impl LinkPanel {
                         .align_x(Alignment::Center)
                         .align_y(Alignment::Center),
                 )
-                .on_press_maybe((link.handle.is_none()).then(|| Message::Connect(id.clone())))
+                .on_press_maybe((!connected).then(|| Message::Connect(id.clone())))
                 .width(100.0)
             };
 
@@ -511,7 +516,7 @@ impl LinkPanel {
 
             let content = container(iced::widget::row![
                 iced::widget::text(&link.config.name),
-                iced::widget::text(if link.handle.is_some() {
+                iced::widget::text(if connected {
                     ": connected"
                 } else {
                     ": disconnected"

@@ -662,7 +662,7 @@ impl Application {
                 .boxed(),
             layout::Panel::Links => iced::widget::column![
                 self.link_panel.view_editor().map(Message::Link),
-                self.link_panel.view_status().map(Message::Link),
+                self.link_panel.view_status(&self.router).map(Message::Link),
             ]
             .spacing(10.0)
             .boxed(),

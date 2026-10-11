@@ -79,6 +79,22 @@ const HIGH_LATENCY_ACK_FACTOR: u32 = 3;
 /// consistent choice either way. The oldest entry is evicted to make room.
 const DUPLICATE_WINDOW: usize = 192;
 
+/// Silence from a source at which its duplicate window is flushed.
+///
+/// Matches the fleet's presumed-lost window: a sender that reboots and resets
+/// its sequence counter takes longer than this before it speaks again, while
+/// genuine multipath duplicates of a live packet do not. After the gap a
+/// fresh window cannot mistake a reboot's first frames for old duplicates.
+const SEQUENCE_RESET_GAP: Duration = Duration::from_secs(10);
+
+/// Consecutive dropped frames after which the duplicate rule gives way and
+/// the frame is accepted.
+///
+/// Eight consecutive drops cannot be multipath: it is a sequence reset (or an
+/// aliased sender), and accepting one packet resynchronizes the window — the
+/// sequence enters it, and the normal rule continues from there.
+const MAX_CONSECUTIVE_DROPS: u8 = 8;
+
 /// Bound on buffered application events. When the UI falls behind, the channel
 /// drops the oldest events so the freshest telemetry is what reaches it.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -111,6 +127,29 @@ struct Link {
     /// Whether this transport's latency warrants the scaled mission-transfer
     /// timeouts ([`MavlinkRouter::transfer_timeouts`]).
     high_latency: bool,
+}
+
+/// The duplicate-suppression state of one source: its most recent inbound
+/// packet sequences, plus when a frame from it was last accepted into state.
+#[derive(Debug)]
+struct SequenceWindow {
+    sequences: VecDeque<u8>,
+    /// When a frame from this source was last accepted (as opposed to
+    /// dropped): a long silence flushes the window for a sequence reset.
+    last_accepted: Instant,
+    /// Consecutive frames dropped: beyond a handful the duplicate rule must
+    /// give way to a suspected sequence reset.
+    consecutive_drops: u8,
+}
+
+impl SequenceWindow {
+    fn new(now: Instant) -> Self {
+        Self {
+            sequences: VecDeque::new(),
+            last_accepted: now,
+            consecutive_drops: 0,
+        }
+    }
 }
 
 impl Link {
@@ -159,8 +198,8 @@ struct MavlinkRouterInner {
     next_link_generation: AtomicU64,
     routes: Mutex<MessageRouteMap>,
     /// The most recent inbound packet sequences per source, for the cross-link
-    /// duplicate suppression in [`MavlinkRouter::dispatch`].
-    seen_sequences: Mutex<BTreeMap<MavlinkId, VecDeque<u8>>>,
+    /// duplicate suppression in [`MavlinkRouter::dispatch`], with reset guards.
+    seen_sequences: Mutex<BTreeMap<MavlinkId, SequenceWindow>>,
     filters: Mutex<MessageFilterMap>,
     acks: Mutex<PendingAckMap>,
     locks: LockMap,
@@ -396,7 +435,7 @@ impl MavlinkRouter {
         // consumers twice would double-fold into vehicle state (duplicated
         // statustexts, doubled trail points). Only the first arriving copy
         // advances; the needed ordering above is unaffected.
-        if self.seen_sequence_before(inbound.source_mav, sequence) {
+        if self.seen_sequence_before(inbound.source_mav, sequence, inbound.received_at) {
             log::debug!(
                 "Dropping duplicate packet sequence {sequence} from {:?} on {:?}",
                 inbound.source_mav,
@@ -419,18 +458,48 @@ impl MavlinkRouter {
     /// Record the packet sequence of a source and report whether an identical
     /// sequence is already inside [`DUPLICATE_WINDOW`], i.e. the frame is a
     /// cross-link duplicate.
-    fn seen_sequence_before(&self, source: MavlinkId, sequence: u8) -> bool {
+    ///
+    /// Two guards keep a sender's sequence reset (reboot) from being mistaken
+    /// for duplicates: a [`SEQUENCE_RESET_GAP`]-sized silence since the last
+    /// accepted frame flushes the window outright, and
+    /// [`MAX_CONSECUTIVE_DROPS`] consecutive dropped frames force the next one
+    /// through, which resynchronizes the window.
+    fn seen_sequence_before(&self, source: MavlinkId, sequence: u8, now: Instant) -> bool {
         let mut seen = lock(&self.inner.seen_sequences);
-        let window = seen.entry(source).or_default();
+        let window = seen
+            .entry(source)
+            .or_insert_with(|| SequenceWindow::new(now));
 
-        if window.contains(&sequence) {
-            return true;
+        // Flush a window that may belong to a previous run of the sender: if
+        // the gap is at least the reset gap, a fresh sequence cannot be an
+        // unexpired duplicate.
+        if now.duration_since(window.last_accepted) >= SEQUENCE_RESET_GAP {
+            window.sequences.clear();
+            window.consecutive_drops = 0;
         }
 
-        window.push_back(sequence);
-        while window.len() > DUPLICATE_WINDOW {
-            window.pop_front();
+        if window.sequences.contains(&sequence) {
+            // Within the intact window, this is a cross-link duplicate.
+            window.consecutive_drops += 1;
+
+            if window.consecutive_drops >= MAX_CONSECUTIVE_DROPS {
+                // More consecutive drops than multipath duplication can
+                // produce: clear the window and accept; entering this frame
+                // resynchronizes the window for the frames after it.
+                window.sequences.clear();
+                window.consecutive_drops = 0;
+            } else {
+                return true;
+            }
+        } else {
+            window.consecutive_drops = 0;
         }
+
+        window.sequences.push_back(sequence);
+        while window.sequences.len() > DUPLICATE_WINDOW {
+            window.sequences.pop_front();
+        }
+        window.last_accepted = now;
         false
     }
 
@@ -804,6 +873,68 @@ mod tests {
             waiter.try_recv().is_ok(),
             "an evicted sequence passes again"
         );
+    }
+
+    #[test]
+    fn a_long_gap_flushes_the_window_for_a_sequence_reset() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let source = MavlinkId {
+            system: 5,
+            component: 1,
+        };
+        let t0 = Instant::now();
+
+        // Warm the window with sequence 0; a repeat inside the window drops.
+        assert!(!router.seen_sequence_before(source, 0, t0));
+        assert!(router.seen_sequence_before(source, 0, t0));
+
+        // After a presumed-lost-sized silence the same sequence passes: the
+        // sender's counter has reset (reboot), so it is not an old packet.
+        let after_gap = t0 + SEQUENCE_RESET_GAP;
+        assert!(
+            !router.seen_sequence_before(source, 0, after_gap),
+            "the long gap must flush the window"
+        );
+
+        // Immediately after, the normal duplicate rule applies again.
+        assert!(
+            router.seen_sequence_before(source, 0, after_gap),
+            "the freshly accepted sequence drops if repeated normally"
+        );
+    }
+
+    #[test]
+    fn consecutive_drops_give_way_after_the_threshold() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let source = MavlinkId {
+            system: 6,
+            component: 1,
+        };
+
+        // Accept sequence 7 once so it sits in the window; its repeats then
+        // repeat at a rate that cannot trip the long-gap flush.
+        let mut now = Instant::now();
+        assert!(!router.seen_sequence_before(source, 7, now));
+
+        for attempt in 0..(MAX_CONSECUTIVE_DROPS - 1) {
+            now += Duration::from_millis(10);
+            assert!(
+                router.seen_sequence_before(source, 7, now),
+                "drop {attempt} must still apply the normal duplicate rule"
+            );
+        }
+
+        // The 8th consecutive drop cannot be multipath: the window flushes
+        // and the frame is accepted, which resynchronizes it.
+        now += Duration::from_millis(10);
+        assert!(
+            !router.seen_sequence_before(source, 7, now),
+            "the threshold consecutive drop must be accepted"
+        );
+
+        // And the normal rule continues from the resynchronized window.
+        now += Duration::from_millis(10);
+        assert!(router.seen_sequence_before(source, 7, now));
     }
 
     #[tokio::test]
