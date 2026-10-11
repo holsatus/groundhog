@@ -18,7 +18,7 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::{DEFAULT_GCS_ID, SystemId},
+    foundation::{DEFAULT_GCS_ID, LinkId, MavlinkId, SystemId},
     layout::{self, Layout},
     mav,
     mav::MavlinkRouter,
@@ -57,7 +57,7 @@ pub enum Message {
     Link(link_panel::Message),
     Logs(log_panel::Message),
     /// A batch of MAVLink events, collected at most once per telemetry frame.
-    MavEvents(Vec<mav::Event>),
+    MavEvents(Vec<Telemetry>),
     Mission(mission_panel::Message),
     Parameter(parameter_panel::Message),
     Vehicles(vehicle_panel::Message),
@@ -93,6 +93,51 @@ impl From<settings_panel::Message> for Message {
     }
 }
 
+/// An inbound router event with its frame already decoded.
+///
+/// Decoding runs on the coalescing tokio task, off the UI thread, so `update`
+/// only has to fold ready messages into the fleet.
+// `DefaultDialect` is inherently large but each value is moved straight into
+// the fleet; the enum only lives for the span of one coalesced batch.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub(crate) enum Telemetry {
+    Message {
+        source: MavlinkId,
+        received_at: Instant,
+        decoded: Option<DefaultDialect>,
+    },
+    LinkClosed(LinkId),
+}
+
+impl From<mav::Event> for Telemetry {
+    fn from(event: mav::Event) -> Self {
+        match event {
+            mav::Event::Message(inbound) => {
+                let decoded = match inbound.frame.decode::<DefaultDialect>() {
+                    Ok(message) => Some(message),
+                    // Downgrade these to trace to avoid spamming the logs
+                    Err(mavio::Error::Spec(SpecError::NotInDialect(id))) => {
+                        log::trace!("mavlink message id {id} is not in default dialect");
+                        None
+                    }
+                    Err(error) => {
+                        log::trace!("could not decode mavlink frame: {error}");
+                        None
+                    }
+                };
+
+                Telemetry::Message {
+                    source: inbound.source_mav,
+                    received_at: inbound.received_at,
+                    decoded,
+                }
+            }
+            mav::Event::LinkClosed(link_id) => Telemetry::LinkClosed(link_id),
+        }
+    }
+}
+
 /// How often telemetry is allowed to reach `update` and rebuild the view/map.
 ///
 /// This caps the redraw cadence, not the data rate: the router still folds every
@@ -114,7 +159,7 @@ const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 fn coalesce(
     events: impl Stream<Item = mav::Event> + Send + 'static,
     frame: Duration,
-) -> impl Stream<Item = Vec<mav::Event>> + Send + 'static {
+) -> impl Stream<Item = Vec<Telemetry>> + Send + 'static {
     iced::stream::channel(1, async move |mut output| {
         let mut events = Box::pin(events);
         let mut tick = tokio::time::interval(frame);
@@ -133,7 +178,7 @@ fn coalesce(
                     }
                 }
                 event = events.next() => match event {
-                    Some(event) => batch.push(event),
+                    Some(event) => batch.push(Telemetry::from(event)),
                     None => break,
                 },
             }
@@ -193,7 +238,47 @@ impl Application {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        self.maybe_update(message).unwrap_or_default()
+        match message {
+            Message::SaveConfigurationToFile => self.save_configuration(),
+            Message::ConfigurationSaved(result) => {
+                if let Err(error) = result {
+                    log::error!("Unable to save configuration file: {error}");
+                }
+                Task::none()
+            }
+            Message::Layout(message) => {
+                self.layout_message_update(message);
+                Task::none()
+            }
+            Message::Map(message) => self.map_message_update(message),
+            Message::Link(message) => self.link_message_update(message),
+            Message::Logs(message) => {
+                self.log_panel.update(message);
+                Task::none()
+            }
+            Message::MavEvents(events) => self.handle_mav_events(events),
+            Message::Mission(message) => self.mission_message_update(message),
+            Message::Parameter(message) => self.parameter_message_update(message),
+            Message::Vehicles(message) => self.vehicle_message_update(message),
+            Message::Settings(message) => self.settings_message_update(message),
+            Message::Tick => {
+                if self.layout_dirty {
+                    self.layout_dirty = false;
+                    self.save_configuration()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::FleetTick(now) => {
+                let events = self.fleet.tick(now);
+                Task::batch(
+                    events
+                        .into_iter()
+                        .map(|event| self.handle_fleet_event(event))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        }
     }
 
     /// Write the current configuration to disk off the UI thread.
@@ -205,43 +290,6 @@ impl Application {
                 .map_err(|error| error.to_string());
             let _ = sender.try_send(Message::ConfigurationSaved(result));
         })
-    }
-
-    fn maybe_update(&mut self, message: Message) -> Option<Task<Message>> {
-        match message {
-            Message::SaveConfigurationToFile => return Some(self.save_configuration()),
-            Message::ConfigurationSaved(result) => {
-                if let Err(error) = result {
-                    log::error!("Unable to save configuration file: {error}");
-                }
-            }
-            Message::Layout(message) => self.layout_message_update(message),
-            Message::Map(message) => return Some(self.map_message_update(message)),
-            Message::Link(message) => return Some(self.link_message_update(message)),
-            Message::Logs(message) => self.log_panel.update(message),
-            Message::MavEvents(events) => return Some(self.handle_mav_events(events)),
-            Message::Mission(message) => return Some(self.mission_message_update(message)),
-            Message::Parameter(message) => return Some(self.parameter_message_update(message)),
-            Message::Vehicles(message) => return Some(self.vehicle_message_update(message)),
-            Message::Settings(message) => return Some(self.settings_message_update(message)),
-            Message::Tick => {
-                if self.layout_dirty {
-                    self.layout_dirty = false;
-                    return Some(self.save_configuration());
-                }
-            }
-            Message::FleetTick(now) => {
-                let events = self.fleet.tick(now);
-                return Some(Task::batch(
-                    events
-                        .into_iter()
-                        .map(|event| self.handle_fleet_event(event))
-                        .collect::<Vec<_>>(),
-                ));
-            }
-        }
-
-        None
     }
 
     fn layout_message_update(&mut self, message: layout::Message) {
@@ -396,34 +444,23 @@ impl Application {
         Task::none()
     }
 
-    /// Feed a batch of MAVLink events into the fleet, in order, and turn what
+    /// Feed a batch of decoded telemetry into the fleet, in order, and turn what
     /// the fleet reports back into application effects.
-    fn handle_mav_events(&mut self, events: Vec<mav::Event>) -> Task<Message> {
+    fn handle_mav_events(&mut self, events: Vec<Telemetry>) -> Task<Message> {
         let mut tasks = Vec::new();
 
         for event in events {
             match event {
-                mav::Event::Message(inbound) => {
-                    let source = inbound.source_mav;
-
-                    let decoded = match inbound.frame.decode::<DefaultDialect>() {
-                        Ok(message) => Some(message),
-                        // Downgrade these to trace to avoid spamming the logs
-                        Err(mavio::Error::Spec(SpecError::NotInDialect(id))) => {
-                            log::trace!("mavlink message id {id} is not in default dialect");
-                            None
-                        }
-                        Err(error) => {
-                            log::trace!("could not decode mavlink frame: {error}");
-                            None
-                        }
-                    };
-
-                    for fleet_event in self.fleet.observe(source, inbound.received_at, decoded) {
+                Telemetry::Message {
+                    source,
+                    received_at,
+                    decoded,
+                } => {
+                    for fleet_event in self.fleet.observe(source, received_at, decoded) {
                         tasks.push(self.handle_fleet_event(fleet_event));
                     }
                 }
-                mav::Event::LinkClosed(link_id) => {
+                Telemetry::LinkClosed(link_id) => {
                     log::info!("Link {link_id:?} closed");
                     tasks.push(self.link_message_update(link_panel::Message::Closed(link_id)));
                 }

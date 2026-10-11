@@ -34,3 +34,9 @@ ron = "0.12.1"
 nalgebra = "0.34.2"
 num_enum = "0.7.6"
 thiserror = "2.0.18"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
