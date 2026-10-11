@@ -357,8 +357,9 @@ impl ParameterPanel {
                 let path = save_path.clone();
                 return Some((
                     iced_runtime::task::blocking(move |mut sender| {
-                        let result = parameter::save_parameters_to_ini(&path, parameters)
-                            .map_err(|error| error.to_string());
+                        let result =
+                            std::fs::write(&path, parameter::parameters_to_ini_string(&parameters))
+                                .map_err(|error| error.to_string());
                         let _ = sender.try_send(Message::SaveFinished(save_path, result));
                     }),
                     None,
@@ -390,8 +391,12 @@ impl ParameterPanel {
                 let path = load_path.clone();
                 return Some((
                     iced_runtime::task::blocking(move |mut sender| {
-                        let result = parameter::load_parameters_from_ini(&path)
-                            .map_err(|error| error.to_string());
+                        let result = std::fs::read_to_string(&path)
+                            .map_err(|error| error.to_string())
+                            .and_then(|text| {
+                                parameter::parameters_from_ini_str(&text)
+                                    .map_err(|error| error.to_string())
+                            });
                         let _ = sender.try_send(Message::LoadFinished(load_path, address, result));
                     }),
                     None,

@@ -217,10 +217,7 @@ impl From<MavProtocolCapability> for ParamEncoding {
     }
 }
 
-pub(crate) fn save_parameters_to_ini(
-    path: impl AsRef<std::path::Path>,
-    parameters: Parameters,
-) -> std::io::Result<()> {
+pub(crate) fn parameters_to_ini_string(parameters: &Parameters) -> String {
     let mut config = ini::Ini::new();
 
     // Group parameters by their first segment
@@ -248,20 +245,23 @@ pub(crate) fn save_parameters_to_ini(
         config.with_section(section).set(property, type_value_str);
     }
 
-    // Write to file
-    config.write_to_file_opt(
-        path,
-        ini::WriteOption {
-            kv_separator: ": ",
-            ..Default::default()
-        },
-    )
+    let mut buffer = Vec::new();
+    config
+        .write_to_opt(
+            &mut buffer,
+            ini::WriteOption {
+                kv_separator: ": ",
+                ..Default::default()
+            },
+        )
+        .expect("writing an INI to a byte buffer is infallible");
+
+    String::from_utf8(buffer).expect("the INI writer emits valid UTF-8")
 }
 
-pub(crate) fn load_parameters_from_ini(
-    path: impl AsRef<std::path::Path>,
-) -> Result<Parameters, ini::Error> {
-    let conf = ini::Ini::load_from_file(path)?;
+pub(crate) fn parameters_from_ini_str(text: &str) -> Result<Parameters, ini::Error> {
+    let mut reader = text.as_bytes();
+    let conf = ini::Ini::read_from(&mut reader)?;
     let mut parameters = Parameters::default();
 
     for (section, properties) in conf.iter() {

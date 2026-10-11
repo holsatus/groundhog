@@ -9,7 +9,7 @@ use mavio::default_dialect::{
 use crate::{
     domain::mission::{Mission, MissionItem},
     foundation::MavlinkId,
-    mav::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted, cmd},
+    mav::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted, commands},
 };
 
 /// An intent-level handle for operating a single vehicle through the router.
@@ -132,12 +132,12 @@ impl VehicleClient {
 
     /// Start executing the stored mission.
     pub async fn start_mission(&self) -> mav::Result<CommandAck> {
-        self.run(cmd::mission_start()).await
+        self.run(commands::mission_start()).await
     }
 
     /// Pause (`true`) or resume (`false`) the running mission.
     pub async fn pause_mission(&self, pause: bool) -> mav::Result<CommandAck> {
-        self.run(cmd::pause_continue(pause)).await
+        self.run(commands::pause_continue(pause)).await
     }
 }
 

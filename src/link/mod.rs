@@ -4,5 +4,5 @@ pub mod config;
 pub mod transport;
 pub mod udp;
 
-pub use config::{BAUDRATES, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant};
+pub use config::LinkConfig;
 pub use transport::Event;

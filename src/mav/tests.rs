@@ -27,7 +27,7 @@ use mavio::{
 use tokio::io::{AsyncRead, ReadBuf};
 
 use super::*;
-use super::{command::Busy, error::MavError};
+use super::{error::MavError, transaction::Busy};
 use crate::{
     domain::fleet::Fleet,
     foundation::{DEFAULT_GCS_ID, LinkId, SystemId},
@@ -106,7 +106,7 @@ async fn command_is_resent_until_acked() {
     let (router, _guard, mut vehicle) = setup();
 
     let command = router
-        .command(VEHICLE, cmd::request_message::<SystemTime>())
+        .command(VEHICLE, commands::request_message::<SystemTime>())
         .timeout(Duration::from_millis(100));
     let task = tokio::spawn(command.into_future());
 
@@ -132,7 +132,7 @@ async fn command_in_progress_then_rejected() {
     let (router, _guard, mut vehicle) = setup();
 
     let command = router
-        .command(VEHICLE, cmd::request_message::<SystemTime>())
+        .command(VEHICLE, commands::request_message::<SystemTime>())
         .timeout(Duration::from_millis(100));
     let task = tokio::spawn(command.into_future());
 
@@ -155,7 +155,7 @@ async fn busy_while_command_in_flight() {
     let key = LockKey::command(VEHICLE, MavCmd::RequestMessage);
     assert!(!router.is_busy(&key));
 
-    let command = router.command(VEHICLE, cmd::request_message::<SystemTime>());
+    let command = router.command(VEHICLE, commands::request_message::<SystemTime>());
     let task = tokio::spawn(command.into_future());
 
     let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
@@ -164,7 +164,7 @@ async fn busy_while_command_in_flight() {
     assert!(router.is_busy(&key));
 
     let second = router
-        .command(VEHICLE, cmd::request_message::<SystemTime>())
+        .command(VEHICLE, commands::request_message::<SystemTime>())
         .on_busy(Busy::Fail)
         .await;
     assert!(matches!(second, Err(MavError::Busy(_))));

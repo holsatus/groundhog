@@ -5,6 +5,8 @@
 //! into [`LinkPanel::update`]); persisting the default link configuration is
 //! requested from the root through [`Event`].
 
+mod editor;
+
 use std::collections::BTreeMap;
 
 use iced::{
@@ -12,9 +14,11 @@ use iced::{
     widget::{Button, Column, button, checkbox, container, pick_list, text::Ellipsis, text_input},
 };
 
+pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkVariant};
+
 use crate::{
     foundation::LinkId,
-    link::{self, BAUDRATES, LinkBuilder, LinkConfig, LinkConfigurator, LinkVariant},
+    link::{self, LinkConfig},
     mav::{LinkGuard, MavlinkRouter},
     style,
 };

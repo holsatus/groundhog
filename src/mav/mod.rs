@@ -16,21 +16,21 @@ use mavio::default_dialect::messages::{
 
 use crate::foundation::MavlinkId;
 
-pub mod cmd;
-mod command;
+pub mod commands;
 pub(crate) mod error;
 mod locks;
 mod mission;
 mod param;
 mod recv;
 mod router;
+mod transaction;
 
-pub use command::Command;
 pub use error::Result;
 pub use locks::LockKey;
 pub use param::ParamListSummary;
 pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};
+pub use transaction::Command;
 
 #[cfg(test)]
 mod tests;

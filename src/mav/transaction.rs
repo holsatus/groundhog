@@ -8,7 +8,7 @@ use mavio::default_dialect::{
 use tokio::sync::mpsc;
 
 use super::{
-    Targeted, cmd,
+    Targeted, commands,
     error::{MavError, Result},
     locks::LockKey,
     recv::MavlinkMessage,
@@ -40,7 +40,7 @@ impl MavlinkRouter {
     /// Request a single message using `MAV_CMD_REQUEST_MESSAGE` and wait for it.
     pub async fn request_message<M: MavlinkMessage>(&self, target: MavlinkId) -> Result<M> {
         let mut reply = self.receive_message::<M>(target);
-        let command = self.command(target, cmd::request_message::<M>());
+        let command = self.command(target, commands::request_message::<M>());
 
         // Some systems send the message before (or without) the ACK
         tokio::select! {
