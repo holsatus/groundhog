@@ -348,20 +348,20 @@ impl Application {
         let request = Task::perform(
             async move {
                 if let Err(error) = client.component_information().await {
-                    log::warn!("No COMPONENT_INFORMATION_BASIC from {system:?}: {error}");
+                    log::warn!("No COMPONENT_INFORMATION_BASIC from {target:?}: {error}");
                 }
 
                 // This requests AUTOPILOT_VERSION to get capabilities for param encoding
                 client.fetch_parameters(true).await
             },
-            move |result| parameter_panel::Message::ListReloadResult(system, result).into(),
+            move |result| parameter_panel::Message::ListReloadResult(target, result).into(),
         );
 
         // Mark the implicit list download as running so the reload button is
         // disabled while the automatic initialisation is in flight.
         Task::batch([
             Task::done(Message::Parameter(
-                parameter_panel::Message::ListReloadStarted(system),
+                parameter_panel::Message::ListReloadStarted(target),
             )),
             request,
         ])

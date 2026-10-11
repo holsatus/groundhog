@@ -1,7 +1,8 @@
-//! Vehicle identity: type, autopilot, mode, firmware capabilities, and names.
+//! Vehicle identity: type, autopilot, mode, and armed state from the autopilot's
+//! heartbeat.
 
 use mavio::default_dialect::{
-    enums::{MavAutopilot, MavModeFlag, MavProtocolCapability, MavState, MavType},
+    enums::{MavAutopilot, MavModeFlag, MavState, MavType},
     messages,
 };
 
@@ -17,9 +18,6 @@ pub struct Identity {
     pub custom_mode: u32,
     pub base_mode: Option<MavModeFlag>,
     pub mav_state: Option<MavState>,
-    pub capabilities: Option<MavProtocolCapability>,
-    pub model_name: Option<String>,
-    pub vendor_name: Option<String>,
     /// The most recent `HEARTBEAT`, kept for display.
     pub last_heartbeat: Option<messages::Heartbeat>,
 }
@@ -51,39 +49,6 @@ impl Identity {
         self.base_mode = Some(message.base_mode);
     }
 
-    pub fn observe_autopilot_version(
-        &mut self,
-        system: SystemId,
-        message: &messages::AutopilotVersion,
-    ) {
-        self.set_capability(system, message.capabilities);
-    }
-
-    pub fn observe_component_information_basic(
-        &mut self,
-        system: SystemId,
-        message: &messages::ComponentInformationBasic,
-    ) {
-        if let Some(model_name) = string_from_cstring(&message.model_name)
-            && !model_name.is_empty()
-        {
-            self.model_name = Some(model_name)
-        }
-        if let Some(vendor_name) = string_from_cstring(&message.vendor_name)
-            && !vendor_name.is_empty()
-        {
-            self.vendor_name = Some(vendor_name)
-        }
-        self.set_capability(system, message.capabilities);
-    }
-
-    pub fn set_capability(&mut self, system: SystemId, capab: MavProtocolCapability) {
-        if self.capabilities != Some(capab) {
-            log::debug!("Received capabilities for {:?}: {:b}", system, capab);
-            self.capabilities = Some(capab);
-        }
-    }
-
     /// The latest reported flight mode, resolved for the vehicle's firmware.
     pub fn flight_mode(&self) -> FlightMode {
         match (self.autopilot, self.mav_type) {
@@ -99,17 +64,6 @@ impl Identity {
         self.base_mode
             .map(|mode| mode.intersects(MavModeFlag::SAFETY_ARMED))
     }
-}
-
-fn string_from_cstring(cstring: &[u8]) -> Option<String> {
-    let null = cstring
-        .iter()
-        .position(|c| *c == 0)
-        .unwrap_or(cstring.len());
-
-    str::from_utf8(&cstring[..null])
-        .map(|str| str.to_string())
-        .ok()
 }
 
 #[cfg(test)]

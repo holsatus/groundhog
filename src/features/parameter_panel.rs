@@ -1,11 +1,13 @@
 //! The parameter feature: browsing, filtering, editing, uploading, and
-//! saving/loading a vehicle's parameter set.
+//! saving/loading a component's parameter set.
 //!
-//! Owns the filter and the per-parameter edit buffers. Parameter data itself
-//! lives on the [`Fleet`] (the single owner of vehicle state), which the root
-//! passes in by mutable reference; the fleet services are passed in for
-//! transactions. Writing the remembered file-picker directory back to the
-//! configuration is requested through [`Event`].
+//! Parameters are per MAVLink *component*: the user picks which component to
+//! view (the autopilot by default), and every transaction is addressed to that
+//! `(system, component)` pair. Parameter data itself lives on the [`Fleet`]
+//! (the single owner of vehicle state), which the root passes in by mutable
+//! reference; the fleet services are passed in for transactions. Writing the
+//! remembered file-picker directory back to the configuration is requested
+//! through [`Event`].
 //!
 //! The filtered view is derived on every frame from the live parameter map, so
 //! there is no cached copy to keep in sync when the vehicle or filter changes.
@@ -19,8 +21,8 @@ use iced::{
     Alignment, Color, Element, Font, Length, Task, Theme, Widget,
     alignment::Vertical,
     widget::{
-        Button, Column, ProgressBar, Space, Text, TextInput, container, progress_bar, row, rule,
-        space, tooltip,
+        Button, Column, ProgressBar, Space, Text, TextInput, container, pick_list, progress_bar,
+        row, rule, space, tooltip,
     },
 };
 use mav_param::{Ident, Value};
@@ -33,7 +35,7 @@ use crate::{
         value_type_matches, value_type_name,
     },
     domain::vehicle::Vehicle,
-    foundation::SystemId,
+    foundation::{MavlinkId, SystemId},
     services::{FleetServices, ParamListSummary, Result},
     style,
     widget::virtualized::virtual_list,
@@ -77,29 +79,32 @@ pub enum Message {
     FilterOnlyChanged(bool),
 
     /// Initiate a parameter list request to the target
-    ListReload(SystemId),
+    ListReload(MavlinkId),
 
     /// A parameter list request to the target has started, e.g. the automatic
     /// initialisation on first sight of a vehicle.
-    ListReloadStarted(SystemId),
+    ListReloadStarted(MavlinkId),
 
     /// The parameter list request to the target has finished
-    ListReloadResult(SystemId, Result<ParamListSummary>),
+    ListReloadResult(MavlinkId, Result<ParamListSummary>),
 
     /// Upload all modified parameters to the target
-    UploadAll(SystemId),
+    UploadAll(MavlinkId),
 
     /// Reset a local parameter to its target-default
-    ValueReset(SystemId, Ident),
+    ValueReset(MavlinkId, Ident),
 
     /// Upload a local parameter to the target
-    ValueUpload(SystemId, Ident, Value),
+    ValueUpload(MavlinkId, Ident, Value),
 
     /// The result of uploading a local parameter to the target
-    ValueUploadResult(SystemId, Ident, Value, Result<Value>),
+    ValueUploadResult(MavlinkId, Ident, Value, Result<Value>),
 
     /// Edit the text-value buffer of the local parameter
-    BufferEdit(SystemId, Ident, String),
+    BufferEdit(MavlinkId, Ident, String),
+
+    /// Select which component's parameters the panel shows.
+    SelectComponent(MavlinkId),
 
     /// Open a file-picker dialog to choose a save location
     SaveDialog(Parameters),
@@ -111,13 +116,13 @@ pub enum Message {
     SaveFinished(PathBuf, Result<(), String>),
 
     /// Open a file-picker dialog to choose file to load
-    LoadDialog(SystemId),
+    LoadDialog(MavlinkId),
 
     /// Load parameters from the chosen path
-    LoadFromFile(PathBuf, SystemId),
+    LoadFromFile(PathBuf, MavlinkId),
 
     /// The result of reading a parameter file from disk
-    LoadFinished(PathBuf, SystemId, Result<Parameters, String>),
+    LoadFinished(PathBuf, MavlinkId, Result<Parameters, String>),
 }
 
 /// Everything the panel needs from the rest of the application to run a
@@ -139,15 +144,17 @@ pub struct ParameterPanel {
     filter: ParameterFilter,
     namespace_sep: char,
     /// Text currently typed into each parameter's value field, keyed by the
-    /// vehicle it belongs to. Kept here (not on the domain `Parameter`) so
-    /// that switching vehicles and back restores the in-progress edit.
-    editing: BTreeMap<SystemId, BTreeMap<Ident, String>>,
+    /// parameter's address. Kept here (not on the domain `Parameter`) so that
+    /// switching components or vehicles and back restores the in-progress edit.
+    editing: BTreeMap<MavlinkId, BTreeMap<Ident, String>>,
     /// Abort handles for in-flight uploads, dropped (aborting) when an upload
     /// is superseded by an edit, a reset, or its own completion.
-    uploads: BTreeMap<(SystemId, Ident), iced::task::Handle>,
-    /// Vehicles with a parameter list download in flight, so the view can
+    uploads: BTreeMap<(MavlinkId, Ident), iced::task::Handle>,
+    /// Addresses with a parameter list download in flight, so the view can
     /// disable the reload button without querying the router.
-    reloading: BTreeSet<SystemId>,
+    reloading: BTreeSet<MavlinkId>,
+    /// The component whose parameters the user chose to view, per vehicle.
+    component: BTreeMap<SystemId, u8>,
 }
 
 impl ParameterPanel {
@@ -158,7 +165,17 @@ impl ParameterPanel {
             editing: BTreeMap::new(),
             uploads: BTreeMap::new(),
             reloading: BTreeSet::new(),
+            component: BTreeMap::new(),
         }
+    }
+
+    /// The component shown for `vehicle`: the user's selection, else its
+    /// autopilot (or the conventional component 1 before one is known).
+    fn selected_component(&self, vehicle: &Vehicle) -> u8 {
+        self.component
+            .get(&vehicle.system)
+            .copied()
+            .unwrap_or_else(|| vehicle.autopilot_component().unwrap_or(1))
     }
 
     pub fn update(
@@ -181,44 +198,45 @@ impl ParameterPanel {
             Message::FilterOnlyChanged(changed) => {
                 self.filter.only_changed = changed;
             }
-            Message::ListReload(id) => {
-                // Resolve the addressing target before taking the mutable borrow.
-                let target = ctx.fleet.vehicle(id)?.target();
-                let client = ctx.services.vehicle(target);
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
+            Message::ListReload(address) => {
+                let system = SystemId::from(address.system);
+                let component = address.component;
+                let client = ctx.services.vehicle(address);
+                let vehicle = ctx.fleet.vehicle_mut(system)?;
 
-                let request_capabilities = vehicle.identity.capabilities.is_none();
-                vehicle.parameters_mut().reset_loading();
-                self.reloading.insert(id);
+                let request_capabilities = vehicle.capabilities(component).is_none();
+                vehicle.parameters_mut(component).reset_loading();
+                self.reloading.insert(address);
 
                 let task = Task::perform(
                     async move { client.fetch_parameters(request_capabilities).await },
-                    move |result| Message::ListReloadResult(id, result),
+                    move |result| Message::ListReloadResult(address, result),
                 );
 
                 return Some((task, None));
             }
-            Message::ListReloadStarted(id) => {
-                self.reloading.insert(id);
+            Message::ListReloadStarted(address) => {
+                self.reloading.insert(address);
             }
-            Message::ListReloadResult(id, result) => {
-                self.reloading.remove(&id);
+            Message::ListReloadResult(address, result) => {
+                self.reloading.remove(&address);
                 match result {
-                    Ok(summary) => log::info!("Parameters from {id:?}: {summary:?}"),
-                    Err(error) => log::warn!("Parameter download from {id:?} failed: {error}"),
+                    Ok(summary) => log::info!("Parameters from {address:?}: {summary:?}"),
+                    Err(error) => log::warn!("Parameter download from {address:?} failed: {error}"),
                 }
             }
-            Message::UploadAll(id) => {
-                let vehicle = ctx.fleet.vehicle(id)?;
+            Message::UploadAll(address) => {
+                let system = SystemId::from(address.system);
+                let vehicle = ctx.fleet.vehicle(system)?;
+                let parameters = vehicle.parameters(address.component)?;
 
                 // The number of concurrent uploads is limited by the middleware
-                let uploads: Vec<_> = vehicle
-                    .parameters()
+                let uploads: Vec<_> = parameters
                     .iter()
                     .filter_map(|(ident, param)| match param.state() {
-                        ParamState::Changed { value, .. } => {
-                            Some(Task::done(Message::ValueUpload(id, ident.clone(), *value)))
-                        }
+                        ParamState::Changed { value, .. } => Some(Task::done(
+                            Message::ValueUpload(address, ident.clone(), *value),
+                        )),
                         _ => None,
                     })
                     .collect();
@@ -226,47 +244,51 @@ impl ParameterPanel {
                 log::info!("Uploading {} changed parameters", uploads.len());
                 return Some((Task::batch(uploads), None));
             }
-            Message::BufferEdit(id, ident, buffer) => {
+            Message::BufferEdit(address, ident, buffer) => {
                 // Editing supersedes any upload in flight for this parameter.
-                self.uploads.remove(&(id, ident.clone()));
+                self.uploads.remove(&(address, ident.clone()));
 
                 {
-                    let entry = ctx.fleet.vehicle_mut(id)?;
-                    let param = entry.parameters_mut().get_mut(&ident)?;
+                    let system = SystemId::from(address.system);
+                    let entry = ctx.fleet.vehicle_mut(system)?;
+                    let param = entry.parameters_mut(address.component).get_mut(&ident)?;
 
                     param.set_edited(value_parse_as(param.value(), &buffer));
                 }
 
-                self.editing.entry(id).or_default().insert(ident, buffer);
+                self.editing
+                    .entry(address)
+                    .or_default()
+                    .insert(ident, buffer);
             }
-            Message::ValueReset(id, ident) => {
-                self.uploads.remove(&(id, ident.clone()));
+            Message::ValueReset(address, ident) => {
+                self.uploads.remove(&(address, ident.clone()));
 
                 {
-                    let entry = ctx.fleet.vehicle_mut(id)?;
-                    let param = entry.parameters_mut().get_mut(&ident)?;
+                    let system = SystemId::from(address.system);
+                    let entry = ctx.fleet.vehicle_mut(system)?;
+                    let param = entry.parameters_mut(address.component).get_mut(&ident)?;
 
                     param.reset();
                 }
 
-                if let Some(editing) = self.editing.get_mut(&id) {
+                if let Some(editing) = self.editing.get_mut(&address) {
                     editing.remove(&ident);
                 }
             }
-            Message::ValueUpload(id, ident, value) => {
-                // Resolve the addressing target before taking the mutable borrow.
-                let target = ctx.fleet.vehicle(id)?.target();
-                let client = ctx.services.vehicle(target);
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-                let cap = vehicle.identity.capabilities.unwrap_or_default();
-                let param = vehicle.parameters_mut().get_mut(&ident)?;
+            Message::ValueUpload(address, ident, value) => {
+                let system = SystemId::from(address.system);
+                let client = ctx.services.vehicle(address);
+                let vehicle = ctx.fleet.vehicle_mut(system)?;
+                let cap = vehicle.capabilities(address.component).unwrap_or_default();
+                let param = vehicle.parameters_mut(address.component).get_mut(&ident)?;
 
                 let ident_cloned = ident.clone();
                 let ident_for_result = ident.clone();
                 let (task, handle) = Task::perform(
                     async move { client.set_parameter(ident_cloned, value, cap).await },
                     move |result| {
-                        Message::ValueUploadResult(id, ident_for_result.clone(), value, result)
+                        Message::ValueUploadResult(address, ident_for_result.clone(), value, result)
                     },
                 )
                 .abortable();
@@ -274,21 +296,28 @@ impl ParameterPanel {
                 // Holding the abort handle lets an edit or reset cancel the
                 // upload by dropping it; completion drops it too.
                 self.uploads
-                    .insert((id, ident.clone()), handle.abort_on_drop());
+                    .insert((address, ident.clone()), handle.abort_on_drop());
                 param.begin_upload(value);
 
                 return Some((task, None));
             }
-            Message::ValueUploadResult(id, ident, requested, result) => {
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-                let param = vehicle.parameters_mut().get_mut(&ident)?;
+            Message::ValueUploadResult(address, ident, requested, result) => {
+                let system = SystemId::from(address.system);
+                let component = address.component;
+                let vehicle = ctx.fleet.vehicle_mut(system)?;
+
+                // A result only updates state it already owns; if the component
+                // was never heard from, it is a no-op.
+                vehicle.parameters(component)?;
+
+                let param = vehicle.parameters_mut(component).get_mut(&ident)?;
 
                 if !matches!(param.state(), ParamState::Uploading { value } if *value == requested)
                 {
                     return None;
                 }
 
-                self.uploads.remove(&(id, ident.clone()));
+                self.uploads.remove(&(address, ident.clone()));
 
                 match result {
                     Ok(value) if value == requested => param.upload_succeeded(value),
@@ -304,6 +333,10 @@ impl ParameterPanel {
                         param.upload_failed(requested);
                     }
                 }
+            }
+            Message::SelectComponent(address) => {
+                self.component
+                    .insert(SystemId::from(address.system), address.component);
             }
             Message::SaveDialog(parameters) => {
                 let file_dialog = file_dialog(ctx.file_picker_path);
@@ -338,20 +371,20 @@ impl ParameterPanel {
 
                 return Some((Task::none(), Some(Event::SetFilePickerPath(save_path))));
             }
-            Message::LoadDialog(id) => {
+            Message::LoadDialog(address) => {
                 let file_dialog = file_dialog(ctx.file_picker_path);
 
                 return Some((
-                    Task::future(
-                        async move { file_dialog.pick_file().await.map(|file| (file, id)) },
-                    )
-                    .and_then(|(file, id)| {
-                        Task::done(Message::LoadFromFile(file.path().to_owned(), id))
+                    Task::future(async move {
+                        file_dialog.pick_file().await.map(|file| (file, address))
+                    })
+                    .and_then(|(file, address)| {
+                        Task::done(Message::LoadFromFile(file.path().to_owned(), address))
                     }),
                     None,
                 ));
             }
-            Message::LoadFromFile(load_path, id) => {
+            Message::LoadFromFile(load_path, address) => {
                 log::info!("Loading parameters from file: {load_path:?}");
 
                 let path = load_path.clone();
@@ -359,12 +392,12 @@ impl ParameterPanel {
                     iced_runtime::task::blocking(move |mut sender| {
                         let result = parameter::load_parameters_from_ini(&path)
                             .map_err(|error| error.to_string());
-                        let _ = sender.try_send(Message::LoadFinished(load_path, id, result));
+                        let _ = sender.try_send(Message::LoadFinished(load_path, address, result));
                     }),
                     None,
                 ));
             }
-            Message::LoadFinished(load_path, id, loaded_params) => {
+            Message::LoadFinished(load_path, address, loaded_params) => {
                 let loaded_params = match loaded_params {
                     Ok(loaded_params) => loaded_params,
                     Err(error) => {
@@ -373,21 +406,26 @@ impl ParameterPanel {
                     }
                 };
 
-                let vehicle = ctx.fleet.vehicle_mut(id)?;
-                let editing = self.editing.entry(id).or_default();
+                let system = SystemId::from(address.system);
+                let component = address.component;
+                let vehicle = ctx.fleet.vehicle_mut(system)?;
 
-                // Set the parameters of the vehicle as modified if that is the case
+                // Mark the loaded values as pending edits on the addressed
+                // component, filling the buffers so the new values are shown.
+                let editing = self.editing.entry(address).or_default();
                 for (ident, new_param) in loaded_params.iter() {
-                    let Some(current) = vehicle.parameters().get(ident) else {
+                    let Some(current) = vehicle.parameters(component).and_then(|p| p.get(ident))
+                    else {
                         continue;
                     };
-                    if !value_type_matches(current.value(), new_param.value())
-                        || current.value() == new_param.value()
+                    let current_value = current.value();
+                    if !value_type_matches(current_value, new_param.value())
+                        || current_value == new_param.value()
                     {
                         continue;
                     }
 
-                    if let Some(old_param) = vehicle.parameters_mut().get_mut(ident) {
+                    if let Some(old_param) = vehicle.parameters_mut(component).get_mut(ident) {
                         old_param.mark_changed(new_param.value());
                         editing.insert(ident.clone(), value_as_string(new_param.value()));
                     }
@@ -408,33 +446,59 @@ impl ParameterPanel {
         primary: Option<SystemId>,
         theme: &Theme,
     ) -> Element<'a, Message> {
-        let Some(id) = primary else {
+        let Some(system) = primary else {
             return space::Space::new().boxed();
         };
 
-        let Some(vehicle) = vehicles.get(&id) else {
+        let Some(vehicle) = vehicles.get(&system) else {
             return space::Space::new().boxed();
         };
+
+        let component = self.selected_component(vehicle);
+        let address = vehicle.target_for(component);
+        let parameters = vehicle.parameters(component);
 
         let mut entries: Vec<Element<'_, Message>> = Vec::with_capacity(128);
 
+        // Which component's parameters are shown; the autopilot is marked.
+        let component_ids = vehicle.component_ids();
+        if !component_ids.is_empty() {
+            let autopilot = vehicle.autopilot_component();
+            let picker = pick_list(Some(component), component_ids, move |id: &u8| {
+                if Some(*id) == autopilot {
+                    format!("comp {id} (autopilot)")
+                } else {
+                    format!("comp {id}")
+                }
+            })
+            .on_select(move |id| {
+                Message::SelectComponent(MavlinkId {
+                    system: system.0,
+                    component: id,
+                })
+            });
+
+            entries.push(picker.boxed());
+        }
+
         // Disabled while a parameter list download is in progress
-        let reloading = self.reloading.contains(&id);
+        let reloading = self.reloading.contains(&address);
         let reload_button = Button::new("Reload parameters")
             .width(Length::Fill)
-            .on_press_maybe((!reloading).then(|| Message::ListReload(id)));
+            .on_press_maybe((!reloading).then(|| Message::ListReload(address)));
 
         let upload_button = Button::new("Upload parameters")
             .width(Length::FillPortion(1))
-            .on_press(Message::UploadAll(id));
+            .on_press(Message::UploadAll(address));
 
+        let save_parameters = parameters.cloned().unwrap_or_default();
         let save_button = Button::new("Save parameters to file")
             .width(Length::FillPortion(1))
-            .on_press_with(|| Message::SaveDialog(vehicle.parameters().clone()));
+            .on_press_with(move || Message::SaveDialog(save_parameters.clone()));
 
         let load_button = Button::new("Load parameters from file")
             .width(Length::FillPortion(1))
-            .on_press(Message::LoadDialog(id));
+            .on_press(Message::LoadDialog(address));
 
         let filter_field = TextInput::new("Filter parameters", &self.filter.ident_pattern)
             .width(Length::FillPortion(1))
@@ -460,8 +524,12 @@ impl ParameterPanel {
                 .boxed(),
         );
 
-        let got = vehicle.parameters().loading().loaded();
-        let exp = vehicle.parameters().loading().expected();
+        let (got, exp) = parameters.map_or((0, 0), |parameters| {
+            (
+                parameters.loading().loaded(),
+                parameters.loading().expected(),
+            )
+        });
 
         let style = if got < exp as usize {
             progress_bar::primary
@@ -479,7 +547,7 @@ impl ParameterPanel {
         container(
             iced::widget::column![
                 iced::widget::Column::from_iter(entries).spacing(5.0),
-                self.view_param_list(id, vehicle, theme),
+                self.view_param_list(address, parameters, theme),
             ]
             .spacing(5.0),
         )
@@ -490,8 +558,8 @@ impl ParameterPanel {
 
     fn view_param_list<'a>(
         &'a self,
-        id: SystemId,
-        vehicle: &'a Vehicle,
+        address: MavlinkId,
+        parameters: Option<&'a Parameters>,
         theme: &Theme,
     ) -> Element<'a, Message> {
         /// Heights must fit the tallest content of each item kind
@@ -509,15 +577,19 @@ impl ParameterPanel {
             Param(&'a Ident, &'a Parameter),
         }
 
+        let Some(parameters) = parameters else {
+            return space::Space::new().boxed();
+        };
+
         let pattern = self.filter.ident_pattern.to_lowercase();
         let editing = &self.editing;
         // Copied up front so the draw closure does not borrow the theme.
         let type_color = theme.palette().secondary.base.color;
 
-        let mut items = Vec::with_capacity(vehicle.parameters().len() + 64);
+        let mut items = Vec::with_capacity(parameters.len() + 64);
         let mut section = None;
 
-        for (ident, param) in vehicle.parameters().iter() {
+        for (ident, param) in parameters.iter() {
             if !self.filter.matches(ident, param, &pattern) {
                 continue;
             }
@@ -560,10 +632,10 @@ impl ParameterPanel {
             }
             Item::Param(ident, param) => {
                 let buffer = editing
-                    .get(&id)
+                    .get(&address)
                     .and_then(|entry| entry.get(*ident))
                     .map(String::as_str);
-                view_param_row(id, ident, param, buffer, type_color).boxed()
+                view_param_row(address, ident, param, buffer, type_color).boxed()
             }
         })
         .item_height(|item| match item {
@@ -572,8 +644,8 @@ impl ParameterPanel {
             Item::Param(..) => ROW_HEIGHT,
         })
         .key(move |item| match item {
-            Item::Section { first, .. } => ((id, (*first).clone()), true),
-            Item::Param(ident, _) => ((id, (*ident).clone()), false),
+            Item::Section { first, .. } => ((address, (*first).clone()), true),
+            Item::Param(ident, _) => ((address, (*ident).clone()), false),
         })
         .spacing(5.0);
 
@@ -585,7 +657,7 @@ impl ParameterPanel {
 }
 
 fn view_param_row<'a>(
-    id: SystemId,
+    address: MavlinkId,
     ident: &'a Ident,
     param: &'a Parameter,
     editing: Option<&'a str>,
@@ -598,7 +670,7 @@ fn view_param_row<'a>(
         .unwrap_or_else(|| value_as_string(param.value()));
 
     let text_input = iced::widget::TextInput::new("Write value", value_string)
-        .on_input(move |string| Message::BufferEdit(id, ident.clone(), string))
+        .on_input(move |string| Message::BufferEdit(address, ident.clone(), string))
         .style(move |theme, status| {
             let mut style = iced::widget::text_input::default(theme, status);
             let palette = theme.palette();
@@ -622,7 +694,7 @@ fn view_param_row<'a>(
 
     let restore_button = Button::new("Restore")
         .on_press_maybe(match param.state() {
-            ParamState::Changed { .. } => Some(Message::ValueReset(id, ident.clone())),
+            ParamState::Changed { .. } => Some(Message::ValueReset(address, ident.clone())),
             _ => None,
         })
         .width(80.0);
@@ -640,7 +712,7 @@ fn view_param_row<'a>(
     let upload_button = Button::new("Upload")
         .on_press_maybe(match param.state() {
             ParamState::Changed { value, .. } => {
-                Some(Message::ValueUpload(id, ident.clone(), *value))
+                Some(Message::ValueUpload(address, ident.clone(), *value))
             }
             _ => None,
         })
@@ -688,25 +760,43 @@ mod tests {
         Ident::from_str_truncated(name)
     }
 
-    /// The address of `id`'s autopilot endpoint, for feeding `observe`.
-    fn source(id: SystemId) -> MavlinkId {
+    /// The `(system, component 1)` address used throughout these tests.
+    fn addr(id: SystemId) -> MavlinkId {
         MavlinkId {
             system: id.0,
             component: 1,
         }
     }
 
-    /// Register `id` and seed it with `params`, using only the public domain API.
+    /// An address for a specific component of `id`'s system.
+    fn addr_c(id: SystemId, component: u8) -> MavlinkId {
+        MavlinkId {
+            system: id.0,
+            component,
+        }
+    }
+
+    /// Register `id` and seed its autopilot (component 1) with `params`.
     fn add_vehicle(fleet: &mut Fleet, id: SystemId, params: &[(&str, Value)]) {
-        fleet.observe(source(id), std::time::Instant::now(), None);
+        fleet.observe(addr(id), std::time::Instant::now(), None);
         let vehicle = fleet.vehicle_mut(id).unwrap();
         for (name, value) in params {
-            vehicle.parameters_mut().insert(ident(name), *value);
+            vehicle.parameters_mut(1).insert(ident(name), *value);
         }
     }
 
     fn param<'a>(fleet: &'a Fleet, id: SystemId, key: &Ident) -> &'a Parameter {
-        fleet.vehicle(id).unwrap().parameters().get(key).unwrap()
+        param_c(fleet, id, 1, key)
+    }
+
+    fn param_c<'a>(fleet: &'a Fleet, id: SystemId, component: u8, key: &Ident) -> &'a Parameter {
+        fleet
+            .vehicle(id)
+            .unwrap()
+            .parameters(component)
+            .unwrap()
+            .get(key)
+            .unwrap()
     }
 
     /// Run one message against the panel with a fresh context, returning any event.
@@ -784,27 +874,27 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::BufferEdit(A, key.clone(), "2.0".to_owned()),
+            Message::BufferEdit(addr(A), key.clone(), "2.0".to_owned()),
         );
 
         assert!(matches!(
             param(&fleet, A, &key).state(),
             ParamState::Changed { .. }
         ));
-        assert_eq!(panel.editing[&A][&key], "2.0");
+        assert_eq!(panel.editing[&addr(A)][&key], "2.0");
 
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueReset(A, key.clone()),
+            Message::ValueReset(addr(A), key.clone()),
         );
 
         assert!(matches!(
             param(&fleet, A, &key).state(),
             ParamState::Unchanged
         ));
-        assert!(!panel.editing[&A].contains_key(&key));
+        assert!(!panel.editing[&addr(A)].contains_key(&key));
     }
 
     #[test]
@@ -820,40 +910,40 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUpload(A, key.clone(), Value::F32(2.0)),
+            Message::ValueUpload(addr(A), key.clone(), Value::F32(2.0)),
         );
         assert!(matches!(
             param(&fleet, A, &key).state(),
             ParamState::Uploading { .. }
         ));
-        assert!(panel.uploads.contains_key(&(A, key.clone())));
+        assert!(panel.uploads.contains_key(&(addr(A), key.clone())));
 
         // Echoed exactly: accepted.
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(A, key.clone(), Value::F32(2.0), Ok(Value::F32(2.0))),
+            Message::ValueUploadResult(addr(A), key.clone(), Value::F32(2.0), Ok(Value::F32(2.0))),
         );
         assert!(matches!(
             param(&fleet, A, &key).state(),
             ParamState::Unchanged
         ));
         assert_eq!(param(&fleet, A, &key).value(), Value::F32(2.0));
-        assert!(!panel.uploads.contains_key(&(A, key.clone())));
+        assert!(!panel.uploads.contains_key(&(addr(A), key.clone())));
 
         // Clamped by the target: rejected, keeping the requested value.
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUpload(A, key.clone(), Value::F32(5.0)),
+            Message::ValueUpload(addr(A), key.clone(), Value::F32(5.0)),
         );
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(A, key.clone(), Value::F32(5.0), Ok(Value::F32(3.0))),
+            Message::ValueUploadResult(addr(A), key.clone(), Value::F32(5.0), Ok(Value::F32(3.0))),
         );
         assert_eq!(
             changed_state(param(&fleet, A, &key)),
@@ -865,13 +955,18 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUpload(A, key.clone(), Value::F32(7.0)),
+            Message::ValueUpload(addr(A), key.clone(), Value::F32(7.0)),
         );
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(A, key.clone(), Value::F32(7.0), Err(MavError::Timeout)),
+            Message::ValueUploadResult(
+                addr(A),
+                key.clone(),
+                Value::F32(7.0),
+                Err(MavError::Timeout),
+            ),
         );
         assert_eq!(
             changed_state(param(&fleet, A, &key)),
@@ -892,7 +987,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(A, key.clone(), Value::F32(9.0), Ok(Value::F32(9.0))),
+            Message::ValueUploadResult(addr(A), key.clone(), Value::F32(9.0), Ok(Value::F32(9.0))),
         );
 
         assert!(matches!(
@@ -910,13 +1005,27 @@ mod tests {
         fleet
             .vehicle_mut(A)
             .unwrap()
-            .parameters_mut()
+            .parameters_mut(1)
             .note_loaded_index(0, 5);
         let mut panel = ParameterPanel::new();
 
-        step(&mut panel, &router, &mut fleet, Message::ListReload(A));
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ListReload(addr(A)),
+        );
 
-        assert_eq!(fleet.vehicle(A).unwrap().parameters().loading().loaded(), 0);
+        assert_eq!(
+            fleet
+                .vehicle(A)
+                .unwrap()
+                .parameters(1)
+                .unwrap()
+                .loading()
+                .loaded(),
+            0
+        );
     }
 
     #[test]
@@ -934,7 +1043,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::LoadFinished(PathBuf::from("/tmp/params.ini"), A, Ok(loaded)),
+            Message::LoadFinished(PathBuf::from("/tmp/params.ini"), addr(A), Ok(loaded)),
         );
 
         assert!(matches!(event, Some(Event::SetFilePickerPath(_))));
@@ -942,7 +1051,40 @@ mod tests {
             param(&fleet, A, &key).state(),
             ParamState::Changed { value: Value::F32(v), .. } if *v == 3.0
         ));
-        assert_eq!(panel.editing[&A][&key], "3");
+        assert_eq!(panel.editing[&addr(A)][&key], "3");
+    }
+
+    #[test]
+    fn editing_buffers_are_kept_per_component() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        fleet
+            .vehicle_mut(A)
+            .unwrap()
+            .parameters_mut(154)
+            .insert(ident("PARAM_ONE"), Value::F32(5.0));
+        let mut panel = ParameterPanel::new();
+        let key = ident("PARAM_ONE");
+
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::BufferEdit(addr_c(A, 1), key.clone(), "2.0".to_owned()),
+        );
+
+        // The autopilot's edit is isolated from the gimbal's set.
+        assert!(matches!(
+            param_c(&fleet, A, 1, &key).state(),
+            ParamState::Changed { .. }
+        ));
+        assert!(matches!(
+            param_c(&fleet, A, 154, &key).state(),
+            ParamState::Unchanged
+        ));
+        assert_eq!(panel.editing[&addr_c(A, 1)][&key], "2.0");
+        assert!(!panel.editing.contains_key(&addr_c(A, 154)));
     }
 
     #[test]
@@ -958,17 +1100,17 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::BufferEdit(A, key.clone(), "42".to_owned()),
+            Message::BufferEdit(addr(A), key.clone(), "42".to_owned()),
         );
 
         // The second vehicle's buffer is untouched.
         assert!(
             !panel
                 .editing
-                .get(&B)
+                .get(&addr(B))
                 .is_some_and(|entry| entry.contains_key(&key))
         );
-        assert_eq!(panel.editing[&A][&key], "42");
+        assert_eq!(panel.editing[&addr(A)][&key], "42");
     }
 
     #[test]
@@ -978,8 +1120,13 @@ mod tests {
         add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
         let mut panel = ParameterPanel::new();
 
-        step(&mut panel, &router, &mut fleet, Message::ListReload(A));
-        assert!(panel.reloading.contains(&A));
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ListReload(addr(A)),
+        );
+        assert!(panel.reloading.contains(&addr(A)));
     }
 
     #[test]
@@ -993,9 +1140,9 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ListReloadStarted(A),
+            Message::ListReloadStarted(addr(A)),
         );
-        assert!(panel.reloading.contains(&A));
+        assert!(panel.reloading.contains(&addr(A)));
     }
 
     #[test]
@@ -1006,29 +1153,128 @@ mod tests {
         let mut panel = ParameterPanel::new();
 
         // A successful download clears the flag.
-        panel.reloading.insert(A);
+        panel.reloading.insert(addr(A));
         step(
             &mut panel,
             &router,
             &mut fleet,
             Message::ListReloadResult(
-                A,
+                addr(A),
                 Ok(ParamListSummary {
                     received: 1,
                     expected: 1,
                 }),
             ),
         );
-        assert!(!panel.reloading.contains(&A));
+        assert!(!panel.reloading.contains(&addr(A)));
 
         // A failed download clears it too.
-        panel.reloading.insert(A);
+        panel.reloading.insert(addr(A));
         step(
             &mut panel,
             &router,
             &mut fleet,
-            Message::ListReloadResult(A, Err(MavError::Timeout)),
+            Message::ListReloadResult(addr(A), Err(MavError::Timeout)),
         );
-        assert!(!panel.reloading.contains(&A));
+        assert!(!panel.reloading.contains(&addr(A)));
+    }
+
+    #[test]
+    fn load_finished_targets_the_address_carried_in_the_message() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        add_vehicle(&mut fleet, B, &[]);
+        fleet
+            .vehicle_mut(B)
+            .unwrap()
+            .parameters_mut(154)
+            .insert(ident("PARAM_ONE"), Value::F32(1.0));
+        let mut panel = ParameterPanel::new();
+        let key = ident("PARAM_ONE");
+
+        let mut loaded = Parameters::default();
+        loaded.insert(key.clone(), Value::F32(3.0));
+
+        let event = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::LoadFinished(PathBuf::from("/tmp/params.ini"), addr_c(B, 154), Ok(loaded)),
+        );
+
+        assert!(matches!(event, Some(Event::SetFilePickerPath(_))));
+        // The loaded values land on `B`'s component 154...
+        assert!(matches!(
+            param_c(&fleet, B, 154, &key).state(),
+            ParamState::Changed { value: Value::F32(v), .. } if *v == 3.0
+        ));
+        assert_eq!(panel.editing[&addr_c(B, 154)][&key], "3");
+
+        // ...and leave the primary `A` untouched.
+        assert!(matches!(
+            param_c(&fleet, A, 1, &key).state(),
+            ParamState::Unchanged
+        ));
+    }
+
+    #[test]
+    fn value_upload_result_targets_the_address_carried_in_the_message() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[]);
+        fleet
+            .vehicle_mut(A)
+            .unwrap()
+            .parameters_mut(154)
+            .insert(ident("PARAM_ONE"), Value::F32(1.0));
+        let mut panel = ParameterPanel::new();
+        let key = ident("PARAM_ONE");
+        let address = addr_c(A, 154);
+
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ValueUpload(address, key.clone(), Value::F32(2.0)),
+        );
+        assert!(panel.uploads.contains_key(&(address, key.clone())));
+
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::ValueUploadResult(address, key.clone(), Value::F32(2.0), Ok(Value::F32(2.0))),
+        );
+        assert!(matches!(
+            param_c(&fleet, A, 154, &key).state(),
+            ParamState::Unchanged
+        ));
+        assert_eq!(param_c(&fleet, A, 154, &key).value(), Value::F32(2.0));
+        assert!(!panel.uploads.contains_key(&(address, key.clone())));
+    }
+
+    #[test]
+    fn component_selection_defaults_to_autopilot_and_tracks_selection() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        fleet
+            .vehicle_mut(A)
+            .unwrap()
+            .parameters_mut(154)
+            .insert(ident("GIMBAL_X"), Value::F32(1.0));
+        let mut panel = ParameterPanel::new();
+
+        // No explicit selection: falls back to the autopilot (component 1).
+        assert_eq!(panel.selected_component(fleet.vehicle(A).unwrap()), 1);
+
+        step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            Message::SelectComponent(addr_c(A, 154)),
+        );
+        assert_eq!(panel.selected_component(fleet.vehicle(A).unwrap()), 154);
     }
 }

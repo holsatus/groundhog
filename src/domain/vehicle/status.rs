@@ -14,16 +14,20 @@ pub struct StatusLog {
 
 #[derive(Clone, Debug)]
 pub struct StatusText {
+    /// The component that emitted the text. `STATUSTEXT` is accepted from any
+    /// component, so each message is attributed to its source.
+    pub component: u8,
     pub at: Instant,
     pub severity: MavSeverity,
     pub text: String,
 }
 
 impl StatusLog {
-    /// Append a decoded `STATUSTEXT`, returning the UTF-8 error (without
-    /// logging) if the payload is not valid.
+    /// Append a decoded `STATUSTEXT` from `component`, returning the UTF-8 error
+    /// (without logging) if the payload is not valid.
     pub fn observe_statustext(
         &mut self,
+        component: u8,
         message: &messages::Statustext,
         time: Instant,
     ) -> Result<(), std::str::Utf8Error> {
@@ -36,6 +40,7 @@ impl StatusLog {
         let text_string = str::from_utf8(&message.text[..null])?.to_string();
 
         self.texts.push_back(StatusText {
+            component,
             at: time,
             severity: message.severity,
             text: text_string,
@@ -71,7 +76,7 @@ mod tests {
         let mut log = StatusLog::default();
 
         for i in 0..MAX_STATUS_TEXTS + 10 {
-            log.observe_statustext(&message(&i.to_string()), Instant::now())
+            log.observe_statustext(1, &message(&i.to_string()), Instant::now())
                 .expect("valid utf8");
         }
 
@@ -81,5 +86,21 @@ mod tests {
             log.texts.back().unwrap().text,
             (MAX_STATUS_TEXTS + 9).to_string()
         );
+    }
+
+    #[test]
+    fn status_texts_are_attributed_to_their_component() {
+        let mut log = StatusLog::default();
+
+        log.observe_statustext(1, &message("from autopilot"), Instant::now())
+            .expect("valid utf8");
+        log.observe_statustext(154, &message("from gimbal"), Instant::now())
+            .expect("valid utf8");
+
+        assert_eq!(log.texts.len(), 2);
+        assert_eq!(log.texts[0].component, 1);
+        assert_eq!(log.texts[0].text, "from autopilot");
+        assert_eq!(log.texts[1].component, 154);
+        assert_eq!(log.texts[1].text, "from gimbal");
     }
 }

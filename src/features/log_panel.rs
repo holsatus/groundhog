@@ -119,7 +119,7 @@ impl LogPanel {
 
             container(
                 row![
-                    text(format!("{id}")).width(Length::Fixed(56.0)),
+                    text(format!("{}:{}", id.0, status.component)).width(Length::Fixed(72.0)),
                     text(format!("{:?}", status.severity))
                         .color(color)
                         .width(Length::Fixed(96.0)),
@@ -138,7 +138,7 @@ impl LogPanel {
             .boxed()
         })
         .item_height(|_| LOG_ROW_HEIGHT)
-        .key(|(_, id, status)| (*id, status.at))
+        .key(|(_, id, status)| (*id, status.component, status.at))
         .spacing(0.0);
 
         let list = scrollable(list)

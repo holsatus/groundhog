@@ -137,6 +137,10 @@ impl Fleet {
 
         if is_position_frame
             && self.primary == Some(id)
+            && self
+                .vehicles
+                .get(&id)
+                .is_some_and(|v| v.is_authoritative(source.component))
             && let Some(position) = self
                 .vehicles
                 .get(&id)
@@ -179,7 +183,7 @@ impl Fleet {
 mod tests {
     use super::*;
     use mavio::default_dialect::{
-        enums::MavAutopilot,
+        enums::{MavAutopilot, MavState, MavType},
         messages::{self, Heartbeat},
     };
 
@@ -339,6 +343,97 @@ mod tests {
     }
 
     #[test]
+    fn component_one_takes_precedence_over_another_autopilot_candidate() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        // A non-1 component may claim the role while nothing else has.
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 10,
+            },
+            t0,
+            Some(heartbeat(MavAutopilot::Ardupilotmega)),
+        );
+        assert_eq!(
+            fleet.vehicle(SystemId(1)).unwrap().autopilot_component(),
+            Some(10)
+        );
+
+        // A valid component-1 heartbeat displaces it...
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 1,
+            },
+            t0,
+            Some(heartbeat(MavAutopilot::Ardupilotmega)),
+        );
+        assert_eq!(
+            fleet.vehicle(SystemId(1)).unwrap().autopilot_component(),
+            Some(1)
+        );
+
+        // ...and a later non-1 candidate cannot reclaim it.
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 10,
+            },
+            t0,
+            Some(heartbeat(MavAutopilot::Ardupilotmega)),
+        );
+        assert_eq!(
+            fleet.vehicle(SystemId(1)).unwrap().autopilot_component(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn peripheral_heartbeat_does_not_overwrite_identity() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+
+        let autopilot = DefaultDialect::Heartbeat(Heartbeat {
+            type_: MavType::Quadrotor,
+            autopilot: MavAutopilot::Ardupilotmega,
+            system_status: MavState::Active,
+            ..Default::default()
+        });
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 1,
+            },
+            t0,
+            Some(autopilot),
+        );
+
+        // A gimbal heartbeat must not clobber the vehicle's identity.
+        let gimbal = DefaultDialect::Heartbeat(Heartbeat {
+            type_: MavType::Gimbal,
+            autopilot: MavAutopilot::Invalid,
+            system_status: MavState::Standby,
+            ..Default::default()
+        });
+        fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 154,
+            },
+            t0,
+            Some(gimbal),
+        );
+
+        let vehicle = fleet.vehicle(SystemId(1)).unwrap();
+        assert_eq!(vehicle.identity.mav_type, Some(MavType::Quadrotor));
+        assert_eq!(vehicle.identity.mav_state, Some(MavState::Active));
+        // The peripheral still registers as a component of the system.
+        assert!(vehicle.component_ids().contains(&154));
+    }
+
+    #[test]
     fn newly_seen_vehicle_is_active() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
@@ -483,5 +578,68 @@ mod tests {
 
         assert!((moved.lat - 47.4).abs() < 1e-7, "lat was {}", moved.lat);
         assert!((moved.lon - 8.5).abs() < 1e-7, "lon was {}", moved.lon);
+    }
+
+    #[test]
+    fn peripheral_position_frame_is_ignored() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+        // Give the autopilot (component 1) a recorded position.
+        fleet.observe(
+            source(A),
+            t0,
+            Some(global_position_int(474_000_000, 85_000_000)),
+        );
+
+        let before = {
+            let pos = fleet
+                .vehicle(A)
+                .unwrap()
+                .position
+                .current
+                .as_ref()
+                .unwrap()
+                .pos;
+            (pos.lat, pos.lon)
+        };
+
+        // A peripheral position frame must be ignored for vehicle state...
+        let events = fleet.observe(
+            MavlinkId {
+                system: 1,
+                component: 191,
+            },
+            t0,
+            Some(global_position_int(0, 0)),
+        );
+
+        let after = {
+            let pos = fleet
+                .vehicle(A)
+                .unwrap()
+                .position
+                .current
+                .as_ref()
+                .unwrap()
+                .pos;
+            (pos.lat, pos.lon)
+        };
+        assert!(
+            (after.0 - before.0).abs() < 1e-12,
+            "lat changed to {}",
+            after.0
+        );
+        assert!(
+            (after.1 - before.1).abs() < 1e-12,
+            "lon changed to {}",
+            after.1
+        );
+
+        // ...and must not emit PrimaryMoved.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::PrimaryMoved(..)))
+        );
     }
 }

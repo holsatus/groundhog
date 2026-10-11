@@ -201,6 +201,7 @@ pub fn view<'a>(
                                         weight: font::Weight::Bold,
                                         ..iced::Font::default()
                                     }),
+                                iced::widget::span(format!("[c{}]", status.component)),
                                 iced::widget::span(" "),
                                 iced::widget::span(&status.text),
                             ]
