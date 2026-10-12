@@ -1,49 +1,29 @@
 //! The link feature: editing link configurations and starting/stopping links.
 //!
-//! Owns the editor draft ([`LinkConfigurator`]) and the set of configured
-//! links. Connection lifecycle is handled internally (the router is passed
-//! into [`LinkPanel::update`]); persisting the default link configuration is
-//! requested from the root through [`Event`].
+//! This is a thin adapter. The editor draft ([`LinkConfigurator`]) and the
+//! connect/disconnect buttons are view state; the links themselves and their
+//! connection lifecycle are owned by the headless [`LinkManager`] in the
+//! services layer. The panel translates widget messages into manager intents,
+//! maps manager futures into [`Task`]s, and renders manager state. Persisting
+//! the link set is requested from the root through [`Event`].
 
 mod editor;
 
-use std::collections::BTreeMap;
-
 use iced::{
+    widget::{button, checkbox, container, pick_list, text::Ellipsis, text_input, Button, Column},
     Alignment, Element, Length, Task, Widget,
-    widget::{Button, Column, button, checkbox, container, pick_list, text::Ellipsis, text_input},
 };
 
-pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkVariant};
+pub use editor::{LinkBuilder, LinkConfigurator, LinkVariant, BAUDRATES};
 
 use crate::{
-    foundation::{ArcError, LinkId},
-    link::{self, LinkConfig},
-    mavlink::{LinkGuard, MavlinkRouter},
+    link::{LinkConfig, LinkId},
+    services::{self, LinkManager, LinkStatus, LinkUpdate},
     style,
 };
 
-/// The result of opening a link transport.
-///
-/// Named for what it is, not when it fires: this value is the outcome of a
-/// `Connect`, not a stream event like [`crate::mavlink::Event`].
-#[derive(Debug, Clone)]
-pub enum OpenResult {
-    Connected(LinkId, LinkGuard),
-    Failed(ArcError),
-}
-
-struct Link {
-    config: LinkConfig,
-    handle: Option<LinkGuard>,
-}
-
 pub struct LinkPanel {
     pub(crate) configurator: LinkConfigurator,
-    /// Configured links, keyed by a stable opaque id independent of the name.
-    links: BTreeMap<LinkId, Link>,
-    /// Source of fresh link ids; never derived from the display name.
-    next_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -60,15 +40,10 @@ pub enum Message {
     Save(LinkConfig),
     Connect(LinkId),
     Disconnect(LinkId),
-    /// The router reported that a link died on its own. Lifecycle events ride
-    /// a lossy ring, so every update also reconciles the pane's handles
-    /// against the router, covering events that never arrived.
-    Closed(LinkId),
     /// Remove a configured link, dropping any live connection with it.
     Delete(LinkId),
-    /// The result of an attempted link attach: a connected guard or the
-    /// transport failure.
-    Opened(OpenResult),
+    /// The result of an attempted link attach, produced by the manager.
+    Update(LinkUpdate),
 }
 
 /// A request the root must satisfy, since it owns the configuration file.
@@ -79,68 +54,22 @@ pub enum Event {
 }
 
 impl LinkPanel {
-    /// Build a panel from the persisted links, returning it along with the ids
-    /// of the links marked for auto-connect.
-    pub fn from_config(configs: Vec<LinkConfig>) -> (Self, Vec<LinkId>) {
-        let mut panel = Self {
+    pub fn new() -> Self {
+        Self {
             configurator: LinkConfigurator::new(LinkBuilder::default_udp(), "New link".to_owned()),
-            links: BTreeMap::new(),
-            next_id: 0,
-        };
-
-        let mut auto_connect = Vec::new();
-        for config in configs {
-            let id = panel.fresh_id();
-            if config.auto_connect {
-                auto_connect.push(id.clone());
-            }
-            panel.links.insert(
-                id,
-                Link {
-                    config,
-                    handle: None,
-                },
-            );
-        }
-
-        (panel, auto_connect)
-    }
-
-    /// Mint an opaque link id that does not depend on the display name.
-    fn fresh_id(&mut self) -> LinkId {
-        self.next_id += 1;
-        LinkId::new(&format!("link-{:04}", self.next_id))
-    }
-
-    /// The configured links, in display order.
-    fn configs(&self) -> Vec<LinkConfig> {
-        self.links
-            .values()
-            .map(|link| link.config.clone())
-            .collect()
-    }
-
-    /// Drop pane handles the router no longer knows about.
-    ///
-    /// `LinkClosed` rides the lossy telemetry ring, so a pane handle can
-    /// outlive the attachment it names. A handle to a link the router has
-    /// detached — however that detach happened — is nonsense, and keeping it
-    /// would block a re-attach forever; this reconciles within one message.
-    fn reconcile_closed(&mut self, router: &MavlinkRouter) {
-        for (id, link) in &mut self.links {
-            if link.handle.is_some() && !router.is_attached(id) {
-                log::info!("link {id:?} was lost by the router; reconciling");
-                link.handle = None;
-            }
         }
     }
 
     pub fn update(
         &mut self,
         message: Message,
-        router: &MavlinkRouter,
+        manager: &mut LinkManager,
     ) -> (Task<Message>, Option<Event>) {
-        self.reconcile_closed(router);
+        // `LinkClosed` rides the lossy telemetry ring, so a stored handle can
+        // outlive the attachment it names; reconcile on every message, exactly
+        // as the buttons do, so the view cannot show a connection whose
+        // attachment has gone.
+        manager.reconcile();
 
         match message {
             Message::ChangeName(name) => self.configurator.name = name,
@@ -166,25 +95,8 @@ impl LinkPanel {
                 }
 
                 return (
-                    iced_runtime::task::blocking(move |mut sender| {
-                        let result = serialport::available_ports()
-                            .map(|ports| {
-                                let mut names = ports
-                                    .into_iter()
-                                    .filter(|p| {
-                                        matches!(
-                                            p.port_type,
-                                            serialport::SerialPortType::UsbPort(_)
-                                        )
-                                    })
-                                    .map(|p| p.port_name)
-                                    .collect::<Vec<_>>();
-                                names.sort();
-                                names
-                            })
-                            .map_err(|error| error.to_string());
-                        let _ = sender.try_send(Message::SerialPortsDetected(result));
-                    }),
+                    Task::future(services::link::detect_serial_ports())
+                        .map(Message::SerialPortsDetected),
                     None,
                 );
             }
@@ -204,75 +116,24 @@ impl LinkPanel {
             Message::Save(config) => {
                 // Saving a link with an existing name updates it in place,
                 // keeping its id and dropping any live connection.
-                let existing = self
-                    .links
-                    .iter()
-                    .find(|(_, link)| link.config.name == config.name)
-                    .map(|(id, _)| id.clone());
-                let id = existing.unwrap_or_else(|| self.fresh_id());
-
-                self.links.insert(
-                    id,
-                    Link {
-                        config: config.clone(),
-                        handle: None,
-                    },
-                );
-                return (Task::none(), Some(Event::LinksChanged(self.configs())));
+                if manager.save(config) {
+                    return (Task::none(), Some(Event::LinksChanged(manager.configs())));
+                }
             }
             Message::Connect(id) => {
-                // Refuse a second attach on a live link: double-clicking
-                // Connect would attach a duplicate reader/writer pair.
-                if let Some(link) = self.links.get(&id)
-                    && link.handle.is_none()
-                {
-                    let build = link.config.build.clone();
-                    let high_latency = link.config.high_latency;
-                    let router = router.clone();
-
-                    return (
-                        Task::future(async move {
-                            let link_id = id.clone();
-                            match link::open(build).await {
-                                Ok((reader, writer)) => {
-                                    let handle = router.attach_reader_writer(
-                                        link_id.clone(),
-                                        reader,
-                                        writer,
-                                        high_latency,
-                                    );
-                                    OpenResult::Connected(link_id, handle)
-                                }
-                                Err(error) => OpenResult::Failed(error),
-                            }
-                        })
-                        .map(Message::Opened),
-                        None,
-                    );
+                // The manager refuses a second attach on a live link; a refused
+                // connect spawns no task at all.
+                if let Some(update) = manager.connect(&id) {
+                    return (Task::future(update).map(Message::Update), None);
                 }
             }
-            Message::Disconnect(id) => {
-                if let Some(link) = self.links.get_mut(&id) {
-                    drop(link.handle.take())
-                }
-            }
-            Message::Closed(id) => {
-                if let Some(link) = self.links.get_mut(&id) {
-                    link.handle = None;
-                }
-            }
+            Message::Disconnect(id) => manager.disconnect(&id),
             Message::Delete(id) => {
-                self.links.remove(&id);
-                return (Task::none(), Some(Event::LinksChanged(self.configs())));
-            }
-            Message::Opened(OpenResult::Connected(id, handle)) => {
-                if let Some(link) = self.links.get_mut(&id) {
-                    link.handle = Some(handle)
+                if manager.remove(&id) {
+                    return (Task::none(), Some(Event::LinksChanged(manager.configs())));
                 }
             }
-            Message::Opened(OpenResult::Failed(error)) => {
-                log::error!("Connect failed: {error:?}");
-            }
+            Message::Update(update) => manager.apply(update),
         }
 
         (Task::none(), None)
@@ -481,14 +342,16 @@ impl LinkPanel {
     /// The list of configured links with connect/disconnect buttons.
     ///
     /// "Connected" here means a live guard on an attachment the router still
-    /// holds, checked against the router itself on every frame: the update-
-    /// time reconciliation repairs the stored state, and between messages the
-    /// view cannot lie about a connection whose attachment has gone.
-    pub fn view_status(&self, router: &MavlinkRouter) -> Element<'_, Message> {
+    /// holds, checked against the manager (which checks the router) on every
+    /// frame: the update-time reconciliation repairs the stored state, and
+    /// between messages the view cannot lie about a connection whose
+    /// attachment has gone.
+    pub fn view_status<'a>(&self, manager: &'a LinkManager) -> Element<'a, Message> {
         let mut contents = Vec::new();
 
-        for (index, (id, link)) in self.links.iter().enumerate() {
-            let connected = link.handle.is_some() && router.is_attached(id);
+        for (index, (id, config, status)) in manager.entries().enumerate() {
+            let connected = manager.is_connected(id);
+            let connecting = matches!(status, LinkStatus::Connecting);
 
             let button = if connected {
                 Button::new(
@@ -508,7 +371,7 @@ impl LinkPanel {
                         .align_x(Alignment::Center)
                         .align_y(Alignment::Center),
                 )
-                .on_press_maybe((!connected).then(|| Message::Connect(id.clone())))
+                .on_press_maybe((!connecting).then(|| Message::Connect(id.clone())))
                 .width(100.0)
             };
 
@@ -524,19 +387,36 @@ impl LinkPanel {
             })
             .width(30.0);
 
-            let content = container(iced::widget::row![
-                iced::widget::text(&link.config.name).ellipsis(Ellipsis::End),
-                iced::widget::space().width(Length::Fill),
-                button,
-                delete
-            ].spacing(5.0).align_y(Alignment::Center))
-            
-            .style(if index % 2 == 0 {
-                style::list_default
-            } else {
-                style::list_brighter
-            })
-            .padding(10.0);
+            let mut children: Vec<Element<'_, Message>> = vec![iced::widget::text(&config.name)
+                .ellipsis(Ellipsis::End)
+                .boxed()];
+
+            match &status {
+                LinkStatus::Connecting => {
+                    children.push(iced::widget::text("Connecting…").size(11).boxed());
+                }
+                LinkStatus::Failed(error) => {
+                    children.push(iced::widget::text(error.clone()).size(11).boxed());
+                }
+                LinkStatus::Connected | LinkStatus::Disconnected => {}
+            }
+
+            children.push(iced::widget::space().width(Length::Fill).boxed());
+            children.push(button.boxed());
+            children.push(delete.boxed());
+
+            let row = iced::widget::Row::with_children(children)
+                .spacing(5.0)
+                .align_y(Alignment::Center);
+
+            let content = container(row)
+                .style(if index % 2 == 0 {
+                    style::list_default
+                } else {
+                    style::list_brighter
+                })
+                .padding(10.0);
+
             contents.push(iced::widget::rule::horizontal(1).boxed());
             contents.push(content.boxed());
         }
@@ -545,11 +425,18 @@ impl LinkPanel {
     }
 }
 
+impl Default for LinkPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::foundation::DEFAULT_GCS_ID;
     use crate::link::config::LinkBuild;
+    use crate::services::MavlinkRouter;
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {
@@ -564,158 +451,64 @@ mod tests {
         }
     }
 
-    fn panel() -> (LinkPanel, MavlinkRouter) {
+    fn panel() -> (LinkPanel, LinkManager, MavlinkRouter) {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let (panel, _auto_connect) = LinkPanel::from_config(Vec::new());
-        (panel, router)
-    }
-
-    #[test]
-    fn from_config_loads_links_and_reports_auto_connect() {
-        let auto = LinkConfig {
-            auto_connect: true,
-            ..config("auto")
-        };
-        let manual = config("manual");
-
-        let (panel, auto_connect) = LinkPanel::from_config(vec![auto, manual]);
-
-        assert_eq!(panel.links.len(), 2);
-        assert_eq!(auto_connect.len(), 1);
-
-        let auto_id = auto_connect[0].clone();
-        let auto_link = panel.links.get(&auto_id).expect("auto link loaded");
-        assert_eq!(auto_link.config.name, "auto");
-        assert!(auto_link.config.auto_connect);
-
-        let manual = panel
-            .links
-            .values()
-            .find(|link| link.config.name == "manual")
-            .expect("manual link loaded");
-        assert!(!manual.config.auto_connect);
+        let (manager, _auto_connect) = LinkManager::from_configs(&router, Vec::new());
+        (LinkPanel::new(), manager, router)
     }
 
     #[test]
     fn save_emits_links_changed() {
-        let (mut panel, router) = panel();
+        let (mut panel, mut manager, _router) = panel();
 
-        let (_, event) = panel.update(Message::Save(config("A")), &router);
+        let (_, event) = panel.update(Message::Save(config("A")), &mut manager);
         let Some(Event::LinksChanged(links)) = event else {
             panic!("Save should emit LinksChanged");
         };
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].name, "A");
 
-        let (_, event) = panel.update(Message::ChangeName("B".to_string()), &router);
+        let (_, event) = panel.update(Message::ChangeName("B".to_string()), &mut manager);
         assert!(event.is_none(), "draft edits must not persist");
     }
 
     #[test]
-    fn saving_same_name_reuses_link_id() {
-        let (mut panel, router) = panel();
+    fn delete_emits_links_changed_and_unknown_is_a_noop() {
+        let (mut panel, mut manager, _router) = panel();
 
-        let _ = panel.update(Message::Save(config("A")), &router);
-        assert_eq!(panel.links.len(), 1);
-        let first_id = panel.links.keys().next().unwrap().clone();
+        let _ = panel.update(Message::Save(config("A")), &mut manager);
+        let id = manager.entries().next().unwrap().0.clone();
 
-        let _ = panel.update(Message::Save(config("A")), &router);
-        assert_eq!(panel.links.len(), 1);
-        let second_id = panel.links.keys().next().unwrap().clone();
+        let (_, event) = panel.update(Message::Delete(LinkId::new("does-not-exist")), &mut manager);
+        assert!(event.is_none());
+        assert_eq!(manager.configs().len(), 1);
 
-        assert_eq!(first_id, second_id);
+        let (_, event) = panel.update(Message::Delete(id), &mut manager);
+        let Some(Event::LinksChanged(links)) = event else {
+            panic!("Delete should emit LinksChanged");
+        };
+        assert!(links.is_empty());
     }
 
     #[test]
-    fn saving_different_name_adds_link_with_new_id() {
-        let (mut panel, router) = panel();
+    fn connect_unknown_id_spawns_no_task() {
+        let (mut panel, mut manager, _router) = panel();
 
-        let _ = panel.update(Message::Save(config("A")), &router);
-        let _ = panel.update(Message::Save(config("B")), &router);
-
-        assert_eq!(panel.links.len(), 2);
-        let ids = panel.links.keys().cloned().collect::<Vec<_>>();
-        assert_ne!(ids[0], ids[1]);
-    }
-
-    #[test]
-    fn connect_and_disconnect_unknown_ids_are_noops() {
-        let (mut panel, router) = panel();
-        let unknown = LinkId::new("does-not-exist");
-
-        let (_, event) = panel.update(Message::Disconnect(unknown.clone()), &router);
-        assert!(event.is_none());
-        assert!(panel.links.is_empty());
-
-        let (_, event) = panel.update(Message::Connect(unknown), &router);
-        assert!(event.is_none());
-        assert!(panel.links.is_empty());
-    }
-
-    #[tokio::test]
-    async fn connect_is_refused_while_a_link_is_live() {
-        let (mut panel, router) = panel();
-
-        let _ = panel.update(Message::Save(config("A")), &router);
-        let id = panel.links.keys().next().unwrap().clone();
-
-        // Attach a real guard to a live transport, as a landed OpenResult
-        // would — under the link's own id, like the production connect path.
-        // (The silent duplex peer is held open for the router's reader/writer
-        // pair.)
-        let (_peer, gcs) = tokio::io::duplex(4096);
-        let (reader, writer) = tokio::io::split(gcs);
-        let guard = router.attach_reader_writer(id.clone(), reader, writer, false);
-        panel.links.get_mut(&id).unwrap().handle = Some(guard);
-
-        // The update must refuse outright: no task is spawned at all, so no
-        // second attach could take place, and the existing handle stays.
-        let (task, event) = panel.update(Message::Connect(id.clone()), &router);
-        assert_eq!(
-            task.units(),
-            0,
-            "a live link must refuse a re-connect without spawning a task"
+        let (task, event) = panel.update(
+            Message::Connect(LinkId::new("does-not-exist")),
+            &mut manager,
         );
+        assert_eq!(task.units(), 0);
         assert!(event.is_none());
-        assert!(
-            panel.links.get(&id).unwrap().handle.is_some(),
-            "the live connection must not be disturbed"
-        );
-    }
-
-    #[tokio::test]
-    async fn ghost_handle_is_reconciled_to_the_attached_reality() {
-        let (mut panel, router) = panel();
-
-        let _ = panel.update(Message::Save(config("A")), &router);
-        let id = panel.links.keys().next().unwrap().clone();
-
-        // A guard from a *different* router: the pane claims a live connection
-        // the router it talks to never attached. Such a handle can only be a
-        // ghost (for example a LinkClosed lost to the lossy telemetry ring).
-        let (other, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let (_peer, gcs) = tokio::io::duplex(4096);
-        let (reader, writer) = tokio::io::split(gcs);
-        let guard = other.attach_reader_writer(LinkId::new("other"), reader, writer, false);
-        panel.links.get_mut(&id).unwrap().handle = Some(guard);
-
-        // One update reconciles the pane with the router's reality, and the
-        // Connect button becomes available again.
-        let _ = panel.update(Message::ChangeName("B".to_string()), &router);
-        assert!(panel.links.get(&id).unwrap().handle.is_none());
     }
 
     #[test]
-    fn delete_removes_link_and_unknown_is_noop() {
-        let (mut panel, router) = panel();
+    fn detect_serial_ports_outside_the_serial_editor_is_a_noop() {
+        let (mut panel, mut manager, _router) = panel();
 
-        let _ = panel.update(Message::Save(config("A")), &router);
-        let id = panel.links.keys().next().unwrap().clone();
-
-        let _ = panel.update(Message::Delete(LinkId::new("does-not-exist")), &router);
-        assert_eq!(panel.links.len(), 1);
-
-        let _ = panel.update(Message::Delete(id), &router);
-        assert!(panel.links.is_empty());
+        // The default draft is UDP, so the enumeration must not start.
+        let (task, event) = panel.update(Message::DetectSerialPorts, &mut manager);
+        assert_eq!(task.units(), 0);
+        assert!(event.is_none());
     }
 }

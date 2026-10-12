@@ -18,11 +18,11 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::{DEFAULT_GCS_ID, LinkId, MavlinkId, SystemId},
+    foundation::{DEFAULT_GCS_ID, MavlinkId, SystemId},
     layout::{self, Layout},
+    link::LinkId,
     mavlink,
-    mavlink::MavlinkRouter,
-    services::FleetServices,
+    services::{FleetServices, LinkManager},
     style,
 };
 
@@ -33,7 +33,7 @@ pub struct Application {
     pub(crate) log_panel: LogPanel,
     pub(crate) mission_panel: MissionPanel,
     pub(crate) parameter_panel: ParameterPanel,
-    pub(crate) router: MavlinkRouter,
+    pub(crate) link_manager: LinkManager,
     pub(crate) services: FleetServices,
     pub(crate) configuration: config::Configuration,
     pub(crate) theme: Theme,
@@ -185,10 +185,9 @@ impl Application {
             config::Configuration::default()
         });
 
-        let (link_panel, auto_connect) = LinkPanel::from_config(config.links.clone());
-
         let (client, events) = mavlink::MavlinkRouter::new(DEFAULT_GCS_ID);
         let services = FleetServices::new(&client);
+        let (link_manager, auto_connect) = LinkManager::from_configs(&client, config.links.clone());
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
 
         let auto_connect = Task::batch(
@@ -205,9 +204,9 @@ impl Application {
         let application = Application {
             layout,
             map: Map::new(),
-            link_panel,
+            link_panel: LinkPanel::new(),
             log_panel: LogPanel::new(),
-            router: client,
+            link_manager,
             services,
             configuration: config.clone(),
             theme: config.settings.theme.theme(),
@@ -441,7 +440,7 @@ impl Application {
     }
 
     fn link_message_update(&mut self, message: link_panel::Message) -> Task<Message> {
-        let (task, event) = self.link_panel.update(message, &self.router);
+        let (task, event) = self.link_panel.update(message, &mut self.link_manager);
         let task = task.map(Message::Link);
 
         match event {
@@ -486,8 +485,10 @@ impl Application {
                     }
                 }
                 Telemetry::LinkClosed(link_id) => {
+                    // Link closure is reconciled by the link manager, which
+                    // drops any handle the router no longer holds on the next
+                    // link message; no UI message is needed.
                     log::info!("Link {link_id:?} closed");
-                    tasks.push(self.link_message_update(link_panel::Message::Closed(link_id)));
                 }
             }
         }
@@ -669,7 +670,7 @@ impl Application {
                 .boxed(),
             layout::Panel::Links => iced::widget::column![
                 self.link_panel.view_editor().map(Message::Link),
-                self.link_panel.view_status(&self.router).map(Message::Link),
+                self.link_panel.view_status(&self.link_manager).map(Message::Link),
             ]
             .spacing(10.0)
             .boxed(),

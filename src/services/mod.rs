@@ -6,9 +6,11 @@
 //! of the services layer.
 
 pub mod fleet;
+pub mod link;
 pub mod vehicle;
 
 pub use fleet::FleetServices;
+pub use link::{LinkManager, LinkStatus, LinkUpdate};
 pub use vehicle::VehicleClient;
 
 pub use crate::mavlink::{ParamListSummary, Result};

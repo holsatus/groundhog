@@ -30,7 +30,8 @@ use super::*;
 use super::{error::MavError, transaction::Busy};
 use crate::{
     domain::fleet::Fleet,
-    foundation::{DEFAULT_GCS_ID, LinkId, SystemId},
+    foundation::{DEFAULT_GCS_ID, SystemId},
+    link::LinkId,
     mavlink::io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
 

@@ -26,8 +26,11 @@ use super::{
     matches_target,
 };
 use crate::{
-    foundation::{LinkId, MavlinkId},
-    link::transport::{DynAsyncReader, DynAsyncWriter},
+    foundation::MavlinkId,
+    link::{
+        LinkId,
+        transport::{DynAsyncReader, DynAsyncWriter},
+    },
 };
 
 /// Maximum number of PARAM_SET transactions in flight at once.

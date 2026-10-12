@@ -54,13 +54,3 @@ pub const DEFAULT_GCS_ID: MavlinkId = MavlinkId {
     system: 255,
     component: 1,
 };
-
-/// The name of a configured link. Cheap to clone and usable as a map key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LinkId(Arc<str>);
-
-impl LinkId {
-    pub fn new(id: &str) -> Self {
-        LinkId(Arc::from(id))
-    }
-}
