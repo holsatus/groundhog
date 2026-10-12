@@ -17,11 +17,21 @@ use iced::{
 pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkVariant};
 
 use crate::{
-    foundation::LinkId,
+    foundation::{ArcError, LinkId},
     link::{self, LinkConfig},
     mavlink::{LinkGuard, MavlinkRouter},
     style,
 };
+
+/// The result of opening a link transport.
+///
+/// Named for what it is, not when it fires: this value is the outcome of a
+/// `Connect`, not a stream event like [`crate::mavlink::Event`].
+#[derive(Debug, Clone)]
+pub enum OpenResult {
+    Connected(LinkId, LinkGuard),
+    Failed(ArcError),
+}
 
 struct Link {
     config: LinkConfig,
@@ -58,7 +68,7 @@ pub enum Message {
     Delete(LinkId),
     /// The result of an attempted link attach: a connected guard or the
     /// transport failure.
-    Opened(link::OpenResult),
+    Opened(OpenResult),
 }
 
 /// A request the root must satisfy, since it owns the configuration file.
@@ -231,9 +241,9 @@ impl LinkPanel {
                                         writer,
                                         high_latency,
                                     );
-                                    link::OpenResult::Connected(link_id, handle)
+                                    OpenResult::Connected(link_id, handle)
                                 }
-                                Err(error) => link::OpenResult::Failed(error),
+                                Err(error) => OpenResult::Failed(error),
                             }
                         })
                         .map(Message::Opened),
@@ -255,12 +265,12 @@ impl LinkPanel {
                 self.links.remove(&id);
                 return (Task::none(), Some(Event::LinksChanged(self.configs())));
             }
-            Message::Opened(link::OpenResult::Connected(id, handle)) => {
+            Message::Opened(OpenResult::Connected(id, handle)) => {
                 if let Some(link) = self.links.get_mut(&id) {
                     link.handle = Some(handle)
                 }
             }
-            Message::Opened(link::OpenResult::Failed(error)) => {
+            Message::Opened(OpenResult::Failed(error)) => {
                 log::error!("Connect failed: {error:?}");
             }
         }

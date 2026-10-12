@@ -18,6 +18,7 @@ use crate::foundation::MavlinkId;
 
 pub mod commands;
 pub(crate) mod error;
+pub(crate) mod io;
 mod locks;
 mod mission;
 mod param;

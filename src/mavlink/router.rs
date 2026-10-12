@@ -20,13 +20,14 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use super::{
     Targeted,
     error::{MavError, Result},
+    io::{new_async_receiver, new_async_sender},
     lock,
     locks::{KeyGuard, LockKey, LockMap},
     matches_target,
 };
 use crate::{
     foundation::{LinkId, MavlinkId},
-    link::transport::{DynAsyncReader, DynAsyncWriter, new_async_receiver, new_async_sender},
+    link::transport::{DynAsyncReader, DynAsyncWriter},
 };
 
 /// Maximum number of PARAM_SET transactions in flight at once.

@@ -31,7 +31,7 @@ use super::{error::MavError, transaction::Busy};
 use crate::{
     domain::fleet::Fleet,
     foundation::{DEFAULT_GCS_ID, LinkId, SystemId},
-    link::transport::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
+    mavlink::io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };
 
 const VEHICLE: MavlinkId = MavlinkId {
