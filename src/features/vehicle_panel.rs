@@ -11,7 +11,7 @@ use iced::{
 
 use crate::{
     domain::vehicle::{Liveness, Vehicle},
-    foundation::SystemId,
+    domain::SystemId,
     style,
     widget::virtualized::virtual_list,
 };

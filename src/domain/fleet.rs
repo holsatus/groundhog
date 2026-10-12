@@ -21,8 +21,8 @@ use mavio::DefaultDialect;
 use crate::{
     domain::geo::GeoPosition,
     domain::mission::MissionPlan,
-    domain::vehicle::{Liveness, Vehicle},
-    foundation::{MavlinkId, SystemId},
+    domain::vehicle::{Liveness, SystemId, Vehicle},
+    foundation::MavlinkId,
 };
 
 /// A vehicle still counts as active while it has been heard from within this

@@ -17,7 +17,6 @@ pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
 pub struct PositionTrack {
     pub current: Option<GlobalPosition>,
     pub trail: VecDeque<GlobalPosition>,
-    pub last_pop_count: usize,
     pub velocity_ned: Option<Vector3<f32>>,
     pub altitude_msl: Option<f32>,
 }
@@ -74,6 +73,20 @@ impl PositionTrack {
         }
     }
 
+    /// Drop one point from the trail according to the retention policy.
+    ///
+    /// The trail is bounded by [`GLOBAL_POSITION_MAX_LEN`]; on overflow this
+    /// compaction step chooses which point to discard so memory stays bounded
+    /// without visibly changing the drawn track. It first drops points that are
+    /// trivially disposable — when fewer than three remain, or the oldest is
+    /// older than [`GLOBAL_POSITION_MAX_AGE`] — then, among the remaining
+    /// interior points, removes the one that deviates least from the polyline
+    /// through its neighbours (a shoelace-area cost, weighted by the time span
+    /// it bridges).
+    ///
+    /// This is the domain's retention policy, not a view concern: it is what
+    /// keeps a long flight's history affordable, and the map simply draws
+    /// whatever the trail holds.
     fn prune_one(&mut self) {
         // Plain closure so the early `return`s below exit the pruning step.
         (|| {
@@ -132,10 +145,8 @@ impl PositionTrack {
             }
 
             if let Some((idx, _)) = prune_idx {
-                self.last_pop_count += 1;
                 self.trail.remove(idx);
             } else {
-                self.last_pop_count = 0;
                 self.trail.pop_front();
             }
         })();

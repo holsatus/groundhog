@@ -9,6 +9,7 @@ use mavio::{DefaultDialect, error::SpecError};
 
 use crate::{
     config,
+    domain::SystemId,
     domain::fleet::{Fleet, FleetEvent},
     domain::vehicle::Liveness,
     features::link_panel::{self, LinkPanel},
@@ -18,7 +19,7 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::{DEFAULT_GCS_ID, MavlinkId, SystemId},
+    foundation::MavlinkId,
     layout::{self, Layout},
     link::LinkId,
     mavlink,
@@ -185,7 +186,7 @@ impl Application {
             config::Configuration::default()
         });
 
-        let (client, events) = mavlink::MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (client, events) = mavlink::MavlinkRouter::new(mavlink::DEFAULT_GCS_ID);
         let services = FleetServices::new(&client);
         let (link_manager, auto_connect) = LinkManager::from_configs(&client, config.links.clone());
         let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));

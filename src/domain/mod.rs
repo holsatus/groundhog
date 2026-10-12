@@ -4,3 +4,5 @@ pub mod geo;
 pub mod mission;
 pub mod parameter;
 pub mod vehicle;
+
+pub use vehicle::SystemId;

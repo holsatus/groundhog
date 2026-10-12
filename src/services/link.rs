@@ -242,8 +242,8 @@ pub async fn detect_serial_ports() -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::DEFAULT_GCS_ID;
     use crate::link::config::LinkBuild;
+    use crate::mavlink::DEFAULT_GCS_ID;
     use std::net::{Ipv4Addr, SocketAddrV4};
 
     fn config(name: &str) -> LinkConfig {

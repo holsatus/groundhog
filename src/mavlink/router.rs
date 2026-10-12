@@ -687,7 +687,7 @@ pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::DEFAULT_GCS_ID;
+    use crate::mavlink::DEFAULT_GCS_ID;
     use futures::StreamExt;
     use mavio::dialects::minimal::messages::Heartbeat;
 

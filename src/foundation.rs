@@ -1,8 +1,16 @@
-//! Small shared value types used across layers.
+//! The shared wire address, plus the common error aliases.
 //!
-//! Anything in here is deliberately tiny and dependency-free so that the
-//! domain, transport, and UI layers can all agree on it without creating a
-//! dependency between one another.
+//! [`MavlinkId`] is the one value type deliberately shared across layers, and
+//! it is shared as an *address*, not as an identity. The domain uses it as "an
+//! address to target" — every command, mission transfer, and parameter
+//! operation names a [`MavlinkId`] (see
+//! [`Vehicle::target`](crate::domain::vehicle::Vehicle::target)) — while the
+//! transports use it to send and receive. A vehicle's *identity*, by contrast,
+//! is the domain's own identity type, which lives with the domain and is never
+//! needed on the wire.
+//!
+//! The error aliases are the shared carriers for boxed and reference-counted
+//! errors crossing layer boundaries.
 
 use std::sync::Arc;
 
@@ -15,42 +23,10 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// This is transport-level addressing, not identity: every command, mission
 /// transfer, and parameter operation is addressed to a specific component of a
 /// system. A component of `0` is treated as a wildcard in the direction of a
-/// target (see `crate::mavlink::matches_target`). For the identity of a *vehicle*, use
-/// [`SystemId`].
+/// target (see `crate::mavlink::matches_target`). For the identity of a
+/// *vehicle*, see the domain's own identity type.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MavlinkId {
     pub system: u8,
     pub component: u8,
 }
-
-/// Identifies a MAVLink system — i.e. a vehicle.
-///
-/// This is the fleet's identity type. It is deliberately distinct from
-/// [`MavlinkId`], which is an *address* (system + component) used for sending
-/// and receiving. A vehicle is a system; components are endpoints within it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SystemId(pub u8);
-
-impl From<u8> for SystemId {
-    fn from(system: u8) -> Self {
-        SystemId(system)
-    }
-}
-
-impl From<SystemId> for u8 {
-    fn from(id: SystemId) -> Self {
-        id.0
-    }
-}
-
-impl std::fmt::Display for SystemId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "sys{}", self.0)
-    }
-}
-
-/// The GCS's default MAVLink identity, stamped on outbound frames.
-pub const DEFAULT_GCS_ID: MavlinkId = MavlinkId {
-    system: 255,
-    component: 1,
-};

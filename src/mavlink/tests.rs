@@ -29,8 +29,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use super::*;
 use super::{error::MavError, transaction::Busy};
 use crate::{
+    domain::SystemId,
     domain::fleet::Fleet,
-    foundation::{DEFAULT_GCS_ID, SystemId},
     link::LinkId,
     mavlink::io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
 };

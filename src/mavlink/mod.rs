@@ -33,6 +33,12 @@ pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};
 pub use transaction::Command;
 
+/// The GCS's default MAVLink identity, stamped on outbound frames.
+pub const DEFAULT_GCS_ID: MavlinkId = MavlinkId {
+    system: 255,
+    component: 1,
+};
+
 #[cfg(test)]
 mod tests;
 

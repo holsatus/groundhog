@@ -13,8 +13,8 @@ use iced::{
 use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
+    domain::SystemId,
     domain::vehicle::{StatusText, Vehicle, status},
-    foundation::SystemId,
     style,
     widget::virtualized::virtual_list,
 };

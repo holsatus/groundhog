@@ -29,13 +29,14 @@ use mav_param::{Ident, Value};
 use rfd::AsyncFileDialog;
 
 use crate::{
+    domain::SystemId,
     domain::fleet::Fleet,
     domain::parameter::{
         ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, group_of, value_parse_as,
         value_type_matches,
     },
     domain::vehicle::Vehicle,
-    foundation::{BoxError, MavlinkId, SystemId},
+    foundation::{BoxError, MavlinkId},
     services::{FleetServices, ParamListSummary, Result},
     storage::parameter::{parameters_from_ini_str, parameters_to_ini_string},
     style,
@@ -899,7 +900,8 @@ fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::{DEFAULT_GCS_ID, MavlinkId};
+    use crate::foundation::MavlinkId;
+    use crate::mavlink::DEFAULT_GCS_ID;
     use crate::services::{MavError, MavlinkRouter};
 
     const A: SystemId = SystemId(1);

@@ -43,8 +43,34 @@ use crate::{
     domain::firmware::FlightMode,
     domain::mission::{MissionPlan, MissionSync},
     domain::parameter::{self, Parameters},
-    foundation::{BoxError, MavlinkId, SystemId},
+    foundation::{BoxError, MavlinkId},
 };
+
+/// Identifies a MAVLink system — i.e. a vehicle.
+///
+/// This is the fleet's identity type. It is deliberately distinct from
+/// [`MavlinkId`], which is an *address* (system + component) used for sending
+/// and receiving. A vehicle is a system; components are endpoints within it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SystemId(pub u8);
+
+impl From<u8> for SystemId {
+    fn from(system: u8) -> Self {
+        SystemId(system)
+    }
+}
+
+impl From<SystemId> for u8 {
+    fn from(id: SystemId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for SystemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sys{}", self.0)
+    }
+}
 
 /// How recently a vehicle has been heard from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

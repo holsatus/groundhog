@@ -30,11 +30,11 @@ use mavio::default_dialect::messages::CommandAck;
 use rfd::AsyncFileDialog;
 
 use crate::{
+    domain::SystemId,
     domain::fleet::Fleet,
     domain::geo::GeoPosition,
     domain::mission::{MissionCommand, MissionCommandKind, MissionField, MissionItem, Position},
     domain::vehicle::Vehicle,
-    foundation::SystemId,
     services::{DownloadedMission, FleetServices, Result},
     storage::mission::{parse_wpl, write_wpl},
     style,
@@ -1088,7 +1088,8 @@ mod tests {
     use std::time::Instant;
 
     use crate::domain::mission::MissionPlan;
-    use crate::foundation::{DEFAULT_GCS_ID, MavlinkId};
+    use crate::foundation::MavlinkId;
+    use crate::mavlink::DEFAULT_GCS_ID;
     use crate::services::{MavError, MavlinkRouter};
 
     const A: SystemId = SystemId(1);

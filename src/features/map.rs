@@ -32,7 +32,7 @@ use slippery::{
     location,
 };
 
-use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::SystemId};
+use crate::{domain::SystemId, domain::geo::GeoPosition, domain::vehicle::Vehicle};
 
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));

@@ -160,7 +160,7 @@ impl VehicleClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::DEFAULT_GCS_ID;
+    use crate::mavlink::DEFAULT_GCS_ID;
 
     const VEHICLE: MavlinkId = MavlinkId {
         system: 1,
