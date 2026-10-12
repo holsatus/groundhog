@@ -3,11 +3,15 @@
 //! The router emits one [`Event`] per received frame. Decoding a frame into the
 //! default dialect is middleware work, so it lives here rather than in the UI
 //! root: [`coalesce`] decodes off the UI thread and delivers ready batches.
+//!
+//! This module depends only on `futures`/`tokio`/`mavio`; the middleware layer
+//! must not pull in the GUI framework.
 
 use std::time::{Duration, Instant};
 
-use iced::futures::{SinkExt, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use mavio::{DefaultDialect, error::SpecError};
+use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{foundation::MavlinkId, link::LinkId};
 
@@ -15,8 +19,8 @@ use super::Event;
 
 /// An inbound router event with its frame already decoded.
 ///
-/// Decoding runs on the coalescing tokio task, off the UI thread, so `update`
-/// only has to fold ready messages into the fleet.
+/// Decoding runs on the coalescing task, off the UI thread, so `update` only
+/// has to fold ready messages into the fleet.
 // `DefaultDialect` is inherently large but each value is moved straight into
 // the fleet; the enum only lives for the span of one coalesced batch.
 #[allow(clippy::large_enum_variant)]
@@ -63,32 +67,48 @@ impl From<Event> for Telemetry {
 /// The router emits one event per received frame. Without this, a busy link
 /// would rebuild the whole view once per frame; instead events are collected
 /// and delivered in order in a single batch at most once per `frame`.
+///
+/// Built from `futures`/`tokio` primitives only. The stream state is the events
+/// stream, the ticker, and the pending batch; each tick yields the batch
+/// accumulated so far. The ticker is created on first poll so constructing the
+/// stream needs no runtime context.
 pub fn coalesce(
     events: impl Stream<Item = Event> + Send + 'static,
     frame: Duration,
 ) -> impl Stream<Item = Vec<Telemetry>> + Send + 'static {
-    iced::stream::channel(1, async move |mut output| {
-        let mut events = Box::pin(events);
-        let mut tick = tokio::time::interval(frame);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        tick.tick().await; // consume the immediate first tick
-
-        let mut batch = Vec::new();
-        loop {
-            tokio::select! {
-                biased;
-                _ = tick.tick() => {
-                    if !batch.is_empty()
-                        && output.send(std::mem::take(&mut batch)).await.is_err()
-                    {
-                        break;
-                    }
+    stream::unfold(
+        (Box::pin(events), None::<Interval>, Vec::new()),
+        move |(mut events, tick, mut batch)| async move {
+            let mut tick = match tick {
+                Some(tick) => tick,
+                None => {
+                    let mut tick = interval(frame);
+                    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    tick.tick().await; // consume the immediate first tick
+                    tick
                 }
-                event = events.next() => match event {
-                    Some(event) => batch.push(Telemetry::from(event)),
-                    None => break,
-                },
+            };
+
+            loop {
+                // `biased` polls the ticker first, so a ready tick flushes the
+                // batch before another event is folded in.
+                let ready = tokio::select! {
+                    biased;
+                    _ = tick.tick() => !batch.is_empty(),
+                    event = events.next() => match event {
+                        Some(event) => {
+                            batch.push(Telemetry::from(event));
+                            false
+                        }
+                        None => return None,
+                    },
+                };
+
+                if ready {
+                    let batch_out = std::mem::take(&mut batch);
+                    return Some((batch_out, (events, Some(tick), batch)));
+                }
             }
-        }
-    })
+        },
+    )
 }
