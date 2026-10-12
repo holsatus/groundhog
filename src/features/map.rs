@@ -21,8 +21,8 @@ use iced::{
     mouse,
     widget::{
         canvas::{
-            Event, Fill, Frame, Gradient, LineCap, LineJoin, Path, Stroke, Style, Text, fill,
-            gradient::Linear,
+            Event as CanvasEvent, Fill, Frame, Gradient, LineCap, LineJoin, Path, Stroke, Style,
+            Text, fill, gradient::Linear,
         },
         image::Handle,
     },
@@ -37,20 +37,37 @@ use crate::{domain::geo::GeoPosition, domain::vehicle::Vehicle, foundation::Syst
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
 
-/// Mission-overlay interaction state supplied by the mission feature.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Interaction {
-    /// The next click places a waypoint.
-    pub placing: bool,
-    /// The mission item currently being dragged, if any.
-    pub dragging: Option<usize>,
+/// A neutral interaction the map observed on its overlay.
+///
+/// The map only reports *what* happened (a click, a drag move, a release) and
+/// where; it does not know what the overlay means. The feature that owns the
+/// displayed overlay resolves it. `system` is the displayed vehicle captured at
+/// emission, so a later primary switch cannot misaddress the interaction.
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// A left click on the overlay. `marker` is the nearest drawn mission
+    /// marker's mission index, or `None` when the click missed every marker.
+    Picked {
+        system: SystemId,
+        marker: Option<usize>,
+        position: GeoPosition,
+    },
+    /// A pointer move while a drag is armed.
+    Dragged {
+        system: SystemId,
+        marker: usize,
+        position: GeoPosition,
+    },
+    /// The left button released while a drag is armed.
+    Released { system: SystemId },
 }
 
 /// The map layer's own state.
 ///
-/// It renders the mission overlay and translates raw map input into mission
-/// intents, but owns no mission interaction state: placement mode and the
-/// dragged waypoint are supplied by the mission feature via [`Interaction`].
+/// It renders the mission overlay and translates raw map input into neutral
+/// [`Event`]s, but owns no mission interaction state: the feature that owns the
+/// overlay supplies the one derived input it needs (the dragged marker) and
+/// resolves each event.
 pub struct Map {
     viewpoint: Viewpoint,
     projector: Option<Projector>,
@@ -69,16 +86,9 @@ pub enum Message {
     Cache(CacheMessage),
     /// Toggle following the primary vehicle.
     Follow(bool),
-    /// A mission waypoint was pressed on the map (select it, begin a drag).
-    /// Carries the vehicle whose mission is displayed, captured at emission.
-    WaypointPressed(SystemId, usize),
-    /// A dragged waypoint's new geographic position, for the displayed vehicle.
-    WaypointDragged(SystemId, usize, GeoPosition),
-    /// A waypoint drag ended, for the displayed vehicle.
-    WaypointReleased(SystemId),
-    /// The map was clicked in "place waypoint" mode.
-    /// Carries the vehicle whose mission is displayed, captured at emission.
-    PlaceAt(SystemId, GeoPosition),
+    /// A neutral interaction observed on the overlay, for the feature that owns
+    /// the displayed overlay to resolve.
+    Interaction(Event),
 }
 
 impl Map {
@@ -94,7 +104,9 @@ impl Map {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> iced::Task<Message> {
+    /// Handle the map's own messages, returning its task and any neutral
+    /// interaction the feature that owns the overlay must resolve.
+    pub fn update(&mut self, message: Message) -> (iced::Task<Message>, Option<Event>) {
         match message {
             Message::Projector(projector) => {
                 self.viewpoint = projector.viewpoint;
@@ -105,25 +117,22 @@ impl Map {
                 self.viewpoint.position = mercator(pos);
             }
             Message::Cache(message) => {
-                return self.tile_cache.update(message).map(Message::Cache);
+                return (self.tile_cache.update(message).map(Message::Cache), None);
             }
             Message::Follow(value) => self.follow = value,
-            // Waypoint messages are intents the mission feature owns; the map
-            // tracks no interaction state, so they are no-ops here.
-            Message::WaypointPressed(..)
-            | Message::WaypointDragged(..)
-            | Message::WaypointReleased(_)
-            | Message::PlaceAt(..) => {}
+            // The overlay's meaning is not the map's concern: pass the event
+            // through for the owning feature to resolve.
+            Message::Interaction(event) => return (iced::Task::none(), Some(event)),
         }
 
-        iced::Task::none()
+        (iced::Task::none(), None)
     }
 
     pub fn view<'a>(
         &'a self,
         vehicles: &'a BTreeMap<SystemId, Vehicle>,
         primary: Option<SystemId>,
-        interaction: Interaction,
+        dragging: Option<usize>,
         theme: &Theme,
     ) -> impl Widget<Message> + 'a {
         let background = theme.palette().background.base.color;
@@ -148,7 +157,7 @@ impl Map {
                     if let Some(id) = primary
                         && let Some(vehicle) = vehicles.get(&id)
                     {
-                        draw_mission(vehicle, projector, frame, interaction.dragging);
+                        draw_mission(vehicle, projector, frame, dragging);
                     }
                 });
 
@@ -171,7 +180,7 @@ impl Map {
                 // therefore read with `position_over`; unlike the draw layer,
                 // whose projector normalises bounds to the origin, we must NOT
                 // use `position_in`.
-                interact(projector, cursor, event, vehicles, primary, interaction)
+                interact(projector, cursor, event, vehicles, primary, dragging)
             })
             .build(self.viewpoint)
     }
@@ -228,7 +237,7 @@ fn draw_rounded_frame(
     );
 }
 
-/// Decide what a canvas event means for the mission overlay.
+/// Decide what a canvas event means for the overlay, as a neutral [`Event`].
 ///
 /// `projector.bounds` are absolute screen coordinates and the projection
 /// methods operate in that space, so the cursor is read with
@@ -236,62 +245,62 @@ fn draw_rounded_frame(
 fn interact(
     projector: &Projector,
     cursor: &mouse::Cursor,
-    event: &Event,
+    event: &CanvasEvent,
     vehicles: &BTreeMap<SystemId, Vehicle>,
     primary: Option<SystemId>,
-    interaction: Interaction,
+    dragging: Option<usize>,
 ) -> Action<Message> {
     let point = cursor.position_over(projector.bounds);
 
     match event {
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+        CanvasEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
             let Some(point) = point else {
                 return Action::None;
             };
-            // Both click actions below need the displayed vehicle; without one
+            // A pick needs a displayed vehicle to address it; without one
             // nothing is emitted.
             let Some(id) = primary else {
                 return Action::None;
             };
 
-            if let Some(vehicle) = vehicles.get(&id)
-                && let Some(index) = waypoint_at(vehicle, projector, point)
-            {
-                return Action::Capture(Message::WaypointPressed(id, index));
-            }
+            let marker = vehicles
+                .get(&id)
+                .and_then(|vehicle| waypoint_at(vehicle, projector, point));
 
-            if interaction.placing {
-                return Action::Capture(Message::PlaceAt(id, cursor_geo(projector, point)));
-            }
-
-            Action::None
+            // Always report the pick: whether a markerless click places a
+            // waypoint or does nothing is the owning feature's decision.
+            Action::Capture(Message::Interaction(Event::Picked {
+                system: id,
+                marker,
+                position: cursor_geo(projector, point),
+            }))
         }
-        Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-            let Some(index) = interaction.dragging else {
+        CanvasEvent::Mouse(mouse::Event::CursorMoved { .. }) => {
+            let Some(marker) = dragging else {
                 return Action::None;
             };
             let Some(point) = point else {
                 return Action::None;
             };
-            // Emission is gated on `interaction.dragging`, which the root seeds
-            // from the displayed vehicle; stamping the current primary is
-            // therefore the drag's vehicle.
+            // Emission is gated on `dragging`, which the root seeds from the
+            // displayed vehicle; stamping the current primary is therefore the
+            // drag's vehicle.
             let Some(id) = primary else {
                 return Action::None;
             };
 
-            Action::Capture(Message::WaypointDragged(
-                id,
-                index,
-                cursor_geo(projector, point),
-            ))
+            Action::Capture(Message::Interaction(Event::Dragged {
+                system: id,
+                marker,
+                position: cursor_geo(projector, point),
+            }))
         }
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-            if interaction.dragging.is_some() {
+        CanvasEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            if dragging.is_some() {
                 let Some(id) = primary else {
                     return Action::None;
                 };
-                Action::Capture(Message::WaypointReleased(id))
+                Action::Capture(Message::Interaction(Event::Released { system: id }))
             } else {
                 Action::None
             }
@@ -633,10 +642,10 @@ mod tests {
         let mut vehicles = BTreeMap::new();
         vehicles.insert(id, vehicle_with_waypoint(47.4, 8.5));
 
-        let pressed = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let pressed = CanvasEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
 
         // The waypoint's absolute screen point must hit the marker, and the
-        // emitted intent is stamped with the displayed vehicle's id.
+        // emitted pick is stamped with the displayed vehicle's id.
         let absolute = projector.geodetic_into_screen_space(Geodetic::new(8.5, 47.4));
         assert!(matches!(
             interact(
@@ -645,12 +654,17 @@ mod tests {
                 &pressed,
                 &vehicles,
                 Some(id),
-                Interaction::default(),
+                None,
             ),
-            Action::Capture(Message::WaypointPressed(stamped, 0)) if stamped == id
+            Action::Capture(Message::Interaction(Event::Picked {
+                system,
+                marker: Some(0),
+                ..
+            })) if system == id
         ));
 
-        // A press far from any marker is ignored when not placing...
+        // A press far from any marker reports a markerless pick; whether that
+        // places a waypoint or does nothing is the owning feature's decision.
         let away = Point::new(absolute.x + 200.0, absolute.y + 200.0);
         assert!(matches!(
             interact(
@@ -659,31 +673,18 @@ mod tests {
                 &pressed,
                 &vehicles,
                 Some(id),
-                Interaction::default(),
+                None,
             ),
-            Action::None
+            Action::Capture(Message::Interaction(Event::Picked {
+                system,
+                marker: None,
+                ..
+            })) if system == id
         ));
 
-        // ...and places a waypoint on the displayed vehicle's mission when
-        // placing.
-        assert!(matches!(
-            interact(
-                &projector,
-                &mouse::Cursor::Available(away),
-                &pressed,
-                &vehicles,
-                Some(id),
-                Interaction {
-                    placing: true,
-                    ..Default::default()
-                },
-            ),
-            Action::Capture(Message::PlaceAt(stamped, _)) if stamped == id
-        ));
-
-        // A drag move on the displayed vehicle's mission is stamped with its
-        // id, as is the release that ends the drag.
-        let dragged = Event::Mouse(mouse::Event::CursorMoved { position: absolute });
+        // A drag move with a drag armed is stamped with the displayed vehicle's
+        // id and the dragged marker...
+        let dragged = CanvasEvent::Mouse(mouse::Event::CursorMoved { position: absolute });
         assert!(matches!(
             interact(
                 &projector,
@@ -691,15 +692,30 @@ mod tests {
                 &dragged,
                 &vehicles,
                 Some(id),
-                Interaction {
-                    dragging: Some(0),
-                    ..Default::default()
-                },
+                Some(0),
             ),
-            Action::Capture(Message::WaypointDragged(stamped, 0, _)) if stamped == id
+            Action::Capture(Message::Interaction(Event::Dragged {
+                system,
+                marker: 0,
+                ..
+            })) if system == id
         ));
 
-        let released = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        // ...and a move with no drag armed is ignored.
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(absolute),
+                &dragged,
+                &vehicles,
+                Some(id),
+                None,
+            ),
+            Action::None
+        ));
+
+        // The release that ends the drag is stamped with its id...
+        let released = CanvasEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
         assert!(matches!(
             interact(
                 &projector,
@@ -707,12 +723,40 @@ mod tests {
                 &released,
                 &vehicles,
                 Some(id),
-                Interaction {
-                    dragging: Some(0),
-                    ..Default::default()
-                },
+                Some(0),
             ),
-            Action::Capture(Message::WaypointReleased(stamped)) if stamped == id
+            Action::Capture(Message::Interaction(Event::Released { system })) if system == id
         ));
+
+        // ...and a release with no drag armed is ignored.
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(absolute),
+                &released,
+                &vehicles,
+                Some(id),
+                None,
+            ),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn update_passes_interaction_events_through() {
+        let mut map = Map::new();
+
+        let (_, event) = map.update(Message::Interaction(Event::Released {
+            system: SystemId(1),
+        }));
+
+        assert!(matches!(
+            event,
+            Some(Event::Released { system }) if system == SystemId(1)
+        ));
+
+        // The map's own messages carry no interaction.
+        let (_, event) = map.update(Message::Follow(true));
+        assert!(event.is_none());
     }
 }

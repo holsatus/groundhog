@@ -117,8 +117,6 @@ pub enum MessageKind {
     MoveUp(usize),
     MoveDown(usize),
     Select(usize),
-    /// A mission waypoint was pressed on the map: select it and begin a drag.
-    BeginDrag(usize),
     /// A map drag ended.
     EndDrag,
     SetCurrent(usize),
@@ -129,8 +127,13 @@ pub enum MessageKind {
     TogglePlacing,
     /// A map drag moved waypoint `usize` to a new geographic position.
     MoveWaypointTo(usize, GeoPosition),
-    /// A map click in "place waypoint" mode adds a waypoint at this position.
-    AddWaypointAt(GeoPosition),
+    /// A neutral pick from the map. `marker` is the pressed mission marker's
+    /// index, or `None` when the click missed every marker; the panel resolves
+    /// it against its own placement and selection state.
+    MapPicked {
+        marker: Option<usize>,
+        position: GeoPosition,
+    },
 
     // Results, for the envelope's vehicle.
     Downloaded(Result<DownloadedMission>),
@@ -173,7 +176,7 @@ impl MissionPanel {
 
     /// Whether the displayed (primary) vehicle's panel is in "place waypoint"
     /// mode.
-    pub fn is_placing(&self, primary: Option<SystemId>) -> bool {
+    fn is_placing(&self, primary: Option<SystemId>) -> bool {
         primary
             .and_then(|id| self.ui(id))
             .is_some_and(|ui| ui.placing)
@@ -228,7 +231,6 @@ impl MissionPanel {
             MessageKind::MoveUp(index) => self.move_item(id, index, true, ctx),
             MessageKind::MoveDown(index) => self.move_item(id, index, false, ctx),
             MessageKind::Select(index) => self.select(id, index, ctx)?,
-            MessageKind::BeginDrag(index) => self.begin_drag(id, index, ctx)?,
             MessageKind::EndDrag => self.end_drag(id)?,
             MessageKind::ChangeCommand(index, command) => {
                 self.change_command(id, index, command, ctx)?
@@ -240,7 +242,9 @@ impl MissionPanel {
             MessageKind::MoveWaypointTo(index, position) => {
                 self.move_waypoint_to(id, index, position, ctx)?
             }
-            MessageKind::AddWaypointAt(position) => self.add_waypoint_at(id, position, ctx)?,
+            MessageKind::MapPicked { marker, position } => {
+                self.map_picked(id, marker, position, ctx)?
+            }
             MessageKind::SaveDialog => return self.save_dialog(id, ctx),
             MessageKind::SaveToFile(path) => return self.save_to_file(id, path, ctx),
             MessageKind::SaveFinished(path, result) => {
@@ -505,6 +509,23 @@ impl MissionPanel {
         }
         ui.dragging = Some(index);
         Some(())
+    }
+
+    /// Resolve a neutral map pick against the panel's own state: a marker press
+    /// selects it and begins a drag; a markerless press places a waypoint while
+    /// placing, and is otherwise a no-op.
+    fn map_picked(
+        &mut self,
+        id: SystemId,
+        marker: Option<usize>,
+        position: GeoPosition,
+        ctx: &mut Context,
+    ) -> Option<()> {
+        match marker {
+            Some(index) => self.begin_drag(id, index, ctx),
+            None if self.is_placing(Some(id)) => self.add_waypoint_at(id, position, ctx),
+            None => Some(()),
+        }
     }
 
     /// End the addressed vehicle's map drag. Clearing only touches state that
@@ -1467,7 +1488,6 @@ mod tests {
             message(UNKNOWN, MessageKind::MoveUp(0)),
             message(UNKNOWN, MessageKind::MoveDown(0)),
             message(UNKNOWN, MessageKind::Select(0)),
-            message(UNKNOWN, MessageKind::BeginDrag(0)),
             message(UNKNOWN, MessageKind::EndDrag),
             message(UNKNOWN, MessageKind::SetCurrent(0)),
             message(
@@ -1491,10 +1511,23 @@ mod tests {
             ),
             message(
                 UNKNOWN,
-                MessageKind::AddWaypointAt(GeoPosition {
-                    lat: 12.0,
-                    lon: 34.0,
-                }),
+                MessageKind::MapPicked {
+                    marker: None,
+                    position: GeoPosition {
+                        lat: 12.0,
+                        lon: 34.0,
+                    },
+                },
+            ),
+            message(
+                UNKNOWN,
+                MessageKind::MapPicked {
+                    marker: Some(0),
+                    position: GeoPosition {
+                        lat: 12.0,
+                        lon: 34.0,
+                    },
+                },
             ),
             message(UNKNOWN, MessageKind::SaveDialog),
             message(UNKNOWN, MessageKind::LoadDialog),
@@ -1660,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn add_waypoint_at_appends_and_selects() {
+    fn placing_a_map_pick_appends_and_selects() {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
@@ -1668,12 +1701,21 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
+            message(A, MessageKind::TogglePlacing),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
             message(
                 A,
-                MessageKind::AddWaypointAt(GeoPosition {
-                    lat: 47.0,
-                    lon: 8.0,
-                }),
+                MessageKind::MapPicked {
+                    marker: None,
+                    position: GeoPosition {
+                        lat: 47.0,
+                        lon: 8.0,
+                    },
+                },
             ),
         );
 
@@ -1682,6 +1724,90 @@ mod tests {
         assert_eq!(ui(&panel, A).selected, Some(0));
         assert!((lat(&fleet, 0) - 47.0).abs() < 1e-9);
         assert!((lon(&fleet, 0) - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn map_pick_resolves_against_placing_and_selection() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        // Seed a mission so a marker can be picked, and start synced.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
+        mission_mark_synced(&mut fleet);
+        assert_eq!(mission(&fleet).len(), 1);
+
+        // A markerless pick while not placing does nothing.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: None,
+                    position: GeoPosition { lat: 1.0, lon: 2.0 },
+                },
+            ),
+        );
+        assert_eq!(mission(&fleet).len(), 1);
+        assert!(!sync(&fleet).dirty);
+        assert_eq!(ui(&panel, A).dragging, None);
+
+        // A pick on a marker selects it and begins a drag, without adding.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: Some(0),
+                    position: GeoPosition { lat: 1.0, lon: 2.0 },
+                },
+            ),
+        );
+        assert_eq!(ui(&panel, A).selected, Some(0));
+        assert_eq!(ui(&panel, A).dragging, Some(0));
+        assert_eq!(mission(&fleet).len(), 1, "a marker pick does not add");
+
+        // A markerless pick while placing adds a waypoint at the position.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::EndDrag),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::TogglePlacing),
+        );
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: None,
+                    position: GeoPosition {
+                        lat: 47.0,
+                        lon: 8.0,
+                    },
+                },
+            ),
+        );
+        assert_eq!(mission(&fleet).len(), 2);
+        assert!(sync(&fleet).dirty);
+        assert_eq!(ui(&panel, A).selected, Some(1));
+        assert!((lat(&fleet, 1) - 47.0).abs() < 1e-9);
+        assert!((lon(&fleet, 1) - 8.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1783,12 +1909,18 @@ mod tests {
         assert_eq!(ui(&panel, A).selected, Some(1));
         assert_eq!(ui(&panel, A).dragging, None);
 
-        // A map press selects and drags the waypoint.
+        // A map press on a marker selects and drags the waypoint.
         let _ = step(
             &mut panel,
             &router,
             &mut fleet,
-            message(A, MessageKind::BeginDrag(2)),
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: Some(2),
+                    position: GeoPosition { lat: 1.0, lon: 2.0 },
+                },
+            ),
         );
         assert_eq!(ui(&panel, A).selected, Some(2));
         assert_eq!(ui(&panel, A).dragging, Some(2));

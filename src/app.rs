@@ -320,10 +320,10 @@ impl Application {
                     Task::none()
                 }
             }
-            vehicle_panel::Message::Follow(follow) => self
-                .map
-                .update(map::Message::Follow(follow))
-                .map(Message::Map),
+            vehicle_panel::Message::Follow(follow) => {
+                let (task, _) = self.map.update(map::Message::Follow(follow));
+                task.map(Message::Map)
+            }
         }
     }
 
@@ -337,34 +337,35 @@ impl Application {
     }
 
     fn map_message_update(&mut self, message: map::Message) -> Task<Message> {
-        let map_task = self.map.update(message.clone()).map(Message::Map);
+        let (map_task, event) = self.map.update(message);
+        let map_task = map_task.map(Message::Map);
 
-        let mission_task = match message {
-            map::Message::WaypointPressed(id, index) => {
+        // The map reports neutral interactions; translate each into the mission
+        // feature's vocabulary, addressed to the vehicle captured at emission.
+        let mission_task = match event {
+            Some(map::Event::Picked {
+                system,
+                marker,
+                position,
+            }) => self.mission_message_update(mission_panel::Message {
+                system,
+                kind: mission_panel::MessageKind::MapPicked { marker, position },
+            }),
+            Some(map::Event::Dragged {
+                system,
+                marker,
+                position,
+            }) => self.mission_message_update(mission_panel::Message {
+                system,
+                kind: mission_panel::MessageKind::MoveWaypointTo(marker, position),
+            }),
+            Some(map::Event::Released { system }) => {
                 self.mission_message_update(mission_panel::Message {
-                    system: id,
-                    kind: mission_panel::MessageKind::BeginDrag(index),
-                })
-            }
-            map::Message::WaypointDragged(id, index, position) => {
-                self.mission_message_update(mission_panel::Message {
-                    system: id,
-                    kind: mission_panel::MessageKind::MoveWaypointTo(index, position),
-                })
-            }
-            map::Message::WaypointReleased(id) => {
-                self.mission_message_update(mission_panel::Message {
-                    system: id,
+                    system,
                     kind: mission_panel::MessageKind::EndDrag,
                 })
             }
-            map::Message::PlaceAt(id, position) => {
-                self.mission_message_update(mission_panel::Message {
-                    system: id,
-                    kind: mission_panel::MessageKind::AddWaypointAt(position),
-                })
-            }
-            _ => Task::none(),
+            None => Task::none(),
         };
 
         Task::batch([map_task, mission_task])
@@ -636,12 +637,9 @@ impl Application {
         match panel {
             layout::Panel::Map => {
                 let primary = self.fleet.primary();
-                let interaction = map::Interaction {
-                    placing: self.mission_panel.is_placing(primary),
-                    dragging: self.mission_panel.dragging(primary),
-                };
+                let dragging = self.mission_panel.dragging(primary);
                 self.map
-                    .view(self.fleet.vehicles(), primary, interaction, &self.theme)
+                    .view(self.fleet.vehicles(), primary, dragging, &self.theme)
                     .map(Message::Map)
                     .boxed()
             }
