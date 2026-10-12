@@ -1,8 +1,8 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        LazyLock,
         atomic::{AtomicU64, Ordering},
+        LazyLock,
     },
 };
 
@@ -32,6 +32,13 @@ pub struct Settings {
     pub theme: ThemeMode,
 }
 
+/// The persisted application configuration.
+///
+/// This is the composition root for the on-disk schema: it owns the top-level
+/// fields and delegates each sub-type's persisted representation to that
+/// sub-type (for example, [`LayoutConfig`] mirrors the pane grid and
+/// [`LinkConfig`] describes a link). Those types therefore live alongside the
+/// data they describe rather than in this module.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Configuration {
     /// Schema version, used to detect configs written by a newer build.

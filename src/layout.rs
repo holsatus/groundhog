@@ -8,14 +8,25 @@
 use crate::widget::pane_grid::{self, Axis as PaneAxis, Edge};
 
 /// A view that can occupy a pane in the workspace grid.
+///
+/// The variant names are the on-disk identity of a pane: they are pinned with
+/// explicit serde renames so renaming a Rust variant cannot silently invalidate
+/// saved layouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Panel {
+    #[serde(rename = "Map")]
     Map,
+    #[serde(rename = "Vehicles")]
     Vehicles,
+    #[serde(rename = "Mission")]
     Mission,
+    #[serde(rename = "Parameters")]
     Parameters,
+    #[serde(rename = "Links")]
     Links,
+    #[serde(rename = "Logs")]
     Logs,
+    #[serde(rename = "Settings")]
     Settings,
 }
 
@@ -66,6 +77,20 @@ impl LayoutConfig {
                 b: Box::new(b.into_configuration()),
             },
             LayoutConfig::Pane(panel) => pane_grid::Configuration::Pane(panel),
+        }
+    }
+}
+
+impl From<pane_grid::Configuration<Panel>> for LayoutConfig {
+    fn from(configuration: pane_grid::Configuration<Panel>) -> Self {
+        match configuration {
+            pane_grid::Configuration::Split { axis, ratio, a, b } => LayoutConfig::Split {
+                axis: SplitAxis::from(axis),
+                ratio,
+                a: Box::new(LayoutConfig::from(*a)),
+                b: Box::new(LayoutConfig::from(*b)),
+            },
+            pane_grid::Configuration::Pane(panel) => LayoutConfig::Pane(panel),
         }
     }
 }
@@ -194,24 +219,7 @@ impl Layout {
 
     /// Snapshot the current arrangement for persistence.
     pub fn configuration(&self) -> Option<LayoutConfig> {
-        Self::node_to_config(self.panes.layout(), &self.panes)
-    }
-
-    fn node_to_config(
-        node: &pane_grid::Node,
-        panes: &pane_grid::State<Panel>,
-    ) -> Option<LayoutConfig> {
-        match node {
-            pane_grid::Node::Split {
-                axis, ratio, a, b, ..
-            } => Some(LayoutConfig::Split {
-                axis: SplitAxis::from(*axis),
-                ratio: *ratio,
-                a: Box::new(Self::node_to_config(a, panes)?),
-                b: Box::new(Self::node_to_config(b, panes)?),
-            }),
-            pane_grid::Node::Pane(pane) => Some(LayoutConfig::Pane(*panes.get(*pane)?)),
-        }
+        Some(self.panes.configuration().into())
     }
 
     pub fn is_focused(&self, pane: pane_grid::Pane) -> bool {

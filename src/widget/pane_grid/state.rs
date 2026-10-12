@@ -321,6 +321,36 @@ impl<T> State<T> {
     }
 }
 
+impl<T: Clone> State<T> {
+    /// Returns the arrangement of the [`State`] as a [`Configuration`].
+    ///
+    /// This is the inverse of [`State::with_configuration`]: it mirrors the
+    /// current layout tree, cloning each pane's internal state. The maximized
+    /// [`Pane`], if any, is ignored; the full arrangement is returned.
+    pub fn configuration(&self) -> Configuration<T> {
+        Self::node_to_configuration(&self.internal.layout, &self.panes)
+    }
+
+    fn node_to_configuration(node: &Node, panes: &BTreeMap<Pane, T>) -> Configuration<T> {
+        match node {
+            Node::Split {
+                axis, ratio, a, b, ..
+            } => Configuration::Split {
+                axis: *axis,
+                ratio: *ratio,
+                a: Box::new(Self::node_to_configuration(a, panes)),
+                b: Box::new(Self::node_to_configuration(b, panes)),
+            },
+            Node::Pane(pane) => Configuration::Pane(
+                panes
+                    .get(pane)
+                    .cloned()
+                    .expect("layout references a pane missing from the state"),
+            ),
+        }
+    }
+}
+
 /// The internal state of a [`PaneGrid`].
 ///
 /// [`PaneGrid`]: super::PaneGrid

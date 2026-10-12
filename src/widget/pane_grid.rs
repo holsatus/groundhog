@@ -11,6 +11,8 @@
 //   - `Content`/`TitleBar` take a `resizing` flag and hide controls while resizing
 //   - `TitleBar::is_over_pick_area` treats the whole bar (apart from controls)
 //     as a pick area
+//   - `State::configuration()` snapshots the current arrangement back into a
+//     `Configuration<T>`, the inverse of `with_configuration`
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the
