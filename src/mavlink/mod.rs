@@ -26,8 +26,7 @@ mod recv;
 mod router;
 mod transaction;
 
-pub use error::Result;
-pub use param::ParamListSummary;
+pub use error::{MavError, Result};
 pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};
 pub use transaction::Command;

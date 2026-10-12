@@ -116,7 +116,7 @@ pub enum Message {
     SaveToFile(PathBuf, Parameters),
 
     /// The result of writing the parameters to disk
-    SaveFinished(PathBuf, Result<(), String>),
+    SaveFinished(PathBuf, std::result::Result<(), String>),
 
     /// Open a file-picker dialog to choose file to load
     LoadDialog(MavlinkId),
@@ -125,7 +125,7 @@ pub enum Message {
     LoadFromFile(PathBuf, MavlinkId),
 
     /// The result of reading a parameter file from disk
-    LoadFinished(PathBuf, MavlinkId, Result<Parameters, String>),
+    LoadFinished(PathBuf, MavlinkId, std::result::Result<Parameters, String>),
 }
 
 /// Everything the panel needs from the rest of the application to run a
@@ -475,7 +475,7 @@ impl ParameterPanel {
     fn save_finished(
         &mut self,
         save_path: PathBuf,
-        result: Result<(), String>,
+        result: std::result::Result<(), String>,
     ) -> (Task<Message>, Option<Event>) {
         if let Err(error) = result {
             log::error!("Error saving to file: {error}");
@@ -528,7 +528,7 @@ impl ParameterPanel {
         &mut self,
         load_path: PathBuf,
         address: MavlinkId,
-        loaded_params: Result<Parameters, String>,
+        loaded_params: std::result::Result<Parameters, String>,
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
         let loaded_params = match loaded_params {
@@ -901,8 +901,8 @@ fn file_dialog(path: Option<&Path>) -> AsyncFileDialog {
 mod tests {
     use super::*;
     use crate::foundation::MavlinkId;
-    use crate::mavlink::DEFAULT_GCS_ID;
-    use crate::services::{MavError, MavlinkRouter};
+    use crate::mavlink::{DEFAULT_GCS_ID, MavlinkRouter};
+    use crate::services::Error;
 
     const A: SystemId = SystemId(1);
     const B: SystemId = SystemId(2);
@@ -1112,12 +1112,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ValueUploadResult(
-                addr(A),
-                key.clone(),
-                Value::F32(7.0),
-                Err(MavError::Timeout),
-            ),
+            Message::ValueUploadResult(addr(A), key.clone(), Value::F32(7.0), Err(Error::Timeout)),
         );
         assert_eq!(
             changed_state(param(&fleet, A, &key)),
@@ -1325,7 +1320,7 @@ mod tests {
             &mut panel,
             &router,
             &mut fleet,
-            Message::ListReloadResult(addr(A), Err(MavError::Timeout)),
+            Message::ListReloadResult(addr(A), Err(Error::Timeout)),
         );
         assert!(!panel.reloading.contains(&addr(A)));
     }

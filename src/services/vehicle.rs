@@ -3,14 +3,25 @@
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
     enums::{MavMissionType, MavProtocolCapability},
-    messages::{AutopilotVersion, CommandAck, ComponentInformationBasic},
+    messages::ComponentInformationBasic,
 };
 
 use crate::{
     domain::mission::{MissionItem, MissionPlan},
     foundation::MavlinkId,
-    mavlink::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted, commands},
+    mavlink::{self, Command, MavlinkMessage, MavlinkRouter, commands},
 };
+
+use super::{Error, Result};
+
+/// A summary of a parameter-list download: how many parameters arrived and how
+/// many the target advertised.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Only logged by the application for now
+pub struct ParamListSummary {
+    pub received: usize,
+    pub expected: u16,
+}
 
 /// A plan downloaded from a vehicle, together with the opaque id the vehicle
 /// reports for it. What the vehicle handed over is what the vehicle has, so the
@@ -26,9 +37,9 @@ pub struct DownloadedMission {
 /// Cheap to clone: it holds the router (an `Arc`) and the target id, so callers
 /// never thread the target through every call.
 ///
-/// Some entry points are retained ahead of upcoming vehicle operations; they
-/// are marked with `#[allow(dead_code)] // Escape hatch: unused yet` and will
-/// lose the marker when their callers arrive.
+/// Every public operation returns [`services::Result`](super::Result): the
+/// middleware's error is mapped at this boundary, so no `mavio` or middleware
+/// type appears in the surface.
 #[derive(Clone)]
 pub struct VehicleClient {
     router: MavlinkRouter,
@@ -51,11 +62,12 @@ impl VehicleClient {
     }
 
     /// Download the vehicle's parameter list, optionally requesting capabilities first.
-    pub async fn fetch_parameters(
-        &self,
-        request_capabilities: bool,
-    ) -> mavlink::Result<ParamListSummary> {
-        self.router.param_list(self.id, request_capabilities).await
+    pub async fn fetch_parameters(&self, request_capabilities: bool) -> Result<ParamListSummary> {
+        let (received, expected) = self
+            .router
+            .param_list(self.id, request_capabilities)
+            .await?;
+        Ok(ParamListSummary { received, expected })
     }
 
     /// Set one parameter, returning the value the vehicle accepted.
@@ -64,46 +76,46 @@ impl VehicleClient {
         ident: Ident,
         value: Value,
         capabilities: MavProtocolCapability,
-    ) -> mavlink::Result<Value> {
+    ) -> Result<Value> {
         self.router
             .param_set(self.id, ident, value, capabilities)
             .await
+            .map_err(Error::from)
     }
 
     /// Request the vehicle's `COMPONENT_INFORMATION_BASIC`.
-    pub async fn component_information(&self) -> mavlink::Result<ComponentInformationBasic> {
-        self.request().await
-    }
-
-    /// Request the vehicle's `AUTOPILOT_VERSION`.
-    #[allow(dead_code)] // Escape hatch: unused yet
-    pub async fn autopilot_version(&self) -> mavlink::Result<AutopilotVersion> {
-        self.request().await
+    ///
+    /// The value itself is not needed by the caller (the vehicle folds the
+    /// message into its own state), so only success is reported.
+    pub async fn component_information(&self) -> Result<()> {
+        self.request::<ComponentInformationBasic>()
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
     }
 
     /// Escape hatch: request and await one message of type `M`.
-    pub async fn request<M: MavlinkMessage>(&self) -> mavlink::Result<M> {
+    pub(crate) async fn request<M: MavlinkMessage>(&self) -> mavlink::Result<M> {
         self.router.request_message::<M>(self.id).await
     }
 
-    /// Escape hatch: run a command and await its final ACK.
-    #[allow(dead_code)] // Escape hatch: unused yet
-    pub async fn run(&self, command: impl Into<Command>) -> mavlink::Result<CommandAck> {
-        self.router.command(self.id, command).await
-    }
-
-    /// Escape hatch: send a targeted message without awaiting a response.
-    #[allow(dead_code)] // Escape hatch: unused yet
-    pub fn send<M: Targeted>(&self, message: M) -> mavlink::Result<()> {
-        self.router.send_targeted(self.id, message)
+    /// Run a command and await its final ACK, discarding the ACK itself: only
+    /// whether it succeeded matters to callers.
+    pub async fn run(&self, command: impl Into<Command>) -> Result<()> {
+        self.router
+            .command(self.id, command)
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
     }
 
     /// Download the vehicle's flight plan.
-    pub async fn download_mission(&self) -> mavlink::Result<DownloadedMission> {
+    pub async fn download_mission(&self) -> Result<DownloadedMission> {
         let downloaded = self
             .router
             .mission_download(self.id, MavMissionType::Mission)
-            .await?;
+            .await
+            .map_err(Error::from)?;
 
         let items = downloaded
             .items
@@ -121,7 +133,7 @@ impl VehicleClient {
     }
 
     /// Upload `plan` to the vehicle; returns the vehicle's opaque plan id.
-    pub async fn upload_mission(&self, plan: &MissionPlan) -> mavlink::Result<u32> {
+    pub async fn upload_mission(&self, plan: &MissionPlan) -> Result<u32> {
         let wire = plan
             .items()
             .iter()
@@ -132,27 +144,32 @@ impl VehicleClient {
         self.router
             .mission_upload(self.id, MavMissionType::Mission, &wire)
             .await
+            .map_err(Error::from)
     }
 
     /// Clear the flight plan on the vehicle.
-    pub async fn clear_mission(&self) -> mavlink::Result<()> {
+    pub async fn clear_mission(&self) -> Result<()> {
         self.router
             .mission_clear(self.id, MavMissionType::Mission)
             .await
+            .map_err(Error::from)
     }
 
     /// Ask the vehicle to make item `seq` the current execution point.
-    pub async fn set_current_mission_item(&self, seq: u16) -> mavlink::Result<()> {
-        self.router.mission_set_current(self.id, seq).await
+    pub async fn set_current_mission_item(&self, seq: u16) -> Result<()> {
+        self.router
+            .mission_set_current(self.id, seq)
+            .await
+            .map_err(Error::from)
     }
 
     /// Start executing the stored mission.
-    pub async fn start_mission(&self) -> mavlink::Result<CommandAck> {
+    pub async fn start_mission(&self) -> Result<()> {
         self.run(commands::mission_start()).await
     }
 
     /// Pause (`true`) or resume (`false`) the running mission.
-    pub async fn pause_mission(&self, pause: bool) -> mavlink::Result<CommandAck> {
+    pub async fn pause_mission(&self, pause: bool) -> Result<()> {
         self.run(commands::pause_continue(pause)).await
     }
 }

@@ -435,8 +435,7 @@ impl Default for LinkPanel {
 mod tests {
     use super::*;
     use crate::link::config::LinkBuild;
-    use crate::mavlink::DEFAULT_GCS_ID;
-    use crate::services::MavlinkRouter;
+    use crate::mavlink::{DEFAULT_GCS_ID, MavlinkRouter};
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {

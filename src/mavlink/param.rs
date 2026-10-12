@@ -20,13 +20,6 @@ const PARAM_SET_RETRIES: u8 = 3;
 const PARAM_LIST_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_LIST_RETRIES: u8 = 3;
 
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Only logged by the application for now
-pub struct ParamListSummary {
-    pub received: usize,
-    pub expected: u16,
-}
-
 impl MavlinkRouter {
     /// Set a parameter on `target` and wait for it to echo back its new value.
     ///
@@ -88,11 +81,13 @@ impl MavlinkRouter {
     /// inbound message stream; this only drives the protocol to completion.
     /// If `request_capabilities` is set, `AUTOPILOT_VERSION` is requested first,
     /// since the capabilities determine how parameter values are encoded.
+    ///
+    /// Returns `(received, expected)`.
     pub async fn param_list(
         &self,
         target: MavlinkId,
         request_capabilities: bool,
-    ) -> Result<ParamListSummary> {
+    ) -> Result<(usize, u16)> {
         let _lock = self.lock_key(LockKey::ParamList(target)).await;
 
         if request_capabilities {
@@ -151,9 +146,6 @@ impl MavlinkRouter {
         }
 
         let expected = expected.ok_or(MavError::Timeout)?;
-        Ok(ParamListSummary {
-            received: received.len(),
-            expected,
-        })
+        Ok((received.len(), expected))
     }
 }

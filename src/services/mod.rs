@@ -5,19 +5,12 @@
 //! rather than [`crate::mavlink`], so the middleware stays an implementation detail
 //! of the services layer.
 
+pub mod error;
 pub mod fleet;
 pub mod link;
 pub mod vehicle;
 
+pub use error::{Error, Result};
 pub use fleet::FleetServices;
 pub use link::{LinkManager, LinkStatus, LinkUpdate};
-pub use vehicle::{DownloadedMission, VehicleClient};
-
-pub use crate::mavlink::{ParamListSummary, Result};
-
-// Tests build routers and error values directly; expose the underlying types
-// through the services layer so feature test modules stay off `crate::mav`.
-#[cfg(test)]
-pub use crate::mavlink::MavlinkRouter;
-#[cfg(test)]
-pub use crate::mavlink::error::MavError;
+pub use vehicle::{DownloadedMission, ParamListSummary, VehicleClient};

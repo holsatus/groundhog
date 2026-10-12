@@ -26,7 +26,6 @@ use iced::{
         Button, Column, Space, TextInput, column, container, pick_list, row, scrollable, text,
     },
 };
-use mavio::default_dialect::messages::CommandAck;
 use rfd::AsyncFileDialog;
 
 use crate::{
@@ -140,20 +139,20 @@ pub enum MessageKind {
     Uploaded(Result<u32>),
     Cleared(Result<()>),
     CurrentSet(Result<()>),
-    CommandFinished(MissionAction, Result<CommandAck>),
+    CommandFinished(MissionAction, Result<()>),
 
     /// Open a file-picker dialog to choose a save location.
     SaveDialog,
     /// Write the given vehicle's mission to the chosen path.
     SaveToFile(PathBuf),
     /// The result of writing the mission to disk.
-    SaveFinished(PathBuf, Result<(), String>),
+    SaveFinished(PathBuf, std::result::Result<(), String>),
     /// Open a file-picker dialog to choose a file to load.
     LoadDialog,
     /// Parse the chosen file and replace the given vehicle's mission.
     LoadFromFile(PathBuf),
     /// The result of reading a mission file from disk.
-    LoadFinished(PathBuf, Result<Vec<MissionItem>, String>),
+    LoadFinished(PathBuf, std::result::Result<Vec<MissionItem>, String>),
 }
 
 impl MissionPanel {
@@ -382,12 +381,7 @@ impl MissionPanel {
     }
 
     /// Clear the busy flag once a start/pause/resume command settles.
-    fn command_finished(
-        &mut self,
-        id: SystemId,
-        action: MissionAction,
-        result: Result<CommandAck>,
-    ) {
+    fn command_finished(&mut self, id: SystemId, action: MissionAction, result: Result<()>) {
         if let Some(ui) = self.ui.get_mut(&id) {
             ui.busy = false;
         }
@@ -700,7 +694,7 @@ impl MissionPanel {
         &mut self,
         id: SystemId,
         path: PathBuf,
-        result: Result<(), String>,
+        result: std::result::Result<(), String>,
     ) -> (Task<Message>, Option<Event>) {
         if let Err(error) = result {
             log::error!("Error saving mission for {id:?} to file: {error}");
@@ -760,7 +754,7 @@ impl MissionPanel {
         &mut self,
         id: SystemId,
         path: PathBuf,
-        result: Result<Vec<MissionItem>, String>,
+        result: std::result::Result<Vec<MissionItem>, String>,
         ctx: &mut Context,
     ) -> Option<(Task<Message>, Option<Event>)> {
         match result {
@@ -1089,8 +1083,8 @@ mod tests {
 
     use crate::domain::mission::MissionPlan;
     use crate::foundation::MavlinkId;
-    use crate::mavlink::DEFAULT_GCS_ID;
-    use crate::services::{MavError, MavlinkRouter};
+    use crate::mavlink::{DEFAULT_GCS_ID, MavlinkRouter};
+    use crate::services::Error;
 
     const A: SystemId = SystemId(1);
     const B: SystemId = SystemId(2);
@@ -1488,13 +1482,13 @@ mod tests {
             ),
             message(UNKNOWN, MessageKind::SaveDialog),
             message(UNKNOWN, MessageKind::LoadDialog),
-            message(UNKNOWN, MessageKind::Downloaded(Err(MavError::Timeout))),
-            message(UNKNOWN, MessageKind::Uploaded(Err(MavError::Timeout))),
-            message(UNKNOWN, MessageKind::Cleared(Err(MavError::Timeout))),
-            message(UNKNOWN, MessageKind::CurrentSet(Err(MavError::Timeout))),
+            message(UNKNOWN, MessageKind::Downloaded(Err(Error::Timeout))),
+            message(UNKNOWN, MessageKind::Uploaded(Err(Error::Timeout))),
+            message(UNKNOWN, MessageKind::Cleared(Err(Error::Timeout))),
+            message(UNKNOWN, MessageKind::CurrentSet(Err(Error::Timeout))),
             message(
                 UNKNOWN,
-                MessageKind::CommandFinished(MissionAction::Start, Err(MavError::Timeout)),
+                MessageKind::CommandFinished(MissionAction::Start, Err(Error::Timeout)),
             ),
         ];
 
