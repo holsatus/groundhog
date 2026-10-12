@@ -124,6 +124,12 @@ impl Vehicle {
         self.components.entry(component).or_default()
     }
 
+    /// The state of `component`, if it has been heard from. Exposed so the view
+    /// layer can render component details (vendor/model names).
+    pub fn component_state(&self, component: u8) -> Option<&ComponentState> {
+        self.component(component)
+    }
+
     /// The component's parameter set, if that component has been heard from.
     pub fn parameters(&self, component: u8) -> Option<&Parameters> {
         self.component(component).map(ComponentState::parameters)
@@ -168,6 +174,12 @@ impl Vehicle {
     /// The component resolved as the autopilot, if any.
     pub fn autopilot_component(&self) -> Option<u8> {
         self.autopilot
+    }
+
+    /// The component whose parameters a panel shows by default: the resolved
+    /// autopilot, or the conventional component 1 before one is known.
+    pub fn default_parameter_component(&self) -> u8 {
+        self.autopilot_component().unwrap_or(1)
     }
 
     /// The MAVLink address to target this vehicle's autopilot transactions at.
@@ -237,21 +249,6 @@ impl Vehicle {
 
         // Keep track of how many we expect
         parameters.note_loaded_index(message.param_index, message.param_count);
-    }
-
-    pub fn pretty_name(&self) -> String {
-        let state = self.component(self.autopilot.unwrap_or(1));
-
-        format!(
-            "{} {} (mav {})",
-            state
-                .and_then(|state| state.vendor_name.as_deref())
-                .unwrap_or("Unknown"),
-            state
-                .and_then(|state| state.model_name.as_deref())
-                .unwrap_or("Unknown"),
-            self.system.0
-        )
     }
 
     pub fn handle_message(&mut self, time: Instant, component: u8, message: DefaultDialect) {
@@ -354,11 +351,7 @@ impl Vehicle {
             }
             DefaultDialect::Statustext(message) => {
                 if let Err(error) = self.status.observe_statustext(component, message, time) {
-                    log::warn!(
-                        "Statustext from '{}' not valid utf8: {}",
-                        self.pretty_name(),
-                        error
-                    );
+                    log::warn!("Statustext from {} not valid utf8: {}", self.system, error);
                 }
             }
             _ => (),

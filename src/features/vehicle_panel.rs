@@ -5,13 +5,12 @@
 use std::collections::BTreeMap;
 
 use iced::{
-    Alignment, Element, Length, Theme, Widget,
     widget::{container, row, scrollable, text, text::Wrapping},
+    Alignment, Element, Length, Theme, Widget,
 };
 
 use crate::{
     domain::vehicle::{Liveness, Vehicle},
-    features::log_panel,
     foundation::SystemId,
     style,
     widget::virtualized::virtual_list,
@@ -27,6 +26,24 @@ fn liveness_label(liveness: Liveness) -> &'static str {
         Liveness::Stale => "stale",
         Liveness::Lost => "lost",
     }
+}
+
+/// A display name for a vehicle: its vendor and model, then its MAVLink id.
+///
+/// Presentation only, so it lives here rather than in the domain.
+fn pretty_name(vehicle: &Vehicle) -> String {
+    let state = vehicle.component_state(vehicle.default_parameter_component());
+
+    format!(
+        "{} {} (mav {})",
+        state
+            .and_then(|state| state.vendor_name.as_deref())
+            .unwrap_or("Unknown"),
+        state
+            .and_then(|state| state.model_name.as_deref())
+            .unwrap_or("Unknown"),
+        vehicle.system.0
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -46,11 +63,9 @@ pub fn view<'a>(
     let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(17);
 
     // Global controls that used to live in the removed top bar.
-    let mut controls = iced::widget::row![
-        iced::widget::checkbox(follow)
-            .label("Follow primary")
-            .on_toggle(Message::Follow)
-    ]
+    let mut controls = iced::widget::row![iced::widget::checkbox(follow)
+        .label("Follow primary")
+        .on_toggle(Message::Follow)]
     .spacing(10.0)
     .align_y(Alignment::Center);
 
@@ -61,7 +76,7 @@ pub fn view<'a>(
         let picker = iced::widget::pick_list(primary, vehicle_ids, |id| {
             vehicles.get(id).map_or_else(
                 || "Invalid vehicle".to_string(),
-                |v| format!("{} ({})", v.pretty_name(), liveness_label(v.liveness)),
+                |v| format!("{} ({})", pretty_name(v), liveness_label(v.liveness)),
             )
         })
         .on_select(Message::SetPrimary);
@@ -192,7 +207,7 @@ pub fn view<'a>(
         let entries = vehicle.status.texts.iter().enumerate().collect::<Vec<_>>();
 
         let list = virtual_list(entries, move |&(index, status)| {
-            let color = log_panel::severity_color(palette, status.severity);
+            let color = style::severity_color(palette, status.severity);
 
             container(
                 row![

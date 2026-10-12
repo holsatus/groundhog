@@ -145,6 +145,16 @@ struct Wire {
 }
 
 impl MissionItem {
+    /// A waypoint item at `pos`, in the frame and with the autocontinue flag
+    /// the editor uses for freshly placed items.
+    pub fn waypoint(pos: Position) -> MissionItem {
+        MissionItem {
+            frame: MavFrame::GlobalRelativeAltInt,
+            autocontinue: true,
+            command: MissionCommand::default_for(MissionCommandKind::Waypoint, pos),
+        }
+    }
+
     /// Decode a wire item, preserving anything the typed model does not cover.
     pub fn from_wire(msg: &MissionItemInt) -> MissionItem {
         MissionItem {
@@ -609,6 +619,27 @@ impl MissionCommand {
             MissionCommand::Unknown { .. } => (),
         }
     }
+
+    /// Apply an edited text field to this command.
+    ///
+    /// Blank or malformed input is left to the edit buffer alone: nothing
+    /// changes and `false` is returned. A case-insensitive `"nan"` means
+    /// [`f64::NAN`] (which [`set_field`](Self::set_field) maps to a `None` yaw),
+    /// applied like any other value. Returns whether a value was applied.
+    pub fn set_field_from_str(&mut self, field: MissionField, text: &str) -> bool {
+        let trimmed = text.trim();
+        let value = if trimmed.eq_ignore_ascii_case("nan") {
+            f64::NAN
+        } else {
+            match trimmed.parse::<f64>() {
+                Ok(value) => value,
+                Err(_) => return false,
+            }
+        };
+
+        self.set_field(field, value);
+        true
+    }
 }
 
 /// The kind of a [`MissionCommand`], without its payload.
@@ -980,7 +1011,11 @@ fn encode_position(pos: &Position) -> (i32, i32, f32) {
 }
 
 fn decode_yaw(param: f32) -> Option<f32> {
-    if param.is_nan() { None } else { Some(param) }
+    if param.is_nan() {
+        None
+    } else {
+        Some(param)
+    }
 }
 
 fn encode_yaw(yaw: Option<f32>) -> f32 {
@@ -1473,18 +1508,16 @@ mod tests {
     #[test]
     fn return_to_launch_has_no_fields() {
         assert!(MissionCommand::ReturnToLaunch.fields().is_empty());
-        assert!(
-            MissionCommand::Unknown {
-                command: MavCmd::DoSetServo,
-                params: [0.0; 4],
-                x: 0,
-                y: 0,
-                z: 0.0,
-                frame: MavFrame::Global,
-            }
-            .fields()
-            .is_empty()
-        );
+        assert!(MissionCommand::Unknown {
+            command: MavCmd::DoSetServo,
+            params: [0.0; 4],
+            x: 0,
+            y: 0,
+            z: 0.0,
+            frame: MavFrame::Global,
+        }
+        .fields()
+        .is_empty());
     }
 
     #[test]
@@ -1534,5 +1567,55 @@ mod tests {
         assert_eq!(unknown.name(), "Unknown");
         assert_eq!(unknown.kind(), None);
         assert!(!unknown.is_positional());
+    }
+
+    #[test]
+    fn set_field_from_str_parses_or_leaves_unchanged() {
+        let mut command = MissionCommand::Takeoff {
+            pos: pos(47.4, 8.5, 30.0),
+            pitch_deg: 0.0,
+            yaw_deg: Some(10.0),
+        };
+
+        // Malformed and blank input is a no-op that reports no change.
+        assert!(!command.set_field_from_str(MissionField::Yaw, "abc"));
+        assert!(!command.set_field_from_str(MissionField::Yaw, "   "));
+        assert!(matches!(
+            command,
+            MissionCommand::Takeoff {
+                yaw_deg: Some(v),
+                ..
+            } if v == 10.0
+        ));
+
+        // A numeric value is applied (surrounding whitespace is ignored).
+        assert!(command.set_field_from_str(MissionField::Yaw, " 33.0 "));
+        assert!(matches!(
+            command,
+            MissionCommand::Takeoff {
+                yaw_deg: Some(v),
+                ..
+            } if v == 33.0
+        ));
+
+        // A case-insensitive "nan" means "no yaw".
+        assert!(command.set_field_from_str(MissionField::Yaw, "NaN"));
+        assert!(matches!(
+            command,
+            MissionCommand::Takeoff { yaw_deg: None, .. }
+        ));
+    }
+
+    #[test]
+    fn waypoint_builds_the_editor_default_item() {
+        let expected = pos(47.4, 8.5, 30.0);
+        let item = MissionItem::waypoint(expected);
+
+        assert_eq!(item.frame, MavFrame::GlobalRelativeAltInt);
+        assert!(item.autocontinue);
+        assert!(matches!(
+            item.command,
+            MissionCommand::Waypoint { pos, .. } if pos == expected
+        ));
     }
 }

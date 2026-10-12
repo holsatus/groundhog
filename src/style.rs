@@ -6,7 +6,10 @@
 //! them. The map cannot work this way — it paints opaque tiles across its whole
 //! pane — so it draws its own frame instead (see `features::map`).
 
-use iced::{border::Radius, widget::container, Border, Color, Shadow, Theme, Vector};
+use iced::{
+    border::Radius, theme::Palette, widget::container, Border, Color, Shadow, Theme, Vector,
+};
+use mavio::default_dialect::enums::MavSeverity;
 
 /// The corner radius of a pane, shared with the map's frame.
 pub(crate) const PANE_RADIUS: f32 = 8.0;
@@ -121,5 +124,18 @@ pub fn tooltip(theme: &Theme) -> container::Style {
             blur_radius: 6.0,
         },
         ..container::Style::default()
+    }
+}
+
+/// The palette color a severity maps to.
+pub fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
+    match severity {
+        MavSeverity::Emergency
+        | MavSeverity::Alert
+        | MavSeverity::Critical
+        | MavSeverity::Error => palette.danger.base.color,
+        MavSeverity::Warning | MavSeverity::Notice => palette.warning.base.color,
+        MavSeverity::Info => palette.primary.base.color,
+        MavSeverity::Debug => palette.secondary.base.color,
     }
 }

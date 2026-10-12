@@ -375,28 +375,10 @@ pub fn value_parse_as(kind: Value, string: &str) -> Option<Value> {
     Some(value)
 }
 
-pub fn value_type_name(value: Value) -> &'static str {
-    match value {
-        Value::U8(_) => "u8",
-        Value::I8(_) => "i8",
-        Value::U16(_) => "u16",
-        Value::I16(_) => "i16",
-        Value::U32(_) => "u32",
-        Value::I32(_) => "i32",
-        Value::F32(_) => "f32",
-    }
-}
-
-pub fn value_as_string(value: Value) -> String {
-    match value {
-        Value::U8(v) => v.to_string(),
-        Value::I8(v) => v.to_string(),
-        Value::U16(v) => v.to_string(),
-        Value::I16(v) => v.to_string(),
-        Value::U32(v) => v.to_string(),
-        Value::I32(v) => v.to_string(),
-        Value::F32(v) => v.to_string(),
-    }
+/// The namespace a parameter name belongs to: the prefix before the first
+/// `'_'`, if any.
+pub fn group_of(ident: &Ident) -> Option<&str> {
+    ident.as_str().split_once('_').map(|(group, _)| group)
 }
 
 #[cfg(test)]
@@ -517,5 +499,15 @@ mod tests {
             param.state(),
             ParamState::Uploading { value } if *value == Value::F32(2.0)
         ));
+    }
+
+    #[test]
+    fn group_of_splits_at_the_first_underscore() {
+        assert_eq!(
+            group_of(&Ident::from_str_truncated("BAT_CAPACITY")),
+            Some("BAT")
+        );
+        assert_eq!(group_of(&Ident::from_str_truncated("A_B_C")), Some("A"));
+        assert_eq!(group_of(&Ident::from_str_truncated("NOUNDERSCORE")), None);
     }
 }

@@ -31,8 +31,8 @@ use rfd::AsyncFileDialog;
 use crate::{
     domain::fleet::Fleet,
     domain::parameter::{
-        ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, value_as_string,
-        value_parse_as, value_type_matches, value_type_name,
+        ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, group_of, value_parse_as,
+        value_type_matches,
     },
     domain::vehicle::Vehicle,
     foundation::{BoxError, MavlinkId, SystemId},
@@ -144,7 +144,6 @@ pub enum Event {
 
 pub struct ParameterPanel {
     filter: ParameterFilter,
-    namespace_sep: char,
     /// Text currently typed into each parameter's value field, keyed by the
     /// parameter's address. Kept here (not on the domain `Parameter`) so that
     /// switching components or vehicles and back restores the in-progress edit.
@@ -163,7 +162,6 @@ impl ParameterPanel {
     pub fn new() -> Self {
         Self {
             filter: ParameterFilter::default(),
-            namespace_sep: '_',
             editing: BTreeMap::new(),
             uploads: BTreeMap::new(),
             reloading: BTreeSet::new(),
@@ -177,7 +175,7 @@ impl ParameterPanel {
         self.component
             .get(&vehicle.system)
             .copied()
-            .unwrap_or_else(|| vehicle.autopilot_component().unwrap_or(1))
+            .unwrap_or_else(|| vehicle.default_parameter_component())
     }
 
     pub fn update(
@@ -722,10 +720,7 @@ impl ParameterPanel {
                 continue;
             }
 
-            let this_section = ident
-                .as_str()
-                .split_once(self.namespace_sep)
-                .map(|(sec, _)| sec);
+            let this_section = group_of(ident);
 
             // Add larger section headers and separators
             if this_section != section {
@@ -781,6 +776,32 @@ impl ParameterPanel {
             .style(iced::widget::scrollable::default)
             .spacing(5.0)
             .boxed()
+    }
+}
+
+/// The display name of a value's type, e.g. `"f32"`.
+fn value_type_name(value: Value) -> &'static str {
+    match value {
+        Value::U8(_) => "u8",
+        Value::I8(_) => "i8",
+        Value::U16(_) => "u16",
+        Value::I16(_) => "i16",
+        Value::U32(_) => "u32",
+        Value::I32(_) => "i32",
+        Value::F32(_) => "f32",
+    }
+}
+
+/// A value formatted for display in the editor.
+fn value_as_string(value: Value) -> String {
+    match value {
+        Value::U8(v) => v.to_string(),
+        Value::I8(v) => v.to_string(),
+        Value::U16(v) => v.to_string(),
+        Value::I16(v) => v.to_string(),
+        Value::U32(v) => v.to_string(),
+        Value::I32(v) => v.to_string(),
+        Value::F32(v) => v.to_string(),
     }
 }
 
@@ -1404,5 +1425,13 @@ mod tests {
             Message::SelectComponent(addr_c(A, 154)),
         );
         assert_eq!(panel.selected_component(fleet.vehicle(A).unwrap()), 154);
+    }
+
+    #[test]
+    fn display_helpers_format_values() {
+        assert_eq!(value_type_name(Value::F32(1.0)), "f32");
+        assert_eq!(value_type_name(Value::U16(1)), "u16");
+        assert_eq!(value_as_string(Value::F32(1.5)), "1.5");
+        assert_eq!(value_as_string(Value::I32(-3)), "-3");
     }
 }

@@ -26,7 +26,7 @@ use iced::{
         Button, Column, Space, TextInput, column, container, pick_list, row, scrollable, text,
     },
 };
-use mavio::default_dialect::{enums::MavFrame, messages::CommandAck};
+use mavio::default_dialect::messages::CommandAck;
 use rfd::AsyncFileDialog;
 
 use crate::{
@@ -450,12 +450,7 @@ impl MissionPanel {
                 alt_m: 50.0,
             });
 
-        let command = MissionCommand::default_for(MissionCommandKind::Waypoint, pos);
-        vehicle.mission.push(MissionItem {
-            frame: MavFrame::GlobalRelativeAltInt,
-            autocontinue: true,
-            command,
-        });
+        vehicle.mission.push(MissionItem::waypoint(pos));
         vehicle.mission_sync.mark_dirty();
 
         let ui = self.ui_mut(id);
@@ -578,10 +573,12 @@ impl MissionPanel {
 
         self.ui_mut(id).edit.insert(field, text.clone());
 
-        if let Some(value) = parse_field_value(&text)
-            && vehicle
-                .mission
-                .update(index, |item| item.command.set_field(field, value))
+        // The parse rule lives in the domain; the plan is dirtied only when a
+        // value was actually applied to a valid index (as before).
+        let mut applied = false;
+        if vehicle.mission.update(index, |item| {
+            applied = item.command.set_field_from_str(field, &text);
+        }) && applied
         {
             vehicle.mission_sync.mark_dirty();
         }
@@ -633,20 +630,11 @@ impl MissionPanel {
             .map(|position| position.alt_agl)
             .unwrap_or(50.0);
 
-        let command = MissionCommand::default_for(
-            MissionCommandKind::Waypoint,
-            Position {
-                lat: position.lat,
-                lon: position.lon,
-                alt_m,
-            },
-        );
-
-        vehicle.mission.push(MissionItem {
-            frame: MavFrame::GlobalRelativeAltInt,
-            autocontinue: true,
-            command,
-        });
+        vehicle.mission.push(MissionItem::waypoint(Position {
+            lat: position.lat,
+            lon: position.lon,
+            alt_m,
+        }));
         vehicle.mission_sync.mark_dirty();
 
         let ui = self.ui_mut(id);
@@ -1056,17 +1044,6 @@ impl MissionPanel {
     }
 }
 
-/// Parse an edited field: blank or malformed input yields `None` (buffer-only),
-/// and a case-insensitive "nan" maps to `f64::NAN`.
-fn parse_field_value(text: &str) -> Option<f64> {
-    let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case("nan") {
-        Some(f64::NAN)
-    } else {
-        trimmed.parse().ok()
-    }
-}
-
 fn format_field_value(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_string()
@@ -1347,18 +1324,11 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         let mut plan = MissionPlan::default();
-        plan.push(MissionItem {
-            frame: MavFrame::GlobalRelativeAltInt,
-            autocontinue: true,
-            command: MissionCommand::default_for(
-                MissionCommandKind::Waypoint,
-                Position {
-                    lat: 47.0,
-                    lon: 8.0,
-                    alt_m: 100.0,
-                },
-            ),
-        });
+        plan.push(MissionItem::waypoint(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 100.0,
+        }));
         let downloaded = DownloadedMission {
             plan,
             vehicle_id: 5,
@@ -1394,18 +1364,11 @@ mod tests {
         let mut panel = MissionPanel::new();
 
         let mut plan = MissionPlan::default();
-        plan.push(MissionItem {
-            frame: MavFrame::GlobalRelativeAltInt,
-            autocontinue: true,
-            command: MissionCommand::default_for(
-                MissionCommandKind::Waypoint,
-                Position {
-                    lat: 12.0,
-                    lon: 34.0,
-                    alt_m: 56.0,
-                },
-            ),
-        });
+        plan.push(MissionItem::waypoint(Position {
+            lat: 12.0,
+            lon: 34.0,
+            alt_m: 56.0,
+        }));
         let downloaded = DownloadedMission {
             plan,
             vehicle_id: 9,
@@ -1435,18 +1398,11 @@ mod tests {
         assert_eq!(fleet.primary(), Some(A));
         let mut panel = MissionPanel::new();
 
-        let items = vec![MissionItem {
-            frame: MavFrame::GlobalRelativeAltInt,
-            autocontinue: true,
-            command: MissionCommand::default_for(
-                MissionCommandKind::Waypoint,
-                Position {
-                    lat: 12.0,
-                    lon: 34.0,
-                    alt_m: 56.0,
-                },
-            ),
-        }];
+        let items = vec![MissionItem::waypoint(Position {
+            lat: 12.0,
+            lon: 34.0,
+            alt_m: 56.0,
+        })];
 
         let _ = step(
             &mut panel,

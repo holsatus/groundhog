@@ -7,14 +7,13 @@
 use std::collections::BTreeMap;
 
 use iced::{
-    Alignment, Color, Element, Length, Theme, Widget,
-    theme::Palette,
+    Alignment, Element, Length, Theme, Widget,
     widget::{container, pick_list, row, scrollable, text, text::Wrapping},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
-    domain::vehicle::{StatusText, Vehicle},
+    domain::vehicle::{StatusText, Vehicle, status},
     foundation::SystemId,
     style,
     widget::virtualized::virtual_list,
@@ -35,18 +34,6 @@ impl std::fmt::Display for Scope {
         }
     }
 }
-
-/// Severities from most to least severe, for the picker.
-const SEVERITIES: [MavSeverity; 8] = [
-    MavSeverity::Emergency,
-    MavSeverity::Alert,
-    MavSeverity::Critical,
-    MavSeverity::Error,
-    MavSeverity::Warning,
-    MavSeverity::Notice,
-    MavSeverity::Info,
-    MavSeverity::Debug,
-];
 
 /// The largest number of messages rendered at once; older ones are dropped.
 const MAX_ENTRIES: usize = 2000;
@@ -115,7 +102,7 @@ impl LogPanel {
         let palette = *theme.palette();
 
         let list = virtual_list(entries, move |&(index, id, status)| {
-            let color = severity_color(palette, status.severity);
+            let color = style::severity_color(palette, status.severity);
 
             container(
                 row![
@@ -157,7 +144,7 @@ impl LogPanel {
             text("min severity:"),
             pick_list(
                 Some(self.filter.min_severity),
-                SEVERITIES,
+                status::ORDERED,
                 |severity| format!("{severity:?}"),
             )
             .on_select(Message::SetMinSeverity),
@@ -182,7 +169,7 @@ impl LogPanel {
 
         let mut push = |id: SystemId, vehicle: &'a Vehicle| {
             for status in &vehicle.status.texts {
-                if (status.severity as u8) <= (self.filter.min_severity as u8) {
+                if status::rank(status.severity) <= status::rank(self.filter.min_severity) {
                     entries.push((id, status));
                 }
             }
@@ -205,18 +192,5 @@ impl LogPanel {
 
         entries.sort_by_key(|(_, status)| status.at);
         entries
-    }
-}
-
-/// The palette color a severity maps to.
-pub(crate) fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
-    match severity {
-        MavSeverity::Emergency
-        | MavSeverity::Alert
-        | MavSeverity::Critical
-        | MavSeverity::Error => palette.danger.base.color,
-        MavSeverity::Warning | MavSeverity::Notice => palette.warning.base.color,
-        MavSeverity::Info => palette.primary.base.color,
-        MavSeverity::Debug => palette.secondary.base.color,
     }
 }
