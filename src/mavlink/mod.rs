@@ -16,7 +16,9 @@ use mavio::default_dialect::messages::{
 
 use crate::foundation::MavlinkId;
 
+mod acks;
 pub mod commands;
+mod dedup;
 pub(crate) mod error;
 pub(crate) mod io;
 mod locks;

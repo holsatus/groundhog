@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, AtomicU64, Ordering},
@@ -19,6 +19,8 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::{
     Targeted,
+    acks::PendingAckMap,
+    dedup::Dedup,
     error::{MavError, Result},
     io::{new_async_receiver, new_async_sender},
     lock,
@@ -71,34 +73,6 @@ pub(super) const MISSION_ITEM_TIMEOUT: Duration = Duration::from_millis(250);
 const HIGH_LATENCY_ITEM_FACTOR: u32 = 8;
 const HIGH_LATENCY_ACK_FACTOR: u32 = 3;
 
-/// Size of the inbound duplicate-suppression window, per source.
-///
-/// Sender sequence numbers are `u8` and wrap around at 256. A window
-/// *strictly below* 256 has a precise property: a `(source, sequence)`
-/// reappearing inside the window can only be a multipath duplicate of an
-/// unexpired packet, since a legitimate wrap-around reappear of the same
-/// sequence would require more than 192 intervening packets from that
-/// sender. Under sender sequence aliasing (two hosts sharing one address)
-/// both readings are pathological, and dropping the first copy is the
-/// consistent choice either way. The oldest entry is evicted to make room.
-const DUPLICATE_WINDOW: usize = 192;
-
-/// Silence from a source at which its duplicate window is flushed.
-///
-/// Matches the fleet's presumed-lost window: a sender that reboots and resets
-/// its sequence counter takes longer than this before it speaks again, while
-/// genuine multipath duplicates of a live packet do not. After the gap a
-/// fresh window cannot mistake a reboot's first frames for old duplicates.
-const SEQUENCE_RESET_GAP: Duration = Duration::from_secs(10);
-
-/// Consecutive dropped frames after which the duplicate rule gives way and
-/// the frame is accepted.
-///
-/// Eight consecutive drops cannot be multipath: it is a sequence reset (or an
-/// aliased sender), and accepting one packet resynchronizes the window — the
-/// sequence enters it, and the normal rule continues from there.
-const MAX_CONSECUTIVE_DROPS: u8 = 8;
-
 /// Bound on buffered application events. When the UI falls behind, the channel
 /// drops the oldest events so the freshest telemetry is what reaches it.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -131,29 +105,6 @@ struct Link {
     /// Whether this transport's latency warrants the scaled mission-transfer
     /// timeouts ([`MavlinkRouter::transfer_timeouts`]).
     high_latency: bool,
-}
-
-/// The duplicate-suppression state of one source: its most recent inbound
-/// packet sequences, plus when a frame from it was last accepted into state.
-#[derive(Debug)]
-struct SequenceWindow {
-    sequences: VecDeque<u8>,
-    /// When a frame from this source was last accepted (as opposed to
-    /// dropped): a long silence flushes the window for a sequence reset.
-    last_accepted: Instant,
-    /// Consecutive frames dropped: beyond a handful the duplicate rule must
-    /// give way to a suspected sequence reset.
-    consecutive_drops: u8,
-}
-
-impl SequenceWindow {
-    fn new(now: Instant) -> Self {
-        Self {
-            sequences: VecDeque::new(),
-            last_accepted: now,
-            consecutive_drops: 0,
-        }
-    }
 }
 
 impl Link {
@@ -190,22 +141,17 @@ struct MessageRouteMap {
     map: BTreeMap<MavlinkId, BTreeMap<LinkId, Instant>>,
 }
 
-#[derive(Default)]
-struct PendingAckMap {
-    map: BTreeMap<(MavlinkId, u16), mpsc::UnboundedSender<CommandAck>>,
-}
-
 struct MavlinkRouterInner {
     gcs_id: MavlinkId,
     events: broadcast::Sender<Event>,
     links: Mutex<BTreeMap<LinkId, Link>>,
     next_link_generation: AtomicU64,
     routes: Mutex<MessageRouteMap>,
-    /// The most recent inbound packet sequences per source, for the cross-link
-    /// duplicate suppression in [`MavlinkRouter::dispatch`], with reset guards.
-    seen_sequences: Mutex<BTreeMap<MavlinkId, SequenceWindow>>,
+    /// The cross-link duplicate suppression used by [`MavlinkRouter::dispatch`],
+    /// keyed per source, with reset guards.
+    dedup: Dedup,
     filters: Mutex<MessageFilterMap>,
-    acks: Mutex<PendingAckMap>,
+    acks: PendingAckMap,
     locks: LockMap,
     param_permit: Semaphore,
 }
@@ -222,9 +168,9 @@ impl MavlinkRouter {
                 links: Mutex::default(),
                 next_link_generation: AtomicU64::new(0),
                 routes: Mutex::default(),
-                seen_sequences: Mutex::default(),
+                dedup: Dedup::default(),
                 filters: Mutex::default(),
-                acks: Mutex::default(),
+                acks: PendingAckMap::default(),
                 locks: LockMap::default(),
                 param_permit: Semaphore::new(PARAM_SET_PERMITS),
                 events: tx,
@@ -313,11 +259,11 @@ impl MavlinkRouter {
         kind: MavCmd,
         tx: mpsc::UnboundedSender<CommandAck>,
     ) {
-        lock(&self.inner.acks).map.insert((target, kind as u16), tx);
+        self.inner.acks.insert(target, kind, tx);
     }
 
     pub(super) fn remove_pending(&self, target: MavlinkId, kind: MavCmd) {
-        lock(&self.inner.acks).map.remove(&(target, kind as u16));
+        self.inner.acks.remove(target, kind);
     }
 
     /// Send a message towards `target` on the link it was most recently heard on.
@@ -439,7 +385,11 @@ impl MavlinkRouter {
         // consumers twice would double-fold into vehicle state (duplicated
         // statustexts, doubled trail points). Only the first arriving copy
         // advances; the needed ordering above is unaffected.
-        if self.seen_sequence_before(inbound.source_mav, sequence, inbound.received_at) {
+        if self
+            .inner
+            .dedup
+            .seen_sequence_before(inbound.source_mav, sequence, inbound.received_at)
+        {
             log::debug!(
                 "Dropping duplicate packet sequence {sequence} from {:?} on {:?}",
                 inbound.source_mav,
@@ -449,7 +399,9 @@ impl MavlinkRouter {
         }
 
         if let Ok(ack) = inbound.frame.decode_message::<CommandAck>() {
-            self.route_ack(inbound.source_mav, &ack);
+            self.inner
+                .acks
+                .route_ack(self.inner.gcs_id, inbound.source_mav, &ack);
         }
 
         lock(&self.inner.filters).map.retain(|_, waiter| {
@@ -457,82 +409,6 @@ impl MavlinkRouter {
         });
 
         _ = self.inner.events.send(Event::Message(inbound));
-    }
-
-    /// Record the packet sequence of a source and report whether an identical
-    /// sequence is already inside [`DUPLICATE_WINDOW`], i.e. the frame is a
-    /// cross-link duplicate.
-    ///
-    /// Two guards keep a sender's sequence reset (reboot) from being mistaken
-    /// for duplicates: a [`SEQUENCE_RESET_GAP`]-sized silence since the last
-    /// accepted frame flushes the window outright, and
-    /// [`MAX_CONSECUTIVE_DROPS`] consecutive dropped frames force the next one
-    /// through, which resynchronizes the window.
-    fn seen_sequence_before(&self, source: MavlinkId, sequence: u8, now: Instant) -> bool {
-        let mut seen = lock(&self.inner.seen_sequences);
-        let window = seen
-            .entry(source)
-            .or_insert_with(|| SequenceWindow::new(now));
-
-        // Flush a window that may belong to a previous run of the sender: if
-        // the gap is at least the reset gap, a fresh sequence cannot be an
-        // unexpired duplicate.
-        if now.duration_since(window.last_accepted) >= SEQUENCE_RESET_GAP {
-            window.sequences.clear();
-            window.consecutive_drops = 0;
-        }
-
-        if window.sequences.contains(&sequence) {
-            // Within the intact window, this is a cross-link duplicate.
-            window.consecutive_drops += 1;
-
-            if window.consecutive_drops >= MAX_CONSECUTIVE_DROPS {
-                // More consecutive drops than multipath duplication can
-                // produce: clear the window and accept; entering this frame
-                // resynchronizes the window for the frames after it.
-                window.sequences.clear();
-                window.consecutive_drops = 0;
-            } else {
-                return true;
-            }
-        } else {
-            window.consecutive_drops = 0;
-        }
-
-        window.sequences.push_back(sequence);
-        while window.sequences.len() > DUPLICATE_WINDOW {
-            window.sequences.pop_front();
-        }
-        window.last_accepted = now;
-        false
-    }
-
-    fn route_ack(&self, source: MavlinkId, ack: &CommandAck) {
-        let gcs = self.inner.gcs_id;
-
-        // Some systems leave the target fields empty, so accept those as well
-        let for_us = (ack.target_system == 0 || ack.target_system == gcs.system)
-            && (ack.target_component == 0 || ack.target_component == gcs.component);
-        if !for_us {
-            return;
-        }
-
-        let command = ack.command as u16;
-        let system_wide = MavlinkId {
-            system: source.system,
-            component: 0,
-        };
-
-        let pending = lock(&self.inner.acks);
-        let sender = pending
-            .map
-            .get(&(source, command))
-            .or_else(|| pending.map.get(&(system_wide, command)));
-
-        match sender {
-            Some(sender) => _ = sender.send(ack.clone()),
-            None => log::debug!("Unsolicited ACK from {source:?}: {ack:?}"),
-        }
     }
 
     fn remove_link(&self, link: &LinkId, generation: u64) {
@@ -673,6 +549,10 @@ impl MavlinkRouter {
                     }
                 })
                 .await;
+
+            // Converge on the writer's teardown path: whichever subsystem gives
+            // up first, the reader's tail performs the actual `remove_link`.
+            token.cancel();
         });
 
         LinkGuard(Arc::new(cancel.drop_guard()))
@@ -879,68 +759,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_long_gap_flushes_the_window_for_a_sequence_reset() {
-        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let source = MavlinkId {
-            system: 5,
-            component: 1,
-        };
-        let t0 = Instant::now();
-
-        // Warm the window with sequence 0; a repeat inside the window drops.
-        assert!(!router.seen_sequence_before(source, 0, t0));
-        assert!(router.seen_sequence_before(source, 0, t0));
-
-        // After a presumed-lost-sized silence the same sequence passes: the
-        // sender's counter has reset (reboot), so it is not an old packet.
-        let after_gap = t0 + SEQUENCE_RESET_GAP;
-        assert!(
-            !router.seen_sequence_before(source, 0, after_gap),
-            "the long gap must flush the window"
-        );
-
-        // Immediately after, the normal duplicate rule applies again.
-        assert!(
-            router.seen_sequence_before(source, 0, after_gap),
-            "the freshly accepted sequence drops if repeated normally"
-        );
-    }
-
-    #[test]
-    fn consecutive_drops_give_way_after_the_threshold() {
-        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let source = MavlinkId {
-            system: 6,
-            component: 1,
-        };
-
-        // Accept sequence 7 once so it sits in the window; its repeats then
-        // repeat at a rate that cannot trip the long-gap flush.
-        let mut now = Instant::now();
-        assert!(!router.seen_sequence_before(source, 7, now));
-
-        for attempt in 0..(MAX_CONSECUTIVE_DROPS - 1) {
-            now += Duration::from_millis(10);
-            assert!(
-                router.seen_sequence_before(source, 7, now),
-                "drop {attempt} must still apply the normal duplicate rule"
-            );
-        }
-
-        // The 8th consecutive drop cannot be multipath: the window flushes
-        // and the frame is accepted, which resynchronizes it.
-        now += Duration::from_millis(10);
-        assert!(
-            !router.seen_sequence_before(source, 7, now),
-            "the threshold consecutive drop must be accepted"
-        );
-
-        // And the normal rule continues from the resynchronized window.
-        now += Duration::from_millis(10);
-        assert!(router.seen_sequence_before(source, 7, now));
-    }
-
     #[tokio::test]
     async fn is_attached_reflects_the_links_map() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
@@ -985,6 +803,43 @@ mod tests {
         assert!(
             !router.is_attached(&id),
             "blocked transport must tear the link down"
+        );
+    }
+
+    /// A link that can still read but can no longer send heartbeats must be torn
+    /// down, not left silently "connected". The heartbeat task converges on the
+    /// writer's teardown path: on send failure it cancels the token, so the
+    /// reader's tail runs `remove_link`.
+    #[tokio::test]
+    async fn heartbeat_send_failure_tears_the_link_down() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let (_peer, gcs) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(gcs);
+        let _guard = router.attach_reader_writer(id.clone(), reader, writer, false);
+
+        assert!(router.is_attached(&id));
+
+        // Detach the link's outbound queue from the live writer task: the next
+        // heartbeat send fails, while the reader keeps the transport readable
+        // and the writer's own queue stays connected, so only the heartbeat
+        // notices. Keeping the original sender alive is what stops the writer
+        // from seeing its channel close and tearing the link down itself.
+        let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+        drop(dead_rx);
+        let _live_tx = {
+            let mut links = lock(&router.inner.links);
+            let link = links.get_mut(&id).expect("just attached");
+            std::mem::replace(&mut link.tx, dead_tx)
+        };
+
+        // Let the heartbeat task's first tick run and give up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            !router.is_attached(&id),
+            "a failed heartbeat must tear the link down"
         );
     }
 
