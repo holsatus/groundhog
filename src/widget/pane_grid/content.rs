@@ -6,7 +6,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::{self, Tree, Void};
 use iced::advanced::{self as core, Layout, Shell, Widget};
 use iced::widget::container;
-use iced::{Event, Point, Rectangle, Size, Vector};
+use iced::{Background, Color, Event, Point, Rectangle, Size, Vector};
 
 /// The content of a [`Pane`].
 ///
@@ -119,12 +119,9 @@ where
         resizing: bool,
     ) {
         let bounds = layout.bounds();
+        let surface = theme.style(&self.class);
 
-        {
-            let style = theme.style(&self.class);
-
-            container::draw_background(renderer, &style, bounds);
-        }
+        container::draw_background(renderer, &surface, bounds);
 
         if let Some(title_bar) = &self.title_bar {
             let mut children = layout.iter(&tree.children);
@@ -165,6 +162,24 @@ where
                 cursor,
                 viewport,
             );
+        }
+
+        // Re-stroke the pane outline over the contents. The surface is drawn
+        // first, so a shaded header (drawn last) would otherwise hide the top of
+        // the border; and a body that clips itself (a scrollable, or the map
+        // canvas) pushes its own renderer layer, so the stroke needs a layer of
+        // its own — created here, after those — to stay on top.
+        if surface.border.width > 0.0 {
+            renderer.with_layer(bounds, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds,
+                        border: surface.border,
+                        ..renderer::Quad::default()
+                    },
+                    Background::Color(Color::TRANSPARENT),
+                );
+            });
         }
     }
 

@@ -555,11 +555,29 @@ impl Application {
             .boxed()
     }
 
-    fn view_panes(&self) -> Element<'_, Message> {
+    fn view_panes(&self) -> impl Widget<Message> + '_ {
         use crate::widget::pane_grid::{self, PaneGrid};
 
-        PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
-            let content = pane_grid::Content::new(self.pane_body(*panel));
+        let panes = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
+            // The map paints opaque tiles across its whole pane, which a rounded
+            // container cannot clip; it draws its own frame instead (see
+            // `map::view`). Every other pane is a rounded card split by a rule.
+            let body: Element<'_, Message> = if panel.is_fixed() {
+                self.pane_body(*panel)
+            } else {
+                iced::widget::column![
+                    iced::widget::rule::horizontal(style::PANE_BORDER_WIDTH).style(style::divider),
+                    self.pane_body(*panel),
+                ]
+                .height(Length::Fill)
+                .boxed()
+            };
+
+            let mut content = pane_grid::Content::new(body);
+
+            if !panel.is_fixed() {
+                content = content.style(style::pane);
+            }
 
             if panel.is_fixed() {
                 // Zero-height title bar: keeps the `Content` type uniform while
@@ -570,24 +588,24 @@ impl Application {
                 content.title_bar(pane_grid::TitleBar::new(empty).padding(0))
             } else {
                 let focused = self.layout.is_focused(pane);
-                let title: Element<'_, Message> = iced::widget::text(panel.title()).boxed();
+                let title = iced::widget::container(iced::widget::text(panel.title())).padding(5.0).boxed();
 
                 let maximize = if is_maximized {
-                    iced::widget::button(iced::widget::text("v"))
+                    iced::widget::button(iced::widget::container(iced::widget::text("v")).center(20))
                         .padding(2)
                         .on_press(Message::Layout(layout::Message::Restore))
                 } else {
-                    iced::widget::button(iced::widget::text("^"))
+                    iced::widget::button(iced::widget::container(iced::widget::text("^")).center(20))
                         .padding(2)
                         .on_press(Message::Layout(layout::Message::Maximize(pane)))
                 };
 
-                let close = iced::widget::button(iced::widget::text("x"))
+                let close = iced::widget::button(iced::widget::container(iced::widget::text("x")).center(20))
                     .style(iced::widget::button::danger)
                     .padding(2)
                     .on_press(Message::Layout(layout::Message::Close(pane)));
 
-                let controls = iced::widget::row![maximize, close].spacing(4);
+                let controls = iced::widget::container(iced::widget::row![maximize, close].spacing(4)).center_y(32);
 
                 let title_bar = pane_grid::TitleBar::new(title)
                     .controls(pane_grid::Controls::new(controls))
@@ -600,16 +618,17 @@ impl Application {
                         }
                     });
 
-                content.title_bar(title_bar).style(style::pane)
+                content.title_bar(title_bar)
             }
         })
         .width(Length::Fill)
         .height(Length::Fill)
-        .spacing(1)
+        .spacing(5)
         .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
-        .on_resize(9, |event| Message::Layout(layout::Message::Resized(event)))
-        .boxed()
+        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
+
+        iced::widget::container(panes).padding(5.0)
     }
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
@@ -621,7 +640,7 @@ impl Application {
                     dragging: self.mission_panel.dragging(primary),
                 };
                 self.map
-                    .view(self.fleet.vehicles(), primary, interaction)
+                    .view(self.fleet.vehicles(), primary, interaction, &self.theme)
                     .map(Message::Map)
                     .boxed()
             }

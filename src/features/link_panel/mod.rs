@@ -515,21 +515,19 @@ impl LinkPanel {
             .width(30.0);
 
             let content = container(iced::widget::row![
-                iced::widget::text(&link.config.name),
-                iced::widget::text(if connected {
-                    ": connected"
-                } else {
-                    ": disconnected"
-                }),
+                iced::widget::text(&link.config.name).ellipsis(Ellipsis::End),
+                iced::widget::space().width(Length::Fill),
                 button,
                 delete
-            ])
+            ].spacing(5.0).align_y(Alignment::Center))
+            
             .style(if index % 2 == 0 {
                 style::list_default
             } else {
                 style::list_brighter
             })
-            .padding(4.0);
+            .padding(10.0);
+            contents.push(iced::widget::rule::horizontal(1).boxed());
             contents.push(content.boxed());
         }
 

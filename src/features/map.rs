@@ -14,14 +14,15 @@ use std::{
 };
 
 use iced::{
-    Color, Element, Pixels, Point, Rectangle, Vector,
+    Color, Pixels, Point, Rectangle, Size, Theme, Vector, Widget,
     advanced::text::Alignment as TextAlignment,
     alignment::Vertical,
     color::Oklch,
     mouse,
     widget::{
         canvas::{
-            Event, Fill, Frame, Gradient, LineCap, Path, Stroke, Style, Text, gradient::Linear,
+            Event, Fill, Frame, Gradient, LineCap, LineJoin, Path, Stroke, Style, Text, fill,
+            gradient::Linear,
         },
         image::Handle,
     },
@@ -123,7 +124,11 @@ impl Map {
         vehicles: &'a BTreeMap<SystemId, Vehicle>,
         primary: Option<SystemId>,
         interaction: Interaction,
-    ) -> Element<'a, Message> {
+        theme: &Theme,
+    ) -> impl Widget<Message> + 'a {
+        let background = theme.palette().background.base.color;
+        let border = theme.palette().background.strongest.color;
+
         MapProgram::new(&self.tile_cache)
             .on_cache(Message::Cache)
             .on_update(Message::Projector)
@@ -145,7 +150,19 @@ impl Map {
                     {
                         draw_mission(vehicle, projector, frame, interaction.dragging);
                     }
-                })
+                });
+
+                // The map cannot be clipped to a rounded container, so round it
+                // here instead: mask the corners (which show the window behind)
+                // and stroke the same border as the regular panes. Drawn last, so
+                // trails near a corner cannot paint over the mask.
+                draw_rounded_frame(
+                    frame,
+                    crate::style::PANE_RADIUS,
+                    crate::style::PANE_BORDER_WIDTH,
+                    background,
+                    border,
+                );
             })
             .with_interaction(move |projector, cursor, event| {
                 // The interaction projector's `bounds` are absolute screen
@@ -158,6 +175,57 @@ impl Map {
             })
             .build(self.viewpoint)
     }
+}
+
+fn draw_rounded_frame(
+    frame: &mut Frame,
+    radius: f32,
+    width: f32,
+    background: Color,
+    border: Color,
+) {
+    let size = frame.size();
+
+    // Rectangle minus rounded rectangle, even-odd: exactly the four corners.
+    let corners = Path::new(|builder| {
+        builder.rectangle(Point::ORIGIN, size);
+
+        let offset = (width, width).into();
+        let half_width = width / 2.0;
+        let size = size - offset;
+        builder.rounded_rectangle(
+            Point::new(half_width, half_width),
+            size,
+            (radius - half_width).into(),
+        );
+    });
+
+    frame.fill(
+        &corners,
+        Fill {
+            style: Style::Solid(background),
+            rule: fill::Rule::EvenOdd,
+        },
+    );
+
+    // Inset by half the stroke so the border stays inside the bounds; the
+    // overlay canvas is not clipped to them.
+    let inset = width / 2.0;
+    let outline = Path::rounded_rectangle(
+        Point::new(inset, inset),
+        Size::new(size.width - width, size.height - width),
+        (radius - inset).max(0.0).into(),
+    );
+
+    frame.stroke(
+        &outline,
+        Stroke {
+            style: Style::Solid(border),
+            width,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        },
+    );
 }
 
 /// Decide what a canvas event means for the mission overlay.

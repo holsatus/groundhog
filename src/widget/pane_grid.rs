@@ -951,28 +951,6 @@ where
         // would be composited *underneath* them. Creating this layer last keeps the
         // chrome on top of the panes.
         renderer.with_layer(layout.bounds(), |renderer| {
-            // Dividers in the gaps between panes, so the seams read like a rule.
-            // Done explicitly (not as a background behind the grid) so the space
-            // vacated by a dragged pane stays the normal backdrop.
-            if self.internal.maximized().is_none() {
-                let bounds = layout.bounds();
-
-                for (axis, region, ratio) in node
-                    .split_regions(self.spacing, self.min_size, bounds.size())
-                    .values()
-                {
-                    let divider = axis.split_line_bounds(*region, *ratio, self.spacing)
-                        + Vector::new(bounds.x, bounds.y);
-
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: divider,
-                            ..renderer::Quad::default()
-                        },
-                        style.divider,
-                    );
-                }
-            }
 
             if dragged_pane.is_some()
                 && let Some(edge) = pane_in_edge
