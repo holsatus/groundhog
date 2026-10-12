@@ -151,12 +151,19 @@ impl Message {
 pub struct Layout {
     panes: pane_grid::State<Panel>,
     focus: Option<pane_grid::Pane>,
+    pub(crate) dirty: bool,
+    pub(crate) revision: u64,
 }
 
 impl Layout {
     pub fn new() -> Self {
         let (panes, _) = pane_grid::State::new(Panel::Map);
-        let mut layout = Self { panes, focus: None };
+        let mut layout = Self {
+            panes,
+            focus: None,
+            dirty: false,
+            revision: 0,
+        };
 
         // Start with the vehicle HUD visible alongside the map.
         layout.open(Panel::Vehicles);
@@ -174,6 +181,8 @@ impl Layout {
         let layout = Self {
             panes: pane_grid::State::with_configuration(config.into_configuration()),
             focus: None,
+            dirty: false,
+            revision: 0,
         };
 
         if layout.is_open(Panel::Map) {

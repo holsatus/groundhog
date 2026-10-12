@@ -34,20 +34,10 @@ pub struct Application {
     pub(crate) mission_panel: MissionPanel,
     pub(crate) parameter_panel: ParameterPanel,
     pub(crate) router: MavlinkRouter,
-    /// Handle to the vehicle operations the feature panels drive.
     pub(crate) services: FleetServices,
     pub(crate) configuration: config::Configuration,
-    /// Cached iced theme, kept in sync with `configuration.settings.theme`.
-    ///
-    /// Regenerating the theme runs real palette colour math and allocates, so
-    /// it is built once at boot and whenever the setting changes rather than
-    /// on every render.
     pub(crate) theme: Theme,
     pub(crate) fleet: Fleet,
-    /// Set when the layout changed and needs to be persisted (debounced).
-    pub(crate) layout_dirty: bool,
-    /// Bumped on every layout change so the debounce timer is restarted.
-    pub(crate) layout_revision: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -224,8 +214,6 @@ impl Application {
             fleet: Fleet::default(),
             mission_panel: MissionPanel::new(),
             parameter_panel: ParameterPanel::new(),
-            layout_dirty: false,
-            layout_revision: 0,
         };
 
         (application, Task::batch([events, auto_connect]))
@@ -264,8 +252,8 @@ impl Application {
             Message::Vehicles(message) => self.vehicle_message_update(message),
             Message::Settings(message) => self.settings_message_update(message),
             Message::Tick => {
-                if self.layout_dirty {
-                    self.layout_dirty = false;
+                if self.layout.dirty {
+                    self.layout.dirty = false;
                     self.save_configuration()
                 } else {
                     Task::none()
@@ -299,8 +287,8 @@ impl Application {
         self.layout.update(message);
         if changed {
             self.configuration.layout = self.layout.configuration();
-            self.layout_revision = self.layout_revision.wrapping_add(1);
-            self.layout_dirty = true;
+            self.layout.revision = self.layout.revision.wrapping_add(1);
+            self.layout.dirty = true;
         }
     }
 
@@ -686,9 +674,9 @@ impl Application {
         // every layout change (the revision is part of the subscription
         // identity), so the write happens `LAYOUT_SAVE_DEBOUNCE` after the last
         // change rather than repeatedly throughout a drag/resize.
-        let layout_tick = if self.layout_dirty {
+        let layout_tick = if self.layout.dirty {
             iced::time::every(LAYOUT_SAVE_DEBOUNCE)
-                .with(self.layout_revision)
+                .with(self.layout.revision)
                 .map(|_| Message::Tick)
         } else {
             Subscription::none()
