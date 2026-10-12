@@ -13,11 +13,12 @@
 use std::{collections::HashMap, hash::Hash};
 
 use iced::{
-    Element, Event, Length, Rectangle, Size, Vector,
     advanced::{
-        Layout, Shell, Widget, layout, mouse, overlay, renderer,
-        widget::{Meta, Operation, Tree, tree},
+        layout, mouse, overlay, renderer,
+        widget::{tree, Meta, Operation, Tree},
+        Layout, Shell, Widget,
     },
+    Element, Event, Length, Rectangle, Size, Vector,
 };
 
 /// Visible height assumed until the list has seen its real viewport.
@@ -30,10 +31,13 @@ const DEFAULT_OVERSCAN: f32 = 200.0;
 const DEFAULT_ESTIMATE: f32 = 32.0;
 
 /// Creates a [`VirtualList`] which calls `view` only for the visible items.
-pub fn virtual_list<'a, T, Message>(
+pub fn virtual_list<'a, T, Message, Theme, Renderer>(
     items: impl IntoIterator<Item = T>,
-    view: impl Fn(&T) -> Element<'a, Message> + 'a,
-) -> VirtualList<'a, T, Message> {
+    view: impl Fn(&T) -> Element<'a, Message, Theme, Renderer> + 'a,
+) -> VirtualList<'a, T, Message, usize, Theme, Renderer>
+where
+    Renderer: iced::advanced::Renderer,
+{
     VirtualList {
         items: items.into_iter().collect(),
         view: Box::new(view),
@@ -54,14 +58,18 @@ enum Height<'a, T> {
 }
 
 /// Builds the element for a single item.
-type View<'a, T, Message> = Box<dyn Fn(&T) -> Element<'a, Message> + 'a>;
+type View<'a, T, Message, Theme, Renderer> =
+    Box<dyn Fn(&T) -> Element<'a, Message, Theme, Renderer> + 'a>;
 
 /// Builds the stable key identifying a single item.
 type KeyFn<'a, T, K> = Box<dyn Fn(usize, &T) -> K + 'a>;
 
-pub struct VirtualList<'a, T, Message, K = usize> {
+pub struct VirtualList<'a, T, Message, K = usize, Theme = iced::Theme, Renderer = iced::Renderer>
+where
+    Renderer: iced::advanced::Renderer,
+{
     items: Vec<T>,
-    view: View<'a, T, Message>,
+    view: View<'a, T, Message, Theme, Renderer>,
     key: KeyFn<'a, T, K>,
     height: Height<'a, T>,
     spacing: f32,
@@ -69,12 +77,20 @@ pub struct VirtualList<'a, T, Message, K = usize> {
 
     // Built during layout, since only then is the visible region known
     keys: Vec<K>,
-    children: Vec<Element<'a, Message>>,
+    children: Vec<Element<'a, Message, Theme, Renderer>>,
 }
 
-impl<'a, T, Message, K> VirtualList<'a, T, Message, K> {
-    /// Use exact item heights. Each item is laid out within its height and
-    /// centered vertically, so the height must fit the item's content.
+impl<'a, T, Message, K, Theme, Renderer> VirtualList<'a, T, Message, K, Theme, Renderer>
+where
+    Renderer: iced::advanced::Renderer,
+{
+    /// Use exact item heights.
+    ///
+    /// Each item is laid out within its height and **centered vertically**: the
+    /// height is a fixed row slot and the built content is centered inside it,
+    /// so the height must fit the item's content or it will be clipped. This
+    /// centering is part of the contract of this method, not an implementation
+    /// detail.
     pub fn item_height(mut self, height: impl Fn(&T) -> f32 + 'a) -> Self {
         self.height = Height::Exact(Box::new(height));
         self
@@ -90,7 +106,10 @@ impl<'a, T, Message, K> VirtualList<'a, T, Message, K> {
     /// Identify items by key rather than by index, so widget state (such as
     /// text input focus) and measured heights follow the item when the list
     /// changes.
-    pub fn key<K2>(self, key: impl Fn(&T) -> K2 + 'a) -> VirtualList<'a, T, Message, K2> {
+    pub fn key<K2>(
+        self,
+        key: impl Fn(&T) -> K2 + 'a,
+    ) -> VirtualList<'a, T, Message, K2, Theme, Renderer> {
         VirtualList {
             items: self.items,
             view: self.view,
@@ -129,12 +148,16 @@ struct State<K> {
     width: f32,
 }
 
-impl<T, Message, K> Meta for VirtualList<'_, T, Message, K> {}
+impl<T, Message, K, Theme, Renderer> Meta for VirtualList<'_, T, Message, K, Theme, Renderer> where
+    Renderer: iced::advanced::Renderer
+{
+}
 
-impl<'a, T, Message, K> Widget<Message, iced::Theme, iced::Renderer>
-    for VirtualList<'a, T, Message, K>
+impl<'a, T, Message, K, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for VirtualList<'a, T, Message, K, Theme, Renderer>
 where
     K: Hash + Eq + Clone + 'static,
+    Renderer: iced::advanced::Renderer,
 {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State<K>>()
@@ -159,7 +182,7 @@ where
         Size::new(Length::Fill, Length::Shrink)
     }
 
-    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         let Tree {
             state,
             children,
@@ -255,7 +278,7 @@ where
         tree: &mut Tree,
         layout: Layout,
         viewport: &Rectangle,
-        renderer: &iced::Renderer,
+        renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
         operation.container(None, layout.bounds(), viewport);
@@ -276,7 +299,7 @@ where
         event: &Event,
         layout: Layout,
         cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
+        renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
@@ -309,7 +332,7 @@ where
         layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
-        renderer: &iced::Renderer,
+        renderer: &Renderer,
     ) -> mouse::Interaction {
         self.children
             .iter()
@@ -324,8 +347,8 @@ where
     fn draw(
         &self,
         tree: &Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
+        renderer: &mut Renderer,
+        theme: &Theme,
         style: &renderer::Style,
         layout: Layout,
         cursor: mouse::Cursor,
@@ -340,11 +363,11 @@ where
         &'b mut self,
         tree: &'b mut Tree,
         layout: Layout,
-        renderer: &iced::Renderer,
+        renderer: &Renderer,
         viewport: &Rectangle,
         translation: Vector,
         window: Size,
-    ) -> Vec<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         overlay::from_children(
             &mut self.children,
             tree,

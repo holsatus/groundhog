@@ -139,3 +139,48 @@ pub fn severity_color(palette: Palette, severity: MavSeverity) -> Color {
         MavSeverity::Debug => palette.secondary.base.color,
     }
 }
+
+/// The semantic color for a parameter's type label.
+///
+/// This is presentation, so it names the meaning rather than reaching into an
+/// arbitrary palette slot at the call site.
+pub fn parameter_type_color(theme: &Theme) -> Color {
+    theme.palette().secondary.base.color
+}
+
+// Map overlay colors.
+//
+// The overlay is drawn on top of the opaque OpenStreetMap tiles, not on the
+// themed pane surface, so it is deliberately theme-independent: a single fixed
+// palette keeps waypoints and the route legible over any tile. These are the
+// one control point for the overlay's look.
+
+/// The translucent wash that darkens the map tiles behind the overlay.
+pub fn map_backdrop() -> Color {
+    Color::BLACK.scale_alpha(0.4)
+}
+
+/// The stroke connecting consecutive positioned mission items.
+pub fn map_route() -> Color {
+    Color::WHITE.scale_alpha(0.6)
+}
+
+/// A mission marker that is neither current nor being dragged.
+pub fn marker_default() -> Color {
+    Color::WHITE.scale_alpha(0.85)
+}
+
+/// The mission marker at the vehicle's current execution item.
+pub fn marker_current() -> Color {
+    Color::from_rgb(0.3, 0.9, 0.4)
+}
+
+/// The mission marker currently being dragged.
+pub fn marker_dragged() -> Color {
+    Color::from_rgb(1.0, 0.6, 0.1)
+}
+
+/// The number label drawn on a mission marker.
+pub fn marker_label() -> Color {
+    Color::BLACK
+}

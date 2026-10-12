@@ -711,7 +711,7 @@ impl ParameterPanel {
         let pattern = self.filter.ident_pattern.to_lowercase();
         let editing = &self.editing;
         // Copied up front so the draw closure does not borrow the theme.
-        let type_color = theme.palette().secondary.base.color;
+        let type_color = style::parameter_type_color(theme);
 
         let mut items = Vec::with_capacity(parameters.len() + 64);
         let mut section = None;

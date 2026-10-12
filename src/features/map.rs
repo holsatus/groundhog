@@ -32,7 +32,7 @@ use slippery::{
     location,
 };
 
-use crate::{domain::SystemId, domain::geo::GeoPosition, domain::vehicle::Vehicle};
+use crate::{domain::SystemId, domain::geo::GeoPosition, domain::vehicle::Vehicle, style};
 
 static ARROW_HANDLE: LazyLock<Handle> =
     LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
@@ -144,7 +144,7 @@ impl Map {
             .with_draw_layer(move |projector, frame| {
                 // Darken the map background to make overlay stand out more
                 let black_fill = Fill {
-                    style: Style::Solid(Color::BLACK.scale_alpha(0.4)),
+                    style: Style::Solid(style::map_backdrop()),
                     ..Fill::default()
                 };
                 frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);
@@ -459,7 +459,7 @@ fn draw_mission(
     // Route: a single consistent stroke between consecutive positioned items.
     for pair in points.windows(2) {
         let stroke = Stroke {
-            style: Style::Solid(Color::WHITE.scale_alpha(0.6)),
+            style: Style::Solid(style::map_route()),
             width: 2.0,
             line_cap: LineCap::Round,
             ..Stroke::default()
@@ -471,18 +471,18 @@ fn draw_mission(
     // Markers, each numbered with its 1-based mission index.
     for (index, point) in points {
         let (radius, color) = if dragged == Some(index) {
-            (9.0, Color::from_rgb(1.0, 0.6, 0.1))
+            (9.0, style::marker_dragged())
         } else if progress.is_current(index) {
-            (7.0, Color::from_rgb(0.3, 0.9, 0.4))
+            (7.0, style::marker_current())
         } else {
-            (5.0, Color::WHITE.scale_alpha(0.85))
+            (5.0, style::marker_default())
         };
 
         frame.fill(&Path::circle(point, radius), Fill::from(color));
 
         let mut label = Text::from((index + 1).to_string());
         label.position = point;
-        label.color = Color::BLACK;
+        label.color = style::marker_label();
         label.size = Pixels(11.0);
         label.align_x = TextAlignment::Center;
         label.align_y = Vertical::Center;
