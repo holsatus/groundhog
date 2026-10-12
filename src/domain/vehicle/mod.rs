@@ -17,14 +17,15 @@
 pub mod attitude;
 pub mod battery;
 pub mod identity;
+pub mod mission;
 pub mod position;
 pub mod status;
 
 pub use self::status::StatusText;
 
 use self::{
-    attitude::AttitudeState, battery::Battery, identity::Identity, position::PositionTrack,
-    status::StatusLog,
+    attitude::AttitudeState, battery::Battery, identity::Identity, mission::MissionProgress,
+    position::PositionTrack, status::StatusLog,
 };
 
 use std::{collections::BTreeMap, time::Instant};
@@ -40,7 +41,7 @@ use mavio::{
 
 use crate::{
     domain::firmware::FlightMode,
-    domain::mission::Mission,
+    domain::mission::{MissionPlan, MissionSync},
     domain::parameter::{self, Parameters},
     foundation::{BoxError, MavlinkId, SystemId},
 };
@@ -94,7 +95,12 @@ pub struct Vehicle {
     pub position: PositionTrack,
     pub battery: Battery,
     pub status: StatusLog,
-    pub mission: Mission,
+    /// The editable flight plan.
+    pub mission: MissionPlan,
+    /// Whether the plan matches the vehicle, and under which id.
+    pub mission_sync: MissionSync,
+    /// The vehicle's mission execution progress.
+    pub mission_progress: MissionProgress,
     /// Per-component state (parameters, capabilities, names), keyed by the
     /// MAVLink component id.
     components: BTreeMap<u8, ComponentState>,
@@ -338,12 +344,12 @@ impl Vehicle {
             }
             DefaultDialect::MissionCurrent(message) => {
                 if self.is_authoritative(component) {
-                    self.mission.observe_current(message);
+                    self.mission_progress.observe_current(message);
                 }
             }
             DefaultDialect::MissionItemReached(message) => {
                 if self.is_authoritative(component) {
-                    self.mission.observe_reached(message.seq);
+                    self.mission_progress.observe_reached(message.seq);
                 }
             }
             DefaultDialect::Statustext(message) => {
@@ -417,9 +423,9 @@ mod tests {
             }),
         );
 
-        assert_eq!(vehicle.mission.progress.current_seq, Some(2));
-        assert_eq!(vehicle.mission.progress.total, Some(8));
-        assert_eq!(vehicle.mission.progress.state, MissionState::Active);
+        assert_eq!(vehicle.mission_progress.current_seq, Some(2));
+        assert_eq!(vehicle.mission_progress.total, Some(8));
+        assert_eq!(vehicle.mission_progress.state, MissionState::Active);
     }
 
     #[test]
@@ -444,7 +450,7 @@ mod tests {
             DefaultDialect::MissionItemReached(messages::MissionItemReached { seq: 5 }),
         );
 
-        assert_eq!(vehicle.mission.progress.current_seq, Some(5));
+        assert_eq!(vehicle.mission_progress.current_seq, Some(5));
     }
 
     #[test]
@@ -549,7 +555,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(vehicle.mission.progress.current_seq, Some(3));
+        assert_eq!(vehicle.mission_progress.current_seq, Some(3));
         assert_eq!(
             vehicle.battery.state.as_ref().unwrap().voltage,
             autopilot_voltage

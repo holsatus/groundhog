@@ -436,18 +436,14 @@ fn draw_mission(
     dragged: Option<usize>,
 ) {
     let mission = &vehicle.mission;
-    let current = mission.progress.current_seq;
+    let progress = &vehicle.mission_progress;
 
     // Only positioned commands get a marker or take part in the route.
     let points: Vec<(usize, Point)> = mission
-        .items()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            item.command.position().map(|pos| {
-                let geo = GeoPosition::new(pos.lat, pos.lon);
-                (index, projector.mercator_into_screen_space(mercator(geo)))
-            })
+        .route_points()
+        .map(|(index, pos)| {
+            let geo = GeoPosition::new(pos.lat, pos.lon);
+            (index, projector.mercator_into_screen_space(mercator(geo)))
         })
         .collect();
 
@@ -467,7 +463,7 @@ fn draw_mission(
     for (index, point) in points {
         let (radius, color) = if dragged == Some(index) {
             (9.0, Color::from_rgb(1.0, 0.6, 0.1))
-        } else if current == Some(index as u16) {
+        } else if progress.is_current(index) {
             (7.0, Color::from_rgb(0.3, 0.9, 0.4))
         } else {
             (5.0, Color::WHITE.scale_alpha(0.85))
@@ -501,11 +497,8 @@ fn waypoint_at(vehicle: &Vehicle, projector: &Projector, cursor: Point) -> Optio
 
     vehicle
         .mission
-        .items()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            let pos = item.command.position()?;
+        .route_points()
+        .filter_map(|(index, pos)| {
             let point = projector.geodetic_into_screen_space(Geodetic::new(pos.lon, pos.lat));
             let offset = point - cursor;
             let distance_sq = offset.x * offset.x + offset.y * offset.y;

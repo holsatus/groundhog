@@ -7,10 +7,19 @@ use mavio::default_dialect::{
 };
 
 use crate::{
-    domain::mission::{Mission, MissionItem},
+    domain::mission::{MissionItem, MissionPlan},
     foundation::MavlinkId,
     mavlink::{self, Command, MavlinkMessage, MavlinkRouter, ParamListSummary, Targeted, commands},
 };
+
+/// A plan downloaded from a vehicle, together with the opaque id the vehicle
+/// reports for it. What the vehicle handed over is what the vehicle has, so the
+/// fleet records it as synced under `vehicle_id`.
+#[derive(Debug, Clone)]
+pub struct DownloadedMission {
+    pub plan: MissionPlan,
+    pub vehicle_id: u32,
+}
 
 /// An intent-level handle for operating a single vehicle through the router.
 ///
@@ -89,8 +98,8 @@ impl VehicleClient {
         self.router.send_targeted(self.id, message)
     }
 
-    /// Download the vehicle's flight plan, replacing the caller's copy.
-    pub async fn download_mission(&self) -> mavlink::Result<Mission> {
+    /// Download the vehicle's flight plan.
+    pub async fn download_mission(&self) -> mavlink::Result<DownloadedMission> {
         let downloaded = self
             .router
             .mission_download(self.id, MavMissionType::Mission)
@@ -102,15 +111,18 @@ impl VehicleClient {
             .map(MissionItem::from_wire)
             .collect::<Vec<_>>();
 
-        let mut mission = Mission::default();
-        mission.set_items(items);
-        mission.mark_synced(Some(downloaded.vehicle_id));
-        Ok(mission)
+        let mut plan = MissionPlan::default();
+        plan.set_items(items);
+
+        Ok(DownloadedMission {
+            plan,
+            vehicle_id: downloaded.vehicle_id,
+        })
     }
 
-    /// Upload `mission` to the vehicle; returns the vehicle's opaque plan id.
-    pub async fn upload_mission(&self, mission: &Mission) -> mavlink::Result<u32> {
-        let wire = mission
+    /// Upload `plan` to the vehicle; returns the vehicle's opaque plan id.
+    pub async fn upload_mission(&self, plan: &MissionPlan) -> mavlink::Result<u32> {
+        let wire = plan
             .items()
             .iter()
             .enumerate()
@@ -187,7 +199,12 @@ mod tests {
         let client = VehicleClient::new(&router, VEHICLE);
 
         assert!(client.download_mission().await.is_err());
-        assert!(client.upload_mission(&Mission::default()).await.is_err());
+        assert!(
+            client
+                .upload_mission(&MissionPlan::default())
+                .await
+                .is_err()
+        );
         assert!(client.clear_mission().await.is_err());
         assert!(client.set_current_mission_item(0).await.is_err());
         assert!(client.start_mission().await.is_err());

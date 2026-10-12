@@ -20,7 +20,7 @@ use mavio::DefaultDialect;
 
 use crate::{
     domain::geo::GeoPosition,
-    domain::mission::Mission,
+    domain::mission::MissionPlan,
     domain::vehicle::{Liveness, Vehicle},
     foundation::{MavlinkId, SystemId},
 };
@@ -189,16 +189,22 @@ impl Fleet {
 
     /// Install a mission the vehicle handed over during a download.
     ///
-    /// The adapter (`services::vehicle`) builds a synced plan, because what
-    /// the vehicle handed over is, by definition, what the vehicle has; this
-    /// fold only installs it. Returns whether the fold landed; an unknown
-    /// vehicle leaves everything untouched.
-    pub fn apply_mission_download(&mut self, id: SystemId, mission: Mission) -> bool {
+    /// The adapter (`services::vehicle`) decodes the wire items into a plan;
+    /// what the vehicle handed over is, by definition, what the vehicle has, so
+    /// this fold also records the plan as synced under `vehicle_id`. Returns
+    /// whether the fold landed; an unknown vehicle leaves everything untouched.
+    pub fn apply_mission_download(
+        &mut self,
+        id: SystemId,
+        plan: MissionPlan,
+        vehicle_id: u32,
+    ) -> bool {
         let Some(vehicle) = self.vehicles.get_mut(&id) else {
             return false;
         };
 
-        vehicle.mission = mission;
+        vehicle.mission = plan;
+        vehicle.mission_sync.mark_synced(Some(vehicle_id));
         true
     }
 
@@ -210,7 +216,7 @@ impl Fleet {
             return false;
         };
 
-        vehicle.mission.mark_synced(Some(vehicle_id));
+        vehicle.mission_sync.mark_synced(Some(vehicle_id));
         true
     }
 
@@ -222,7 +228,7 @@ impl Fleet {
         };
 
         vehicle.mission.clear();
-        vehicle.mission.mark_synced(None);
+        vehicle.mission_sync.mark_synced(None);
         true
     }
 }
@@ -236,15 +242,17 @@ mod tests {
     };
 
     use crate::domain::mission::{
-        Mission, MissionCommand, MissionCommandKind, MissionItem, Position,
+        MissionCommand, MissionCommandKind, MissionItem, MissionPlan, Position,
     };
 
     const A: SystemId = SystemId(1);
     const B: SystemId = SystemId(2);
 
-    /// Push one waypoint onto `id`'s working mission.
+    /// Push one waypoint onto `id`'s working mission and mark it dirty, as a
+    /// user edit would.
     fn push_waypoint(fleet: &mut Fleet, id: SystemId) {
-        fleet.vehicle_mut(id).unwrap().mission.push(MissionItem {
+        let vehicle = fleet.vehicle_mut(id).unwrap();
+        vehicle.mission.push(MissionItem {
             frame: MavFrame::GlobalRelativeAltInt,
             autocontinue: true,
             command: MissionCommand::default_for(
@@ -256,13 +264,14 @@ mod tests {
                 },
             ),
         });
+        vehicle.mission_sync.mark_dirty();
     }
 
-    /// A plan shaped like one an in-flight download hands back: exactly what
-    /// the vehicle has, hence already synced under `vehicle_id`.
-    fn synced_mission(vehicle_id: u32) -> Mission {
-        let mut mission = Mission::default();
-        mission.push(MissionItem {
+    /// A plan shaped like one an in-flight download hands back, with the opaque
+    /// id the vehicle reports for it.
+    fn synced_mission(vehicle_id: u32) -> (MissionPlan, u32) {
+        let mut plan = MissionPlan::default();
+        plan.push(MissionItem {
             frame: MavFrame::GlobalRelativeAltInt,
             autocontinue: true,
             command: MissionCommand::default_for(
@@ -274,8 +283,7 @@ mod tests {
                 },
             ),
         });
-        mission.mark_synced(Some(vehicle_id));
-        mission
+        (plan, vehicle_id)
     }
 
     /// The address of `id`'s autopilot endpoint, for feeding `observe`.
@@ -805,18 +813,17 @@ mod tests {
 
         // Setup: a dirty working plan awaiting the download.
         push_waypoint(&mut fleet, A);
-        assert!(fleet.vehicle(A).unwrap().mission.dirty);
+        assert!(fleet.vehicle(A).unwrap().mission_sync.dirty);
 
-        // The adapter hands over what the vehicle already has: synced.
-        let downloaded = synced_mission(5);
-        assert!(!downloaded.dirty);
+        // The adapter hands over what the vehicle already has, under id `5`.
+        let (plan, vehicle_id) = synced_mission(5);
 
-        assert!(fleet.apply_mission_download(A, downloaded));
+        assert!(fleet.apply_mission_download(A, plan, vehicle_id));
 
-        let mission = &fleet.vehicle(A).unwrap().mission;
-        assert_eq!(mission.len(), 1);
-        assert!(!mission.dirty, "the adapter's sync state is preserved");
-        assert_eq!(mission.vehicle_id, Some(5));
+        let vehicle = fleet.vehicle(A).unwrap();
+        assert_eq!(vehicle.mission.len(), 1);
+        assert!(!vehicle.mission_sync.dirty);
+        assert_eq!(vehicle.mission_sync.vehicle_id, Some(5));
     }
 
     #[test]
@@ -826,15 +833,15 @@ mod tests {
         fleet.observe(source(A), t0, None);
 
         push_waypoint(&mut fleet, A);
-        assert!(fleet.vehicle(A).unwrap().mission.dirty);
+        assert!(fleet.vehicle(A).unwrap().mission_sync.dirty);
 
         // The vehicle accepted the plan and reports it under `7`.
         assert!(fleet.apply_mission_upload(A, 7));
 
-        let mission = &fleet.vehicle(A).unwrap().mission;
-        assert_eq!(mission.len(), 1, "the working plan is kept");
-        assert!(!mission.dirty);
-        assert_eq!(mission.vehicle_id, Some(7));
+        let vehicle = fleet.vehicle(A).unwrap();
+        assert_eq!(vehicle.mission.len(), 1, "the working plan is kept");
+        assert!(!vehicle.mission_sync.dirty);
+        assert_eq!(vehicle.mission_sync.vehicle_id, Some(7));
     }
 
     #[test]
@@ -845,14 +852,14 @@ mod tests {
 
         push_waypoint(&mut fleet, A);
         assert!(fleet.apply_mission_upload(A, 3));
-        assert_eq!(fleet.vehicle(A).unwrap().mission.vehicle_id, Some(3));
+        assert_eq!(fleet.vehicle(A).unwrap().mission_sync.vehicle_id, Some(3));
 
         assert!(fleet.apply_mission_clear(A));
 
-        let mission = &fleet.vehicle(A).unwrap().mission;
-        assert_eq!(mission.len(), 0);
-        assert!(!mission.dirty);
-        assert_eq!(mission.vehicle_id, None);
+        let vehicle = fleet.vehicle(A).unwrap();
+        assert_eq!(vehicle.mission.len(), 0);
+        assert!(!vehicle.mission_sync.dirty);
+        assert_eq!(vehicle.mission_sync.vehicle_id, None);
     }
 
     #[test]
@@ -864,14 +871,15 @@ mod tests {
         push_waypoint(&mut fleet, A);
         assert!(fleet.apply_mission_upload(A, 3));
 
-        assert!(!fleet.apply_mission_download(B, synced_mission(9)));
+        let (plan, vehicle_id) = synced_mission(9);
+        assert!(!fleet.apply_mission_download(B, plan, vehicle_id));
         assert!(!fleet.apply_mission_upload(B, 9));
         assert!(!fleet.apply_mission_clear(B));
 
         // Every fold on an unknown vehicle leaves the known one untouched.
-        let mission = &fleet.vehicle(A).unwrap().mission;
-        assert_eq!(mission.len(), 1);
-        assert!(!mission.dirty);
-        assert_eq!(mission.vehicle_id, Some(3));
+        let vehicle = fleet.vehicle(A).unwrap();
+        assert_eq!(vehicle.mission.len(), 1);
+        assert!(!vehicle.mission_sync.dirty);
+        assert_eq!(vehicle.mission_sync.vehicle_id, Some(3));
     }
 }

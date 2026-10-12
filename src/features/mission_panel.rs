@@ -32,10 +32,10 @@ use rfd::AsyncFileDialog;
 use crate::{
     domain::fleet::Fleet,
     domain::geo::GeoPosition,
-    domain::mission::{Mission, MissionCommand, MissionCommandKind, MissionField, MissionItem, Position},
+    domain::mission::{MissionCommand, MissionCommandKind, MissionField, MissionItem, Position},
     domain::vehicle::Vehicle,
     foundation::SystemId,
-    services::{FleetServices, Result},
+    services::{DownloadedMission, FleetServices, Result},
     storage::mission::{parse_wpl, write_wpl},
     style,
     widget::virtualized::virtual_list,
@@ -133,7 +133,7 @@ pub enum MessageKind {
     AddWaypointAt(GeoPosition),
 
     // Results, for the envelope's vehicle.
-    Downloaded(Result<Mission>),
+    Downloaded(Result<DownloadedMission>),
     Uploaded(Result<u32>),
     Cleared(Result<()>),
     CurrentSet(Result<()>),
@@ -279,7 +279,7 @@ impl MissionPanel {
     }
 
     /// Apply a download result to the vehicle it was started against.
-    fn downloaded(&mut self, id: SystemId, result: Result<Mission>, ctx: &mut Context) {
+    fn downloaded(&mut self, id: SystemId, result: Result<DownloadedMission>, ctx: &mut Context) {
         // Results update the state a transfer already established; they
         // never create it, so an unsolicited result is a no-op.
         if let Some(ui) = self.ui.get_mut(&id) {
@@ -287,8 +287,10 @@ impl MissionPanel {
         }
 
         match result {
-            Ok(mission) => {
-                if ctx.fleet.apply_mission_download(id, mission)
+            Ok(downloaded) => {
+                if ctx
+                    .fleet
+                    .apply_mission_download(id, downloaded.plan, downloaded.vehicle_id)
                     && let Some(ui) = self.ui.get_mut(&id)
                 {
                     ui.selected = None;
@@ -307,13 +309,13 @@ impl MissionPanel {
     ) -> Option<(Task<Message>, Option<Event>)> {
         let vehicle = ctx.fleet.vehicle(id)?;
 
-        let mission = vehicle.mission.clone();
+        let plan = vehicle.mission.clone();
         let target = vehicle.target();
         let client = ctx.services.vehicle(target);
         self.ui_mut(id).busy = true;
         Some((
             Task::perform(
-                async move { client.upload_mission(&mission).await },
+                async move { client.upload_mission(&plan).await },
                 move |result| Message {
                     system: id,
                     kind: MessageKind::Uploaded(result),
@@ -450,6 +452,7 @@ impl MissionPanel {
             autocontinue: true,
             command,
         });
+        vehicle.mission_sync.mark_dirty();
 
         let ui = self.ui_mut(id);
         ui.selected = Some(vehicle.mission.len() - 1);
@@ -462,6 +465,7 @@ impl MissionPanel {
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
         vehicle.mission.remove(index)?;
+        vehicle.mission_sync.mark_dirty();
 
         let ui = self.ui_mut(id);
         match ui.selected {
@@ -534,6 +538,7 @@ impl MissionPanel {
         if vehicle.mission.update(index, |item| {
             item.command = MissionCommand::default_for(kind, pos)
         }) {
+            vehicle.mission_sync.mark_dirty();
             self.ui_mut(id).edit.clear();
         }
         Some(())
@@ -552,10 +557,12 @@ impl MissionPanel {
 
         self.ui_mut(id).edit.insert(field, text.clone());
 
-        if let Some(value) = parse_field_value(&text) {
-            vehicle
+        if let Some(value) = parse_field_value(&text)
+            && vehicle
                 .mission
-                .update(index, |item| item.command.set_field(field, value));
+                .update(index, |item| item.command.set_field(field, value))
+        {
+            vehicle.mission_sync.mark_dirty();
         }
         Some(())
     }
@@ -579,11 +586,13 @@ impl MissionPanel {
     ) -> Option<()> {
         let vehicle = ctx.fleet.vehicle_mut(id)?;
 
-        vehicle.mission.update(index, |item| {
+        if vehicle.mission.update(index, |item| {
             item.command.set_field(MissionField::Latitude, position.lat);
             item.command
                 .set_field(MissionField::Longitude, position.lon);
-        });
+        }) {
+            vehicle.mission_sync.mark_dirty();
+        }
         Some(())
     }
 
@@ -617,6 +626,7 @@ impl MissionPanel {
             autocontinue: true,
             command,
         });
+        vehicle.mission_sync.mark_dirty();
 
         let ui = self.ui_mut(id);
         ui.selected = Some(vehicle.mission.len() - 1);
@@ -750,7 +760,7 @@ impl MissionPanel {
                 // state it already owns, so an unsolicited result is a no-op.
                 if let Some(vehicle) = ctx.fleet.vehicle_mut(id) {
                     vehicle.mission.set_items(items);
-                    vehicle.mission.mark_dirty();
+                    vehicle.mission_sync.mark_dirty();
                 }
                 if let Some(ui) = self.ui.get_mut(&id) {
                     ui.selected = None;
@@ -805,6 +815,7 @@ impl MissionPanel {
         };
 
         if moved {
+            vehicle.mission_sync.mark_dirty();
             let ui = self.ui_mut(id);
             // The selection follows the moved item; the previous open
             // editor's in-progress values must not fold into it.
@@ -832,6 +843,7 @@ impl MissionPanel {
 
         let ui = self.ui(id);
         let mission = &vehicle.mission;
+        let progress = &vehicle.mission_progress;
 
         let enabled = !ui.is_some_and(|ui| ui.busy);
         let toolbar = row![
@@ -883,23 +895,21 @@ impl MissionPanel {
         ]
         .spacing(6.0);
 
-        let mut status = if mission.dirty {
+        let mut status = if vehicle.mission_sync.dirty {
             "modified".to_string()
         } else {
             "synced".to_string()
         };
-        if let (Some(current), Some(total)) = (mission.progress.current_seq, mission.progress.total)
-        {
+        if let (Some(current), Some(total)) = (progress.current_seq, progress.total) {
             status.push_str(&format!(" · item {current}/{total}"));
         }
 
-        let current_seq = mission.progress.current_seq;
         let current_color = theme.palette().success.base.color;
 
         let list = virtual_list(mission.items().iter().enumerate(), move |entry| {
             let &(index, item) = entry;
             let summary = command_summary(&item.command);
-            let is_current = current_seq == Some(index as u16);
+            let is_current = progress.is_current(index);
 
             let content = row![
                 text(format!("{}", index + 1)).width(Length::Fixed(32.0)),
@@ -1079,6 +1089,7 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    use crate::domain::mission::MissionPlan;
     use crate::foundation::{DEFAULT_GCS_ID, MavlinkId};
     use crate::services::{MavError, MavlinkRouter};
 
@@ -1128,8 +1139,12 @@ mod tests {
         panel.update(message, &mut ctx)
     }
 
-    fn mission(fleet: &Fleet) -> &Mission {
+    fn mission(fleet: &Fleet) -> &MissionPlan {
         &fleet.vehicle(A).unwrap().mission
+    }
+
+    fn sync(fleet: &Fleet) -> &crate::domain::mission::MissionSync {
+        &fleet.vehicle(A).unwrap().mission_sync
     }
 
     fn lat(fleet: &Fleet, index: usize) -> f64 {
@@ -1153,7 +1168,7 @@ mod tests {
     }
 
     fn mission_mark_synced(fleet: &mut Fleet) {
-        fleet.vehicle_mut(A).unwrap().mission.mark_synced(None);
+        fleet.vehicle_mut(A).unwrap().mission_sync.mark_synced(None);
     }
 
     #[test]
@@ -1169,7 +1184,7 @@ mod tests {
         );
 
         assert_eq!(mission(&fleet).len(), 1);
-        assert!(mission(&fleet).dirty);
+        assert!(sync(&fleet).dirty);
         assert_eq!(ui(&panel, A).selected, Some(0));
         assert!(matches!(
             mission(&fleet).get(0).unwrap().command,
@@ -1310,8 +1325,8 @@ mod tests {
         let (router, mut fleet) = setup();
         let mut panel = MissionPanel::new();
 
-        let mut downloaded = Mission::default();
-        downloaded.push(MissionItem {
+        let mut plan = MissionPlan::default();
+        plan.push(MissionItem {
             frame: MavFrame::GlobalRelativeAltInt,
             autocontinue: true,
             command: MissionCommand::default_for(
@@ -1323,7 +1338,10 @@ mod tests {
                 },
             ),
         });
-        downloaded.mark_synced(Some(5));
+        let downloaded = DownloadedMission {
+            plan,
+            vehicle_id: 5,
+        };
 
         // Open an editor first, so the download has view state to reset.
         let _ = step(
@@ -1342,8 +1360,8 @@ mod tests {
         );
 
         assert_eq!(mission(&fleet).len(), 1);
-        assert_eq!(mission(&fleet).vehicle_id, Some(5));
-        assert!(!mission(&fleet).dirty);
+        assert_eq!(sync(&fleet).vehicle_id, Some(5));
+        assert!(!sync(&fleet).dirty);
         assert_eq!(ui(&panel, A).selected, None);
     }
 
@@ -1354,8 +1372,8 @@ mod tests {
         assert_eq!(fleet.primary(), Some(A));
         let mut panel = MissionPanel::new();
 
-        let mut downloaded = Mission::default();
-        downloaded.push(MissionItem {
+        let mut plan = MissionPlan::default();
+        plan.push(MissionItem {
             frame: MavFrame::GlobalRelativeAltInt,
             autocontinue: true,
             command: MissionCommand::default_for(
@@ -1367,7 +1385,10 @@ mod tests {
                 },
             ),
         });
-        downloaded.mark_synced(Some(9));
+        let downloaded = DownloadedMission {
+            plan,
+            vehicle_id: 9,
+        };
 
         let _ = step(
             &mut panel,
@@ -1379,11 +1400,11 @@ mod tests {
         // The result lands on `B`, the vehicle it was started against...
         let b = &fleet.vehicle(B).unwrap().mission;
         assert_eq!(b.len(), 1);
-        assert_eq!(b.vehicle_id, Some(9));
+        assert_eq!(fleet.vehicle(B).unwrap().mission_sync.vehicle_id, Some(9));
 
         // ...and leaves the primary `A` untouched.
         assert!(mission(&fleet).is_empty());
-        assert_eq!(mission(&fleet).vehicle_id, None);
+        assert_eq!(sync(&fleet).vehicle_id, None);
     }
 
     #[test]
@@ -1419,11 +1440,11 @@ mod tests {
         // The loaded mission lands on `B`, the vehicle the dialog was opened for...
         let b = &fleet.vehicle(B).unwrap().mission;
         assert_eq!(b.len(), 1);
-        assert!(b.dirty);
+        assert!(fleet.vehicle(B).unwrap().mission_sync.dirty);
 
         // ...and leaves the primary `A` untouched.
         assert!(mission(&fleet).is_empty());
-        assert!(!mission(&fleet).dirty);
+        assert!(!sync(&fleet).dirty);
     }
 
     #[test]
@@ -1563,7 +1584,7 @@ mod tests {
             .unwrap()
             .lon;
         assert!((b_lon - 8.0).abs() < 1e-9);
-        assert!(mission(&fleet).dirty);
+        assert!(sync(&fleet).dirty);
     }
 
     #[test]
@@ -1615,7 +1636,7 @@ mod tests {
             message(A, MessageKind::AddItem),
         );
         mission_mark_synced(&mut fleet);
-        assert!(!mission(&fleet).dirty);
+        assert!(!sync(&fleet).dirty);
 
         let _ = step(
             &mut panel,
@@ -1635,7 +1656,7 @@ mod tests {
 
         assert!((lat(&fleet, 0) - 12.5).abs() < 1e-9);
         assert!((lon(&fleet, 0) + 3.25).abs() < 1e-9);
-        assert!(mission(&fleet).dirty);
+        assert!(sync(&fleet).dirty);
     }
 
     #[test]
@@ -1657,7 +1678,7 @@ mod tests {
         );
 
         assert_eq!(mission(&fleet).len(), 1);
-        assert!(mission(&fleet).dirty);
+        assert!(sync(&fleet).dirty);
         assert_eq!(ui(&panel, A).selected, Some(0));
         assert!((lat(&fleet, 0) - 47.0).abs() < 1e-9);
         assert!((lon(&fleet, 0) - 8.0).abs() < 1e-9);

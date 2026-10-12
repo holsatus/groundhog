@@ -11,7 +11,7 @@ pub mod vehicle;
 
 pub use fleet::FleetServices;
 pub use link::{LinkManager, LinkStatus, LinkUpdate};
-pub use vehicle::VehicleClient;
+pub use vehicle::{DownloadedMission, VehicleClient};
 
 pub use crate::mavlink::{ParamListSummary, Result};
 
