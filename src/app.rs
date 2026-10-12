@@ -668,7 +668,7 @@ impl Application {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let fleet_tick = iced::time::every(Duration::from_secs(1)).map(Message::FleetTick);
+        let fleet_tick = iced::time::every(Duration::from_millis(100)).map(Message::FleetTick);
 
         // Trailing debounce for layout persistence: the timer is restarted on
         // every layout change (the revision is part of the subscription
