@@ -195,7 +195,7 @@ impl MavlinkRouter {
 
     /// Whether a transaction for `key` is currently in flight or queued.
     /// Useful for reflecting in the UI whether an operation is ongoing.
-    #[allow(dead_code)] // Retained middleware API; only exercised by tests
+    #[cfg(test)] // Only exercised by the middleware tests
     pub fn is_busy(&self, key: &LockKey) -> bool {
         self.inner.locks.is_busy(key)
     }

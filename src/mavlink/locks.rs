@@ -87,6 +87,7 @@ impl LockMap {
     }
 
     /// Whether the lock for `key` is currently held or waited for.
+    #[cfg(test)] // Reached only through the router's test-only `is_busy`
     pub fn is_busy(&self, key: &LockKey) -> bool {
         lock(&self.map)
             .get(key)

@@ -156,7 +156,12 @@ impl Configuration {
             WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&tmp_path, serialized.as_bytes())?;
-        std::fs::rename(&tmp_path, path)?;
+
+        if let Err(error) = std::fs::rename(&tmp_path, path) {
+            // A failed save must not leak its unique sidecar behind.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error.into());
+        }
 
         Ok(())
     }
