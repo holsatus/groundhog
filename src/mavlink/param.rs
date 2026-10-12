@@ -12,7 +12,7 @@ use super::{
     locks::LockKey,
     router::MavlinkRouter,
 };
-use crate::{domain::parameter, foundation::MavlinkId};
+use crate::foundation::MavlinkId;
 
 const PARAM_SET_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_SET_RETRIES: u8 = 3;
@@ -41,7 +41,7 @@ impl MavlinkRouter {
         cap: MavProtocolCapability,
     ) -> Result<Value> {
         let (param_value, param_type) =
-            parameter::mavio_from_value(cap, value).ok_or(MavError::ParamEncoding)?;
+            crate::wire::param::mavio_from_value(cap, value).ok_or(MavError::ParamEncoding)?;
 
         // Ensure we are the only ones setting *this* parameter
         let _lock = self.lock_key(LockKey::Param(target, ident.clone())).await;
@@ -70,8 +70,12 @@ impl MavlinkRouter {
             )?;
 
             if let Ok(Some(reply)) = timeout(PARAM_SET_TIMEOUT, recv_value.next()).await {
-                return parameter::mavio_into_value(cap, reply.param_value, reply.param_type)
-                    .ok_or(MavError::ParamEncoding);
+                return crate::wire::param::mavio_into_value(
+                    cap,
+                    reply.param_value,
+                    reply.param_type,
+                )
+                .ok_or(MavError::ParamEncoding);
             }
         }
 

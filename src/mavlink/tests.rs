@@ -27,7 +27,7 @@ use mavio::{
 use tokio::io::{AsyncRead, ReadBuf};
 
 use super::*;
-use super::{error::MavError, transaction::Busy};
+use super::{error::MavError, locks::LockKey, transaction::Busy};
 use crate::{
     domain::SystemId,
     domain::fleet::Fleet,
@@ -168,7 +168,7 @@ async fn busy_while_command_in_flight() {
         .command(VEHICLE, commands::request_message::<SystemTime>())
         .on_busy(Busy::Fail)
         .await;
-    assert!(matches!(second, Err(MavError::Busy(_))));
+    assert!(matches!(second, Err(MavError::Busy { .. })));
 
     vehicle.ack(long.command, MavResult::Accepted).await;
     task.await.unwrap().unwrap();

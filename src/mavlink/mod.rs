@@ -27,7 +27,6 @@ mod router;
 mod transaction;
 
 pub use error::Result;
-pub use locks::LockKey;
 pub use param::ParamListSummary;
 pub use recv::MavlinkMessage;
 pub use router::{Event, LinkGuard, MavlinkRouter};

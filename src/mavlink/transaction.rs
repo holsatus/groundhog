@@ -183,7 +183,9 @@ impl CommandRequest {
                 Busy::Fail => self
                     .router
                     .try_lock_key(key.clone())
-                    .ok_or(MavError::Busy(key))?,
+                    .ok_or(MavError::Busy {
+                        target: self.target,
+                    })?,
             })
         };
 

@@ -11,6 +11,7 @@ mod storage;
 mod style;
 mod theme;
 mod widget;
+mod wire;
 
 use app::Application;
 
