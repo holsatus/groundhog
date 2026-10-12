@@ -26,6 +26,7 @@ mod mission;
 mod param;
 mod recv;
 mod router;
+pub mod telemetry;
 mod transaction;
 
 pub use error::{MavError, Result};

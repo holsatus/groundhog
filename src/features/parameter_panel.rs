@@ -80,6 +80,11 @@ pub enum Message {
     /// Whether to only show changed parameters
     FilterOnlyChanged(bool),
 
+    /// Bootstrap a newly detected vehicle: request its component information
+    /// and fetch the default component's parameter list. Runs the whole
+    /// initialisation internally, so the root has no parameter logic.
+    Initialize(SystemId),
+
     /// Initiate a parameter list request to the target
     ListReload(MavlinkId),
 
@@ -195,6 +200,7 @@ impl ParameterPanel {
         match message {
             Message::FilterIdentPattern(buffer) => self.filter.ident_pattern = buffer,
             Message::FilterOnlyChanged(changed) => self.filter.only_changed = changed,
+            Message::Initialize(system) => return self.initialize(system, ctx),
             Message::ListReload(address) => return self.list_reload(address, ctx),
             Message::ListReloadStarted(address) => {
                 self.reloading.insert(address);
@@ -229,6 +235,51 @@ impl ParameterPanel {
         }
 
         None
+    }
+
+    /// Bootstrap a newly detected vehicle.
+    ///
+    /// Resolves the vehicle's default parameter component, requests its
+    /// `COMPONENT_INFORMATION_BASIC` (the domain folds the reply from the event
+    /// stream; only a failure is logged here), then downloads that component's
+    /// parameter list, deciding whether to request capabilities exactly as a
+    /// manual reload does. Both the in-flight flag and the result message are
+    /// produced here, so the root has no parameter-bootstrap logic.
+    fn initialize(
+        &mut self,
+        system: SystemId,
+        ctx: &mut Context,
+    ) -> Option<(Task<Message>, Option<Event>)> {
+        let (address, request_capabilities) = {
+            let vehicle = ctx.fleet.vehicle_mut(system)?;
+            let component = vehicle.default_parameter_component();
+            let address = vehicle.target_for(component);
+            let request_capabilities = vehicle.capabilities(component).is_none();
+            vehicle.parameters_mut(component).reset_loading();
+            (address, request_capabilities)
+        };
+
+        let client = ctx.services.vehicle(address);
+
+        let request = Task::perform(
+            async move {
+                // The reply is folded into vehicle state from the event stream;
+                // here it only sequences the request before the list download.
+                if let Err(error) = client.component_information().await {
+                    log::warn!("No COMPONENT_INFORMATION_BASIC from {address:?}: {error}");
+                }
+
+                client.fetch_parameters(request_capabilities).await
+            },
+            move |result| Message::ListReloadResult(address, result),
+        );
+
+        // Produce the same started/result pair the root used to hand-build, so
+        // the in-flight flag is set exactly as for a manual reload.
+        Some((
+            Task::batch([Task::done(Message::ListReloadStarted(address)), request]),
+            None,
+        ))
     }
 
     /// Request the addressed component's parameter list.
@@ -1273,6 +1324,41 @@ mod tests {
             Message::ListReload(addr(A)),
         );
         assert!(panel.reloading.contains(&addr(A)));
+    }
+
+    #[test]
+    fn initialize_bootstraps_the_default_component() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        add_vehicle(&mut fleet, A, &[("PARAM_ONE", Value::F32(1.0))]);
+        let mut panel = ParameterPanel::new();
+
+        let services = FleetServices::new(&router);
+        let mut ctx = Context {
+            services: &services,
+            fleet: &mut fleet,
+            file_picker_path: None,
+        };
+        let (task, event) = panel.update(Message::Initialize(A), &mut ctx);
+
+        assert!(event.is_none());
+        assert!(task.units() > 0, "the bootstrap schedules work");
+
+        // The scheduled `ListReloadStarted` marks the default component (1) in
+        // flight, exactly as the root's hand-built pair used to.
+        let _ = panel.update(Message::ListReloadStarted(addr(A)), &mut ctx);
+        assert!(panel.reloading.contains(&addr(A)));
+    }
+
+    #[test]
+    fn initialize_unknown_vehicle_is_a_noop() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let mut fleet = Fleet::default();
+        let mut panel = ParameterPanel::new();
+
+        step(&mut panel, &router, &mut fleet, Message::Initialize(A));
+
+        assert!(panel.reloading.is_empty());
     }
 
     #[test]

@@ -3,15 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use iced::futures::{SinkExt, Stream, StreamExt};
+use iced::futures::StreamExt;
 use iced::{Element, Length, Subscription, Task, Theme, Widget};
-use mavio::{DefaultDialect, error::SpecError};
 
 use crate::{
     config,
-    domain::SystemId,
     domain::fleet::{Fleet, FleetEvent},
     domain::vehicle::Liveness,
+    domain::SystemId,
     features::link_panel::{self, LinkPanel},
     features::log_panel::{self, LogPanel},
     features::map::{self, Map},
@@ -19,10 +18,8 @@ use crate::{
     features::parameter_panel::{self, ParameterPanel},
     features::settings_panel,
     features::vehicle_panel,
-    foundation::MavlinkId,
     layout::{self, Layout},
-    link::LinkId,
-    mavlink,
+    mavlink::{self, telemetry::Telemetry},
     services::{FleetServices, LinkManager},
     style,
 };
@@ -37,7 +34,6 @@ pub struct Application {
     pub(crate) link_manager: LinkManager,
     pub(crate) services: FleetServices,
     pub(crate) configuration: config::Configuration,
-    pub(crate) theme: Theme,
     pub(crate) fleet: Fleet,
 }
 
@@ -84,51 +80,6 @@ impl From<settings_panel::Message> for Message {
     }
 }
 
-/// An inbound router event with its frame already decoded.
-///
-/// Decoding runs on the coalescing tokio task, off the UI thread, so `update`
-/// only has to fold ready messages into the fleet.
-// `DefaultDialect` is inherently large but each value is moved straight into
-// the fleet; the enum only lives for the span of one coalesced batch.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub(crate) enum Telemetry {
-    Message {
-        source: MavlinkId,
-        received_at: Instant,
-        decoded: Option<DefaultDialect>,
-    },
-    LinkClosed(LinkId),
-}
-
-impl From<mavlink::Event> for Telemetry {
-    fn from(event: mavlink::Event) -> Self {
-        match event {
-            mavlink::Event::Message(inbound) => {
-                let decoded = match inbound.frame.decode::<DefaultDialect>() {
-                    Ok(message) => Some(message),
-                    // Downgrade these to trace to avoid spamming the logs
-                    Err(mavio::Error::Spec(SpecError::NotInDialect(id))) => {
-                        log::trace!("mavlink message id {id} is not in default dialect");
-                        None
-                    }
-                    Err(error) => {
-                        log::trace!("could not decode mavlink frame: {error}");
-                        None
-                    }
-                };
-
-                Telemetry::Message {
-                    source: inbound.source_mav,
-                    received_at: inbound.received_at,
-                    decoded,
-                }
-            }
-            mavlink::Event::LinkClosed(link_id) => Telemetry::LinkClosed(link_id),
-        }
-    }
-}
-
 /// How often telemetry is allowed to reach `update` and rebuild the view/map.
 ///
 /// This caps the redraw cadence, not the data rate: the router still dispatches
@@ -144,41 +95,6 @@ const TELEMETRY_FRAME: Duration = Duration::from_millis(33);
 /// Idle time after the last layout change before the layout is persisted.
 const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 
-/// Cap the rate at which inbound MAVLink events reach `update`.
-///
-/// The router emits one event per received frame. Without this, a busy link
-/// would rebuild the whole view once per frame; instead events are collected
-/// and delivered in order in a single batch at most once per `frame`.
-fn coalesce(
-    events: impl Stream<Item = mavlink::Event> + Send + 'static,
-    frame: Duration,
-) -> impl Stream<Item = Vec<Telemetry>> + Send + 'static {
-    iced::stream::channel(1, async move |mut output| {
-        let mut events = Box::pin(events);
-        let mut tick = tokio::time::interval(frame);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        tick.tick().await; // consume the immediate first tick
-
-        let mut batch = Vec::new();
-        loop {
-            tokio::select! {
-                biased;
-                _ = tick.tick() => {
-                    if !batch.is_empty()
-                        && output.send(std::mem::take(&mut batch)).await.is_err()
-                    {
-                        break;
-                    }
-                }
-                event = events.next() => match event {
-                    Some(event) => batch.push(Telemetry::from(event)),
-                    None => break,
-                },
-            }
-        }
-    })
-}
-
 impl Application {
     pub fn boot() -> (Self, Task<Message>) {
         let config = config::Configuration::initialize().unwrap_or_else(|e| {
@@ -189,7 +105,9 @@ impl Application {
         let (client, events) = mavlink::MavlinkRouter::new(mavlink::DEFAULT_GCS_ID);
         let services = FleetServices::new(&client);
         let (link_manager, auto_connect) = LinkManager::from_configs(&client, config.links.clone());
-        let events = Task::stream(coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents));
+        let events = Task::stream(
+            mavlink::telemetry::coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents),
+        );
 
         let auto_connect = Task::batch(
             auto_connect
@@ -210,7 +128,6 @@ impl Application {
             link_manager,
             services,
             configuration: config.clone(),
-            theme: config.settings.theme.theme(),
             fleet: Fleet::default(),
             mission_panel: MissionPanel::new(),
             parameter_panel: ParameterPanel::new(),
@@ -220,7 +137,7 @@ impl Application {
     }
 
     pub fn theme(&self) -> Theme {
-        self.theme.clone()
+        self.configuration.settings.theme.theme()
     }
 
     pub fn title(&self) -> String {
@@ -236,24 +153,18 @@ impl Application {
                 }
                 Task::none()
             }
-            Message::Layout(message) => {
-                self.layout_message_update(message);
-                Task::none()
-            }
+            Message::Layout(message) => self.layout_message_update(message),
             Message::Map(message) => self.map_message_update(message),
             Message::Link(message) => self.link_message_update(message),
-            Message::Logs(message) => {
-                self.log_panel.update(message);
-                Task::none()
-            }
+            Message::Logs(message) => self.log_message_update(message),
             Message::MavEvents(events) => self.handle_mav_events(events),
             Message::Mission(message) => self.mission_message_update(message),
             Message::Parameter(message) => self.parameter_message_update(message),
             Message::Vehicles(message) => self.vehicle_message_update(message),
             Message::Settings(message) => self.settings_message_update(message),
             Message::Tick => {
-                if self.layout.dirty {
-                    self.layout.dirty = false;
+                if self.layout.is_dirty() {
+                    self.layout.clear_dirty();
                     self.save_configuration()
                 } else {
                     Task::none()
@@ -282,14 +193,22 @@ impl Application {
         })
     }
 
-    fn layout_message_update(&mut self, message: layout::Message) {
-        let changed = message.changes_layout();
-        self.layout.update(message);
-        if changed {
+    /// Apply a layout change, snapshotting the arrangement when it changed.
+    ///
+    /// `Layout::update` maintains the dirty flag and revision; the root owns
+    /// only the snapshot and the debounce policy (see [`Message::Tick`] and
+    /// [`Application::subscription`]).
+    fn layout_message_update(&mut self, message: layout::Message) -> Task<Message> {
+        if self.layout.update(message) {
             self.configuration.layout = self.layout.configuration();
-            self.layout.revision = self.layout.revision.wrapping_add(1);
-            self.layout.dirty = true;
         }
+
+        Task::none()
+    }
+
+    fn log_message_update(&mut self, message: log_panel::Message) -> Task<Message> {
+        self.log_panel.update(message);
+        Task::none()
     }
 
     fn vehicle_message_update(&mut self, message: vehicle_panel::Message) -> Task<Message> {
@@ -413,34 +332,6 @@ impl Application {
         }
     }
 
-    /// Fetch basic information and the parameter list from a newly detected vehicle.
-    fn initialize_vehicle(&self, system: SystemId) -> Task<Message> {
-        let Some(target) = self.fleet.vehicle(system).map(|vehicle| vehicle.target()) else {
-            return Task::none();
-        };
-        let client = self.services.vehicle(target);
-        let request = Task::perform(
-            async move {
-                if let Err(error) = client.component_information().await {
-                    log::warn!("No COMPONENT_INFORMATION_BASIC from {target:?}: {error}");
-                }
-
-                // This requests AUTOPILOT_VERSION to get capabilities for param encoding
-                client.fetch_parameters(true).await
-            },
-            move |result| parameter_panel::Message::ListReloadResult(target, result).into(),
-        );
-
-        // Mark the implicit list download as running so the reload button is
-        // disabled while the automatic initialisation is in flight.
-        Task::batch([
-            Task::done(Message::Parameter(
-                parameter_panel::Message::ListReloadStarted(target),
-            )),
-            request,
-        ])
-    }
-
     fn link_message_update(&mut self, message: link_panel::Message) -> Task<Message> {
         let (task, event) = self.link_panel.update(message, &mut self.link_manager);
         let task = task.map(Message::Link);
@@ -454,14 +345,13 @@ impl Application {
         }
     }
 
-    /// Apply an application setting and persist it. The cached theme is
-    /// refreshed here alongside the setting so it takes effect immediately.
+    /// Apply an application setting and persist it. The theme is derived from
+    /// the configuration, so the new setting takes effect on the next frame.
     fn settings_message_update(&mut self, message: settings_panel::Message) -> Task<Message> {
         match message {
             settings_panel::Message::SetTheme(mode) => {
                 if self.configuration.settings.theme != mode {
                     self.configuration.settings.theme = mode;
-                    self.theme = mode.theme();
                     return Task::done(Message::SaveConfigurationToFile);
                 }
             }
@@ -505,7 +395,9 @@ impl Application {
         match event {
             FleetEvent::Registered(system) => {
                 log::info!("New vehicle detected: {system:?}");
-                self.initialize_vehicle(system)
+                Task::done(Message::Parameter(parameter_panel::Message::Initialize(
+                    system,
+                )))
             }
             FleetEvent::LivenessChanged(system, liveness) => {
                 log_liveness(system, liveness);
@@ -591,24 +483,34 @@ impl Application {
                 content.title_bar(pane_grid::TitleBar::new(empty).padding(0))
             } else {
                 let focused = self.layout.is_focused(pane);
-                let title = iced::widget::container(iced::widget::text(panel.title())).padding(5.0).boxed();
+                let title = iced::widget::container(iced::widget::text(panel.title()))
+                    .padding(5.0)
+                    .boxed();
 
                 let maximize = if is_maximized {
-                    iced::widget::button(iced::widget::container(iced::widget::text("v")).center(20))
-                        .padding(2)
-                        .on_press(Message::Layout(layout::Message::Restore))
+                    iced::widget::button(
+                        iced::widget::container(iced::widget::text("v")).center(20),
+                    )
+                    .padding(2)
+                    .on_press(Message::Layout(layout::Message::Restore))
                 } else {
-                    iced::widget::button(iced::widget::container(iced::widget::text("^")).center(20))
-                        .padding(2)
-                        .on_press(Message::Layout(layout::Message::Maximize(pane)))
+                    iced::widget::button(
+                        iced::widget::container(iced::widget::text("^")).center(20),
+                    )
+                    .padding(2)
+                    .on_press(Message::Layout(layout::Message::Maximize(pane)))
                 };
 
-                let close = iced::widget::button(iced::widget::container(iced::widget::text("x")).center(20))
-                    .style(iced::widget::button::danger)
-                    .padding(2)
-                    .on_press(Message::Layout(layout::Message::Close(pane)));
+                let close = iced::widget::button(
+                    iced::widget::container(iced::widget::text("x")).center(20),
+                )
+                .style(iced::widget::button::danger)
+                .padding(2)
+                .on_press(Message::Layout(layout::Message::Close(pane)));
 
-                let controls = iced::widget::container(iced::widget::row![maximize, close].spacing(4)).center_y(32);
+                let controls =
+                    iced::widget::container(iced::widget::row![maximize, close].spacing(4))
+                        .center_y(32);
 
                 let title_bar = pane_grid::TitleBar::new(title)
                     .controls(pane_grid::Controls::new(controls))
@@ -635,51 +537,48 @@ impl Application {
     }
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
+        let theme = self.theme();
+
         match panel {
             layout::Panel::Map => {
                 let primary = self.fleet.primary();
                 let dragging = self.mission_panel.dragging(primary);
                 self.map
-                    .view(self.fleet.vehicles(), primary, dragging, &self.theme)
+                    .view(self.fleet.vehicles(), primary, dragging, &theme)
                     .map(Message::Map)
                     .boxed()
             }
-            layout::Panel::Vehicles => {
-                let theme = &self.theme;
-                vehicle_panel::view(
-                    self.fleet.vehicles(),
-                    self.fleet.primary(),
-                    self.map.follow,
-                    theme,
-                )
-                .map(Message::Vehicles)
-                .boxed()
-            }
-            layout::Panel::Parameters => {
-                let theme = &self.theme;
-                self.parameter_panel
-                    .view(self.fleet.vehicles(), self.fleet.primary(), theme)
-                    .map(Message::Parameter)
-                    .boxed()
-            }
+            layout::Panel::Vehicles => vehicle_panel::view(
+                self.fleet.vehicles(),
+                self.fleet.primary(),
+                self.map.follow,
+                &theme,
+            )
+            .map(Message::Vehicles)
+            .boxed(),
+            layout::Panel::Parameters => self
+                .parameter_panel
+                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                .map(Message::Parameter)
+                .boxed(),
             layout::Panel::Mission => self
                 .mission_panel
-                .view(self.fleet.vehicles(), self.fleet.primary(), &self.theme)
+                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
                 .map(Message::Mission)
                 .boxed(),
             layout::Panel::Links => iced::widget::column![
                 self.link_panel.view_editor().map(Message::Link),
-                self.link_panel.view_status(&self.link_manager).map(Message::Link),
+                self.link_panel
+                    .view_status(&self.link_manager)
+                    .map(Message::Link),
             ]
             .spacing(10.0)
             .boxed(),
-            layout::Panel::Logs => {
-                let theme = &self.theme;
-                self.log_panel
-                    .view(self.fleet.vehicles(), self.fleet.primary(), theme)
-                    .map(Message::Logs)
-                    .boxed()
-            }
+            layout::Panel::Logs => self
+                .log_panel
+                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                .map(Message::Logs)
+                .boxed(),
             layout::Panel::Settings => settings_panel::view(&self.configuration.settings)
                 .map(Message::Settings)
                 .boxed(),
@@ -693,9 +592,9 @@ impl Application {
         // every layout change (the revision is part of the subscription
         // identity), so the write happens `LAYOUT_SAVE_DEBOUNCE` after the last
         // change rather than repeatedly throughout a drag/resize.
-        let layout_tick = if self.layout.dirty {
+        let layout_tick = if self.layout.is_dirty() {
             iced::time::every(LAYOUT_SAVE_DEBOUNCE)
-                .with(self.layout.revision)
+                .with(self.layout.revision())
                 .map(|_| Message::Tick)
         } else {
             Subscription::none()

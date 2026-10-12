@@ -176,8 +176,8 @@ impl Message {
 pub struct Layout {
     panes: pane_grid::State<Panel>,
     focus: Option<pane_grid::Pane>,
-    pub(crate) dirty: bool,
-    pub(crate) revision: u64,
+    dirty: bool,
+    revision: u64,
 }
 
 impl Layout {
@@ -222,6 +222,23 @@ impl Layout {
         Some(self.panes.configuration().into())
     }
 
+    /// The arrangement revision, bumped on every change that can affect the
+    /// persisted arrangement. Part of the debounce subscription's identity, so
+    /// the timer restarts on each change rather than firing mid-drag.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether the arrangement has changed since the last persistence.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Clear the dirty flag once the arrangement has been persisted.
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
     pub fn is_focused(&self, pane: pane_grid::Pane) -> bool {
         self.focus == Some(pane)
     }
@@ -238,7 +255,25 @@ impl Layout {
             .map(|(pane, _)| *pane)
     }
 
-    pub fn update(&mut self, message: Message) {
+    /// Apply a layout message, reporting whether it may have changed the
+    /// persisted arrangement.
+    ///
+    /// The dirty flag and revision are maintained here, so the root never
+    /// writes layout bookkeeping directly. The root keeps only the debounce
+    /// policy: when to snapshot and persist a dirty arrangement.
+    pub fn update(&mut self, message: Message) -> bool {
+        let changed = message.changes_layout();
+        self.apply(message);
+
+        if changed {
+            self.dirty = true;
+            self.revision = self.revision.wrapping_add(1);
+        }
+
+        changed
+    }
+
+    fn apply(&mut self, message: Message) {
         match message {
             Message::Clicked(pane) => self.focus = Some(pane),
             Message::Dragged(pane_grid::DragEvent::Dropped { pane, target }) => {
