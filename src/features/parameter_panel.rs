@@ -31,12 +31,13 @@ use rfd::AsyncFileDialog;
 use crate::{
     domain::fleet::Fleet,
     domain::parameter::{
-        self, ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, value_as_string,
+        ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, value_as_string,
         value_parse_as, value_type_matches, value_type_name,
     },
     domain::vehicle::Vehicle,
     foundation::{BoxError, MavlinkId, SystemId},
     services::{FleetServices, ParamListSummary, Result},
+    storage::parameter::{parameters_from_ini_str, parameters_to_ini_string},
     style,
     widget::virtualized::virtual_list,
 };
@@ -463,7 +464,7 @@ impl ParameterPanel {
         (
             iced_runtime::task::blocking(move |mut sender| {
                 let result =
-                    std::fs::write(&path, parameter::parameters_to_ini_string(&parameters))
+                    std::fs::write(&path, parameters_to_ini_string(&parameters))
                         .map_err(|error| error.to_string());
                 let _ = sender.try_send(Message::SaveFinished(save_path, result));
             }),
@@ -515,7 +516,7 @@ impl ParameterPanel {
                 let result = std::fs::read_to_string(&path)
                     .map_err(|error| error.to_string())
                     .and_then(|text| {
-                        parameter::parameters_from_ini_str(&text).map_err(|error| error.to_string())
+                        parameters_from_ini_str(&text).map_err(|error| error.to_string())
                     });
                 let _ = sender.try_send(Message::LoadFinished(load_path, address, result));
             }),

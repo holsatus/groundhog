@@ -7,6 +7,7 @@ mod layout;
 mod link;
 mod mavlink;
 mod services;
+mod storage;
 mod style;
 mod theme;
 mod widget;

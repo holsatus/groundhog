@@ -8,7 +8,6 @@
 use mavio::default_dialect::{enums::MissionState, messages};
 
 pub mod command;
-pub mod file;
 
 pub use command::*;
 

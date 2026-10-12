@@ -32,13 +32,11 @@ use rfd::AsyncFileDialog;
 use crate::{
     domain::fleet::Fleet,
     domain::geo::GeoPosition,
-    domain::mission::{
-        Mission, MissionCommand, MissionCommandKind, MissionField, MissionItem, Position,
-        file::{parse_wpl, write_wpl},
-    },
+    domain::mission::{Mission, MissionCommand, MissionCommandKind, MissionField, MissionItem, Position},
     domain::vehicle::Vehicle,
     foundation::SystemId,
     services::{FleetServices, Result},
+    storage::mission::{parse_wpl, write_wpl},
     style,
     widget::virtualized::virtual_list,
 };

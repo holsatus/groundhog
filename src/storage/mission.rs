@@ -10,7 +10,7 @@ use mavio::default_dialect::{
     messages::MissionItemInt,
 };
 
-use super::{LATLON_SCALE, MissionItem, is_positional_command};
+use crate::domain::mission::{is_positional_command, MissionItem, LATLON_SCALE};
 
 const HEADER: &str = "QGC WPL 110";
 
