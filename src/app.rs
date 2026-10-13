@@ -8,9 +8,9 @@ use iced::{Element, Length, Subscription, Task, Theme, Widget};
 
 use crate::{
     config,
+    domain::SystemId,
     domain::fleet::{Fleet, FleetEvent},
     domain::vehicle::Liveness,
-    domain::SystemId,
     features::link_panel::{self, LinkPanel},
     features::log_panel::{self, LogPanel},
     features::map::{self, Map},

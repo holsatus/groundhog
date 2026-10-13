@@ -10,11 +10,11 @@
 mod editor;
 
 use iced::{
-    widget::{button, checkbox, container, pick_list, text::Ellipsis, text_input, Button, Column},
     Alignment, Element, Length, Task, Widget,
+    widget::{Button, Column, button, checkbox, container, pick_list, text::Ellipsis, text_input},
 };
 
-pub use editor::{LinkBuilder, LinkConfigurator, LinkVariant, BAUDRATES};
+pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkVariant};
 
 use crate::{
     link::LinkConfig,
@@ -387,9 +387,11 @@ impl LinkPanel {
             })
             .width(30.0);
 
-            let mut children: Vec<Element<'_, Message>> = vec![iced::widget::text(&config.name)
-                .ellipsis(Ellipsis::End)
-                .boxed()];
+            let mut children: Vec<Element<'_, Message>> = vec![
+                iced::widget::text(&config.name)
+                    .ellipsis(Ellipsis::End)
+                    .boxed(),
+            ];
 
             match &status {
                 LinkStatus::Connecting => {
@@ -435,7 +437,7 @@ impl Default for LinkPanel {
 mod tests {
     use super::*;
     use crate::link::config::LinkBuild;
-    use crate::mavlink::{MavlinkRouter, DEFAULT_GCS_ID};
+    use crate::mavlink::{DEFAULT_GCS_ID, MavlinkRouter};
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {

@@ -513,9 +513,8 @@ impl ParameterPanel {
         let path = save_path.clone();
         (
             iced_runtime::task::blocking(move |mut sender| {
-                let result =
-                    std::fs::write(&path, parameters_to_ini_string(&parameters))
-                        .map_err(|error| error.to_string());
+                let result = std::fs::write(&path, parameters_to_ini_string(&parameters))
+                    .map_err(|error| error.to_string());
                 let _ = sender.try_send(Message::SaveFinished(save_path, result));
             }),
             None,

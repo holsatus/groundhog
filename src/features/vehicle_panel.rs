@@ -5,13 +5,13 @@
 use std::collections::BTreeMap;
 
 use iced::{
-    widget::{container, row, scrollable, text, text::Wrapping},
     Alignment, Element, Length, Theme, Widget,
+    widget::{container, row, scrollable, text, text::Wrapping},
 };
 
 use crate::{
-    domain::vehicle::{Liveness, Vehicle},
     domain::SystemId,
+    domain::vehicle::{Liveness, Vehicle},
     style,
     widget::virtualized::virtual_list,
 };
@@ -63,9 +63,11 @@ pub fn view<'a>(
     let mut row_contents = Vec::<Element<'_, Message>>::with_capacity(17);
 
     // Global controls that used to live in the removed top bar.
-    let mut controls = iced::widget::row![iced::widget::checkbox(follow)
-        .label("Follow primary")
-        .on_toggle(Message::Follow)]
+    let mut controls = iced::widget::row![
+        iced::widget::checkbox(follow)
+            .label("Follow primary")
+            .on_toggle(Message::Follow)
+    ]
     .spacing(10.0)
     .align_y(Alignment::Center);
 

@@ -7,8 +7,8 @@ use mavio::default_dialect::{
 };
 
 use crate::{
-    domain::firmware::{self, FlightMode},
     domain::SystemId,
+    domain::firmware::{self, FlightMode},
 };
 
 #[derive(Debug, Clone, Default)]

@@ -1005,11 +1005,7 @@ fn encode_position(pos: &Position) -> (i32, i32, f32) {
 }
 
 fn decode_yaw(param: f32) -> Option<f32> {
-    if param.is_nan() {
-        None
-    } else {
-        Some(param)
-    }
+    if param.is_nan() { None } else { Some(param) }
 }
 
 fn encode_yaw(yaw: Option<f32>) -> f32 {
@@ -1502,16 +1498,18 @@ mod tests {
     #[test]
     fn return_to_launch_has_no_fields() {
         assert!(MissionCommand::ReturnToLaunch.fields().is_empty());
-        assert!(MissionCommand::Unknown {
-            command: MavCmd::DoSetServo,
-            params: [0.0; 4],
-            x: 0,
-            y: 0,
-            z: 0.0,
-            frame: MavFrame::Global,
-        }
-        .fields()
-        .is_empty());
+        assert!(
+            MissionCommand::Unknown {
+                command: MavCmd::DoSetServo,
+                params: [0.0; 4],
+                x: 0,
+                y: 0,
+                z: 0.0,
+                frame: MavFrame::Global,
+            }
+            .fields()
+            .is_empty()
+        );
     }
 
     #[test]

@@ -953,7 +953,6 @@ where
         // would be composited *underneath* them. Creating this layer last keeps the
         // chrome on top of the panes.
         renderer.with_layer(layout.bounds(), |renderer| {
-
             if dragged_pane.is_some()
                 && let Some(edge) = pane_in_edge
             {

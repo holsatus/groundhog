@@ -63,12 +63,8 @@ impl MavlinkRouter {
             )?;
 
             if let Ok(Some(reply)) = timeout(PARAM_SET_TIMEOUT, recv_value.next()).await {
-                return crate::wire::param::from_wire(
-                    cap,
-                    reply.param_value,
-                    reply.param_type,
-                )
-                .ok_or(MavError::ParamEncoding);
+                return crate::wire::param::from_wire(cap, reply.param_value, reply.param_type)
+                    .ok_or(MavError::ParamEncoding);
             }
         }
 

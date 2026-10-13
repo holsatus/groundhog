@@ -108,7 +108,10 @@ impl LinkManager {
     /// repairs entries that hold a handle, and there is no handle yet, so
     /// reconnecting the same id is refused until the entry is removed or
     /// re-saved.
-    pub fn connect(&mut self, id: &LinkId) -> Option<impl Future<Output = LinkUpdate> + Send + 'static> {
+    pub fn connect(
+        &mut self,
+        id: &LinkId,
+    ) -> Option<impl Future<Output = LinkUpdate> + Send + 'static> {
         let (build, high_latency) = {
             let entry = self.links.get_mut(id)?;
 

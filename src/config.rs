@@ -1,8 +1,8 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         LazyLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 

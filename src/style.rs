@@ -7,7 +7,7 @@
 //! pane — so it draws its own frame instead (see `features::map`).
 
 use iced::{
-    border::Radius, theme::Palette, widget::container, Border, Color, Shadow, Theme, Vector,
+    Border, Color, Shadow, Theme, Vector, border::Radius, theme::Palette, widget::container,
 };
 use mavio::default_dialect::enums::MavSeverity;
 
