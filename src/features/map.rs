@@ -99,7 +99,7 @@ impl Map {
                 zoom: Zoom::try_from(8.0).unwrap(),
             },
             projector: None,
-            tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
+            tile_cache: TileCache::new(slippery::sources::ArcGisWorldMap),
             follow: false,
         }
     }
@@ -242,6 +242,10 @@ fn draw_rounded_frame(
 /// `projector.bounds` are absolute screen coordinates and the projection
 /// methods operate in that space, so the cursor is read with
 /// [`mouse::Cursor::position_over`] (absolute), never `position_in` (relative).
+///
+/// A marker press captures the pointer, because the overlay is starting a drag
+/// the map must not pan underneath. Every other pick is published without
+/// capturing, so the map still pans when the pointer is dragged.
 fn interact(
     projector: &Projector,
     cursor: &mouse::Cursor,
@@ -267,13 +271,21 @@ fn interact(
                 .get(&id)
                 .and_then(|vehicle| waypoint_at(vehicle, projector, point));
 
-            // Always report the pick: whether a markerless click places a
-            // waypoint or does nothing is the owning feature's decision.
-            Action::Capture(Message::Interaction(Event::Picked {
+            let picked = Message::Interaction(Event::Picked {
                 system: id,
                 marker,
                 position: cursor_geo(projector, point),
-            }))
+            });
+
+            // Only a marker press starts a drag the overlay owns, so only it
+            // claims the pointer. A markerless click is reported but left
+            // uncaptured, so the map still pans when the pointer is dragged;
+            // whether it places a waypoint is the owning feature's decision.
+            if marker.is_some() {
+                Action::Capture(picked)
+            } else {
+                Action::Publish(picked)
+            }
         }
         CanvasEvent::Mouse(mouse::Event::CursorMoved { .. }) => {
             let Some(marker) = dragging else {
@@ -663,8 +675,9 @@ mod tests {
             })) if system == id
         ));
 
-        // A press far from any marker reports a markerless pick; whether that
-        // places a waypoint or does nothing is the owning feature's decision.
+        // A press far from any marker reports a markerless pick without
+        // capturing the pointer, so the map still pans underneath it; whether
+        // it places a waypoint or does nothing is the owning feature's decision.
         let away = Point::new(absolute.x + 200.0, absolute.y + 200.0);
         assert!(matches!(
             interact(
@@ -675,7 +688,7 @@ mod tests {
                 Some(id),
                 None,
             ),
-            Action::Capture(Message::Interaction(Event::Picked {
+            Action::Publish(Message::Interaction(Event::Picked {
                 system,
                 marker: None,
                 ..
@@ -736,6 +749,61 @@ mod tests {
                 &released,
                 &vehicles,
                 Some(id),
+                None,
+            ),
+            Action::None
+        ));
+    }
+
+    /// A markerless click must not capture the pointer, or the map can no longer
+    /// be panned: the overlay only claims the pointer for a marker drag.
+    #[test]
+    fn markerless_pick_does_not_capture_the_pointer() {
+        let projector = projector();
+        let id = SystemId(1);
+        let mut vehicles = BTreeMap::new();
+        vehicles.insert(id, vehicle_with_waypoint(47.4, 8.5));
+
+        let pressed = CanvasEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+
+        // Pressing a marker starts a drag the overlay owns, so it captures the
+        // pointer and the map must not pan underneath it.
+        let on_marker = projector.geodetic_into_screen_space(Geodetic::new(8.5, 47.4));
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(on_marker),
+                &pressed,
+                &vehicles,
+                Some(id),
+                None,
+            ),
+            Action::Capture(_)
+        ));
+
+        // A markerless press reports the pick without capturing, so dragging
+        // still pans the map.
+        let away = Point::new(on_marker.x + 200.0, on_marker.y + 200.0);
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(away),
+                &pressed,
+                &vehicles,
+                Some(id),
+                None,
+            ),
+            Action::Publish(_)
+        ));
+
+        // With no displayed vehicle there is nothing to report.
+        assert!(matches!(
+            interact(
+                &projector,
+                &mouse::Cursor::Available(on_marker),
+                &pressed,
+                &vehicles,
+                None,
                 None,
             ),
             Action::None
