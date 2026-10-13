@@ -160,6 +160,10 @@ pub enum Message {
 
 impl Message {
     /// Whether this message can change the persisted arrangement.
+    ///
+    /// Maximization is view state that [`Layout::configuration`] does not
+    /// record, so `Maximize`/`Restore` are excluded: they must not trigger a
+    /// byte-identical write and debounce churn.
     pub fn changes_layout(&self) -> bool {
         matches!(
             self,
@@ -167,8 +171,6 @@ impl Message {
                 | Message::Resized(_)
                 | Message::Open(_)
                 | Message::Close(_)
-                | Message::Maximize(_)
-                | Message::Restore
         )
     }
 }
@@ -218,8 +220,8 @@ impl Layout {
     }
 
     /// Snapshot the current arrangement for persistence.
-    pub fn configuration(&self) -> Option<LayoutConfig> {
-        Some(self.panes.configuration().into())
+    pub fn configuration(&self) -> LayoutConfig {
+        self.panes.configuration().into()
     }
 
     /// The arrangement revision, bumped on every change that can affect the
@@ -331,7 +333,7 @@ mod tests {
         assert!(layout.is_open(Panel::Map));
         assert!(layout.is_open(Panel::Vehicles));
 
-        let config = layout.configuration().expect("snapshot");
+        let config = layout.configuration();
         let serialized = ron::to_string(&config).expect("serialize");
         let restored: LayoutConfig = ron::from_str(&serialized).expect("deserialize");
 
@@ -340,8 +342,7 @@ mod tests {
         assert!(rebuilt.is_open(Panel::Vehicles));
 
         // The rebuilt layout snapshots to the same structure.
-        let reserialized =
-            ron::to_string(&rebuilt.configuration().expect("snapshot")).expect("serialize");
+        let reserialized = ron::to_string(&rebuilt.configuration()).expect("serialize");
         assert_eq!(serialized, reserialized);
     }
 

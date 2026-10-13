@@ -25,10 +25,15 @@ pub enum LinkStatus {
 
 /// The outcome of an attempted link attach.
 ///
-/// Named for what it is, not when it fires: this value is the outcome of a
-/// [`LinkManager::connect`], not a stream event like [`crate::mavlink::Event`].
+/// Opaque to the UI: it only carries the value back to [`LinkManager::apply`],
+/// which is the only place that inspects it. Named for what it is, not when it
+/// fires: this value is the outcome of a [`LinkManager::connect`], not a stream
+/// event like [`crate::mavlink::Event`].
 #[derive(Debug, Clone)]
-pub enum LinkUpdate {
+pub struct LinkUpdate(LinkUpdateKind);
+
+#[derive(Debug, Clone)]
+enum LinkUpdateKind {
     Connected(LinkId, LinkGuard),
     Failed(LinkId, String),
 }
@@ -95,6 +100,14 @@ impl LinkManager {
     /// future. The returned future is `'static`: it carries a router clone and
     /// the link's parsed build, so it can run after the borrow of the manager
     /// that produced it has ended.
+    ///
+    /// The entry is marked [`LinkStatus::Connecting`] immediately, and the
+    /// caller is assumed to poll the future to completion while the application
+    /// runs (the UI drives it as a task). A future dropped before it lands
+    /// leaves the entry stuck in `Connecting`: [`LinkManager::reconcile`] only
+    /// repairs entries that hold a handle, and there is no handle yet, so
+    /// reconnecting the same id is refused until the entry is removed or
+    /// re-saved.
     pub fn connect(&mut self, id: &LinkId) -> Option<impl Future<Output = LinkUpdate> + Send + 'static> {
         let (build, high_latency) = {
             let entry = self.links.get_mut(id)?;
@@ -115,23 +128,23 @@ impl LinkManager {
                 Ok((reader, writer)) => {
                     let handle =
                         router.attach_reader_writer(id.clone(), reader, writer, high_latency);
-                    LinkUpdate::Connected(id, handle)
+                    LinkUpdate(LinkUpdateKind::Connected(id, handle))
                 }
-                Err(error) => LinkUpdate::Failed(id, error.to_string()),
+                Err(error) => LinkUpdate(LinkUpdateKind::Failed(id, error.to_string())),
             }
         })
     }
 
     /// Fold a landed connect outcome back into the link's state.
     pub fn apply(&mut self, update: LinkUpdate) {
-        match update {
-            LinkUpdate::Connected(id, handle) => {
+        match update.0 {
+            LinkUpdateKind::Connected(id, handle) => {
                 if let Some(entry) = self.links.get_mut(&id) {
                     entry.handle = Some(handle);
                     entry.status = LinkStatus::Connected;
                 }
             }
-            LinkUpdate::Failed(id, error) => {
+            LinkUpdateKind::Failed(id, error) => {
                 log::error!("Connect failed for {id:?}: {error}");
                 if let Some(entry) = self.links.get_mut(&id) {
                     entry.handle = None;
@@ -155,6 +168,11 @@ impl LinkManager {
     /// outlive the attachment it names. A handle to a link the router has
     /// detached — however that detach happened — is nonsense, and keeping it
     /// would block a re-attach forever; this reconciles within one call.
+    ///
+    /// Only entries that hold a handle are repaired. An entry stuck in
+    /// [`LinkStatus::Connecting`] because its connect future was dropped has no
+    /// handle to compare against the router, so this deliberately leaves it
+    /// alone; see [`LinkManager::connect`].
     pub fn reconcile(&mut self) {
         for (id, entry) in &mut self.links {
             if entry.handle.is_some() && !self.router.is_attached(id) {
@@ -176,9 +194,9 @@ impl LinkManager {
     ///
     /// Reusing the id of a same-named link keeps its identity stable across
     /// edits; any live connection is dropped, since the configuration it was
-    /// attached under no longer applies. Saving is always a mutation (an add or
-    /// a replace), so this reports `true`.
-    pub fn save(&mut self, config: LinkConfig) -> bool {
+    /// attached under no longer applies. Saving always mutates the set (an add
+    /// or a replace), so the caller persists unconditionally.
+    pub fn save(&mut self, config: LinkConfig) {
         let existing = self
             .links
             .iter()
@@ -194,8 +212,6 @@ impl LinkManager {
                 status: LinkStatus::Disconnected,
             },
         );
-
-        true
     }
 
     /// Remove a configured link, dropping any live connection with it.
@@ -293,18 +309,18 @@ mod tests {
     fn save_adds_then_updates_by_name_reusing_the_id() {
         let (mut manager, _router) = manager();
 
-        assert!(manager.save(config("A")));
+        manager.save(config("A"));
         assert_eq!(manager.configs().len(), 1);
         let first_id = manager.entries().next().unwrap().0.clone();
 
         // Saving the same name updates in place, keeping the id.
-        assert!(manager.save(config("A")));
+        manager.save(config("A"));
         assert_eq!(manager.configs().len(), 1);
         let second_id = manager.entries().next().unwrap().0.clone();
         assert_eq!(first_id, second_id);
 
         // A different name adds a link with a fresh id.
-        assert!(manager.save(config("B")));
+        manager.save(config("B"));
         assert_eq!(manager.configs().len(), 2);
     }
 
@@ -312,7 +328,7 @@ mod tests {
     fn remove_drops_the_link_and_unknown_is_a_noop() {
         let (mut manager, _router) = manager();
 
-        assert!(manager.save(config("A")));
+        manager.save(config("A"));
         let id = manager.entries().next().unwrap().0.clone();
 
         assert!(!manager.remove(&LinkId::new("does-not-exist")));
@@ -325,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_drops_a_ghost_handle() {
         let (mut manager, _router) = manager();
-        assert!(manager.save(config("A")));
+        manager.save(config("A"));
         let id = manager.entries().next().unwrap().0.clone();
 
         // A guard from a *different* router: the manager claims a live
@@ -335,7 +351,7 @@ mod tests {
         let (_peer, gcs) = tokio::io::duplex(4096);
         let (reader, writer) = tokio::io::split(gcs);
         let guard = other.attach_reader_writer(LinkId::new("other"), reader, writer, false);
-        manager.apply(LinkUpdate::Connected(id.clone(), guard));
+        manager.apply(LinkUpdate(LinkUpdateKind::Connected(id.clone(), guard)));
 
         assert!(
             !manager.is_connected(&id),
@@ -354,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn connect_is_refused_while_a_link_is_live() {
         let (mut manager, router) = manager();
-        assert!(manager.save(config("A")));
+        manager.save(config("A"));
         let id = manager.entries().next().unwrap().0.clone();
 
         // Attach a real guard to a live transport, under the link's own id,
@@ -362,7 +378,7 @@ mod tests {
         let (_peer, gcs) = tokio::io::duplex(4096);
         let (reader, writer) = tokio::io::split(gcs);
         let guard = router.attach_reader_writer(id.clone(), reader, writer, false);
-        manager.apply(LinkUpdate::Connected(id.clone(), guard));
+        manager.apply(LinkUpdate(LinkUpdateKind::Connected(id.clone(), guard)));
 
         assert!(manager.is_connected(&id));
 

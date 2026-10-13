@@ -733,12 +733,6 @@ impl MissionCommand {
             .unwrap_or("Unknown")
     }
 
-    /// Whether the command carries a WGS-84 position.
-    #[allow(dead_code)] // Part of the command API; exercised by tests.
-    pub fn is_positional(&self) -> bool {
-        self.position().is_some()
-    }
-
     pub fn position(&self) -> Option<Position> {
         match self {
             MissionCommand::Waypoint { pos, .. }
@@ -1540,7 +1534,7 @@ mod tests {
                     | MissionCommandKind::VtolTakeoff
                     | MissionCommandKind::SetRoiLocation
             );
-            assert_eq!(command.is_positional(), positional);
+            assert_eq!(command.position().is_some(), positional);
             assert_eq!(command.position(), positional.then_some(p));
         }
     }
@@ -1550,10 +1544,10 @@ mod tests {
         let waypoint =
             MissionCommand::default_for(MissionCommandKind::Waypoint, pos(1.0, 2.0, 3.0));
         assert_eq!(waypoint.name(), "Waypoint");
-        assert!(waypoint.is_positional());
+        assert!(waypoint.position().is_some());
 
         assert_eq!(MissionCommand::ReturnToLaunch.name(), "ReturnToLaunch");
-        assert!(!MissionCommand::ReturnToLaunch.is_positional());
+        assert!(MissionCommand::ReturnToLaunch.position().is_none());
         assert_eq!(MissionCommand::ReturnToLaunch.position(), None);
 
         let unknown = MissionCommand::Unknown {
@@ -1566,7 +1560,7 @@ mod tests {
         };
         assert_eq!(unknown.name(), "Unknown");
         assert_eq!(unknown.kind(), None);
-        assert!(!unknown.is_positional());
+        assert!(unknown.position().is_none());
     }
 
     #[test]

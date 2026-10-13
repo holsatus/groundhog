@@ -8,7 +8,7 @@ use std::{
 use mavio::default_dialect::messages;
 use nalgebra::Vector3;
 
-use crate::domain::geo::GeoPosition;
+use crate::domain::geo::{GeoPosition, LATLON_SCALE};
 
 pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
 pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
@@ -36,7 +36,10 @@ impl PositionTrack {
     ) {
         self.register(GlobalPosition {
             at: time,
-            pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
+            pos: GeoPosition::new(
+                message.lat as f64 * LATLON_SCALE,
+                message.lon as f64 * LATLON_SCALE,
+            ),
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(
@@ -54,7 +57,10 @@ impl PositionTrack {
     ) {
         self.register(GlobalPosition {
             at: time,
-            pos: GeoPosition::new(message.lat as f64 * 1e-7, message.lon as f64 * 1e-7),
+            pos: GeoPosition::new(
+                message.lat as f64 * LATLON_SCALE,
+                message.lon as f64 * LATLON_SCALE,
+            ),
             alt_agl: message.relative_alt as f32 * 1e-3,
         });
         self.velocity_ned = Some(Vector3::new(

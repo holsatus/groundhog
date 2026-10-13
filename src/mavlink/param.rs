@@ -34,7 +34,7 @@ impl MavlinkRouter {
         cap: MavProtocolCapability,
     ) -> Result<Value> {
         let (param_value, param_type) =
-            crate::wire::param::mavio_from_value(cap, value).ok_or(MavError::ParamEncoding)?;
+            crate::wire::param::to_wire(cap, value).ok_or(MavError::ParamEncoding)?;
 
         // Ensure we are the only ones setting *this* parameter
         let _lock = self.lock_key(LockKey::Param(target, ident.clone())).await;
@@ -63,7 +63,7 @@ impl MavlinkRouter {
             )?;
 
             if let Ok(Some(reply)) = timeout(PARAM_SET_TIMEOUT, recv_value.next()).await {
-                return crate::wire::param::mavio_into_value(
+                return crate::wire::param::from_wire(
                     cap,
                     reply.param_value,
                     reply.param_type,

@@ -200,7 +200,7 @@ impl Application {
     /// [`Application::subscription`]).
     fn layout_message_update(&mut self, message: layout::Message) -> Task<Message> {
         if self.layout.update(message) {
-            self.configuration.layout = self.layout.configuration();
+            self.configuration.layout = Some(self.layout.configuration());
         }
 
         Task::none()

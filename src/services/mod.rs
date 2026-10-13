@@ -14,3 +14,7 @@ pub use error::{Error, Result};
 pub use fleet::FleetServices;
 pub use link::{LinkManager, LinkStatus, LinkUpdate};
 pub use vehicle::{DownloadedMission, ParamListSummary, VehicleClient};
+
+// Re-exported so features can name a link handle without reaching into the
+// `link` layer; only `link::config` types (configs, builds) are imported there.
+pub use crate::link::LinkId;

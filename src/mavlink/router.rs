@@ -559,8 +559,7 @@ impl MavlinkRouter {
     }
 }
 
-/// Keeps a link alive. The link is closed when the last clone is dropped, or
-/// when [`LinkHandle::close`] is called.
+/// Keeps a link alive. The link is closed when the last clone is dropped.
 #[derive(Debug, Clone)]
 pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
 

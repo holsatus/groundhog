@@ -88,14 +88,14 @@ pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
     }
 }
 
-pub fn mavio_from_value(cap: MavProtocolCapability, value: Value) -> Option<(f32, MavParamType)> {
+pub fn to_wire(cap: MavProtocolCapability, value: Value) -> Option<(f32, MavParamType)> {
     match ParamEncoding::from(cap) {
         ParamEncoding::CCast => Some(value_into_c_cast(value)),
         ParamEncoding::Bytewise => Some(value_into_bytewise(value)),
     }
 }
 
-pub fn mavio_into_value(
+pub fn from_wire(
     cap: MavProtocolCapability,
     param_value: f32,
     param_type: MavParamType,

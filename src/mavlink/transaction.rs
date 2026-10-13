@@ -140,26 +140,29 @@ pub struct CommandRequest {
     locks: bool,
 }
 
-#[allow(dead_code)] // Builder options not used by the UI yet
 impl CommandRequest {
     /// How long to wait for an ACK before resending.
+    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
         self
     }
 
     /// How many times to resend the command if no ACK is received.
+    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn retries(mut self, retries: u8) -> Self {
         self.retries = retries;
         self
     }
 
     /// How long to wait between `IN_PROGRESS` updates.
+    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn progress_timeout(mut self, timeout: Duration) -> Self {
         self.progress_timeout = timeout;
         self
     }
 
+    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn on_busy(mut self, on_busy: Busy) -> Self {
         self.on_busy = on_busy;
         self

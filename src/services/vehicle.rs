@@ -9,7 +9,7 @@ use mavio::default_dialect::{
 use crate::{
     domain::mission::{MissionItem, MissionPlan},
     foundation::MavlinkId,
-    mavlink::{self, Command, MavlinkMessage, MavlinkRouter, commands},
+    mavlink::{Command, MavlinkRouter, commands},
 };
 
 use super::{Error, Result};
@@ -55,12 +55,6 @@ impl VehicleClient {
         }
     }
 
-    /// The target vehicle's MAVLink id.
-    #[allow(dead_code)] // Escape hatch: unused yet
-    pub fn id(&self) -> MavlinkId {
-        self.id
-    }
-
     /// Download the vehicle's parameter list, optionally requesting capabilities first.
     pub async fn fetch_parameters(&self, request_capabilities: bool) -> Result<ParamListSummary> {
         let (received, expected) = self
@@ -88,15 +82,11 @@ impl VehicleClient {
     /// The value itself is not needed by the caller (the vehicle folds the
     /// message into its own state), so only success is reported.
     pub async fn component_information(&self) -> Result<()> {
-        self.request::<ComponentInformationBasic>()
+        self.router
+            .request_message::<ComponentInformationBasic>(self.id)
             .await
             .map(|_| ())
             .map_err(Error::from)
-    }
-
-    /// Escape hatch: request and await one message of type `M`.
-    pub(crate) async fn request<M: MavlinkMessage>(&self) -> mavlink::Result<M> {
-        self.router.request_message::<M>(self.id).await
     }
 
     /// Run a command and await its final ACK, discarding the ACK itself: only
@@ -183,13 +173,6 @@ mod tests {
         system: 1,
         component: 1,
     };
-
-    #[test]
-    fn id_is_returned() {
-        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let client = VehicleClient::new(&router, VEHICLE);
-        assert_eq!(client.id(), VEHICLE);
-    }
 
     #[tokio::test]
     async fn operations_without_a_link_error() {

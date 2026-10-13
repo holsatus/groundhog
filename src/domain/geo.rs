@@ -4,6 +4,10 @@
 //! into map coordinates (Web Mercator) is the view layer's job, so this module
 //! deliberately does not depend on the map/tile crate.
 
+/// Scale between WGS-84 degrees and the integer coordinates of
+/// `GLOBAL_POSITION_INT` / `MISSION_ITEM_INT` (both in degrees × 1e7).
+pub(crate) const LATLON_SCALE: f64 = 1e-7;
+
 /// A WGS-84 geographic position in degrees.
 ///
 /// The constructor takes `(lat, lon)`. Beware that the map layer's geodetic

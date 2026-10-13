@@ -42,11 +42,12 @@ impl MavlinkRouter {
     }
 }
 
-/// Receives every inbound message matching a filter. Created by [`MavlinkRouter::watch`].
+/// Receives every inbound message matching a filter. Created by
+/// [`MavlinkRouter::receive_filtered`].
 ///
-/// The filter is registered when the [`Watch`] is created, not when it is first
-/// polled, so no message can be missed between creating it and sending a request.
-/// It is deregistered when dropped.
+/// The filter is registered when the [`FilteredReceiver`] is created, not when
+/// it is first polled, so no message can be missed between creating it and
+/// sending a request. It is deregistered when dropped.
 pub struct FilteredReceiver {
     id: u64,
     router: MavlinkRouter,
@@ -81,7 +82,8 @@ impl Drop for FilteredReceiver {
 /// A predicate used to select which received messages are accepted.
 type MessageFilter<M> = Box<dyn FnMut(&M) -> bool + Send>;
 
-/// Receives messages of type `M` from a specific source. Created by [`MavlinkRouter::recv`].
+/// Receives messages of type `M` from a specific source. Created by
+/// [`MavlinkRouter::receive_message`].
 ///
 /// Await it directly to get the next matching message (with a timeout), or call
 /// [`MessageReceiver::next`] repeatedly to process a sequence of messages.

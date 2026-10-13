@@ -11,7 +11,11 @@ pub mod command;
 pub use command::*;
 
 /// Scale between WGS-84 degrees and the integer coordinates of `MISSION_ITEM_INT`.
-pub(crate) const LATLON_SCALE: f64 = 1e-7;
+///
+/// Defined in [`crate::domain::geo`] so the mission and vehicle layers share one
+/// source; re-exported here for the existing `domain::mission::LATLON_SCALE`
+/// path.
+pub(crate) use crate::domain::geo::LATLON_SCALE;
 
 /// The editable flight plan: an ordered list of mission items.
 ///
@@ -43,11 +47,6 @@ impl MissionPlan {
 
     pub fn push(&mut self, item: MissionItem) {
         self.items.push(item);
-    }
-
-    #[allow(dead_code)] // Part of the plan API; exercised by tests.
-    pub fn insert(&mut self, index: usize, item: MissionItem) {
-        self.items.insert(index, item);
     }
 
     pub fn remove(&mut self, index: usize) -> Option<MissionItem> {
@@ -157,7 +156,6 @@ mod tests {
     fn mutations_update_order() {
         let a = waypoint(1.0);
         let b = waypoint(2.0);
-        let c = waypoint(3.0);
 
         let mut plan = MissionPlan::default();
         assert!(plan.is_empty());
@@ -167,12 +165,9 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_eq!(plan.get(0), Some(&a));
 
-        plan.insert(1, c.clone());
-        assert_eq!(plan.items(), [a.clone(), c.clone(), b.clone()].as_slice());
-
         let removed = plan.remove(0);
         assert_eq!(removed, Some(a));
-        assert_eq!(plan.items(), [c.clone(), b.clone()].as_slice());
+        assert_eq!(plan.items(), [b.clone()].as_slice());
         assert_eq!(plan.remove(9), None);
 
         assert!(plan.update(0, |item| item.autocontinue = false));

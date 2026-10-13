@@ -17,8 +17,8 @@ use iced::{
 pub use editor::{LinkBuilder, LinkConfigurator, LinkVariant, BAUDRATES};
 
 use crate::{
-    link::{LinkConfig, LinkId},
-    services::{self, LinkManager, LinkStatus, LinkUpdate},
+    link::LinkConfig,
+    services::{self, LinkId, LinkManager, LinkStatus, LinkUpdate},
     style,
 };
 
@@ -115,10 +115,10 @@ impl LinkPanel {
             }
             Message::Save(config) => {
                 // Saving a link with an existing name updates it in place,
-                // keeping its id and dropping any live connection.
-                if manager.save(config) {
-                    return (Task::none(), Some(Event::LinksChanged(manager.configs())));
-                }
+                // keeping its id and dropping any live connection; the set
+                // always changed, so it is always persisted.
+                manager.save(config);
+                return (Task::none(), Some(Event::LinksChanged(manager.configs())));
             }
             Message::Connect(id) => {
                 // The manager refuses a second attach on a live link; a refused
@@ -435,7 +435,7 @@ impl Default for LinkPanel {
 mod tests {
     use super::*;
     use crate::link::config::LinkBuild;
-    use crate::mavlink::{DEFAULT_GCS_ID, MavlinkRouter};
+    use crate::mavlink::{MavlinkRouter, DEFAULT_GCS_ID};
     use std::net::SocketAddrV4;
 
     fn config(name: &str) -> LinkConfig {

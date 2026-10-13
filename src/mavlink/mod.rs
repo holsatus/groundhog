@@ -29,8 +29,7 @@ mod router;
 pub mod telemetry;
 mod transaction;
 
-pub use error::{MavError, Result};
-pub use recv::MavlinkMessage;
+pub use error::MavError;
 pub use router::{Event, LinkGuard, MavlinkRouter};
 pub use transaction::Command;
 

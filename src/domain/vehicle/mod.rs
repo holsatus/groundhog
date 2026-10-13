@@ -252,7 +252,7 @@ impl Vehicle {
         let cap = self.capabilities(component).unwrap_or_default();
 
         let maybe_value =
-            crate::wire::param::mavio_into_value(cap, message.param_value, message.param_type);
+            crate::wire::param::from_wire(cap, message.param_value, message.param_type);
 
         let Some(new_value) = maybe_value else {
             log::error!("Unsupported type of parameter: {:?}", message.param_type);
