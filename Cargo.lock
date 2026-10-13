@@ -878,7 +878,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 [[package]]
 name = "cosmic-text"
 version = "0.19.0"
-source = "git+https://github.com/hecrj/cosmic-text.git?rev=19cca2bd90e73e20614964f06d44240e71e503b3#19cca2bd90e73e20614964f06d44240e71e503b3"
+source = "git+https://github.com/hecrj/cosmic-text.git?rev=6adc2364289fd241daed751948a03d0aea5a31ca#6adc2364289fd241daed751948a03d0aea5a31ca"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -971,7 +971,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "cryoglyph"
 version = "0.1.0"
-source = "git+https://github.com/iced-rs/cryoglyph.git?rev=e13618df29a5593968040c12ab086b7237249ded#e13618df29a5593968040c12ab086b7237249ded"
+source = "git+https://github.com/iced-rs/cryoglyph.git?rev=cf38ed5ea0cfe95270b31ced2910560a7fcc5003#cf38ed5ea0cfe95270b31ced2910560a7fcc5003"
 dependencies = [
  "cosmic-text",
  "etagere",
@@ -2158,10 +2158,11 @@ dependencies = [
 [[package]]
 name = "iced"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "iced_core",
  "iced_debug",
+ "iced_devtools",
  "iced_futures",
  "iced_renderer",
  "iced_runtime",
@@ -2172,9 +2173,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "iced_beacon"
+version = "0.15.0-dev"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
+dependencies = [
+ "bincode",
+ "futures",
+ "iced_core",
+ "log",
+ "semver",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "iced_core"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -2184,6 +2200,7 @@ dependencies = [
  "num-traits",
  "raw-window-handle",
  "rustc-hash 2.1.3",
+ "serde",
  "smol_str",
  "thiserror 2.0.21",
  "unicode-segmentation",
@@ -2193,17 +2210,29 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
+ "iced_beacon",
  "iced_core",
  "iced_futures",
  "log",
 ]
 
 [[package]]
+name = "iced_devtools"
+version = "0.15.0-dev"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
+dependencies = [
+ "iced_debug",
+ "iced_program",
+ "iced_widget",
+ "log",
+]
+
+[[package]]
 name = "iced_futures"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "futures",
  "iced_core",
@@ -2217,7 +2246,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2237,7 +2266,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -2246,7 +2275,7 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "iced_graphics",
  "iced_tiny_skia",
@@ -2258,7 +2287,7 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "bytes",
  "iced_core",
@@ -2269,7 +2298,7 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2285,7 +2314,7 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2304,7 +2333,7 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "iced_renderer",
  "iced_runtime",
@@ -2318,7 +2347,7 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced#a8231fd9ddf3570f95affba2d45a9be092007f71"
+source = "git+https://github.com/iced-rs/iced#ab336f6d6403d7206d82c7c2caa46143efde8284"
 dependencies = [
  "arboard",
  "iced_debug",
@@ -4858,6 +4887,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -5112,7 +5145,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slippery"
 version = "0.1.0"
-source = "git+https://github.com/peterkrull/slippery#6e0a62084c2e11b4736b6a3560d4d75ee3a5ba43"
+source = "git+https://github.com/peterkrull/slippery#874328bc3d8a2161b788c8ab12241a375943f22a"
 dependencies = [
  "env_logger",
  "http-cache-reqwest",

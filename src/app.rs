@@ -144,6 +144,10 @@ impl Application {
         "Holsatus Groundhog".to_string()
     }
 
+    pub fn scale_factor(&self) -> f32 {
+        self.configuration.settings.scale_factor
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SaveConfigurationToFile => self.save_configuration(),
@@ -352,6 +356,12 @@ impl Application {
             settings_panel::Message::SetTheme(mode) => {
                 if self.configuration.settings.theme != mode {
                     self.configuration.settings.theme = mode;
+                    return Task::done(Message::SaveConfigurationToFile);
+                }
+            }
+            settings_panel::Message::SetScaleFactor(scale) => {
+                if self.configuration.settings.scale_factor != scale {
+                    self.configuration.settings.scale_factor = scale;
                     return Task::done(Message::SaveConfigurationToFile);
                 }
             }
@@ -586,7 +596,7 @@ impl Application {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let fleet_tick = iced::time::every(Duration::from_millis(100)).map(Message::FleetTick);
+        let fleet_tick = iced::time::every(Duration::from_millis(500)).map(Message::FleetTick);
 
         // Trailing debounce for layout persistence: the timer is restarted on
         // every layout change (the revision is part of the subscription

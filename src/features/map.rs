@@ -9,22 +9,19 @@
 
 use std::{
     collections::BTreeMap,
-    sync::LazyLock,
     time::{Duration, Instant},
 };
 
 use iced::{
-    Color, Pixels, Point, Rectangle, Size, Theme, Vector, Widget,
+    Color, Font, Pixels, Point, Size, Theme, Widget,
     advanced::text::Alignment as TextAlignment,
     alignment::Vertical,
     color::Oklch,
     mouse,
-    widget::{
-        canvas::{
-            Event as CanvasEvent, Fill, Frame, Gradient, LineCap, LineJoin, Path, Stroke, Style,
-            Text, fill, gradient::Linear,
-        },
-        image::Handle,
+    theme::Palette,
+    widget::canvas::{
+        Event as CanvasEvent, Fill, Frame, Gradient, LineCap, LineDash, LineJoin, Path, Stroke,
+        Style, Text, fill, gradient::Linear,
     },
 };
 use slippery::{
@@ -32,10 +29,9 @@ use slippery::{
     location,
 };
 
-use crate::{domain::SystemId, domain::geo::GeoPosition, domain::vehicle::Vehicle, style};
-
-static ARROW_HANDLE: LazyLock<Handle> =
-    LazyLock::new(|| Handle::from_bytes(include_bytes!("../../assets/pointer.png").as_slice()));
+use crate::{
+    domain::SystemId, domain::geo::GeoPosition, domain::vehicle::Vehicle, style, widget::attitude,
+};
 
 /// A neutral interaction the map observed on its overlay.
 ///
@@ -99,7 +95,7 @@ impl Map {
                 zoom: Zoom::try_from(8.0).unwrap(),
             },
             projector: None,
-            tile_cache: TileCache::new(slippery::sources::ArcGisWorldMap),
+            tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
             follow: false,
         }
     }
@@ -137,34 +133,40 @@ impl Map {
     ) -> impl Widget<Message> + 'a {
         let background = theme.palette().background.base.color;
         let border = theme.palette().background.strongest.color;
+        let palette = *theme.palette();
 
         MapProgram::new(&self.tile_cache)
             .on_cache(Message::Cache)
             .on_update(Message::Projector)
-            .with_draw_layer(move |projector, frame| {
+            .with_visual_layer(move |projector, frame| {
                 // Darken the map background to make overlay stand out more
                 let black_fill = Fill {
                     style: Style::Solid(style::map_backdrop()),
                     ..Fill::default()
                 };
-                frame.fill_rectangle([0.0, 0.0].into(), frame.size(), black_fill);
+                frame.fill_rectangle(Point::ORIGIN, frame.size(), black_fill);
 
                 iced::debug::time_with("position_segments_view", || {
-                    for vehicle in vehicles.values() {
-                        draw_vehicle(vehicle, projector, frame);
-                    }
-
                     if let Some(id) = primary
                         && let Some(vehicle) = vehicles.get(&id)
                     {
                         draw_mission(vehicle, projector, frame, dragging);
                     }
-                });
 
-                // The map cannot be clipped to a rounded container, so round it
-                // here instead: mask the corners (which show the window behind)
-                // and stroke the same border as the regular panes. Drawn last, so
-                // trails near a corner cannot paint over the mask.
+                    for vehicle in vehicles.values() {
+                        draw_vehicle(vehicle, projector, frame, &palette);
+                    }
+                });
+            })
+            .with_visual_layer(move |_, frame| {
+                if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id))
+                    && let Some(attitude) = vehicle.attitude.current.as_ref()
+                {
+                    let (roll, pitch, yaw) = attitude.attitude.euler_angles();
+                    attitude::overlay(frame, roll, pitch, yaw, &palette);
+                }
+            })
+            .with_visual_layer(move |_, frame| {
                 draw_rounded_frame(
                     frame,
                     crate::style::PANE_RADIUS,
@@ -173,13 +175,7 @@ impl Map {
                     border,
                 );
             })
-            .with_interaction(move |projector, cursor, event| {
-                // The interaction projector's `bounds` are absolute screen
-                // coordinates (iced passes `layout.bounds()`), and its projection
-                // methods work in that same absolute space. The cursor is
-                // therefore read with `position_over`; unlike the draw layer,
-                // whose projector normalises bounds to the origin, we must NOT
-                // use `position_in`.
+            .with_interact_layer(move |projector, cursor, event| {
                 interact(projector, cursor, event, vehicles, primary, dragging)
             })
             .build(self.viewpoint)
@@ -365,7 +361,7 @@ impl DrawLineSegment {
 /// projection cache keyed by `(viewpoint, position-revision)` is the known next
 /// step, but it was deferred: profiling shows stroke frequency dominates the
 /// cost, and a cache would add untested staleness risk. Revisit with a profiler.
-fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame) {
+fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame, palette: &Palette) {
     let Some(position) = &vehicle.position.current else {
         return;
     };
@@ -430,19 +426,7 @@ fn draw_vehicle(vehicle: &Vehicle, projector: &Projector, frame: &mut Frame) {
     }
 
     frame.with_save(|frame| {
-        frame.translate(Vector::new(center.x, center.y));
-        frame.rotate(yaw_angle);
-
-        const WIDTH: f32 = 60.0;
-        frame.draw_image(
-            Rectangle {
-                x: -WIDTH / 2.0,
-                y: -WIDTH / 2.0,
-                width: WIDTH,
-                height: WIDTH,
-            },
-            &*ARROW_HANDLE,
-        );
+        crate::widget::attitude::draw_arrow_head(frame, center, 40.0, yaw_angle, palette, true);
     });
 }
 
@@ -478,7 +462,11 @@ fn draw_mission(
         let stroke = Stroke {
             style: Style::Solid(style::map_route()),
             width: 2.0,
-            line_cap: LineCap::Round,
+            line_cap: LineCap::Butt,
+            line_dash: LineDash {
+                segments: &[15.0, 15.0],
+                offset: 0,
+            },
             ..Stroke::default()
         };
 
@@ -488,19 +476,20 @@ fn draw_mission(
     // Markers, each numbered with its 1-based mission index.
     for (index, point) in points {
         let (radius, color) = if dragged == Some(index) {
-            (9.0, style::marker_dragged())
+            (12.0, style::marker_dragged())
         } else if progress.is_current(index) {
-            (7.0, style::marker_current())
+            (10.0, style::marker_current())
         } else {
-            (5.0, style::marker_default())
+            (8.0, style::marker_default())
         };
 
         frame.fill(&Path::circle(point, radius), Fill::from(color));
 
         let mut label = Text::from((index + 1).to_string());
+        label.font = Font::MONOSPACE;
         label.position = point;
         label.color = style::marker_label();
-        label.size = Pixels(11.0);
+        label.size = Pixels(12.0);
         label.align_x = TextAlignment::Center;
         label.align_y = Vertical::Center;
         frame.fill_text(label);
@@ -564,6 +553,7 @@ fn altitude_to_color(altitude_m: f32, brightness: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::Rectangle;
     use mavio::default_dialect::enums::MavFrame;
 
     use crate::domain::mission::{MissionCommand, MissionCommandKind, MissionItem, Position};

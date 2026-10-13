@@ -23,7 +23,8 @@ fn main() -> iced::Result {
 
     iced::application(Application::boot, Application::update, Application::view)
         .subscription(Application::subscription)
-        .theme(Application::theme)
+        .scale_factor(Application::scale_factor)
         .title(Application::title)
+        .theme(Application::theme)
         .run()
 }

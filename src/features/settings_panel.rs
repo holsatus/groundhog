@@ -4,7 +4,7 @@
 //! settings should be added to [`Settings`](crate::config::Settings) and
 //! surfaced here; the root applies the changes.
 
-use iced::widget::{column, container, pick_list, row, rule, text};
+use iced::widget::{column, container, pick_list, row, rule, slider, text};
 use iced::{Alignment, Element, Length, Widget};
 
 use crate::{config::Settings, theme::ThemeMode};
@@ -13,6 +13,7 @@ use crate::{config::Settings, theme::ThemeMode};
 pub enum Message {
     /// Switch the application palette.
     SetTheme(ThemeMode),
+    SetScaleFactor(f32),
 }
 
 pub fn view(settings: &Settings) -> Element<'_, Message> {
@@ -26,10 +27,20 @@ pub fn view(settings: &Settings) -> Element<'_, Message> {
     .spacing(10.0)
     .align_y(Alignment::Center);
 
+    let scale_row = row![
+        text("Scale").width(Length::Fill),
+        slider(0.5..=2.0, settings.scale_factor, Message::SetScaleFactor)
+            .step(0.1)
+            .width(Length::Fixed(160.0)),
+    ]
+    .spacing(10.0)
+    .align_y(Alignment::Center);
+
     let contents = column![
         text("Application settings").size(24.0),
         rule::horizontal(1.0),
         theme_row,
+        scale_row
     ]
     .spacing(10.0);
 

@@ -194,13 +194,6 @@ pub fn view<'a>(
     );
 
     if let Some(vehicle) = primary.and_then(|id| vehicles.get(&id)) {
-        if let Some(heartbeat) = &vehicle.identity.last_heartbeat {
-            row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
-            row_contents.push(
-                iced::widget::container(iced::widget::text(format!("{:?}", heartbeat))).boxed(),
-            );
-        }
-
         row_contents.push(iced::widget::rule::horizontal(1.0).boxed());
 
         // The status list is virtualized like the log panel's list:

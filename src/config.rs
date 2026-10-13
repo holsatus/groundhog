@@ -25,11 +25,21 @@ fn default_config_version() -> u32 {
 }
 
 /// Persisted application preferences.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Which palette to use.
     pub theme: ThemeMode,
+    pub scale_factor: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::Dark,
+            scale_factor: 1.0,
+        }
+    }
 }
 
 /// The persisted application configuration.

@@ -162,12 +162,12 @@ pub fn map_backdrop() -> Color {
 
 /// The stroke connecting consecutive positioned mission items.
 pub fn map_route() -> Color {
-    Color::WHITE.scale_alpha(0.6)
+    Color::WHITE.scale_alpha(1.0)
 }
 
 /// A mission marker that is neither current nor being dragged.
 pub fn marker_default() -> Color {
-    Color::WHITE.scale_alpha(0.85)
+    Color::WHITE
 }
 
 /// The mission marker at the vehicle's current execution item.

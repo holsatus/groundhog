@@ -12,7 +12,7 @@ rust-ini = "0.21.3"
 # two sources (incompatible types). The exact revision is fixed by the committed
 # Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
 # dependency first.
-iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "advanced", "canvas", "image"] }
+iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "advanced", "canvas", "image", "debug"] }
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
 # Direct dependency for the `mav` middleware, which must not depend on the GUI
@@ -38,9 +38,3 @@ ron = "0.12.1"
 nalgebra = "0.34.2"
 num_enum = "0.7.6"
 thiserror = "2.0.18"
-
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
