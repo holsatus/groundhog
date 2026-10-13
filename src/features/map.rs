@@ -245,7 +245,9 @@ fn draw_rounded_frame(
 ///
 /// A marker press captures the pointer, because the overlay is starting a drag
 /// the map must not pan underneath. Every other pick is published without
-/// capturing, so the map still pans when the pointer is dragged.
+/// capturing, so the map still pans when the pointer is dragged. A release is
+/// always published, so the drag always ends (idempotently) and the map always
+/// ends any pan it started, even if the overlay never saw the matching press.
 fn interact(
     projector: &Projector,
     cursor: &mouse::Cursor,
@@ -308,14 +310,17 @@ fn interact(
             }))
         }
         CanvasEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-            if dragging.is_some() {
-                let Some(id) = primary else {
-                    return Action::None;
-                };
-                Action::Capture(Message::Interaction(Event::Released { system: id }))
-            } else {
-                Action::None
-            }
+            // A left release always ends any drag the overlay owns. It must not
+            // be gated on `dragging`: that is a view-time snapshot, so a press
+            // and release delivered in the same frame would leave the drag armed
+            // and the map unable to pan. Publishing (rather than capturing) also
+            // lets the map end its own pan, even if the overlay never saw the
+            // matching press.
+            let Some(id) = primary else {
+                return Action::None;
+            };
+
+            Action::Publish(Message::Interaction(Event::Released { system: id }))
         }
         _ => Action::None,
     }
@@ -727,7 +732,8 @@ mod tests {
             Action::None
         ));
 
-        // The release that ends the drag is stamped with its id...
+        // A release always ends the drag and is published so the map also ends
+        // any pan it started; it is stamped with the displayed vehicle's id.
         let released = CanvasEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
         assert!(matches!(
             interact(
@@ -738,10 +744,11 @@ mod tests {
                 Some(id),
                 Some(0),
             ),
-            Action::Capture(Message::Interaction(Event::Released { system })) if system == id
+            Action::Publish(Message::Interaction(Event::Released { system })) if system == id
         ));
 
-        // ...and a release with no drag armed is ignored.
+        // A release with no drag armed is still reported, so a drag armed by a
+        // press whose release was evaluated against a stale snapshot cannot latch.
         assert!(matches!(
             interact(
                 &projector,
@@ -751,7 +758,7 @@ mod tests {
                 Some(id),
                 None,
             ),
-            Action::None
+            Action::Publish(Message::Interaction(Event::Released { system })) if system == id
         ));
     }
 
