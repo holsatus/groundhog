@@ -512,8 +512,19 @@ impl MissionPanel {
     ) -> Option<()> {
         match marker {
             Some(index) => self.begin_drag(id, index, ctx),
-            None if self.is_placing(Some(id)) => self.add_waypoint_at(id, position, ctx),
-            None => Some(()),
+            None => {
+                // A press that misses every marker also ends any drag still
+                // armed: a new press means the button was up, so a drag that
+                // outlived its release (a lost release, e.g. across a focus
+                // change) is stale and must not latch the map out of panning.
+                self.end_drag(id);
+
+                if self.is_placing(Some(id)) {
+                    self.add_waypoint_at(id, position, ctx)
+                } else {
+                    Some(())
+                }
+            }
         }
     }
 
@@ -1759,6 +1770,52 @@ mod tests {
         assert_eq!(ui(&panel, A).selected, Some(1));
         assert!((lat(&fleet, 1) - 47.0).abs() < 1e-9);
         assert!((lon(&fleet, 1) - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn markerless_pick_clears_a_stale_drag() {
+        let (router, mut fleet) = setup();
+        let mut panel = MissionPanel::new();
+
+        // Seed a mission item so a marker can be picked.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(A, MessageKind::AddItem),
+        );
+
+        // A marker pick arms a drag.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: Some(0),
+                    position: GeoPosition { lat: 1.0, lon: 2.0 },
+                },
+            ),
+        );
+        assert_eq!(ui(&panel, A).dragging, Some(0));
+
+        // A later markerless press means the button was up, so a drag that
+        // outlived its release is stale and must be cleared, or the map could
+        // never be panned again.
+        let _ = step(
+            &mut panel,
+            &router,
+            &mut fleet,
+            message(
+                A,
+                MessageKind::MapPicked {
+                    marker: None,
+                    position: GeoPosition { lat: 1.0, lon: 2.0 },
+                },
+            ),
+        );
+        assert_eq!(ui(&panel, A).dragging, None);
     }
 
     #[test]
