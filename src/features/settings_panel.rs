@@ -22,6 +22,7 @@ pub fn view(settings: &Settings) -> Element<'_, Message> {
         pick_list(Some(settings.theme), ThemeMode::ALL, |mode| mode
             .to_string())
         .on_select(Message::SetTheme)
+        .style(crate::style::pick_list::default)
         .width(Length::Fixed(160.0)),
     ]
     .spacing(10.0)

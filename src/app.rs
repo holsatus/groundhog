@@ -543,7 +543,16 @@ impl Application {
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
         .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
 
-        iced::widget::container(panes).padding(5.0)
+        iced::widget::container(panes)
+            .padding(5.0)
+            .style(move |theme: &Theme| {
+                let palette = theme.palette();
+
+                iced::widget::container::Style {
+                    background: Some(palette.background.base.color.into()),
+                    ..iced::widget::container::Style::default()
+                }
+            })
     }
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {

@@ -24,11 +24,6 @@ pub enum LinkBuild {
     Tcp {
         sock_addr: SocketAddrV4,
     },
-    /// A UDP link: bound at `sock_addr`, and — when `peer` is set — connected
-    /// to that peer immediately at open, so outbound frames (heartbeats
-    /// included) flow before the peer has spoken. Without a peer the link
-    /// listens; the socket locks onto the first inbound datagram and outbound
-    /// frames are discarded until it arrives.
     Udp {
         sock_addr: SocketAddrV4,
         #[serde(default)]

@@ -41,7 +41,7 @@ use crate::{
 };
 
 /// Height of a single mission-list row.
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 32.0;
 
 /// The mission feature's view-local state for one vehicle.
 ///
@@ -890,7 +890,7 @@ impl MissionPanel {
                 kind: MessageKind::AddItem,
             })),
             Button::new(if ui.is_some_and(|ui| ui.placing) {
-                "Placing…"
+                "Placing..."
             } else {
                 "Place waypoint"
             })
@@ -915,7 +915,7 @@ impl MissionPanel {
             "synced".to_string()
         };
         if let (Some(current), Some(total)) = (progress.current_seq, progress.total) {
-            status.push_str(&format!(" · item {current}/{total}"));
+            status.push_str(&format!(" - item {current}/{total}"));
         }
 
         let current_color = theme.palette().success.base.color;

@@ -56,7 +56,7 @@ impl fmt::Display for ThemeMode {
 /// Neutral surfaces with a cool accent. Deliberately close to grayscale, so the
 /// map and the telemetry overlays stay the most saturated things on screen.
 const DARK: Seed = Seed {
-    background: iced::color!(0x151515),
+    background: iced::color!(0x101010),
     text: iced::color!(0xe4e6eb),
     primary: iced::color!(0x5098E5),
     success: iced::color!(0x5CCC75),
@@ -66,7 +66,7 @@ const DARK: Seed = Seed {
 
 /// The light counterpart, with the same accents darkened for contrast on white.
 const LIGHT: Seed = Seed {
-    background: iced::color!(0xf6f7f9),
+    background: iced::color!(0xFFFFFF),
     text: iced::color!(0x1f2328),
     primary: iced::color!(0x3b6fe0),
     success: iced::color!(0x3e9e5a),

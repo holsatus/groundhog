@@ -143,7 +143,9 @@ impl LinkPanel {
     pub fn view_editor(&self) -> Element<'_, Message> {
         let link = &self.configurator;
 
-        let name_editor = text_input("Link name", &link.name).on_input(Message::ChangeName);
+        let name_editor = text_input("Link name", &link.name)
+            .on_input(Message::ChangeName)
+            .style(crate::style::text_input::default);
 
         let high_latency = checkbox(link.high_latency)
             .on_toggle(Message::SetHighLatency)
@@ -158,8 +160,9 @@ impl LinkPanel {
             LinkVariant::list(),
             LinkVariant::to_string,
         )
-        .width(Length::Fill)
-        .on_select(Message::ChangeVariant);
+        .on_select(Message::ChangeVariant)
+        .style(crate::style::pick_list::default)
+        .width(Length::Fill);
 
         let fields =
             Column::from_vec(self.builder_fields(Length::Fill, Length::Fill, Length::Fill))
@@ -210,6 +213,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::text_input::default)
                         .width(addr)
                         .boxed(),
                 );
@@ -225,6 +229,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::text_input::default)
                         .width(port)
                         .boxed(),
                 );
@@ -247,6 +252,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::text_input::default)
                         .width(addr)
                         .boxed(),
                 );
@@ -264,6 +270,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::text_input::default)
                         .width(port)
                         .boxed(),
                 );
@@ -284,6 +291,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::text_input::default)
                         .width(peer)
                         .boxed(),
                 );
@@ -300,6 +308,7 @@ impl LinkPanel {
                         } else {
                             "Select a port"
                         })
+                        .style(crate::style::pick_list::default)
                         .ellipsis(Ellipsis::Start)
                         .on_open(Message::DetectSerialPorts)
                         .on_select({
@@ -330,6 +339,7 @@ impl LinkPanel {
                                 })
                             }
                         })
+                        .style(crate::style::pick_list::default)
                         .width(port)
                         .boxed(),
                 );

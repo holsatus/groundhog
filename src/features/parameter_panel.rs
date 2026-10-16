@@ -15,33 +15,48 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 
 use iced::{
     Alignment, Color, Element, Font, Length, Task, Theme, Widget,
     alignment::Vertical,
     widget::{
-        Button, Column, ProgressBar, Space, Text, TextInput, container, pick_list, progress_bar,
-        row, rule, space, tooltip,
+        Button, Column, ProgressBar, Space, Svg, Text, TextInput, container, pick_list,
+        progress_bar, row, rule, space, tooltip,
     },
 };
 use mav_param::{Ident, Value};
 use rfd::AsyncFileDialog;
 
 use crate::{
-    domain::SystemId,
-    domain::fleet::Fleet,
-    domain::parameter::{
-        ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, group_of, value_parse_as,
-        value_type_matches,
+    domain::{
+        SystemId,
+        fleet::Fleet,
+        parameter::{
+            ChangedStatus, ParamState, Parameter, Parameters, UploadOutcome, group_of,
+            value_parse_as, value_type_matches,
+        },
+        vehicle::Vehicle,
     },
-    domain::vehicle::Vehicle,
     foundation::{BoxError, MavlinkId},
     services::{FleetServices, ParamListSummary, Result},
     storage::parameter::{parameters_from_ini_str, parameters_to_ini_string},
     style,
     widget::virtualized::virtual_list,
 };
+
+use iced::widget::svg::Handle;
+
+static UPLOAD_ICON: LazyLock<Handle> = LazyLock::new(|| {
+    static BYTES: &[u8] = include_bytes!("../../assets/icons/upload.svg");
+    Handle::from_memory(BYTES)
+});
+
+static RESTORE_ICON: LazyLock<Handle> = LazyLock::new(|| {
+    static BYTES: &[u8] = include_bytes!("../../assets/icons/undo-2.svg");
+    Handle::from_memory(BYTES)
+});
 
 #[derive(Default, PartialEq)]
 pub struct ParameterFilter {
@@ -328,7 +343,9 @@ impl ParameterPanel {
         let uploads: Vec<_> = parameters
             .iter()
             .filter_map(|(ident, param)| match param.state() {
-                ParamState::Changed { value, .. } => Some(Task::done(Message::ValueUpload(
+                ParamState::Changed {
+                    value: Some(value), ..
+                } => Some(Task::done(Message::ValueUpload(
                     address,
                     ident.clone(),
                     *value,
@@ -608,7 +625,7 @@ impl ParameterPanel {
             }
 
             if let Some(old_param) = vehicle.parameters_mut(component).get_mut(ident) {
-                old_param.mark_changed(new_param.value());
+                old_param.set_edited(Some(new_param.value()));
                 editing.insert(ident.clone(), value_as_string(new_param.value()));
             }
         }
@@ -644,40 +661,47 @@ impl ParameterPanel {
             let autopilot = vehicle.autopilot_component();
             let picker = pick_list(Some(component), component_ids, move |id: &u8| {
                 if Some(*id) == autopilot {
-                    format!("comp {id} (autopilot)")
+                    format!("Component {id} (autopilot)")
                 } else {
-                    format!("comp {id}")
+                    format!("Component {id}")
                 }
             })
+            .style(crate::style::pick_list::default)
             .on_select(move |id| {
                 Message::SelectComponent(MavlinkId {
                     system: system.0,
                     component: id,
                 })
-            });
+            })
+            .width(Length::Fill);
 
             entries.push(picker.boxed());
         }
 
         // Disabled while a parameter list download is in progress
         let reloading = self.reloading.contains(&address);
-        let reload_button = Button::new("Reload parameters")
+        let reload_button = Button::new("Download parameters")
+            .style(crate::style::button::transparent)
             .width(Length::Fill)
             .on_press_maybe((!reloading).then(|| Message::ListReload(address)));
 
         let upload_button = Button::new("Upload parameters")
+            .style(crate::style::button::transparent)
             .width(Length::FillPortion(1))
             .on_press(Message::UploadAll(address));
 
-        let save_button = Button::new("Save parameters to file")
+        let save_button = Button::new("Save to file")
+            .style(crate::style::button::transparent)
             .width(Length::FillPortion(1))
             .on_press(Message::SaveDialog(address));
 
-        let load_button = Button::new("Load parameters from file")
+        let load_button = Button::new("Load from file")
+            .style(crate::style::button::transparent)
             .width(Length::FillPortion(1))
             .on_press(Message::LoadDialog(address));
 
         let filter_field = TextInput::new("Filter parameters", &self.filter.ident_pattern)
+            .style(crate::style::text_input::default)
             .width(Length::FillPortion(1))
             .on_input(Message::FilterIdentPattern);
 
@@ -689,15 +713,6 @@ impl ParameterPanel {
         entries.push(
             iced::widget::row![save_button, load_button]
                 .spacing(5.0)
-                .boxed(),
-        );
-
-        entries.push(filter_field.boxed());
-
-        entries.push(
-            iced::widget::checkbox(self.filter.only_changed)
-                .label("Only changed")
-                .on_toggle(Message::FilterOnlyChanged)
                 .boxed(),
         );
 
@@ -721,6 +736,21 @@ impl ParameterPanel {
 
         entries.push(progress);
 
+        entries.push(
+            iced::widget::container(
+                iced::widget::column![
+                    filter_field,
+                    iced::widget::checkbox(self.filter.only_changed)
+                        .label("Only changed")
+                        .on_toggle(Message::FilterOnlyChanged)
+                ]
+                .spacing(5.0),
+            )
+            .style(crate::style::inner_container)
+            .padding(10.0)
+            .boxed(),
+        );
+
         container(
             iced::widget::column![
                 iced::widget::Column::from_iter(entries).spacing(5.0),
@@ -728,7 +758,7 @@ impl ParameterPanel {
             ]
             .spacing(5.0),
         )
-        .padding(8.0)
+        .padding(10.0)
         .width(Length::Fill)
         .boxed()
     }
@@ -872,32 +902,52 @@ fn view_param_row<'a>(
     let text_input = iced::widget::TextInput::new("Write value", value_string)
         .on_input(move |string| Message::BufferEdit(address, ident.clone(), string))
         .style(move |theme, status| {
-            let mut style = iced::widget::text_input::default(theme, status);
+            let mut style = crate::style::text_input::default(theme, status);
+
             let palette = theme.palette();
             match param.state() {
                 ParamState::Unchanged => {}
-                ParamState::Changed { status, .. } => {
-                    style.background = match status {
-                        ChangedStatus::None => palette.success.base.color,
+                ParamState::Changed { status, value } => {
+                    style.border.color = match status {
+                        ChangedStatus::None if value.is_some() => palette.success.base.color,
+                        ChangedStatus::None => palette.secondary.base.color,
                         ChangedStatus::Failed => palette.warning.base.color,
                         ChangedStatus::Rejected => palette.danger.base.color,
                     }
                     .into();
+                    style.background = style.border.color.scale_alpha(0.1).into();
+                    style.border.width = 2.0;
                 }
                 ParamState::Uploading { .. } => {
-                    style.background = palette.secondary.base.color.into();
+                    style.border.color = palette.secondary.base.color.into();
+                    style.background = style.border.color.scale_alpha(0.1).into();
+                    style.border.width = 2.0;
                 }
             }
             style
         })
         .width(Length::Fill);
 
-    let restore_button = Button::new("Restore")
-        .on_press_maybe(match param.state() {
-            ParamState::Changed { .. } => Some(Message::ValueReset(address, ident.clone())),
-            _ => None,
-        })
-        .width(80.0);
+    let restore_button = Button::new(
+        container(
+            Svg::new(RESTORE_ICON.clone())
+                .style(|theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(match param.state() {
+                        ParamState::Changed { .. } => theme.palette().background.base.text,
+                        _ => theme.palette().background.strongest.color,
+                    }),
+                })
+                .width(40.0),
+        )
+        .align_y(Alignment::Center),
+    )
+    .on_press_maybe(match param.state() {
+        ParamState::Changed { .. } => Some(Message::ValueReset(address, ident.clone())),
+        _ => None,
+    })
+    .style(crate::style::button::transparent)
+    .width(38.0)
+    .height(38.0);
 
     let restore_tooltip = container(Text::new(match param.state() {
         ParamState::Changed { .. } => format!("Restore to: {}", value_as_string(param.value())),
@@ -909,14 +959,42 @@ fn view_param_row<'a>(
     let restore_button = tooltip(restore_button, restore_tooltip, Default::default())
         .delay(std::time::Duration::from_millis(250));
 
-    let upload_button = Button::new("Upload")
-        .on_press_maybe(match param.state() {
-            ParamState::Changed { value, .. } => {
-                Some(Message::ValueUpload(address, ident.clone(), *value))
-            }
-            _ => None,
-        })
-        .width(80.0);
+    let upload_button = Button::new(
+        container(
+            Svg::new(UPLOAD_ICON.clone())
+                .style(|theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(match param.state() {
+                        ParamState::Changed { value: Some(_), .. } => {
+                            theme.palette().background.base.text
+                        }
+                        _ => theme.palette().background.strongest.color,
+                    }),
+                })
+                .width(40.0),
+        )
+        .align_y(Alignment::Center),
+    )
+    .on_press_maybe(match param.state() {
+        ParamState::Changed {
+            value: Some(value), ..
+        } => Some(Message::ValueUpload(address, ident.clone(), *value)),
+        _ => None,
+    })
+    .style(crate::style::button::transparent)
+    .width(38.0)
+    .height(38.0);
+
+    let upload_tooltip = container(Text::new(match param.state() {
+        ParamState::Changed {
+            value: Some(value), ..
+        } => format!("Upload as: {}", value_as_string(*value)),
+        _ => "Nothing to upload".to_string(),
+    }))
+    .padding(10.0)
+    .style(style::tooltip);
+
+    let upload_button = tooltip(upload_button, upload_tooltip, Default::default())
+        .delay(std::time::Duration::from_millis(250));
 
     row![
         Text::new(ident.as_str().to_string())
@@ -1245,7 +1323,7 @@ mod tests {
         assert!(matches!(event, Some(Event::SetFilePickerPath(_))));
         assert!(matches!(
             param(&fleet, A, &key).state(),
-            ParamState::Changed { value: Value::F32(v), .. } if *v == 3.0
+            ParamState::Changed { value: Some(Value::F32(v)), .. } if *v == 3.0
         ));
         assert_eq!(panel.editing[&addr(A)][&key], "3");
     }
@@ -1438,7 +1516,7 @@ mod tests {
         // The loaded values land on `B`'s component 154...
         assert!(matches!(
             param_c(&fleet, B, 154, &key).state(),
-            ParamState::Changed { value: Value::F32(v), .. } if *v == 3.0
+            ParamState::Changed { value: Some(Value::F32(v)), .. } if *v == 3.0
         ));
         assert_eq!(panel.editing[&addr_c(B, 154)][&key], "3");
 

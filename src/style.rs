@@ -12,9 +12,27 @@ use iced::{
 use mavio::default_dialect::enums::MavSeverity;
 
 /// The corner radius of a pane, shared with the map's frame.
-pub(crate) const PANE_RADIUS: f32 = 8.0;
+pub(crate) const PANE_RADIUS: f32 = 10.0;
+pub(crate) const WIDGET_RADIUS: f32 = 6.0;
+
 /// The width of a pane's border, and the height of the header divider.
 pub(crate) const PANE_BORDER_WIDTH: f32 = 1.0;
+
+/// A bordered [`Container`] with a background.
+pub fn inner_container(theme: &Theme) -> container::Style {
+    let palette = theme.palette();
+
+    container::Style {
+        background: Some(palette.background.weaker.color.into()),
+        text_color: Some(palette.background.weaker.text),
+        border: Border {
+            width: 1.0,
+            radius: WIDGET_RADIUS.into(),
+            color: palette.background.neutral.color,
+        },
+        ..container::Style::default()
+    }
+}
 
 /// A regular pane: one solid surface with a rounded border. The body is
 /// transparent against this backdrop and a `rule` divides it from the header.
@@ -119,7 +137,7 @@ pub fn tooltip(theme: &Theme) -> container::Style {
             color: palette.background.strongest.color,
         },
         shadow: Shadow {
-            color: Color::BLACK.scale_alpha(0.5),
+            color: Color::BLACK.scale_alpha(0.2),
             offset: Vector::new(0.0, 1.0),
             blur_radius: 6.0,
         },
@@ -155,11 +173,6 @@ pub fn parameter_type_color(theme: &Theme) -> Color {
 // palette keeps waypoints and the route legible over any tile. These are the
 // one control point for the overlay's look.
 
-/// The translucent wash that darkens the map tiles behind the overlay.
-pub fn map_backdrop() -> Color {
-    Color::BLACK.scale_alpha(0.4)
-}
-
 /// The stroke connecting consecutive positioned mission items.
 pub fn map_route() -> Color {
     Color::WHITE.scale_alpha(1.0)
@@ -183,4 +196,79 @@ pub fn marker_dragged() -> Color {
 /// The number label drawn on a mission marker.
 pub fn marker_label() -> Color {
     Color::BLACK
+}
+
+pub mod pick_list {
+    use iced::{
+        Theme,
+        widget::pick_list::{Status, Style},
+    };
+
+    use crate::style::WIDGET_RADIUS;
+
+    pub fn default(theme: &Theme, status: Status) -> Style {
+        let mut style = iced::widget::pick_list::default(theme, status);
+        style.border.radius = WIDGET_RADIUS.into();
+        style
+    }
+}
+
+pub mod text_input {
+    use iced::{
+        Theme,
+        widget::text_input::{Status, Style},
+    };
+
+    use crate::style::WIDGET_RADIUS;
+
+    pub fn default(theme: &Theme, status: Status) -> Style {
+        let mut style = iced::widget::text_input::default(theme, status);
+        style.border.radius = WIDGET_RADIUS.into();
+        style
+    }
+}
+
+pub mod button {
+    use iced::{
+        Border, Color, Theme,
+        widget::button::{Status, Style},
+    };
+
+    use crate::style::WIDGET_RADIUS;
+
+    pub fn transparent(theme: &Theme, status: Status) -> Style {
+        let palette = theme.palette();
+
+        let background = match status {
+            Status::Active => Some(palette.background.weaker.color.into()),
+            Status::Hovered => Some(palette.background.weak.color.into()),
+            Status::Pressed => Some(palette.background.weaker.color.into()),
+            Status::Disabled => None,
+        };
+
+        let border = match status {
+            Status::Active => palette.background.weak.color,
+            Status::Hovered => palette.background.neutral.color,
+            Status::Pressed => palette.background.weak.color,
+            Status::Disabled => Color::TRANSPARENT,
+        };
+
+        let text_color = match status {
+            Status::Active => palette.background.weaker.text,
+            Status::Hovered => palette.background.weaker.text,
+            Status::Pressed => palette.background.weaker.text,
+            Status::Disabled => palette.background.weaker.text.scale_alpha(0.5),
+        };
+
+        iced::widget::button::Style {
+            background,
+            text_color,
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: WIDGET_RADIUS.into(),
+            },
+            ..iced::widget::button::Style::default()
+        }
+    }
 }

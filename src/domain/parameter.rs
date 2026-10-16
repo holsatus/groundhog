@@ -13,8 +13,13 @@ pub struct Parameter {
 #[derive(Clone, Debug)]
 pub enum ParamState {
     Unchanged,
-    Changed { value: Value, status: ChangedStatus },
-    Uploading { value: Value },
+    Changed {
+        value: Option<Value>,
+        status: ChangedStatus,
+    },
+    Uploading {
+        value: Value,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,15 +49,14 @@ impl Parameter {
 
     /// Fold a freshly parsed edit buffer into the state. An unparseable buffer
     /// or a value equal to the current one clears any pending change.
-    pub fn set_edited(&mut self, parsed: Option<Value>) {
-        match parsed {
-            Some(value) if value != self.value => {
-                self.state = ParamState::Changed {
-                    value,
-                    status: ChangedStatus::None,
-                };
-            }
-            _ => self.state = ParamState::Unchanged,
+    pub fn set_edited(&mut self, value: Option<Value>) {
+        if value != Some(self.value) {
+            self.state = ParamState::Changed {
+                value,
+                status: ChangedStatus::None,
+            };
+        } else {
+            self.state = ParamState::Unchanged
         }
     }
 
@@ -76,7 +80,7 @@ impl Parameter {
     pub fn upload_rejected(&mut self, reported: Value, requested: Value) {
         self.value = reported;
         self.state = ParamState::Changed {
-            value: requested,
+            value: Some(requested),
             status: ChangedStatus::Rejected,
         };
     }
@@ -84,7 +88,7 @@ impl Parameter {
     /// The upload transport failed; keep `requested`.
     pub fn upload_failed(&mut self, requested: Value) {
         self.state = ParamState::Changed {
-            value: requested,
+            value: Some(requested),
             status: ChangedStatus::Failed,
         };
     }
@@ -93,14 +97,6 @@ impl Parameter {
     /// local edit state.
     fn observe_value(&mut self, value: Value) {
         self.value = value;
-    }
-
-    /// Mark a different `value` as pending, leaving the reported value in place.
-    pub fn mark_changed(&mut self, value: Value) {
-        self.state = ParamState::Changed {
-            value,
-            status: ChangedStatus::None,
-        };
     }
 }
 
@@ -329,7 +325,7 @@ mod tests {
         assert_eq!(param.value(), Value::F32(3.0), "the reported value is kept");
         match param.state() {
             ParamState::Changed { value, status } => {
-                assert_eq!(*value, Value::F32(5.0), "the request stays pending");
+                assert_eq!(*value, Some(Value::F32(5.0)), "the request stays pending");
                 assert_eq!(*status, ChangedStatus::Rejected);
             }
             state => panic!("expected Changed(Rejected), got {state:?}"),
@@ -348,7 +344,7 @@ mod tests {
         assert_eq!(param.value(), Value::F32(1.0), "the target set nothing");
         match param.state() {
             ParamState::Changed { value, status } => {
-                assert_eq!(*value, Value::F32(7.0), "the request stays pending");
+                assert_eq!(*value, Some(Value::F32(7.0)), "the request stays pending");
                 assert_eq!(*status, ChangedStatus::Failed);
             }
             state => panic!("expected Changed(Failed), got {state:?}"),

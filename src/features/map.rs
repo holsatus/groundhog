@@ -139,12 +139,12 @@ impl Map {
             .on_cache(Message::Cache)
             .on_update(Message::Projector)
             .with_visual_layer(move |projector, frame| {
-                // Darken the map background to make overlay stand out more
-                let black_fill = Fill {
-                    style: Style::Solid(style::map_backdrop()),
+                // Darken or brighten the map background to make overlay stand out more
+                let map_tint = Fill {
+                    style: Style::Solid(background.scale_alpha(0.3)),
                     ..Fill::default()
                 };
-                frame.fill_rectangle(Point::ORIGIN, frame.size(), black_fill);
+                frame.fill_rectangle(Point::ORIGIN, frame.size(), map_tint);
 
                 iced::debug::time_with("position_segments_view", || {
                     if let Some(id) = primary

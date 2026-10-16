@@ -27,9 +27,9 @@ use iced::{
 const MAX_ATTITUDE_DEG: f32 = 40.0;
 
 /// The arc band's thickness, as a fraction of the dial radius.
-const ARC_WIDTH_RATIO: f32 = 0.16;
+const ARC_WIDTH_RATIO: f32 = 0.2;
 /// The gap between the dial edge and the arc band, as a fraction of the radius.
-const ARC_GAP_RATIO: f32 = 0.08;
+const ARC_GAP_RATIO: f32 = 0.1;
 /// The instrument's outermost reach from the dial centre, in dial radii:
 /// the dial, then the gap, then the full arc thickness.
 const ARC_REACH: f32 = 1.0 + ARC_GAP_RATIO + ARC_WIDTH_RATIO;

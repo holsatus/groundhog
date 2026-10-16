@@ -27,8 +27,6 @@ pub enum LinkBuilder {
     Udp {
         addr: String,
         port: String,
-        /// The fixed peer to connect to at open, as raw text. Empty means the
-        /// link listens and locks onto the first inbound datagram.
         peer: String,
     },
     Serial {
