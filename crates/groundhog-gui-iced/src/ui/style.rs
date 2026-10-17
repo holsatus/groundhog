@@ -24,7 +24,7 @@ use mavio::default_dialect::enums::MavSeverity;
 pub mod space {
     /// Between lines of one label.
     pub const XXS: f32 = 2.0;
-    /// Between tightly related elements (chips, a label and its value).
+    /// Between tightly related elements (badges, a label and its value).
     pub const XS: f32 = 4.0;
     /// Between the items of a row or column of controls.
     pub const S: f32 = 6.0;
@@ -43,8 +43,6 @@ pub mod size {
     pub const CAPTION: f32 = 12.0;
     /// The title of a card or a dialog.
     pub const TITLE: f32 = 18.0;
-    /// The heading of a panel or a list section.
-    pub const HEADING: f32 = 24.0;
     /// An icon in a button.
     pub const ICON: f32 = 18.0;
     /// The side of a square icon button.
@@ -122,7 +120,8 @@ fn surface(pair: iced::theme::palette::Pair) -> container::Style {
     }
 }
 
-/// A bordered card inside a panel, grouping related content.
+/// A card inside a panel, grouping related content: an outline on the
+/// pane's own surface, so the controls in it look as they do outside.
 pub fn card(theme: &Theme) -> container::Style {
     let palette = theme.palette();
 
@@ -132,7 +131,7 @@ pub fn card(theme: &Theme) -> container::Style {
             radius: WIDGET_RADIUS.into(),
             color: palette.background.neutral.color,
         },
-        ..surface(palette.background.weaker)
+        ..container::Style::default()
     }
 }
 
@@ -218,40 +217,6 @@ pub fn list_row(index: usize) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// The state a chip shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Chip {
-    /// Done, or healthy.
-    Done,
-    Current,
-    /// Still to do, or not in use.
-    Pending,
-    /// Failing.
-    Failed,
-}
-
-/// A small rounded label: for one step of a sequence, or the state of one
-/// of a set (a sensor).
-pub fn chip(chip: Chip) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        let palette = theme.palette();
-        let pair = match chip {
-            Chip::Done => palette.success.weak,
-            Chip::Current => palette.primary.base,
-            Chip::Pending => palette.background.weak,
-            Chip::Failed => palette.danger.base,
-        };
-
-        container::Style {
-            border: Border {
-                radius: WIDGET_RADIUS.into(),
-                ..Border::default()
-            },
-            ..surface(pair)
-        }
-    }
-}
-
 /// A meter (a progress bar showing a level), filled in `tone`.
 pub fn meter(tone: Tone) -> impl Fn(&Theme) -> widget::progress_bar::Style {
     move |theme| {
@@ -286,8 +251,49 @@ pub fn tooltip(theme: &Theme) -> container::Style {
     }
 }
 
-/// How much of a toast's tone its background takes.
-const TOAST_TINT: f32 = 0.12;
+/// How much of its tone a tinted surface (a toast, a banner) takes.
+const TINT: f32 = 0.12;
+/// How much of its tone a badge takes: more than a surface, as it is small.
+const BADGE_TINT: f32 = 0.22;
+
+/// A status badge: a small pill tinted with its tone, its text in it.
+pub fn badge(tone: Tone) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let palette = theme.palette();
+        let color = tone.color(palette);
+
+        container::Style {
+            background: Some(mix(palette.background.weakest.color, color, BADGE_TINT).into()),
+            text_color: Some(color),
+            border: Border {
+                radius: WIDGET_RADIUS.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        }
+    }
+}
+
+/// A banner: a message across a panel, on a surface tinted with its tone
+/// and bordered in it.
+pub fn banner(tone: Tone) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let palette = theme.palette();
+        let color = tone.color(palette);
+        let surface_pair = palette.background.weakest;
+
+        container::Style {
+            background: Some(mix(surface_pair.color, color, TINT).into()),
+            text_color: Some(surface_pair.text),
+            border: Border {
+                width: 1.0,
+                radius: WIDGET_RADIUS.into(),
+                color,
+            },
+            ..container::Style::default()
+        }
+    }
+}
 
 /// A notification toast, accented by its tone: bordered in it, on a
 /// background tinted with it. The background stays opaque, since toasts
@@ -298,7 +304,7 @@ pub fn toast(tone: Tone) -> impl Fn(&Theme) -> container::Style {
         let surface_pair = palette.background.weak;
 
         container::Style {
-            background: Some(mix(surface_pair.color, tone.color(palette), TOAST_TINT).into()),
+            background: Some(mix(surface_pair.color, tone.color(palette), TINT).into()),
             border: Border {
                 width: 2.0,
                 radius: PANE_RADIUS.into(),

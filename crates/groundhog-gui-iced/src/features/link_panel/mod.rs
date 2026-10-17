@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use iced::{
     Alignment, Element, Length, Task, Widget,
-    widget::{Column, column, container, row, text::Ellipsis, tooltip},
+    widget::{Column, Space, column, container, row, scrollable, text::Ellipsis, tooltip},
 };
 
 pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkField, LinkVariant};
@@ -171,13 +171,16 @@ impl LinkPanel {
             .entries()
             .any(|(_, config, _)| config.name == self.configurator.name);
 
-        ui::panel(
+        ui::panel(scrollable(
             column![
-                ui::section("Links", [links]),
-                ui::section("Add or update a link", [self.view_editor(overwrites)]),
+                ui::section("Saved links", [links]),
+                ui::section(
+                    if overwrites { "Edit link" } else { "New link" },
+                    [self.view_editor(overwrites)],
+                ),
             ]
             .spacing(ui::space::L),
-        )
+        ))
     }
 
     /// The link editor: name, kind, the kind's fields, flags, and save.
@@ -201,12 +204,22 @@ impl LinkPanel {
                 ),
                 ui::field("Kind", variant),
                 Column::with_children(self.builder_fields()).spacing(ui::space::S),
-                ui::checkbox("High latency", link.high_latency).on_toggle(Message::SetHighLatency),
-                ui::checkbox("Connect on startup", link.auto_connect)
-                    .on_toggle(Message::SetAutoconnect),
-                ui::checkbox("Reconnect when lost", link.auto_reconnect)
-                    .on_toggle(Message::SetAutoReconnect),
-                save_button(&link.name, overwrites, link.parse().map(Message::Save)),
+                ui::field(
+                    "",
+                    column![
+                        ui::checkbox("Connect on startup", link.auto_connect)
+                            .on_toggle(Message::SetAutoconnect),
+                        ui::checkbox("Reconnect when lost", link.auto_reconnect)
+                            .on_toggle(Message::SetAutoReconnect),
+                        ui::checkbox("High latency", link.high_latency)
+                            .on_toggle(Message::SetHighLatency),
+                    ]
+                    .spacing(ui::space::S),
+                ),
+                row![
+                    Space::new().width(Length::Fill),
+                    save_button(&link.name, overwrites, link.parse().map(Message::Save)),
+                ],
             ]
             .spacing(ui::space::S),
         )
@@ -279,7 +292,7 @@ fn save_button<'a>(name: &str, overwrites: bool, save: Option<Message>) -> Eleme
     } else {
         ui::button(format!("Save as '{name}'")).primary()
     };
-    button.width(Length::Fill).on_press_maybe(save).boxed()
+    button.on_press_maybe(save).boxed()
 }
 
 /// One configured link: its name and status, and its controls.
@@ -289,14 +302,11 @@ fn view_link<'a>(
     config: &'a LinkConfig,
     status: LinkStatus,
 ) -> Element<'a, Message> {
+    // The state is the line under the name; the button only acts.
     let toggle = if status.is_active() {
-        ui::button("Disconnect")
-            .danger()
-            .on_press(Message::Disconnect(id.clone()))
+        ui::button("Disconnect").on_press(Message::Disconnect(id.clone()))
     } else {
-        ui::button("Connect")
-            .primary()
-            .on_press(Message::Connect(id.clone()))
+        ui::button("Connect").on_press(Message::Connect(id.clone()))
     };
 
     let edit = ui::icon_button(Icon::Edit)

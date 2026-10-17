@@ -16,14 +16,14 @@ use groundhog_logic::{
     },
 };
 use iced::{
-    Alignment, Element, Length,
-    widget::{column, row, scrollable},
+    Alignment, Element, Length, Widget,
+    widget::{container, row, scrollable},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
 use super::notifications::{Level, Notice, Notifications};
 use crate::{
-    ui::{self, TextExt},
+    ui::{self, TextExt, Tone},
     widget::virtualized::virtual_list,
 };
 
@@ -109,7 +109,9 @@ fn timeline_row<'a, M: 'a>(
     ui::list_row(
         index,
         row![
-            ui::text(source).width(Length::Fixed(72.0)),
+            ui::text(source)
+                .tone(Tone::Muted)
+                .width(Length::Fixed(72.0)),
             ui::severity(severity).width(Length::Fixed(96.0)),
             ui::text(message).single_line().width(Length::Fill),
         ]
@@ -151,6 +153,7 @@ impl LogPanel {
             entries.drain(..entries.len() - MAX_ENTRIES);
         }
 
+        let count = entries.len();
         let entries = entries.into_iter().enumerate().collect::<Vec<_>>();
         let list = virtual_list(entries, |&(index, entry)| match entry {
             Entry::Vehicle(system, status) => timeline_row(
@@ -172,37 +175,49 @@ impl LogPanel {
         .item_height(|_| ui::size::LIST_ROW)
         .key(|(index, entry)| (*index, entry.at()));
 
-        let controls = row![
-            ui::text("Show"),
+        // The filter is what the panel is about: whose messages, and how
+        // severe at least.
+        let filter = row![
             ui::pick_list(
                 Some(self.filter.scope),
                 [Scope::All, Scope::Selected, Scope::Gcs],
                 Scope::to_string,
             )
             .on_select(Message::SetScope)
-            .width(Length::Fixed(200.0)),
-            ui::text("at least"),
+            .width(Length::Fixed(180.0)),
             ui::pick_list(
                 Some(self.filter.min_severity),
                 status::ORDERED,
-                |severity| format!("{severity:?}"),
+                |severity| format!("{severity:?} and up"),
             )
             .on_select(Message::SetMinSeverity)
-            .width(Length::Fixed(140.0)),
+            .width(Length::Fixed(180.0)),
         ]
-        .spacing(ui::space::M)
+        .spacing(ui::space::S)
         .align_y(Alignment::Center);
+        let header = ui::header(
+            filter,
+            [ui::caption(match count {
+                1 => "1 message".to_string(),
+                count => format!("{count} messages"),
+            })
+            .tone(Tone::Muted)
+            .boxed()],
+        );
 
-        ui::panel(
-            column![
-                controls,
-                scrollable(list)
-                    .anchor_bottom()
-                    .height(Length::Fill)
-                    .width(Length::Fill)
-            ]
-            .spacing(ui::space::S),
-        )
+        let body = if count == 0 {
+            container(ui::text("Nothing to show yet.").tone(Tone::Muted))
+                .center(Length::Fill)
+                .boxed()
+        } else {
+            scrollable(list)
+                .anchor_bottom()
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .boxed()
+        };
+
+        ui::panel_with(header, body)
     }
 
     /// The entries matching the filter, oldest first.

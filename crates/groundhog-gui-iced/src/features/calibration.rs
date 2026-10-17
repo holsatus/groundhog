@@ -16,7 +16,7 @@ use groundhog_logic::{
 };
 use iced::{
     Alignment, Element, Length, Task, Widget,
-    widget::{Column, column, row, scrollable, space},
+    widget::{column, row, scrollable, space},
 };
 
 use super::{
@@ -24,7 +24,7 @@ use super::{
     notifications::Notice,
     operations::{Operations, Ticket},
 };
-use crate::ui::{self, Chip, TextExt, Tone};
+use crate::ui::{self, Icon, TextExt, Tone};
 
 /// How many of the vehicle's calibration texts the panel shows.
 const MESSAGES: usize = 6;
@@ -142,11 +142,14 @@ impl CalibrationPanel {
 
         let calibrations = kinds.into_iter().map(|kind| {
             row![
-                column![ui::text(kind.title()), ui::caption(kind.preparation())]
-                    .spacing(ui::space::XXS)
-                    .width(Length::Fill),
+                column![
+                    ui::text(kind.title()),
+                    ui::caption(kind.preparation()).tone(Tone::Muted)
+                ]
+                .spacing(ui::space::XXS)
+                .width(Length::Fill),
                 ui::button("Start")
-                    .primary()
+                    .icon(Icon::Play)
                     .on_press_maybe(can_start.then_some(Message::Start(vehicle.system, kind)))
                     .boxed(),
             ]
@@ -155,24 +158,28 @@ impl CalibrationPanel {
             .boxed()
         });
 
-        let contents = column![
+        let header = ui::header(
             row![
-                ui::title(vehicle.display_name()),
-                space::horizontal(),
+                ui::text(vehicle.display_name()),
                 ui::caption(firmware.name()).tone(Tone::Muted),
             ]
+            .spacing(ui::space::S)
             .align_y(Alignment::Center),
-            blocker.map(|blocker| ui::text(blocker).tone(Tone::Warning)),
+            [],
+        );
+
+        // A run under way comes first: it is what the operator is doing.
+        let contents = column![
+            blocker.map(|blocker| ui::banner(blocker, Tone::Warning)),
             vehicle
                 .calibration
                 .as_ref()
                 .map(|session| self.view_session(vehicle, session)),
-            ui::divider(),
-            Column::with_children(calibrations).spacing(ui::space::M),
+            ui::section("Sensors", [ui::card_list(calibrations)]),
         ]
-        .spacing(ui::space::M);
+        .spacing(ui::space::L);
 
-        scrollable(ui::panel(contents)).height(Length::Fill).boxed()
+        ui::panel_with(header, scrollable(contents).height(Length::Fill))
     }
 
     fn view_session<'a>(&self, vehicle: &'a Vehicle, session: &'a Session) -> Element<'a, Message> {
@@ -192,7 +199,7 @@ impl CalibrationPanel {
             row![
                 ui::title(session.kind.title()),
                 space::horizontal(),
-                ui::text(phase).tone(tone),
+                ui::badge(phase, tone),
             ]
             .align_y(Alignment::Center)
         ]
@@ -292,18 +299,18 @@ fn view_sides(session: &Session) -> Element<'_, Message> {
         _ => None,
     };
 
-    let chips = Side::ALL.into_iter().map(|side| {
-        let state = if session.sides.is_done(side) {
-            Chip::Done
+    let sides = Side::ALL.into_iter().map(|side| {
+        let tone = if session.sides.is_done(side) {
+            Tone::Success
         } else if current == Some(side) && session.is_running() {
-            Chip::Current
+            Tone::Accent
         } else {
-            Chip::Pending
+            Tone::Muted
         };
-        ui::chip(side.label(), state)
+        ui::badge(side.label(), tone)
     });
 
-    row(chips).spacing(ui::space::XS).wrap().boxed()
+    row(sides).spacing(ui::space::XS).wrap().boxed()
 }
 
 fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {

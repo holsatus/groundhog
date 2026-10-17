@@ -6,12 +6,12 @@
 
 use iced::{
     Alignment, Element, Length, Widget,
-    widget::{column, row, slider},
+    widget::{column, row, scrollable, slider},
 };
 
 use crate::{
     config::Settings,
-    ui::{self, theme::ThemeMode},
+    ui::{self, TextExt, Tone, theme::ThemeMode},
 };
 
 #[derive(Debug, Clone)]
@@ -72,11 +72,14 @@ pub fn view<'a>(
                 Some(path) => format!("Recording to {}", path.display()),
                 None => "Not recording".to_string(),
             })
+            .tone(Tone::Muted)
             .boxed(),
         ],
     );
 
-    ui::panel(column![appearance, planning, recording].spacing(ui::space::L))
+    ui::panel(scrollable(
+        column![appearance, planning, recording].spacing(ui::space::L),
+    ))
 }
 
 /// A slider with its value beside it.

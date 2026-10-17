@@ -6,7 +6,7 @@
 
 mod map;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use groundhog_logic::{
     SystemId,
@@ -26,7 +26,7 @@ use mavio::default_dialect::enums::{GpsFixType, MissionState};
 use super::{
     Context, Effect, confirm::Confirmation, notifications::Notice, operations::Operations,
 };
-use crate::ui::{self, Chip, TextExt, Tone};
+use crate::ui::{self, Icon, TextExt, Tone};
 
 /// The commands the panel runs, one of each kind per vehicle at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -172,6 +172,8 @@ impl VehiclePanel {
         Task::none()
     }
 
+    /// The panel, most urgent first: which vehicle, how it is (mode,
+    /// arming, a recent alert), the commands, then the read-outs.
     pub fn view<'a>(
         &'a self,
         fleet: &'a FleetSnapshot,
@@ -180,57 +182,47 @@ impl VehiclePanel {
     ) -> Element<'a, Message> {
         let picker = (!fleet.is_empty()).then(|| {
             ui::pick_list(selected, fleet.ids().collect::<Vec<_>>(), move |id| {
-                fleet.vehicle(*id).map_or_else(
-                    || fleet.vehicle_name(*id),
-                    |vehicle| {
-                        format!(
-                            "{} ({})",
-                            vehicle.display_name(),
-                            liveness(vehicle.liveness).0
-                        )
-                    },
-                )
+                fleet.vehicle_name(*id)
             })
             .on_select(Message::Select)
         });
+        let vehicle = selected.and_then(|id| fleet.vehicle(id));
 
-        let header = row![
-            ui::checkbox("Follow", follow).on_toggle(Message::Follow),
-            picker
-        ]
-        .spacing(ui::space::M)
-        .align_y(Alignment::Center);
+        let header = ui::header(
+            column![picker],
+            [
+                vehicle.map(|vehicle| {
+                    let (label, tone) = liveness(vehicle.liveness);
+                    ui::badge(label, tone)
+                }),
+                Some(
+                    ui::checkbox("Follow", follow)
+                        .on_toggle(Message::Follow)
+                        .boxed(),
+                ),
+            ]
+            .into_iter()
+            .flatten(),
+        );
 
-        let Some(vehicle) = selected.and_then(|id| fleet.vehicle(id)) else {
-            return ui::panel(
-                column![
-                    header,
-                    ui::divider(),
-                    ui::text("No vehicle. Connect a link to begin.").tone(Tone::Muted)
-                ]
-                .spacing(ui::space::M),
+        let Some(vehicle) = vehicle else {
+            return ui::panel_with(
+                header,
+                ui::text("No vehicle. Connect a link to begin.").tone(Tone::Muted),
             );
         };
 
         let contents = column![
             view_status(vehicle),
-            ui::divider(),
+            view_alert(vehicle),
             self.view_controls(vehicle),
             ui::section("Flight", [view_telemetry(vehicle)]),
             ui::section("Health", [view_health(vehicle)]),
             ui::section("Navigation", [view_navigation(vehicle)]),
-            view_alert(vehicle),
         ]
         .spacing(ui::space::L);
 
-        ui::panel(
-            column![
-                header,
-                ui::divider(),
-                scrollable(contents).height(Length::Fill)
-            ]
-            .spacing(ui::space::M),
-        )
+        ui::panel_with(header, scrollable(contents).height(Length::Fill))
     }
 
     fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> Element<'a, Message> {
@@ -259,10 +251,12 @@ impl VehiclePanel {
 
         let mode_picker = ui::pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
             .placeholder("Mode")
+            .width(Length::Fixed(160.0))
             .on_select(move |mode| Message::SetMode(system, mode));
 
-        let quick = |kind: ModeKind, label: &'static str| {
+        let quick = |kind: ModeKind, label: &'static str, hint: &'static str| {
             ui::button(label)
+                .hint(hint)
                 .on_press_maybe(
                     (firmware.mode_of_kind(class, kind).is_some() && !busy(Command::SetMode))
                         .then_some(Message::RequestModeKind(system, kind)),
@@ -270,20 +264,17 @@ impl VehiclePanel {
                 .boxed()
         };
 
-        column![
-            row![arm.boxed(), mode_picker]
-                .spacing(ui::space::S)
-                .align_y(Alignment::Center),
-            ui::toolbar([
-                quick(ModeKind::ReturnToLaunch, "Return"),
-                quick(ModeKind::Land, "Land"),
-                ui::button("Locate")
+        ui::actions([
+            vec![arm.width(Length::Fixed(96.0)).boxed(), mode_picker.boxed()],
+            vec![
+                quick(ModeKind::ReturnToLaunch, "Return", "Fly home and land"),
+                quick(ModeKind::Land, "Land", "Land where the vehicle is"),
+                ui::icon_button(Icon::Place)
+                    .hint("Show the vehicle on the map")
                     .on_press(Message::Locate(system))
                     .boxed(),
-            ]),
-        ]
-        .spacing(ui::space::S)
-        .boxed()
+            ],
+        ])
     }
 }
 
@@ -302,32 +293,33 @@ fn stats<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     rows.boxed()
 }
 
+/// What the vehicle is doing, at a glance: its mode, large, whether it
+/// is armed, and what it is.
 fn view_status(vehicle: &Vehicle) -> Element<'_, Message> {
-    let (liveness, tone) = liveness(vehicle.liveness);
-
     let armed = match vehicle.armed() {
-        Some(true) => ui::text("ARMED").tone(Tone::Danger),
-        Some(false) => ui::text("disarmed"),
-        None => ui::text("unknown").tone(Tone::Muted),
+        Some(true) => ui::badge("Armed", Tone::Danger),
+        Some(false) => ui::badge("Disarmed", Tone::Muted),
+        None => ui::badge("Arming unknown", Tone::Muted),
     };
 
     let mode = vehicle
         .flight_mode()
-        .map_or_else(|| "unknown".to_string(), |mode| mode.name.to_string());
+        .map_or_else(|| "Unknown mode".to_string(), |mode| mode.name.to_string());
 
-    let state = vehicle
-        .identity
-        .mav_state
-        .map_or_else(|| "unknown".to_string(), |state| format!("{state:?}"));
+    let mut identity = vec![
+        vehicle.firmware().name().to_string(),
+        vehicle.class().name().to_string(),
+    ];
+    identity.extend(vehicle.identity.mav_state.map(|state| format!("{state:?}")));
 
-    stats(vec![
-        ui::stat("Link", ui::text(liveness).tone(tone)),
-        ui::stat("Armed", armed),
-        ui::stat("Mode", ui::text(mode)),
-        ui::stat("Firmware", ui::text(vehicle.firmware().name())),
-        ui::stat("Type", ui::text(vehicle.class().name())),
-        ui::stat("State", ui::text(state)),
-    ])
+    column![
+        row![ui::title(mode), armed]
+            .spacing(ui::space::M)
+            .align_y(Alignment::Center),
+        ui::caption(identity.join(" · ")).tone(Tone::Muted),
+    ]
+    .spacing(ui::space::XXS)
+    .boxed()
 }
 
 fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
@@ -373,7 +365,7 @@ fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
     ])
 }
 
-/// The battery, GPS, link and pre-arm checks, and the sensors as chips.
+/// The battery, GPS, link and pre-arm checks, and the sensors as badges.
 fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
     let health = &vehicle.health;
 
@@ -400,7 +392,7 @@ fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
     .collect();
     let battery = column![
         row![
-            ui::caption("Battery").width(Length::Fill),
+            ui::caption("Battery").tone(Tone::Muted).width(Length::Fill),
             ui::caption(if readings.is_empty() {
                 "–".to_string()
             } else {
@@ -466,12 +458,12 @@ fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
             .boxed()
     } else {
         row(sensors.into_iter().map(|status| {
-            let state = match (status.enabled, status.healthy) {
-                (false, _) => Chip::Pending,
-                (true, true) => Chip::Done,
-                (true, false) => Chip::Failed,
+            let tone = match (status.enabled, status.healthy) {
+                (false, _) => Tone::Muted,
+                (true, true) => Tone::Success,
+                (true, false) => Tone::Danger,
             };
-            ui::chip(status.sensor.name(), state)
+            ui::badge(status.sensor.name(), tone)
         }))
         .spacing(ui::space::XS)
         .wrap()
@@ -509,11 +501,11 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
     };
 
     let (state, tone) = match mission.state {
-        MissionState::Active => ("active", Tone::Success),
-        MissionState::Paused => ("paused", Tone::Warning),
-        MissionState::Complete => ("complete", Tone::Muted),
-        MissionState::NotStarted => ("not started", Tone::Muted),
-        _ => ("", Tone::Muted),
+        MissionState::Active => ("Active", Tone::Success),
+        MissionState::Paused => ("Paused", Tone::Warning),
+        MissionState::Complete => ("Complete", Tone::Muted),
+        MissionState::NotStarted => ("Not started", Tone::Muted),
+        _ => ("Unknown", Tone::Muted),
     };
     let item = match mission.count {
         Some(count) => format!("Item {} of {count}", mission.current + 1),
@@ -534,7 +526,7 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
                 (mission.current + 1) as f32,
                 mission.count.unwrap_or(mission.current + 1) as f32
             ),
-            ui::caption(state).tone(tone),
+            ui::badge(state, tone),
         ]
         .spacing(ui::space::M)
         .align_y(Alignment::Center),
@@ -543,20 +535,16 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
     .boxed()
 }
 
-/// The latest warning or worse the vehicle sent, if any; the log panel has
-/// them all.
-fn view_alert(vehicle: &Vehicle) -> Element<'_, Message> {
-    match vehicle.status.latest_alert() {
-        Some(alert) => column![
-            ui::caption("Latest alert"),
-            ui::text(&alert.text)
-                .tone(Tone::of_severity(alert.severity))
-                .single_line(),
-        ]
-        .spacing(ui::space::XXS)
-        .boxed(),
-        None => ui::caption("No alerts").tone(Tone::Muted).boxed(),
-    }
+/// How long an alert stays on the panel. Older ones are in the log.
+const ALERT_SHOWN_FOR: Duration = Duration::from_secs(60);
+
+/// The latest warning or worse the vehicle sent, while it is recent.
+fn view_alert(vehicle: &Vehicle) -> Option<Element<'_, Message>> {
+    let alert = vehicle
+        .status
+        .latest_alert()
+        .filter(|alert| alert.at.elapsed() < ALERT_SHOWN_FOR)?;
+    Some(ui::banner(&alert.text, Tone::of_severity(alert.severity)))
 }
 
 /// A distance in metres, or kilometres from one up.
@@ -571,8 +559,8 @@ fn distance(metres: f64) -> String {
 /// A short, legible marker for a vehicle's liveness, and its tone.
 fn liveness(liveness: Liveness) -> (&'static str, Tone) {
     match liveness {
-        Liveness::Active => ("active", Tone::Success),
-        Liveness::Stale => ("stale", Tone::Warning),
-        Liveness::Lost => ("lost", Tone::Danger),
+        Liveness::Active => ("Active", Tone::Success),
+        Liveness::Stale => ("Stale", Tone::Warning),
+        Liveness::Lost => ("Lost", Tone::Danger),
     }
 }

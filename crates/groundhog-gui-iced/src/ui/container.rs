@@ -1,5 +1,9 @@
 //! Layout: panels, cards, forms, lists and the other arrangements views
 //! share.
+//!
+//! A pane reads top to bottom in the same order everywhere (see
+//! [`crate::ui`]): a [`header`] saying what the panel is about, then its
+//! actions, any [`activity`] in progress, and its body.
 
 use iced::{
     Alignment, Element, Length, Widget,
@@ -10,8 +14,9 @@ use iced::{
 };
 
 use super::{
-    style::{self, Chip, Tone, size, space},
-    text::{TextExt, caption, text, title},
+    button::button,
+    style::{self, Tone, size, space},
+    text::{TextExt, caption, text},
 };
 
 /// The body of a pane: its content, padded, filling the pane.
@@ -20,6 +25,82 @@ pub fn panel<'a, M: 'a>(content: impl Widget<M> + 'a) -> Element<'a, M> {
         .padding(space::M)
         .width(Length::Fill)
         .height(Length::Fill)
+        .boxed()
+}
+
+/// A pane's body under a [`header`], divided from it by a rule. The body
+/// takes the rest of the height, and scrolls itself if it must.
+pub fn panel_with<'a, M: 'a>(header: Element<'a, M>, body: impl Widget<M> + 'a) -> Element<'a, M> {
+    panel(column![header, divider(), body].spacing(space::M))
+}
+
+/// What a panel is about, on one line of a fixed height: `subject` (a
+/// picker, a name) fills it, and `status` (badges, quiet icon actions)
+/// sits at its end.
+pub fn header<'a, M: 'a>(
+    subject: impl Widget<M> + 'a,
+    status: impl IntoIterator<Item = Element<'a, M>>,
+) -> Element<'a, M> {
+    row![
+        container(subject).width(Length::Fill),
+        row(status).spacing(space::S).align_y(Alignment::Center),
+    ]
+    .spacing(space::M)
+    .height(size::ICON_BUTTON)
+    .align_y(Alignment::Center)
+    .boxed()
+}
+
+/// A panel's actions, in groups of related buttons: a wider gap sets the
+/// groups apart, and a group wraps onto the next line whole.
+pub fn actions<'a, M: 'a>(groups: impl IntoIterator<Item = Vec<Element<'a, M>>>) -> Element<'a, M> {
+    row(groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .map(|group| row(group).spacing(space::S).boxed()))
+    .spacing(space::L)
+    .wrap()
+    .vertical_spacing(space::S)
+    .boxed()
+}
+
+/// Something under way: what it is, how far along (`done` of `total`, if
+/// known), and a button to stop it.
+pub fn activity<'a, M: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+    progress: Option<(f32, f32)>,
+    cancel: Option<M>,
+) -> Element<'a, M> {
+    let (done, total) = progress.unwrap_or((0.0, 1.0));
+    row![
+        column![
+            caption(label).tone(Tone::Accent),
+            self::progress(done, total)
+        ]
+        .spacing(space::XS)
+        .width(Length::Fill),
+        cancel.map(|cancel| button("Cancel").on_press(cancel).boxed()),
+    ]
+    .spacing(space::M)
+    .align_y(Alignment::Center)
+    .boxed()
+}
+
+/// A status, as a small pill tinted with its tone.
+pub fn badge<'a, M: 'a>(label: impl IntoFragment<'a>, tone: Tone) -> Element<'a, M> {
+    container(caption(label).single_line())
+        .padding([space::XXS, space::S])
+        .style(style::badge(tone))
+        .boxed()
+}
+
+/// A message that needs the operator's attention, across the panel, in
+/// the tone of its urgency.
+pub fn banner<'a, M: 'a>(message: impl IntoFragment<'a>, tone: Tone) -> Element<'a, M> {
+    container(text(message))
+        .padding([space::S, space::M])
+        .width(Length::Fill)
+        .style(style::banner(tone))
         .boxed()
 }
 
@@ -59,13 +140,21 @@ pub fn divider<'a>() -> Rule<'a> {
     rule::horizontal(1.0)
 }
 
-/// A titled group of content.
+/// A titled group of content. The title is an [`overline`]: sections are
+/// told apart by a quiet heading and the space between them, not by size.
 pub fn section<'a, M: 'a>(
     heading: impl IntoFragment<'a>,
     children: impl IntoIterator<Item = Element<'a, M>>,
 ) -> Element<'a, M> {
-    column(std::iter::once(title(heading).boxed()).chain(children))
+    column(std::iter::once(overline(heading)).chain(children))
         .spacing(space::S)
+        .boxed()
+}
+
+/// A section's heading: small, quiet capitals.
+pub fn overline<'a, M: 'a>(heading: impl IntoFragment<'a>) -> Element<'a, M> {
+    caption(heading.into_fragment().to_uppercase())
+        .tone(Tone::Muted)
         .boxed()
 }
 
@@ -75,23 +164,21 @@ pub fn field<'a, M: 'a>(
     label: impl IntoFragment<'a>,
     control: impl Widget<M> + 'a,
 ) -> Element<'a, M> {
-    row![text(label).width(size::FIELD_LABEL), control]
-        .spacing(space::S)
-        .align_y(Alignment::Center)
-        .boxed()
+    row![
+        text(label).tone(Tone::Muted).width(size::FIELD_LABEL),
+        control
+    ]
+    .spacing(space::S)
+    .align_y(Alignment::Center)
+    .boxed()
 }
 
 /// A value and the caption naming it, sharing a row equally with its
 /// siblings.
 pub fn stat<'a, M: 'a>(label: impl IntoFragment<'a>, value: Text<'a>) -> Element<'a, M> {
-    container(column![caption(label), value.single_line()].spacing(space::XXS))
+    container(column![caption(label).tone(Tone::Muted), value.single_line()].spacing(space::XXS))
         .width(Length::FillPortion(1))
         .boxed()
-}
-
-/// Buttons in a row, wrapping onto more rows when they do not fit.
-pub fn toolbar<'a, M: 'a>(buttons: impl IntoIterator<Item = Element<'a, M>>) -> Element<'a, M> {
-    row(buttons).spacing(space::S).wrap().boxed()
 }
 
 /// Row `index` of a list, striped so long rows stay legible.
@@ -118,14 +205,6 @@ pub fn tooltip<'a, M: 'a>(
     )
     .delay(std::time::Duration::from_millis(250))
     .boxed()
-}
-
-/// A small label for one step of a sequence.
-pub fn chip<'a, M: 'a>(label: impl IntoFragment<'a>, state: Chip) -> Element<'a, M> {
-    container(caption(label))
-        .padding([space::XXS, space::M])
-        .style(style::chip(state))
-        .boxed()
 }
 
 /// How far along something is, as `done` of `total`.

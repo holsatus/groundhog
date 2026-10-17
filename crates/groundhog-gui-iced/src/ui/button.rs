@@ -10,22 +10,26 @@
 //!     .on_press(Message::Arm)
 //!     .boxed()
 //! ```
+//!
+//! Labelled and icon buttons share one height, so a row of them lines up.
+//! A label is one line: a button says a verb, not a sentence.
 
 use iced::{
-    Element, Length, Widget,
-    widget::{container, text::IntoFragment, tooltip::Position},
+    Alignment, Element, Length, Widget,
+    widget::{container, row, text::IntoFragment, tooltip::Position},
 };
 
 use super::{
     container::tooltip,
     icon::{self, Icon},
-    style::{self, ButtonKind, size},
-    text::text,
+    style::{self, ButtonKind, size, space},
+    text::{TextExt, text},
 };
 
 /// What a button shows.
 enum Content<'a, M> {
-    Label(iced::widget::text::Fragment<'a>),
+    /// A label, after an icon if it has one.
+    Label(iced::widget::text::Fragment<'a>, Option<Icon>),
     Icon(Icon),
     Element(Element<'a, M>),
 }
@@ -42,7 +46,7 @@ pub struct Action<'a, M> {
 
 /// A button labelled `label`.
 pub fn button<'a, M>(label: impl IntoFragment<'a>) -> Action<'a, M> {
-    Action::new(Content::Label(label.into_fragment()))
+    Action::new(Content::Label(label.into_fragment(), None))
 }
 
 /// A square button showing `icon`. Give it a [`hint`](Action::hint): an icon
@@ -66,6 +70,15 @@ impl<'a, M> Action<'a, M> {
             busy: None,
             hint: None,
         }
+    }
+
+    /// Show `icon` before the label. An icon helps a verb that recurs
+    /// across panels (download, upload, add) to be found at a glance.
+    pub fn icon(mut self, glyph: Icon) -> Self {
+        if let Content::Label(label, _) = self.content {
+            self.content = Content::Label(label, Some(glyph));
+        }
+        self
     }
 
     /// The action a view is for.
@@ -145,14 +158,22 @@ impl<'a, M> Action<'a, M> {
         let enabled = on_press.is_some();
 
         let button = match content {
-            Content::Label(label) => {
-                let label = text(busy.unwrap_or(label));
+            Content::Label(label, glyph) => {
+                let label = row![
+                    glyph.map(|glyph| icon::icon(glyph, size::ICON, kind, enabled)),
+                    text(busy.unwrap_or(label)).single_line()
+                ]
+                .spacing(space::S)
+                .align_y(Alignment::Center);
                 let content = if width == Length::Shrink {
-                    label.boxed()
+                    container(label).center_y(Length::Fill)
                 } else {
-                    container(label).center_x(Length::Fill).boxed()
+                    container(label).center(Length::Fill)
                 };
-                iced::widget::button(content).width(width)
+                iced::widget::button(content.boxed())
+                    .width(width)
+                    .height(size::ICON_BUTTON)
+                    .padding([0.0, space::M])
             }
             Content::Icon(glyph) => iced::widget::button(
                 container(icon::icon(glyph, size::ICON, kind, enabled))

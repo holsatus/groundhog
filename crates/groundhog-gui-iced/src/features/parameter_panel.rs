@@ -28,7 +28,7 @@ use groundhog_logic::{
 };
 use iced::{
     Alignment, Element, Length, Task, Widget,
-    widget::{column, progress_bar, row, scrollable, space},
+    widget::{column, container, row, scrollable, space},
 };
 use mav_param::{Ident, Value};
 
@@ -38,7 +38,10 @@ use super::{
     operations::{Operations, Ticket},
 };
 use crate::{
-    ui::{self, Icon, TextExt, Tone, style},
+    ui::{
+        self, Icon, TextExt, Tone,
+        style::{self, ButtonKind},
+    },
     widget::virtualized::virtual_list,
 };
 
@@ -395,85 +398,111 @@ impl ParameterPanel {
             .filter(|(_, edit)| edit.uploadable().is_some())
             .count();
 
-        let action = |label: String, message: Option<Message>| {
-            ui::button(label)
-                .width(Length::FillPortion(1))
-                .on_press_maybe(message)
-                .boxed()
-        };
+        let loading = parameters.map(Parameters::loading);
+        let (got, expected) =
+            loading.map_or((0, 0), |loading| (loading.loaded(), loading.expected()));
 
-        let transfers = row![
-            ui::button("Download parameters")
-                .width(Length::FillPortion(1))
+        // What the operator is looking at: the component, and how its
+        // values stand against the vehicle's.
+        let state = if pending > 0 {
+            ui::badge(format!("{pending} changed"), Tone::Warning)
+        } else if got > 0 {
+            ui::badge(format!("{got} parameters"), Tone::Muted)
+        } else {
+            ui::badge("Not downloaded", Tone::Muted)
+        };
+        let header = ui::header(
+            picker,
+            [
+                state,
+                ui::icon_button(Icon::Open)
+                    .hint("Load values from a file, as edits")
+                    .on_press(Message::LoadDialog(address))
+                    .boxed(),
+                ui::icon_button(Icon::Save)
+                    .hint("Save the parameters to a file")
+                    .on_press(Message::SaveDialog(address))
+                    .boxed(),
+            ],
+        );
+
+        let actions = ui::actions([vec![
+            ui::button("Download")
+                .icon(Icon::Download)
                 .busy(downloading, "Downloading…")
+                .hint("Read every parameter from the vehicle")
                 .on_press(Message::Reload(address))
                 .boxed(),
-            action(
-                format!("Upload {pending} changed"),
-                (pending > 0 && encoding_known).then_some(Message::UploadAll(address)),
-            ),
-        ]
-        .spacing(ui::space::S);
-
-        let files = row![
-            action("Save to file".into(), Some(Message::SaveDialog(address))),
-            action("Load from file".into(), Some(Message::LoadDialog(address))),
-            action(
-                "Discard changes".into(),
-                (pending > 0).then_some(Message::ResetAll(address)),
-            ),
-        ]
-        .spacing(ui::space::S);
+            ui::button(if pending > 0 {
+                format!("Upload {pending}")
+            } else {
+                "Upload".to_string()
+            })
+            .icon(Icon::Upload)
+            .kind(if pending > 0 && encoding_known {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Subtle
+            })
+            .hint("Write every changed value to the vehicle")
+            .on_press_maybe((pending > 0 && encoding_known).then_some(Message::UploadAll(address)))
+            .boxed(),
+            ui::icon_button(Icon::Revert)
+                .hint("Discard every change")
+                .on_press_maybe((pending > 0).then_some(Message::ResetAll(address)))
+                .boxed(),
+        ]]);
 
         let encoding_warning = (!encoding_known
             && parameters.is_some_and(|parameters| !parameters.is_empty()))
         .then(|| {
-            ui::caption(
+            ui::banner(
                 "The component's parameter encoding is not known yet, so values may \
                  display wrongly and uploads are disabled.",
+                Tone::Warning,
             )
-            .tone(Tone::Warning)
-        });
-
-        let loading = parameters.map(Parameters::loading);
-        let (got, expected) =
-            loading.map_or((0, 0), |loading| (loading.loaded(), loading.expected()));
-        let complete = loading.is_some_and(|loading| loading.is_complete());
-        let progress = ui::progress(got as f32, f32::from(expected)).style(if complete {
-            progress_bar::success
-        } else {
-            progress_bar::primary
         });
 
         let failure = match parameters.map(Parameters::download) {
-            Some(DownloadState::Failed(error)) => {
-                Some(ui::caption(format!("Last download: {error}")).tone(Tone::Danger))
-            }
+            Some(DownloadState::Failed(error)) => Some(ui::banner(
+                format!("The last download failed: {error}"),
+                Tone::Danger,
+            )),
             _ => None,
         };
 
-        let filter = ui::card(
-            column![
-                ui::text_input("Filter parameters", &self.filter.ident_pattern)
-                    .on_input(Message::FilterIdentPattern),
-                ui::checkbox("Only changed", self.filter.only_changed)
-                    .on_toggle(Message::FilterOnlyChanged),
-            ]
-            .spacing(ui::space::S),
-        );
+        let progress = (downloading || (expected > 0 && got < usize::from(expected))).then(|| {
+            ui::activity(
+                if expected > 0 {
+                    format!("Downloading: {got} of {expected}")
+                } else {
+                    "Downloading…".to_string()
+                },
+                (expected > 0).then(|| (got as f32, f32::from(expected))),
+                None,
+            )
+        });
 
-        ui::panel(
+        let filter = row![
+            ui::text_input("Search parameters", &self.filter.ident_pattern)
+                .on_input(Message::FilterIdentPattern),
+            ui::checkbox("Only changed", self.filter.only_changed)
+                .on_toggle(Message::FilterOnlyChanged),
+        ]
+        .spacing(ui::space::M)
+        .align_y(Alignment::Center);
+
+        ui::panel_with(
+            header,
             column![
-                picker,
-                transfers,
-                files,
+                actions,
                 encoding_warning,
-                progress,
                 failure,
+                progress,
                 filter,
                 self.view_param_list(address, parameters, encoding_known),
             ]
-            .spacing(ui::space::S),
+            .spacing(ui::space::M),
         )
     }
 
@@ -485,7 +514,7 @@ impl ParameterPanel {
     ) -> Element<'a, Message> {
         /// Heights must fit the tallest content of each item kind
         const ROW_HEIGHT: f32 = 32.0;
-        const HEADER_HEIGHT: f32 = 40.0;
+        const HEADER_HEIGHT: f32 = 28.0;
         const SEPARATOR_HEIGHT: f32 = 1.0;
 
         enum Item<'a> {
@@ -535,9 +564,12 @@ impl ParameterPanel {
                 name, separator, ..
             } => column![
                 separator.then(ui::divider),
-                name.map(|name| ui::heading(format!("[{name}]")).font(iced::Font::MONOSPACE)),
+                name.map(|name| {
+                    container(ui::overline(name.to_string()))
+                        .height(Length::Fill)
+                        .align_bottom(Length::Fill)
+                }),
             ]
-            .spacing(ui::space::XS)
             .boxed(),
             Item::Param(ident, param, edit) => {
                 view_param_row(address, ident, param, *edit, encoding_known)

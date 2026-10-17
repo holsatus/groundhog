@@ -1,5 +1,6 @@
-//! The mission panel: toolbar, transfer progress, the item list and the
-//! selected item's editor.
+//! The mission panel: how the plan stands against the vehicle, the
+//! vehicle's actions, transfer progress, the item list and the selected
+//! item's editor.
 
 use std::fmt;
 
@@ -21,7 +22,7 @@ use mavio::default_dialect::enums::MavCmd;
 
 use super::{Draft, Message, MessageKind, MissionEditor, Operation, PlanKey, SyncStatus};
 use crate::{
-    ui::{self, TextExt, Tone},
+    ui::{self, Icon, TextExt, Tone, style::ButtonKind},
     widget::virtualized::virtual_list,
 };
 
@@ -52,6 +53,9 @@ impl fmt::Display for Choice {
 }
 
 impl MissionEditor {
+    /// The panel, in the order a mission is worked: how the plan stands
+    /// against the vehicle (and its files), the vehicle's and the plan's
+    /// actions, a transfer under way, then the items and the one selected.
     pub fn view<'a>(
         &'a self,
         fleet: &'a FleetSnapshot,
@@ -66,64 +70,106 @@ impl MissionEditor {
         let status = self.status(plan, fleet);
         let transferring = plan.is_some_and(|system| self.transferring(system));
         let editable = !transferring;
+        let on_vehicle = |kind: MessageKind| (!transferring).then(|| message(kind));
+        let on_plan = |kind: MessageKind| editable.then(|| message(kind));
 
-        let vehicle_action = |label: &'static str, kind: MessageKind| {
-            ui::button(label)
-                .on_press_maybe((plan.is_some() && !transferring).then(|| message(kind)))
-                .boxed()
-        };
-        let edit_action = |label: &'static str, kind: MessageKind| {
-            ui::button(label)
-                .on_press_maybe(editable.then(|| message(kind)))
-                .boxed()
-        };
-
-        let transfers = ui::toolbar([
-            vehicle_action("Download", MessageKind::Download { confirmed: false }),
-            vehicle_action("Upload", MessageKind::Upload { confirmed: false }),
-            vehicle_action("Clear vehicle", MessageKind::Clear { confirmed: false }),
-            vehicle_action("Start", MessageKind::Start { confirmed: false }),
-            vehicle_action("Pause", MessageKind::Pause),
-            vehicle_action("Resume", MessageKind::Resume),
-        ]);
-
-        let editing = ui::toolbar([
-            edit_action("Add waypoint", MessageKind::AddWaypoint),
-            ui::button(if draft.placing {
-                "Placing… (click map)"
-            } else {
-                "Place on map"
-            })
-            .chosen(draft.placing)
-            .on_press_maybe(editable.then(|| message(MessageKind::TogglePlacing)))
-            .boxed(),
-            edit_action("Discard plan", MessageKind::Discard),
-            edit_action("Save…", MessageKind::SaveDialog),
-            edit_action("Load…", MessageKind::LoadDialog),
-        ]);
-
-        let (status_text, tone) = match status {
+        let (state, tone) = match status {
             SyncStatus::Offline => ("Offline plan", Tone::Muted),
-            SyncStatus::Unknown => ("Vehicle mission not downloaded", Tone::Muted),
-            SyncStatus::Synced => ("Synced with the vehicle", Tone::Success),
-            SyncStatus::Modified => ("Modified (not uploaded)", Tone::Warning),
-            SyncStatus::VehicleChanged => (
-                "The vehicle's mission was changed elsewhere; download it",
-                Tone::Danger,
-            ),
+            SyncStatus::Unknown => ("Not downloaded", Tone::Muted),
+            SyncStatus::Synced => ("Synced", Tone::Success),
+            SyncStatus::Modified => ("Not uploaded", Tone::Warning),
+            SyncStatus::VehicleChanged => ("Changed on the vehicle", Tone::Danger),
         };
         let count = match draft.plan().len() {
             1 => "1 item".to_string(),
             count => format!("{count} items"),
         };
+        let header = ui::header(
+            row![ui::badge(state, tone), ui::caption(count).tone(Tone::Muted)]
+                .spacing(ui::space::S)
+                .align_y(Alignment::Center),
+            [
+                ui::icon_button(Icon::Add)
+                    .hint("Add a waypoint after the last")
+                    .on_press_maybe(on_plan(MessageKind::AddWaypoint))
+                    .boxed(),
+                ui::icon_button(Icon::Place)
+                    .chosen(draft.placing)
+                    .hint(if draft.placing {
+                        "Placing: each click on the map adds a waypoint. Press to stop."
+                    } else {
+                        "Add waypoints by clicking the map"
+                    })
+                    .on_press_maybe(on_plan(MessageKind::TogglePlacing))
+                    .boxed(),
+                Space::new().width(ui::space::S).boxed(),
+                ui::icon_button(Icon::Open)
+                    .hint("Load a plan from a file")
+                    .on_press_maybe(on_plan(MessageKind::LoadDialog))
+                    .boxed(),
+                ui::icon_button(Icon::Save)
+                    .hint("Save the plan to a file")
+                    .on_press_maybe(on_plan(MessageKind::SaveDialog))
+                    .boxed(),
+                ui::icon_button(Icon::Delete)
+                    .hint("Discard the plan (the vehicle keeps its mission)")
+                    .on_press_maybe(
+                        on_plan(MessageKind::Discard).filter(|_| !draft.plan().is_empty()),
+                    )
+                    .boxed(),
+            ],
+        );
 
-        let header = column![
-            transfers,
-            editing,
-            ui::text(format!("{status_text} · {count}")).tone(tone),
-            plan.and_then(|system| self.view_progress(system, message)),
-        ]
-        .spacing(ui::space::S);
+        // The vehicle's actions only exist with a vehicle; the offline plan
+        // is edited and saved, nothing else.
+        let vehicle = plan.map(|_| {
+            vec![
+                ui::button("Download")
+                    .icon(Icon::Download)
+                    .hint("Replace the plan with the vehicle's mission")
+                    .on_press_maybe(on_vehicle(MessageKind::Download { confirmed: false }))
+                    .boxed(),
+                ui::button("Upload")
+                    .icon(Icon::Upload)
+                    .kind(if status == SyncStatus::Modified {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Subtle
+                    })
+                    .hint("Replace the vehicle's mission with the plan")
+                    .on_press_maybe(on_vehicle(MessageKind::Upload { confirmed: false }))
+                    .boxed(),
+                ui::icon_button(Icon::Erase)
+                    .hint("Clear the vehicle's mission")
+                    .on_press_maybe(on_vehicle(MessageKind::Clear { confirmed: false }))
+                    .boxed(),
+            ]
+        });
+        let flight = plan.map(|_| {
+            vec![
+                ui::button("Start")
+                    .icon(Icon::Play)
+                    .hint("Fly the mission from its first item")
+                    .on_press_maybe(on_vehicle(MessageKind::Start { confirmed: false }))
+                    .boxed(),
+                ui::icon_button(Icon::Pause)
+                    .hint("Pause the mission")
+                    .on_press_maybe(on_vehicle(MessageKind::Pause))
+                    .boxed(),
+                ui::button("Resume")
+                    .hint("Resume the paused mission")
+                    .on_press_maybe(on_vehicle(MessageKind::Resume))
+                    .boxed(),
+            ]
+        });
+        let actions = plan.map(|_| ui::actions([vehicle, flight].into_iter().flatten()));
+
+        let changed_elsewhere = (status == SyncStatus::VehicleChanged).then(|| {
+            ui::banner(
+                "The vehicle's mission was changed elsewhere. Download it before uploading.",
+                Tone::Danger,
+            )
+        });
 
         let current = plan
             .and_then(|system| fleet.vehicle(system))
@@ -145,11 +191,21 @@ impl MissionEditor {
             ],
             None => column![
                 list,
-                ui::caption("Select an item to edit it.").tone(Tone::Muted)
+                (!draft.plan().is_empty())
+                    .then(|| ui::caption("Select an item to edit it.").tone(Tone::Muted)),
             ],
         };
 
-        ui::panel(column![header, body.spacing(ui::space::M)].spacing(ui::space::M))
+        ui::panel_with(
+            header,
+            column![
+                actions,
+                changed_elsewhere,
+                plan.and_then(|system| self.view_progress(system, message)),
+                body.spacing(ui::space::M),
+            ]
+            .spacing(ui::space::M),
+        )
     }
 
     /// The running transfer's progress and a cancel button.
@@ -165,31 +221,19 @@ impl MissionEditor {
         let progress = self.operations.progress(&(system, operation));
         let label = match progress {
             Some(progress) => format!(
-                "{}: {}/{}",
+                "{}: {} of {}",
                 operation.describe(),
                 progress.done,
                 progress.total
             ),
             None => format!("{}…", operation.describe()),
         };
-        let (done, total) = progress.map_or((0.0, 1.0), |progress| {
-            (f32::from(progress.done), f32::from(progress.total))
-        });
 
-        Some(
-            row![
-                column![ui::caption(label), ui::progress(done, total)]
-                    .spacing(ui::space::XXS)
-                    .width(Length::Fill),
-                ui::button("Cancel")
-                    .danger()
-                    .on_press(message(MessageKind::Cancel(operation)))
-                    .boxed(),
-            ]
-            .spacing(ui::space::M)
-            .align_y(Alignment::Center)
-            .boxed(),
-        )
+        Some(ui::activity(
+            label,
+            progress.map(|progress| (f32::from(progress.done), f32::from(progress.total))),
+            Some(message(MessageKind::Cancel(operation))),
+        ))
     }
 
     fn view_list<'a>(
@@ -199,9 +243,12 @@ impl MissionEditor {
         current: Option<usize>,
     ) -> Element<'a, Message> {
         if draft.plan().is_empty() {
-            return container(ui::caption("The plan is empty.").tone(Tone::Muted))
-                .height(Length::Fill)
-                .boxed();
+            return container(
+                ui::text("No items yet. Add a waypoint, or place them on the map.")
+                    .tone(Tone::Muted),
+            )
+            .center(Length::Fill)
+            .boxed();
         }
 
         let selected = draft.selected;
@@ -212,18 +259,14 @@ impl MissionEditor {
             let item = &planned.item;
 
             let content = row![
-                ui::text(format!("{}", index + 1)).width(Length::Fixed(32.0)),
+                ui::text(format!("{}", index + 1))
+                    .tone(Tone::Muted)
+                    .width(Length::Fixed(28.0)),
                 ui::text(item.name())
                     .single_line()
-                    .width(Length::Fixed(130.0)),
-                ui::text(summary(item)).single_line().width(Length::Fill),
-                ui::text(if current == Some(index) {
-                    "current"
-                } else {
-                    ""
-                })
-                .tone(Tone::Success)
-                .width(Length::Fixed(72.0)),
+                    .width(Length::Fixed(120.0)),
+                ui::caption(summary(item)).single_line().width(Length::Fill),
+                (current == Some(index)).then(|| ui::badge("Current", Tone::Success)),
             ]
             .spacing(ui::space::M)
             .align_y(Alignment::Center);
@@ -285,35 +328,51 @@ fn view_editor<'a>(
         )
     });
 
-    let action = |label: &'static str, kind: Option<MessageKind>| {
-        ui::button(label)
-            .on_press_maybe(kind.filter(|_| editable).map(message))
-            .boxed()
-    };
+    let on_edit = |kind: MessageKind| editable.then(|| message(kind));
+    let first = index == 0;
+    let last = index + 1 == draft.plan().len();
 
-    let actions = ui::toolbar([
-        action("Move up", Some(MessageKind::MoveUp(id))),
-        action("Move down", Some(MessageKind::MoveDown(id))),
-        action("Remove", Some(MessageKind::Remove(id))),
-        action(
-            "Continue here",
-            (plan.is_some() && status == SyncStatus::Synced).then_some(MessageKind::SetCurrent {
-                item: id,
-                confirmed: false,
-            }),
-        ),
-        action("Deselect", Some(MessageKind::Select(None))),
-    ]);
+    // The item's actions head the card, so they stay in view however far
+    // its fields scroll.
+    let header = row![
+        ui::title(format!("Item {}", index + 1)),
+        command,
+        ui::icon_button(Icon::MoveUp)
+            .hint("Move up")
+            .on_press_maybe(on_edit(MessageKind::MoveUp(id)).filter(|_| !first))
+            .boxed(),
+        ui::icon_button(Icon::MoveDown)
+            .hint("Move down")
+            .on_press_maybe(on_edit(MessageKind::MoveDown(id)).filter(|_| !last))
+            .boxed(),
+        ui::icon_button(Icon::Skip)
+            .hint(if plan.is_some() && status == SyncStatus::Synced {
+                "Continue the mission from here"
+            } else {
+                "Continue the mission from here (once the plan is synced)"
+            })
+            .on_press_maybe(
+                on_edit(MessageKind::SetCurrent {
+                    item: id,
+                    confirmed: false,
+                })
+                .filter(|_| plan.is_some() && status == SyncStatus::Synced),
+            )
+            .boxed(),
+        ui::icon_button(Icon::Delete)
+            .hint("Remove the item")
+            .on_press_maybe(on_edit(MessageKind::Remove(id)))
+            .boxed(),
+        ui::icon_button(Icon::Close)
+            .hint("Deselect")
+            .on_press(message(MessageKind::Select(None)))
+            .boxed(),
+    ]
+    .spacing(ui::space::XS)
+    .align_y(Alignment::Center);
 
     ui::card(
-        column![
-            row![ui::title(format!("Item {}", index + 1)), command]
-                .spacing(ui::space::M)
-                .align_y(Alignment::Center),
-            Column::with_children(fields).spacing(ui::space::XS),
-            actions,
-        ]
-        .spacing(ui::space::S),
+        column![header, Column::with_children(fields).spacing(ui::space::S)].spacing(ui::space::M),
     )
 }
 

@@ -439,21 +439,69 @@ so the look is decided in one place:
 
 - **Tokens:** gaps from `ui::space` (`XXS`…`XL`), sizes from `ui::size`.
   No numeric spacing, padding or text size appears in a view.
-- **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::heading`, `ui::mono`;
-  colour by meaning with `.tone(Tone::Warning)` (`TextExt`), never a palette
-  slot, so a view needs no `&Theme`.
+- **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::mono`, and
+  `ui::overline` for section headings; colour by meaning with
+  `.tone(Tone::Warning)` (`TextExt`), never a palette slot, so a view needs
+  no `&Theme`.
 - **Buttons** are built: `ui::button("Arm").primary().busy(arming, "Arming…")
   .on_press(message).boxed()`. `.busy` swaps the label and refuses presses
   while an operation runs; `.chosen(bool)` highlights a selected row or an
-  active mode; `.hint(..)` adds a tooltip. The builder is for actions in
-  views; window chrome that looks nothing like them (the rail) builds its
-  own buttons from a style in `ui/style.rs` (`rail_button`).
+  active mode; `.hint(..)` adds a tooltip; `.icon(Icon::Download)` puts an
+  icon before the label. Labelled and icon buttons share one height. The
+  builder is for actions in views; window chrome that looks nothing like
+  them (the rail) builds its own buttons from a style in `ui/style.rs`
+  (`rail_button`).
 - **Icons** are named, never loaded: `ui::icon_button(Icon::Upload)`. To add
   one, put a Lucide SVG in `assets/icons/` and a line in the `icons!` list in
   `ui/icon.rs` (see `assets/icons/README.md`).
-- **Layout:** `ui::panel` is every pane's body, `ui::empty` a panel with only
-  a reason; `ui::card`, `ui::card_list` (rows split by edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`,
-  `ui::toolbar`, `ui::list_row` (striped), `ui::split_column` (two scrolling views sharing a height by what each needs) cover the shared arrangements.
+- **Layout:** `ui::panel` is every pane's body (`ui::panel_with` puts a
+  header above it), `ui::empty` a panel with only a reason. `ui::header`,
+  `ui::actions`, `ui::activity`, `ui::badge` and `ui::banner` are the parts
+  of the panel anatomy below; `ui::card`, `ui::card_list` (rows split by
+  edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`
+  and `ui::list_row` (striped) cover the shared arrangements.
+
+### The design language
+
+Every pane looks alike, and each is laid out for its own work. The look is
+shared; the structure follows the panel's workflow.
+
+**One surface.** A pane is one flat surface. Structure comes from space and
+type, not from boxes: sections are set apart by an overline heading and
+`space::L`, not by borders. A card (an outline on the same surface) is for
+an *object* the operator acts on as a whole: a saved link, a calibration
+run, the mission item being edited. Never wrap a group of controls in a
+card just to group them.
+
+**The anatomy of a pane**, top to bottom, each part optional:
+
+1. **Header** (`ui::header`, via `ui::panel_with`): what the panel is about
+   (a vehicle or component picker, a name, a filter) and how it stands
+   (badges), then quiet icon actions on things the panel holds as a whole
+   (files, adding items). One line, one height, divided from the body.
+2. **Actions** (`ui::actions`): groups of buttons in workflow order, a
+   group per kind of work (talking to the vehicle; flying; editing).
+   Groups wrap whole. Hide a group that cannot apply (no vehicle) rather
+   than disabling all of it.
+3. **Banners** (`ui::banner`): something that needs attention now: a recent
+   alert, a blocker, a failure. Only while it is true.
+4. **Activity** (`ui::activity`): a transfer or download under way, with
+   its progress and a cancel. Only while it runs.
+5. **Body**: the panel's content, scrolling on its own (lists keep their
+   own scrollable).
+
+**Buttons.** At most one primary button in view, and only while it is the
+next thing to do (Upload when there are changes, Arm). Repeated per-row
+actions and rare ones are icon buttons with a hint; verbs of the main
+workflow are labelled, with an icon when the verb recurs across panels
+(download, upload, start). Danger is for stopping something live
+(Disarm); a destructive stored change asks through a `Confirmation`
+instead of shouting.
+
+**Status.** A state is a `ui::badge` in its tone (Synced, Not uploaded,
+Active, Armed, a sensor's health); a value is text, coloured only when its
+colour means something. Read-outs put a muted caption above the value
+(`ui::stat`); forms put a muted label before the control (`ui::field`).
 
 When a second view would build something the same way, add it to `ui`
 rather than copying it.

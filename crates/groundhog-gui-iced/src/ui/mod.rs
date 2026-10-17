@@ -11,8 +11,13 @@
 //! - buttons ([`button()`], [`icon_button`]) built as an
 //!   [`Action`](button::Action);
 //! - inputs ([`text_input`], [`pick_list`], [`checkbox`]);
-//! - layout ([`panel`], [`card`], [`field`], [`list_row`], [`toolbar`],
-//!   [`split_column`], ...).
+//! - layout ([`panel`], [`card`], [`field`], [`list_row`], ...), and the
+//!   parts of a pane: [`header`], [`actions`], [`banner`], [`activity`],
+//!   [`badge`].
+//!
+//! Every pane has the same anatomy, top to bottom: a header saying what it
+//! is about and how that stands, grouped actions, banners and activity
+//! while they apply, then its body (see AGENTS.md, "The design language").
 //!
 //! A view that needs something new adds it here when a second view would
 //! build it the same way.
@@ -27,10 +32,10 @@ pub mod theme;
 
 pub use button::{button, button_with, icon_button};
 pub use container::{
-    card, card_list, chip, divider, empty, field, list_row, meter, panel, progress, section, stat,
-    toolbar, tooltip,
+    actions, activity, badge, banner, card, card_list, divider, empty, field, header, list_row,
+    meter, overline, panel, panel_with, progress, section, stat, tooltip,
 };
 pub use icon::Icon;
 pub use input::{checkbox, pick_list, text_input};
-pub use style::{Chip, Tone, size, space};
-pub use text::{TextExt, caption, heading, mono, severity, text, title};
+pub use style::{Tone, size, space};
+pub use text::{TextExt, caption, mono, severity, text, title};

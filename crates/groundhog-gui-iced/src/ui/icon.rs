@@ -59,6 +59,28 @@ icons! {
     Upload => "upload.svg",
     /// Undo an edit.
     Revert => "undo-2.svg",
+    /// Fetch from the vehicle.
+    Download => "download.svg",
+    /// Add an item.
+    Add => "plus.svg",
+    /// Move an item earlier.
+    MoveUp => "arrow-up.svg",
+    /// Move an item later.
+    MoveDown => "arrow-down.svg",
+    /// Write to a file.
+    Save => "save.svg",
+    /// Read from a file.
+    Open => "folder-open.svg",
+    /// Place on the map.
+    Place => "map-pin.svg",
+    /// Start or resume.
+    Play => "play.svg",
+    /// Pause.
+    Pause => "pause.svg",
+    /// Continue from here.
+    Skip => "skip-forward.svg",
+    /// Erase something stored on the vehicle.
+    Erase => "eraser.svg",
     /// Maximize a pane.
     Maximize => "maximize-2.svg",
     /// Restore a maximized pane.

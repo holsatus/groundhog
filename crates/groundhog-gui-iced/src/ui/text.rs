@@ -21,11 +21,6 @@ pub fn title<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
     text(content).size(size::TITLE)
 }
 
-/// The heading of a panel or a list section.
-pub fn heading<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
-    text(content).size(size::HEADING)
-}
-
 /// Monospaced text, for identifiers that line up in columns.
 pub fn mono<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
     text(content).font(Font::MONOSPACE)
