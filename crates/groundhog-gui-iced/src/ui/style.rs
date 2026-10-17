@@ -189,6 +189,14 @@ pub fn title_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// The pane grid: its defaults, with drop highlights rounded like the
+/// panes they stand for.
+pub fn pane_grid(theme: &Theme) -> crate::widget::pane_grid::Style {
+    let mut style = crate::widget::pane_grid::default(theme);
+    style.hovered_region.border.radius = PANE_RADIUS.into();
+    style
+}
+
 /// The `rule` separating a pane's header from its body. It shares the border
 /// colour, so the divider meets the pane outline without a seam.
 pub fn pane_divider(theme: &Theme) -> rule::Style {
@@ -213,12 +221,17 @@ pub fn list_row(index: usize) -> impl Fn(&Theme) -> container::Style {
 /// The state a chip shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chip {
+    /// Done, or healthy.
     Done,
     Current,
+    /// Still to do, or not in use.
     Pending,
+    /// Failing.
+    Failed,
 }
 
-/// A small rounded label for one step of a sequence.
+/// A small rounded label: for one step of a sequence, or the state of one
+/// of a set (a sensor).
 pub fn chip(chip: Chip) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let palette = theme.palette();
@@ -226,6 +239,7 @@ pub fn chip(chip: Chip) -> impl Fn(&Theme) -> container::Style {
             Chip::Done => palette.success.weak,
             Chip::Current => palette.primary.base,
             Chip::Pending => palette.background.weak,
+            Chip::Failed => palette.danger.base,
         };
 
         container::Style {
@@ -234,6 +248,21 @@ pub fn chip(chip: Chip) -> impl Fn(&Theme) -> container::Style {
                 ..Border::default()
             },
             ..surface(pair)
+        }
+    }
+}
+
+/// A meter (a progress bar showing a level), filled in `tone`.
+pub fn meter(tone: Tone) -> impl Fn(&Theme) -> widget::progress_bar::Style {
+    move |theme| {
+        let palette = theme.palette();
+        widget::progress_bar::Style {
+            background: palette.background.weak.color.into(),
+            bar: tone.color(palette).into(),
+            border: Border {
+                radius: WIDGET_RADIUS.into(),
+                ..Border::default()
+            },
         }
     }
 }

@@ -76,6 +76,15 @@ struct Pending {
 }
 
 impl StatusLog {
+    /// The newest text of warning severity or worse: what an operator should
+    /// see without opening the log.
+    pub fn latest_alert(&self) -> Option<&StatusText> {
+        self.texts
+            .iter()
+            .rev()
+            .find(|text| rank(text.severity) <= rank(MavSeverity::Warning))
+    }
+
     /// Fold in a `STATUSTEXT` from `component`. Returns the text it
     /// completed, if any (a single-chunk text completes immediately).
     pub(crate) fn observe_statustext(

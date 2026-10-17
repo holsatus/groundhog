@@ -13,6 +13,7 @@
 
 use std::{
     collections::BTreeMap,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -91,6 +92,36 @@ struct Session {
 struct LinkEntry {
     config: LinkConfig,
     session: Option<Session>,
+    /// When the link's last connection ended; shared with its supervisor,
+    /// which sees a connection end on its own.
+    last_connected: LastConnected,
+}
+
+/// When a link's last connection ended, if it has had one.
+#[derive(Clone, Default)]
+struct LastConnected(Arc<Mutex<Option<Instant>>>);
+
+impl LastConnected {
+    fn get(&self) -> Option<Instant> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Note a change of status: a connection that ends ends now.
+    fn note(&self, previous: &LinkStatus, status: &LinkStatus) {
+        if previous.is_connected() && !status.is_connected() {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        }
+    }
+}
+
+impl LinkEntry {
+    fn new(config: LinkConfig) -> Self {
+        Self {
+            config,
+            session: None,
+            last_connected: LastConnected::default(),
+        }
+    }
 }
 
 /// Owns the configured links and their supervisors.
@@ -139,13 +170,7 @@ impl LinkManager {
             if config.auto_connect {
                 auto_connect.push(id.clone());
             }
-            manager.links.insert(
-                id,
-                LinkEntry {
-                    config,
-                    session: None,
-                },
-            );
+            manager.links.insert(id, LinkEntry::new(config));
         }
 
         (manager, auto_connect, LinkEvents(receiver))
@@ -181,6 +206,7 @@ impl LinkManager {
             id.clone(),
             entry.config.clone(),
             status_tx,
+            entry.last_connected.clone(),
             self.events.clone(),
         ));
 
@@ -196,10 +222,14 @@ impl LinkManager {
         if let Some(entry) = self.links.get_mut(id)
             && let Some(session) = entry.session.take()
         {
+            let previous = session.status.borrow().clone();
+            entry
+                .last_connected
+                .note(&previous, &LinkStatus::Disconnected);
             let _ = self.events.send(LinkEvent {
                 id: id.clone(),
                 name: entry.config.name.clone(),
-                previous: session.status.borrow().clone(),
+                previous,
                 status: LinkStatus::Disconnected,
             });
         }
@@ -212,6 +242,13 @@ impl LinkManager {
             .and_then(|entry| entry.session.as_ref())
             .map(|session| session.status.borrow().clone())
             .unwrap_or(LinkStatus::Disconnected)
+    }
+
+    /// When the link's last connection ended, if it has been connected since
+    /// the manager started. While it is connected, its status says since
+    /// when.
+    pub fn last_connected(&self, id: &LinkId) -> Option<Instant> {
+        self.links.get(id)?.last_connected.get()
     }
 
     /// Traffic counters of the link's current attachment.
@@ -233,11 +270,16 @@ impl LinkManager {
         let id = existing.unwrap_or_else(|| self.fresh_id());
 
         self.disconnect(&id);
+        let last_connected = self
+            .links
+            .get(&id)
+            .map(|entry| entry.last_connected.clone())
+            .unwrap_or_default();
         self.links.insert(
             id.clone(),
             LinkEntry {
-                config,
-                session: None,
+                last_connected,
+                ..LinkEntry::new(config)
             },
         );
         id
@@ -279,10 +321,12 @@ async fn supervise(
     id: LinkId,
     config: LinkConfig,
     status: watch::Sender<LinkStatus>,
+    last_connected: LastConnected,
     events: mpsc::UnboundedSender<LinkEvent>,
 ) {
     let publish = |state: LinkStatus| {
         let previous = status.send_replace(state.clone());
+        last_connected.note(&previous, &state);
         let _ = events.send(LinkEvent {
             id: id.clone(),
             name: config.name.clone(),
@@ -485,10 +529,15 @@ mod tests {
         let connected = wait_for_event(&mut events, LinkStatus::is_connected).await;
         assert!(matches!(connected.previous, LinkStatus::Connecting { .. }));
 
+        assert_eq!(manager.last_connected(&id), None, "connected now");
         manager.disconnect(&id);
         let disconnected =
             wait_for_event(&mut events, |status| *status == LinkStatus::Disconnected).await;
         assert!(disconnected.previous.is_connected());
+        assert!(
+            manager.last_connected(&id).is_some(),
+            "the connection that just ended is remembered"
+        );
     }
 
     #[tokio::test]

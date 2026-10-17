@@ -22,6 +22,7 @@
 pub mod attitude;
 pub mod battery;
 pub mod class;
+pub mod health;
 pub mod home;
 pub mod identity;
 pub mod mission;
@@ -31,8 +32,8 @@ pub mod status;
 pub use self::status::StatusText;
 
 use self::{
-    attitude::AttitudeState, battery::Battery, class::VehicleClass, home::Home, identity::Identity,
-    mission::VehicleMission, position::PositionTrack, status::StatusLog,
+    attitude::AttitudeState, battery::Battery, class::VehicleClass, health::Health, home::Home,
+    identity::Identity, mission::VehicleMission, position::PositionTrack, status::StatusLog,
 };
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -41,7 +42,7 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavAutopilot, MavProtocolCapability},
+        enums::{MavAutopilot, MavProtocolCapability, MissionState},
         messages,
     },
 };
@@ -105,6 +106,36 @@ impl ComponentState {
     }
 }
 
+/// Where a place is from the vehicle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Offset {
+    pub distance_m: f64,
+    /// Degrees clockwise from north.
+    pub bearing_deg: f64,
+}
+
+impl Offset {
+    fn between(from: GeoPosition, to: GeoPosition) -> Self {
+        Self {
+            distance_m: from.distance_to(to),
+            bearing_deg: from.bearing_to(to),
+        }
+    }
+}
+
+/// How far a vehicle has come through its mission.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MissionStatus {
+    /// The plan index of the item being executed.
+    pub current: usize,
+    /// How many items the mission has, if known.
+    pub count: Option<usize>,
+    pub state: MissionState,
+    /// Where the current item is from the vehicle, for items with a
+    /// position.
+    pub to_current: Option<Offset>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Vehicle {
     /// The system this vehicle represents: its identity in the fleet.
@@ -116,6 +147,7 @@ pub struct Vehicle {
     pub attitude: AttitudeState,
     pub position: Arc<PositionTrack>,
     pub battery: Battery,
+    pub health: Health,
     pub status: Arc<StatusLog>,
     home_position: Option<Home>,
     pub mission: VehicleMission,
@@ -243,6 +275,41 @@ impl Vehicle {
     /// The plan index the vehicle is executing, if known.
     pub fn current_mission_index(&self) -> Option<usize> {
         self.mission.progress.current_index(self.mission_layout())
+    }
+
+    /// Where the vehicle is, if it has reported a position.
+    pub fn location(&self) -> Option<GeoPosition> {
+        self.position.current.as_ref().map(|position| position.pos)
+    }
+
+    /// How far, and in which direction, home is from the vehicle.
+    pub fn to_home(&self) -> Option<Offset> {
+        Some(Offset::between(self.location()?, self.home()?.position))
+    }
+
+    /// How far the vehicle has come through its mission, while it reports a
+    /// current item.
+    pub fn mission_status(&self) -> Option<MissionStatus> {
+        let current = self.current_mission_index()?;
+        let onboard = self.mission.onboard.as_deref();
+        let home_slot = usize::from(self.mission_layout().home_slot);
+        let count = onboard.map(|mission| mission.items.len()).or_else(|| {
+            let total = usize::from(self.mission.progress.total?);
+            Some(total.saturating_sub(home_slot))
+        });
+        let to_current = onboard
+            .and_then(|mission| mission.items.get(current)?.position())
+            .zip(self.location())
+            .map(|(item, location)| {
+                Offset::between(location, GeoPosition::new(item.lat, item.lon))
+            });
+
+        Some(MissionStatus {
+            current,
+            count,
+            state: self.mission.progress.state,
+            to_current,
+        })
     }
 
     /// A display name: vendor and model when known, else the class and id.
@@ -421,6 +488,10 @@ impl Vehicle {
             }
             DefaultDialect::SysStatus(message) if self.is_authoritative(component) => {
                 self.battery.observe_sys_status(message);
+                self.health.observe_sys_status(message);
+            }
+            DefaultDialect::GpsRawInt(message) if self.is_authoritative(component) => {
+                self.health.observe_gps_raw_int(message);
             }
             DefaultDialect::BatteryStatus(message) if self.is_authoritative(component) => {
                 self.battery.observe_battery_status(message);
@@ -521,6 +592,133 @@ mod tests {
             text: bytes,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn health_is_taken_from_the_autopilot_only() {
+        use mavio::default_dialect::enums::{GpsFixType, MavSysStatusSensor};
+
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+
+        let gps = |fix_type| {
+            DefaultDialect::GpsRawInt(messages::GpsRawInt {
+                fix_type,
+                satellites_visible: 12,
+                eph: 90,
+                ..Default::default()
+            })
+        };
+        vehicle.handle_message(t, 1, &gps(GpsFixType::_3dFix));
+        // A peripheral's own GPS does not describe the vehicle.
+        vehicle.handle_message(t, 154, &gps(GpsFixType::NoFix));
+        assert_eq!(vehicle.health.gps().unwrap().fix, GpsFixType::_3dFix);
+
+        let compass = MavSysStatusSensor::_3D_MAG;
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::SysStatus(messages::SysStatus {
+                onboard_control_sensors_present: compass,
+                onboard_control_sensors_enabled: compass,
+                onboard_control_sensors_health: MavSysStatusSensor::empty(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            vehicle.health.failing().collect::<Vec<_>>(),
+            [health::Sensor::Compass]
+        );
+    }
+
+    #[test]
+    fn home_and_the_current_item_are_measured_from_the_vehicle() {
+        use crate::domain::mission::{MissionItem, Position};
+
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Px4));
+        assert_eq!(vehicle.to_home(), None, "no position yet");
+
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+                lat: 550_000_000,
+                lon: 100_000_000,
+                ..Default::default()
+            }),
+        );
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::HomePosition(messages::HomePosition {
+                latitude: 550_100_000,
+                longitude: 100_000_000,
+                ..Default::default()
+            }),
+        );
+        let home = vehicle.to_home().unwrap();
+        assert!((home.distance_m - 1112.0).abs() < 5.0, "{home:?}");
+        assert!(home.bearing_deg.abs() < 0.01, "due north");
+
+        let waypoint = |lat| {
+            MissionItem::waypoint(Position {
+                lat,
+                lon: 10.0,
+                alt_m: 30.0,
+            })
+        };
+        vehicle.set_onboard_mission(OnboardMission {
+            items: vec![waypoint(55.0), waypoint(54.99)],
+            home: None,
+            opaque_id: 0,
+        });
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::MissionCurrent(messages::MissionCurrent {
+                seq: 1,
+                total: 2,
+                mission_state: MissionState::Active,
+                ..Default::default()
+            }),
+        );
+        let status = vehicle.mission_status().unwrap();
+        assert_eq!((status.current, status.count), (1, Some(2)));
+        assert_eq!(status.state, MissionState::Active);
+        let to_current = status.to_current.unwrap();
+        assert!((to_current.bearing_deg - 180.0).abs() < 0.01, "due south");
+    }
+
+    #[test]
+    fn the_latest_alert_skips_lesser_texts() {
+        use mavio::default_dialect::enums::MavSeverity;
+
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        let text = |severity, text: &str| {
+            let mut bytes = [0u8; 50];
+            bytes[..text.len()].copy_from_slice(text.as_bytes());
+            DefaultDialect::Statustext(messages::Statustext {
+                severity,
+                text: bytes,
+                ..Default::default()
+            })
+        };
+        vehicle.handle_message(t, 1, &text(MavSeverity::Info, "Ready"));
+        assert_eq!(vehicle.status.latest_alert(), None);
+
+        vehicle.handle_message(t, 1, &text(MavSeverity::Warning, "PreArm: Compass"));
+        vehicle.handle_message(t, 1, &text(MavSeverity::Info, "Mode changed"));
+        assert_eq!(
+            vehicle
+                .status
+                .latest_alert()
+                .map(|alert| alert.text.as_str()),
+            Some("PreArm: Compass")
+        );
     }
 
     #[test]

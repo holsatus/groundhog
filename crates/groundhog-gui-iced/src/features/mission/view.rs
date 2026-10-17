@@ -132,24 +132,25 @@ impl MissionEditor {
 
         let list = self.view_list(plan, draft, current);
 
-        // With an item selected, the list and its editor share the height,
-        // each scrolling on its own.
+        // With an item selected, the list and its editor share the height by
+        // what each needs, each scrolling on its own when cut short.
         let body = match draft
             .selected
             .and_then(|id| draft.plan().get(id).map(|item| (id, item)))
         {
-            Some((id, item)) => column![
-                container(list).height(Length::FillPortion(1)),
-                scrollable(view_editor(plan, draft, id, item, status, editable))
-                    .height(Length::FillPortion(1)),
-            ],
-            None => column![
+            Some((id, item)) => ui::split_column(
                 list,
+                scrollable(view_editor(plan, draft, id, item, status, editable)),
+            ),
+            None => column![
+                container(list).height(Length::Fill),
                 ui::caption("Select an item to edit it.").tone(Tone::Muted)
-            ],
+            ]
+            .spacing(ui::space::M)
+            .boxed(),
         };
 
-        ui::panel(column![header, body.spacing(ui::space::M)].spacing(ui::space::M))
+        ui::panel(column![header, body].spacing(ui::space::M))
     }
 
     /// The running transfer's progress and a cancel button.
@@ -199,9 +200,7 @@ impl MissionEditor {
         current: Option<usize>,
     ) -> Element<'a, Message> {
         if draft.plan().is_empty() {
-            return container(ui::caption("The plan is empty.").tone(Tone::Muted))
-                .height(Length::Fill)
-                .boxed();
+            return ui::caption("The plan is empty.").tone(Tone::Muted).boxed();
         }
 
         let selected = draft.selected;
@@ -240,10 +239,8 @@ impl MissionEditor {
         .item_height(|_| ROW_HEIGHT)
         .key(|(_, planned)| planned.id());
 
-        scrollable(list)
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .boxed()
+        // Only as tall as its rows; its parent decides how much of that shows.
+        scrollable(list).width(Length::Fill).boxed()
     }
 }
 

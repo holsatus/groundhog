@@ -10,7 +10,7 @@ use groundhog_logic::{
     persist::{SaveQueue, read_or_set_aside, write_atomic},
 };
 
-use crate::{layout::LayoutConfig, ui::theme::ThemeMode};
+use crate::{layout::Workspace, ui::theme::ThemeMode};
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
@@ -76,7 +76,7 @@ pub fn spawn_writer() -> (
 ///
 /// This is the composition root for the on-disk schema: it owns the top-level
 /// fields and delegates each sub-type's persisted representation to that
-/// sub-type (for example, [`LayoutConfig`] mirrors the pane grid and
+/// sub-type (for example, [`Workspace`] arranges the panes and
 /// [`LinkConfig`] describes a link). Those types therefore live alongside the
 /// data they describe rather than in this module.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -91,8 +91,10 @@ pub struct Configuration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_picker_path: Option<PathBuf>,
 
+    /// The panes' arrangement. (Configurations from before the three-column
+    /// workspace stored a `layout` instead, which is ignored.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout: Option<LayoutConfig>,
+    pub workspace: Option<Workspace>,
 
     #[serde(default)]
     pub settings: Settings,
@@ -104,7 +106,7 @@ impl Default for Configuration {
             version: CONFIG_VERSION,
             links: Vec::new(),
             file_picker_path: None,
-            layout: None,
+            workspace: None,
             settings: Settings::default(),
         }
     }

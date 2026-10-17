@@ -157,6 +157,8 @@ impl<T> State<T> {
             Target::Pane(target, region) => {
                 self.split_with(target, pane, region);
             }
+            // Only a custom drop target produces it, and gives it meaning.
+            Target::Between(..) => {}
         }
     }
 
@@ -318,6 +320,56 @@ impl<T> State<T> {
     /// [`PaneGrid`]: super::PaneGrid
     pub fn maximized(&self) -> Option<Pane> {
         self.internal.maximized
+    }
+}
+
+impl<T: PartialEq> State<T> {
+    /// Rearranges the panes into `config`, keeping the [`Pane`] of every
+    /// state that appears both before and after (compared with `==`).
+    ///
+    /// A pane's identity keys its widget state in the [`PaneGrid`], so
+    /// keeping it keeps what the pane's content holds (scroll positions,
+    /// focus), and the maximized pane stays maximized. States new to the
+    /// arrangement get new panes; panes whose state is gone are removed.
+    ///
+    /// [`PaneGrid`]: super::PaneGrid
+    pub fn rearrange(&mut self, config: Configuration<T>) {
+        let mut previous: Vec<(Pane, T)> = std::mem::take(&mut self.panes).into_iter().collect();
+        self.internal.layout = self.rebuild(config, &mut previous);
+
+        if let Some(pane) = self.internal.maximized
+            && !self.panes.contains_key(&pane)
+        {
+            self.internal.maximized = None;
+        }
+    }
+
+    fn rebuild(&mut self, config: Configuration<T>, previous: &mut Vec<(Pane, T)>) -> Node {
+        match config {
+            Configuration::Split { axis, ratio, a, b } => {
+                let a = self.rebuild(*a, previous);
+                let b = self.rebuild(*b, previous);
+                self.internal.last_id += 1;
+                Node::Split {
+                    id: Split(self.internal.last_id),
+                    axis,
+                    ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }
+            }
+            Configuration::Pane(state) => {
+                let id = match previous.iter().position(|(_, kept)| *kept == state) {
+                    Some(index) => previous.swap_remove(index).0,
+                    None => {
+                        self.internal.last_id += 1;
+                        Pane(self.internal.last_id)
+                    }
+                };
+                let _ = self.panes.insert(id, state);
+                Node::Pane(id)
+            }
+        }
     }
 }
 
@@ -494,5 +546,58 @@ impl Action {
             Action::Resizing(targets) => targets,
             _ => ResizeTargets::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split(axis: Axis, a: Configuration<u8>, b: Configuration<u8>) -> Configuration<u8> {
+        Configuration::Split {
+            axis,
+            ratio: 0.5,
+            a: Box::new(a),
+            b: Box::new(b),
+        }
+    }
+
+    #[test]
+    fn rearranging_keeps_the_panes_of_kept_states() {
+        let mut state = State::with_configuration(split(
+            Axis::Vertical,
+            Configuration::Pane(1),
+            Configuration::Pane(2),
+        ));
+        let pane_of = |state: &State<u8>, value: u8| {
+            state
+                .iter()
+                .find(|(_, v)| **v == value)
+                .map(|(pane, _)| *pane)
+        };
+        let one = pane_of(&state, 1).unwrap();
+        let two = pane_of(&state, 2).unwrap();
+        state.maximize(two);
+
+        state.rearrange(split(
+            Axis::Horizontal,
+            Configuration::Pane(2),
+            split(
+                Axis::Vertical,
+                Configuration::Pane(3),
+                Configuration::Pane(1),
+            ),
+        ));
+
+        assert_eq!(pane_of(&state, 1), Some(one));
+        assert_eq!(pane_of(&state, 2), Some(two));
+        let three = pane_of(&state, 3).unwrap();
+        assert!(three > one && three > two, "new panes sort after kept ones");
+        assert_eq!(state.maximized(), Some(two), "still maximized");
+
+        state.rearrange(Configuration::Pane(1));
+        assert_eq!(state.len(), 1);
+        assert_eq!(pane_of(&state, 1), Some(one));
+        assert_eq!(state.maximized(), None, "the maximized pane is gone");
     }
 }

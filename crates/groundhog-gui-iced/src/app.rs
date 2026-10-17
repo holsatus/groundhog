@@ -21,8 +21,8 @@ use groundhog_logic::{
     services::{FleetUpdate, LinkEvent, LinkStatus, TlogRecorder},
 };
 use iced::{
-    Alignment, Element, Length, Padding, Subscription, Task, Theme, Widget,
-    widget::{Space, button, column, container, row, rule, stack, tooltip},
+    Alignment, Element, Length, Padding, Subscription, Task, Theme, Widget, keyboard,
+    widget::{Space, button, column, container, mouse_area, row, rule, sensor, stack, tooltip},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
@@ -69,6 +69,8 @@ pub struct Application {
     fleet: Arc<FleetSnapshot>,
     /// The vehicle the UI shows.
     selected: Option<SystemId>,
+    /// The keyboard modifiers held, for the rail's clicks.
+    modifiers: keyboard::Modifiers,
     recorder: Option<TlogRecorder>,
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
@@ -87,6 +89,11 @@ pub enum Message {
     ConfigurationSaved(Result<(), String>),
 
     Layout(layout::Message),
+    /// A rail button was clicked with the primary button; the modifiers
+    /// held decide where its panel opens.
+    Rail(layout::Panel),
+    /// The keyboard modifiers changed.
+    Modifiers(keyboard::Modifiers),
     Map(map::Message),
     Vehicles(vehicles::Message),
     Mission(mission::Message),
@@ -126,9 +133,9 @@ impl Application {
         let (config_writer, saved) = config::spawn_writer();
 
         let layout = configuration
-            .layout
+            .workspace
             .clone()
-            .map_or_else(Layout::new, Layout::from_configuration);
+            .map_or_else(Layout::new, Layout::from_workspace);
 
         let mut application = Application {
             layout,
@@ -138,6 +145,7 @@ impl Application {
             backend,
             fleet: Arc::default(),
             selected: None,
+            modifiers: keyboard::Modifiers::default(),
             recorder: None,
             notices,
             confirmation: None,
@@ -213,8 +221,24 @@ impl Application {
             }
             Message::Layout(message) => {
                 if self.layout.update(message) {
-                    self.configuration.layout = Some(self.layout.configuration());
+                    self.configuration.workspace = Some(self.layout.workspace().clone());
                 }
+                Task::none()
+            }
+            Message::Rail(panel) => {
+                // A plain click opens on the left; the modifiers stand in
+                // for the middle and right buttons a trackpad lacks.
+                let slot = if self.modifiers.command() {
+                    layout::Slot::Middle
+                } else if self.modifiers.shift() {
+                    layout::Slot::Right
+                } else {
+                    layout::Slot::Left
+                };
+                self.update(Message::Layout(layout::Message::Toggle(panel, slot)))
+            }
+            Message::Modifiers(modifiers) => {
+                self.modifiers = modifiers;
                 Task::none()
             }
             Message::Map(message) => self.map.update(message).map(Message::Map),
@@ -493,7 +517,9 @@ impl Application {
     }
 
     /// The rail: a button per panel, highlighted while it is open. Pressing
-    /// one opens its panel, or closes it if open.
+    /// an open panel's button closes it. A closed panel opens in the left,
+    /// middle or right column by the mouse button pressed (or a plain,
+    /// Ctrl/Cmd or Shift click).
     fn view_rail(&self) -> Element<'_, Message> {
         let buttons = layout::Panel::DOCKABLE.into_iter().map(|panel| {
             let open = self.layout.is_open(panel);
@@ -503,12 +529,21 @@ impl Application {
                 .width(ui::size::RAIL_BUTTON)
                 .height(ui::size::RAIL_BUTTON)
                 .style(style::rail_button(open))
-                .on_press(Message::Layout(layout::Message::Toggle(panel)));
+                .on_press(Message::Rail(panel));
+            let toggle = |slot| Message::Layout(layout::Message::Toggle(panel, slot));
+            let button = mouse_area(button)
+                .on_middle_press(toggle(layout::Slot::Middle))
+                .on_right_press(toggle(layout::Slot::Right));
 
             let hint = if open {
                 format!("Close {}", panel.title())
             } else {
-                format!("Open {}", panel.title())
+                format!(
+                    "Open {}\nClick: left column\n\
+                     Middle-click or Ctrl/Cmd-click: beneath the map\n\
+                     Right-click or Shift-click: right column",
+                    panel.title()
+                )
             };
             ui::tooltip(button, hint, tooltip::Position::Right)
         });
@@ -516,8 +551,12 @@ impl Application {
         column(buttons).spacing(ui::space::S).boxed()
     }
 
+    /// The panes, as the layout arranges them. The layout is told the
+    /// grid's size, which it needs to keep the side columns' widths in
+    /// pixels.
     fn view_panes(&self) -> impl Widget<Message> + '_ {
-        PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
+        let sized = |size| Message::Layout(layout::Message::Sized(size));
+        let grid = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
             // The map paints opaque tiles across its whole pane, which a rounded
             // container cannot clip; it draws its own frame instead (see
             // `map::Map::view`), and has no title bar to grab, so it cannot be
@@ -580,10 +619,15 @@ impl Application {
         })
         .width(Length::Fill)
         .height(Length::Fill)
-        .spacing(ui::space::S)
+        .spacing(layout::SPACING)
+        .min_size(layout::MIN_PANE)
+        .style(style::pane_grid)
         .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
-        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)))
+        .drop_target(|dragged, cursor, regions| self.layout.drop_hint(dragged, cursor, regions))
+        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
+
+        sensor(grid).on_show(sized).on_resize(sized)
     }
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
@@ -672,7 +716,14 @@ impl Application {
             Subscription::none()
         };
 
-        Subscription::batch([layout_tick, refresh])
+        let modifiers = iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Message::Modifiers(modifiers))
+            }
+            _ => None,
+        });
+
+        Subscription::batch([layout_tick, refresh, modifiers])
     }
 }
 

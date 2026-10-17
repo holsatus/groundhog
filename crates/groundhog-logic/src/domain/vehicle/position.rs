@@ -42,6 +42,11 @@ impl PositionTrack {
     }
 
     /// Horizontal speed over ground, metres per second.
+    /// The rate of climb, in metres per second (negative while descending).
+    pub fn climb_rate(&self) -> Option<f32> {
+        self.velocity_ned.map(|velocity| -velocity.z)
+    }
+
     pub fn ground_speed(&self) -> Option<f32> {
         self.velocity_ned
             .map(|velocity| (velocity.x * velocity.x + velocity.y * velocity.y).sqrt())

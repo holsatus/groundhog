@@ -14,6 +14,12 @@
 //   - `State::configuration()` snapshots the current arrangement back into a
 //     `Configuration<T>`, the inverse of `with_configuration`
 //   - `TitleBar` centres its title and controls vertically
+//   - `PaneGrid::drop_target` lets the application decide where a dragged
+//     pane lands and what is highlighted (`DropHint`, `Target::Between`); the
+//     hint is drawn over the dragged pane, whose preview shrinks to its title
+//     bar (`Content::draw_title_bar`)
+//   - `State::rearrange` replaces the arrangement, keeping the `Pane` of every
+//     kept state (so pane widget state survives a rearrangement)
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the
@@ -118,6 +124,20 @@ use iced::widget::container;
 use iced::window;
 use iced::{Background, Border, Color, Event, Length, Pixels, Point, Rectangle, Size, Vector};
 
+use std::collections::BTreeMap;
+
+/// Where a dragged pane would land, and the area to highlight for it.
+#[derive(Debug, Clone, Copy)]
+pub struct DropHint {
+    pub target: Target,
+    /// In the grid's coordinates, like the pane regions it was found in.
+    pub area: Rectangle,
+}
+
+/// Decides where a dragged [`Pane`] lands, given the cursor and every
+/// pane's region; `None` where it cannot be dropped.
+type DropTarget<'a> = Box<dyn Fn(Pane, Point, &BTreeMap<Pane, Rectangle>) -> Option<DropHint> + 'a>;
+
 const DRAG_DEADBAND_DISTANCE: f32 = 10.0;
 const THICKNESS_RATIO: f32 = 25.0;
 
@@ -186,6 +206,7 @@ where
     min_size: f32,
     on_click: Option<Box<dyn Fn(Pane) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
+    drop_target: Option<DropTarget<'a>>,
     #[allow(clippy::type_complexity)]
     on_resize: Option<(f32, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     class: <Theme as Catalog>::Class<'a>,
@@ -225,6 +246,7 @@ where
             min_size: 50.0,
             on_click: None,
             on_drag: None,
+            drop_target: None,
             on_resize: None,
             class: <Theme as Catalog>::default(),
             last_mouse_interaction: None,
@@ -275,6 +297,42 @@ where
             self.on_drag = Some(Box::new(f));
         }
         self
+    }
+
+    /// Decide where dragged panes land: `target` gets the dragged pane, the
+    /// cursor and every pane's region, and returns the target and the area
+    /// to highlight, or `None` where nothing may be dropped. Without it, a
+    /// pane can be dropped on any part of another pane, or the grid's edges.
+    pub fn drop_target<F>(mut self, target: F) -> Self
+    where
+        F: 'a + Fn(Pane, Point, &BTreeMap<Pane, Rectangle>) -> Option<DropHint>,
+    {
+        self.drop_target = Some(Box::new(target));
+        self
+    }
+
+    /// The custom drop target under `cursor` while `dragged` is dragged,
+    /// in a grid laid out at `bounds`; `None` without a custom target.
+    fn custom_drop(
+        &self,
+        dragged: Pane,
+        cursor: Point,
+        bounds: Rectangle,
+    ) -> Option<Option<DropHint>> {
+        let target = self.drop_target.as_ref()?;
+        let regions = self.regions(bounds);
+        Some(target(dragged, cursor, &regions))
+    }
+
+    /// Every pane's region, in a grid laid out at `bounds`.
+    fn regions(&self, bounds: Rectangle) -> BTreeMap<Pane, Rectangle> {
+        let offset = Vector::new(bounds.x, bounds.y);
+        self.internal
+            .layout()
+            .pane_regions(self.spacing, self.min_size, bounds.size())
+            .into_iter()
+            .map(|(pane, region)| (pane, region + offset))
+            .collect()
     }
 
     /// Enables the resize interactions of the [`PaneGrid`], which will
@@ -689,7 +747,17 @@ where
                     && let Some(cursor_position) = cursor.position()
                 {
                     if cursor_position.distance(origin) > DRAG_DEADBAND_DISTANCE {
-                        let event = if let Some(edge) = in_edge(layout, cursor_position) {
+                        let event = if let Some(hint) =
+                            self.custom_drop(pane, cursor_position, layout.bounds())
+                        {
+                            match hint {
+                                Some(hint) => DragEvent::Dropped {
+                                    pane,
+                                    target: hint.target,
+                                },
+                                None => DragEvent::Canceled { pane },
+                            }
+                        } else if let Some(edge) = in_edge(layout, cursor_position) {
                             DragEvent::Dropped {
                                 pane,
                                 target: Target::Edge(edge),
@@ -876,7 +944,17 @@ where
             cursor
         };
 
-        let pane_in_edge = if picked_pane.is_some() {
+        // A custom drop target replaces the default highlights entirely; its
+        // own is drawn over the picked pane (see `PickedPane`), which would
+        // cover it otherwise.
+        let custom_hint = match (dragged_pane, cursor.position()) {
+            (Some((dragged, _)), Some(cursor_position)) => {
+                self.custom_drop(dragged, cursor_position, layout.bounds())
+            }
+            _ => None,
+        };
+
+        let pane_in_edge = if picked_pane.is_some() && custom_hint.is_none() {
             cursor
                 .position()
                 .and_then(|cursor_position| in_edge(layout, cursor_position))
@@ -914,6 +992,7 @@ where
 
                     if let Some(cursor_position) = cursor.position()
                         && dragged_pane.is_some()
+                        && custom_hint.is_none()
                         && pane_in_edge.is_none()
                         && let Some(region) = layout_region(pane_layout, cursor_position)
                     {
@@ -1028,6 +1107,15 @@ where
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         let state = tree.state.downcast_ref::<Memory>();
         let picked_pane = state.action.picked_pane();
+        // Only a picked pane draws a hint.
+        let regions = picked_pane.map(|_| self.regions(layout.bounds()));
+        let mut hint = regions.and_then(|regions| {
+            self.drop_target.as_ref().map(|target| DropHintSource {
+                target,
+                regions,
+                class: &self.class,
+            })
+        });
 
         self.panes
             .iter()
@@ -1051,6 +1139,8 @@ where
                         content,
                         tree,
                         layout,
+                        hint: hint.take(),
+                        dragged: pane,
                     }))];
                 }
 
@@ -1062,19 +1152,28 @@ where
 
 struct PickedPane<'a, 'b, Message, T, W, Theme, Renderer>
 where
-    Theme: container::Catalog,
+    Theme: container::Catalog + Catalog,
     Renderer: core::Renderer,
 {
     content: &'a Content<'b, Message, T, W, Theme, Renderer>,
     origin: Point,
     tree: &'a mut Tree,
     layout: Layout,
+    hint: Option<DropHintSource<'a, 'b, Theme>>,
+    dragged: Pane,
+}
+
+/// What a picked pane needs to draw the custom drop hint over itself.
+struct DropHintSource<'a, 'b, Theme: Catalog> {
+    target: &'a DropTarget<'b>,
+    regions: BTreeMap<Pane, Rectangle>,
+    class: &'a <Theme as Catalog>::Class<'b>,
 }
 
 impl<'a, 'b, Message, T, W, Theme, Renderer> core::Overlay<Message, Theme, Renderer>
     for PickedPane<'a, 'b, Message, T, W, Theme, Renderer>
 where
-    Theme: container::Catalog,
+    Theme: container::Catalog + Catalog,
     Renderer: core::Renderer,
     T: Widget<Message, Theme, Renderer>,
     W: Widget<Message, Theme, Renderer>,
@@ -1101,6 +1200,22 @@ where
 
         renderer.with_layer(bounds, |renderer| {
             renderer.with_translation(translation, |renderer| {
+                // With a custom drop target, the preview is the title bar
+                // alone, so it hides as little as possible of where the pane
+                // would land.
+                if self.hint.is_some()
+                    && self.content.draw_title_bar(
+                        self.tree,
+                        renderer,
+                        theme,
+                        style,
+                        self.layout,
+                        &Rectangle::INFINITE,
+                    )
+                {
+                    return;
+                }
+
                 self.content.draw(
                     self.tree,
                     renderer,
@@ -1113,6 +1228,24 @@ where
                 );
             });
         });
+
+        // The drop hint, over the preview.
+        if let Some(source) = &self.hint
+            && is_dragging(self.origin, cursor_position)
+            && let Some(hint) = (source.target)(self.dragged, cursor_position, &source.regions)
+        {
+            let style = <Theme as Catalog>::style(theme, source.class);
+            renderer.with_layer(hint.area, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: hint.area,
+                        border: style.hovered_region.border,
+                        ..renderer::Quad::default()
+                    },
+                    style.hovered_region.background,
+                );
+            });
+        }
     }
 }
 
@@ -1438,6 +1571,9 @@ pub enum Target {
     Edge(Edge),
     /// A single [`Pane`] of the [`PaneGrid`].
     Pane(Pane, Region),
+    /// The seam between two adjacent panes, the first before the second.
+    /// Only a [custom drop target](PaneGrid::drop_target) produces it.
+    Between(Pane, Pane),
 }
 
 /// The region of a [`Pane`].

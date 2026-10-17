@@ -1,7 +1,12 @@
-//! The vehicles feature: the selected vehicle's state and controls, the
-//! vehicle picker, and the vehicles' map layers.
+//! The vehicles feature: the selected vehicle's state, health and controls,
+//! the vehicle picker, and the vehicles' map layers.
+//!
+//! The panel shows what an operator glances at in flight. Status texts are
+//! the log panel's; only the latest alert is repeated here.
 
 mod map;
+
+use std::time::Instant;
 
 use groundhog_logic::{
     SystemId,
@@ -16,15 +21,12 @@ use iced::{
     Alignment, Element, Length, Task, Widget,
     widget::{column, row, scrollable},
 };
+use mavio::default_dialect::enums::{GpsFixType, MissionState};
 
 use super::{
-    Context, Effect, confirm::Confirmation, log_panel::timeline_row, notifications::Notice,
-    operations::Operations,
+    Context, Effect, confirm::Confirmation, notifications::Notice, operations::Operations,
 };
-use crate::{
-    ui::{self, TextExt, Tone},
-    widget::virtualized::virtual_list,
-};
+use crate::ui::{self, Chip, TextExt, Tone};
 
 /// The commands the panel runs, one of each kind per vehicle at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -210,17 +212,22 @@ impl VehiclePanel {
             );
         };
 
+        let contents = column![
+            view_status(vehicle),
+            ui::divider(),
+            self.view_controls(vehicle),
+            ui::section("Flight", [view_telemetry(vehicle)]),
+            ui::section("Health", [view_health(vehicle)]),
+            ui::section("Navigation", [view_navigation(vehicle)]),
+            view_alert(vehicle),
+        ]
+        .spacing(ui::space::L);
+
         ui::panel(
             column![
                 header,
                 ui::divider(),
-                view_status(vehicle),
-                ui::divider(),
-                self.view_controls(vehicle),
-                ui::divider(),
-                view_telemetry(vehicle),
-                ui::divider(),
-                view_status_texts(vehicle),
+                scrollable(contents).height(Length::Fill)
             ]
             .spacing(ui::space::M),
         )
@@ -345,53 +352,220 @@ fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
         .current
         .as_ref()
         .map_or_else(unknown, |position| format!("{:.1} m", position.alt_agl));
+    let climb = vehicle
+        .position
+        .climb_rate()
+        // Adding zero turns a negative zero into a positive one, so a
+        // level vehicle does not read as sinking.
+        .map_or_else(unknown, |climb| format!("{:+.1} m/s", climb + 0.0));
     let speed = vehicle
         .position
         .ground_speed()
         .map_or_else(unknown, |speed| format!("{speed:.1} m/s"));
-
-    let battery = vehicle.battery.primary();
-    let voltage = battery
-        .and_then(|battery| battery.voltage)
-        .map_or_else(unknown, |volts| format!("{volts:.2} V"));
-    let current = battery
-        .and_then(|battery| battery.current)
-        .map_or_else(unknown, |amps| format!("{amps:.1} A"));
-    let remaining = battery
-        .and_then(|battery| battery.remaining)
-        .map_or_else(unknown, |percent| format!("{percent:.0} %"));
 
     stats(vec![
         ui::stat("Roll", ui::text(roll)),
         ui::stat("Pitch", ui::text(pitch)),
         ui::stat("Heading", ui::text(yaw)),
         ui::stat("Altitude", ui::text(altitude)),
+        ui::stat("Climb", ui::text(climb)),
         ui::stat("Speed", ui::text(speed)),
-        ui::stat("Battery", ui::text(remaining)),
-        ui::stat("Voltage", ui::text(voltage)),
-        ui::stat("Current", ui::text(current)),
     ])
 }
 
-fn view_status_texts(vehicle: &Vehicle) -> Element<'_, Message> {
-    let entries = vehicle.status.texts.iter().enumerate().collect::<Vec<_>>();
+/// The battery, GPS, link and pre-arm checks, and the sensors as chips.
+fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
+    let health = &vehicle.health;
 
-    let list = virtual_list(entries, |&(index, status)| {
-        timeline_row(
-            index,
-            format!("c{}", status.component),
-            status.severity,
-            status.text.clone(),
-        )
-    })
-    .item_height(|_| ui::size::LIST_ROW)
-    .key(|(_, status)| (status.component, status.at));
+    // The battery: a gauge, with what is known beside it.
+    let battery = vehicle.battery.primary();
+    let remaining = battery.and_then(|battery| battery.remaining);
+    let tone = match remaining {
+        None => Tone::Muted,
+        Some(percent) if percent < 20.0 => Tone::Danger,
+        Some(percent) if percent < 35.0 => Tone::Warning,
+        Some(_) => Tone::Success,
+    };
+    let readings: Vec<String> = [
+        remaining.map(|percent| format!("{percent:.0} %")),
+        battery
+            .and_then(|battery| battery.voltage)
+            .map(|volts| format!("{volts:.2} V")),
+        battery
+            .and_then(|battery| battery.current)
+            .map(|amps| format!("{amps:.1} A")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let battery = column![
+        row![
+            ui::caption("Battery").width(Length::Fill),
+            ui::caption(if readings.is_empty() {
+                "–".to_string()
+            } else {
+                readings.join(" · ")
+            })
+        ],
+        ui::meter(remaining.unwrap_or(0.0), 100.0, tone),
+    ]
+    .spacing(ui::space::XS);
 
-    scrollable(list)
-        .anchor_bottom()
-        .height(Length::Fill)
-        .width(Length::Fill)
+    // The GPS: the fix in its tone, satellites and precision in the caption.
+    let gps = match health.gps() {
+        None => ui::text("–"),
+        Some(gps) => {
+            let tone = match gps.fix {
+                GpsFixType::NoGps => Tone::Muted,
+                _ if !gps.has_position() => Tone::Danger,
+                _ if gps.hdop.is_some_and(|hdop| hdop > 2.0) => Tone::Warning,
+                _ => Tone::Success,
+            };
+            ui::text(gps.fix_name()).tone(tone)
+        }
+    };
+    let precision = health
+        .gps()
+        .map(|gps| {
+            [
+                gps.satellites.map(|count| format!("{count} sats")),
+                gps.hdop.map(|hdop| format!("HDOP {hdop:.1}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+        })
+        .unwrap_or_default();
+
+    let heard = vehicle.last_seen.map_or_else(
+        || ui::text("–"),
+        |at| {
+            let ago = Instant::now().saturating_duration_since(at).as_secs_f32();
+            ui::text(format!("{ago:.1} s ago")).tone(liveness(vehicle.liveness).1)
+        },
+    );
+
+    let prearm = match health.prearm_passes() {
+        Some(true) => ui::text("Ready").tone(Tone::Success),
+        Some(false) => ui::text("Not ready").tone(Tone::Danger),
+        None => ui::text("–").tone(Tone::Muted),
+    };
+
+    let checks = stats(vec![
+        ui::stat("GPS", gps),
+        ui::stat("Last heard", heard),
+        ui::stat("Pre-arm", prearm),
+    ]);
+
+    // Healthy sensors in green, failing ones in red, those not in use dim.
+    let sensors = health.sensors();
+    let sensors = if sensors.is_empty() {
+        ui::caption("No sensor health reported")
+            .tone(Tone::Muted)
+            .boxed()
+    } else {
+        row(sensors.into_iter().map(|status| {
+            let state = match (status.enabled, status.healthy) {
+                (false, _) => Chip::Pending,
+                (true, true) => Chip::Done,
+                (true, false) => Chip::Failed,
+            };
+            ui::chip(status.sensor.name(), state)
+        }))
+        .spacing(ui::space::XS)
+        .wrap()
         .boxed()
+    };
+
+    column![
+        battery,
+        checks,
+        (!precision.is_empty()).then(|| ui::caption(precision).tone(Tone::Muted)),
+        sensors,
+    ]
+    .spacing(ui::space::S)
+    .boxed()
+}
+
+/// Home, and how far the mission has come.
+fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
+    let home = vehicle.to_home().map_or_else(
+        || ui::text("–"),
+        |home| {
+            ui::text(format!(
+                "{} · {:.0}°",
+                distance(home.distance_m),
+                home.bearing_deg
+            ))
+        },
+    );
+
+    let Some(mission) = vehicle.mission_status() else {
+        return stats(vec![
+            ui::stat("Home", home),
+            ui::stat("Mission", ui::text("–")),
+        ]);
+    };
+
+    let (state, tone) = match mission.state {
+        MissionState::Active => ("active", Tone::Success),
+        MissionState::Paused => ("paused", Tone::Warning),
+        MissionState::Complete => ("complete", Tone::Muted),
+        MissionState::NotStarted => ("not started", Tone::Muted),
+        _ => ("", Tone::Muted),
+    };
+    let item = match mission.count {
+        Some(count) => format!("Item {} of {count}", mission.current + 1),
+        None => format!("Item {}", mission.current + 1),
+    };
+    let to_item = mission
+        .to_current
+        .map_or_else(|| "–".to_string(), |offset| distance(offset.distance_m));
+
+    column![
+        stats(vec![
+            ui::stat("Home", home),
+            ui::stat("Mission", ui::text(item)),
+            ui::stat("To item", ui::text(to_item)),
+        ]),
+        row![
+            ui::progress(
+                (mission.current + 1) as f32,
+                mission.count.unwrap_or(mission.current + 1) as f32
+            ),
+            ui::caption(state).tone(tone),
+        ]
+        .spacing(ui::space::M)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(ui::space::S)
+    .boxed()
+}
+
+/// The latest warning or worse the vehicle sent, if any; the log panel has
+/// them all.
+fn view_alert(vehicle: &Vehicle) -> Element<'_, Message> {
+    match vehicle.status.latest_alert() {
+        Some(alert) => column![
+            ui::caption("Latest alert"),
+            ui::text(&alert.text)
+                .tone(Tone::of_severity(alert.severity))
+                .single_line(),
+        ]
+        .spacing(ui::space::XXS)
+        .boxed(),
+        None => ui::caption("No alerts").tone(Tone::Muted).boxed(),
+    }
+}
+
+/// A distance in metres, or kilometres from one up.
+fn distance(metres: f64) -> String {
+    if metres < 1000.0 {
+        format!("{metres:.0} m")
+    } else {
+        format!("{:.2} km", metres / 1000.0)
+    }
 }
 
 /// A short, legible marker for a vehicle's liveness, and its tone.

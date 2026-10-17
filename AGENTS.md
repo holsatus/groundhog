@@ -308,6 +308,39 @@ It requests anything else as an `Effect`: confirm, select a vehicle, move the
 map, remember a directory. Features never reach into each other or into the
 application.
 
+### The workspace is three columns around the map
+
+`layout.rs` keeps a `Workspace`: a left and a right column that stack panes
+top to bottom, and a row beneath the map that tiles them left to right. The
+map is fixed in the middle. A rail button opens its panel at the end of the
+left column (click), the row (middle-click or Ctrl/Cmd-click) or the right
+column (right-click or Shift-click); a panel joining `n` others takes
+`1/(n + 1)` of its stack and the others keep their proportions. Clicking
+an open panel's button closes it.
+
+Dragging a pane moves it within this shape, and the highlight shows only
+what the shape allows, where the pane would be laid out if it were added
+to the layout on screen (which still holds it in its old place)
+(`Layout::drop_hint`, plugged into the vendored grid with
+`PaneGrid::drop_target`): dropped in the middle of a pane, the two swap
+places and sizes; on the rest of one half of a pane (top or bottom in a
+column, left or right in the row), it splits that pane's share in two;
+dropped on the divider between two panes, it takes an even share of the
+stack; dropped on the map's left or right quarter, it opens that column,
+and anywhere else on the map, the row, but only while that stack is empty
+(a stack with panes is joined beside them).
+
+The columns' widths and the row's height are pixels, so resizing the window
+resizes the map. The `Workspace` is the persisted truth: the pane grid's
+state is rebuilt from it (`State::rearrange`, in the vendored grid, keeps
+each surviving pane's identity and so its widget state) on every structural
+change and every change of the grid's size, which a `sensor` reports. A
+dragged divider moves the grid first; the workspace then measures it.
+
+*Why:* free splitting made every new pane take half of whatever it split,
+and a layout that tracks fractions makes the side panels grow and shrink
+with the window, where the map is what should.
+
 ### Failures reach the operator; consequential commands ask first
 
 Every failed operation becomes a `Notice`: a toast, plus the log panel's
@@ -410,7 +443,7 @@ so the look is decided in one place:
   `ui/icon.rs` (see `assets/icons/README.md`).
 - **Layout:** `ui::panel` is every pane's body, `ui::empty` a panel with only
   a reason; `ui::card`, `ui::card_list` (rows split by edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`,
-  `ui::toolbar`, `ui::list_row` (striped) cover the shared arrangements.
+  `ui::toolbar`, `ui::list_row` (striped), `ui::split_column` (two scrolling views sharing a height by what each needs) cover the shared arrangements.
 
 When a second view would build something the same way, add it to `ui`
 rather than copying it.
@@ -582,8 +615,9 @@ with a location), the file formats, and jump-target translation (for
 ### Add a UI panel
 
 1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
-   `icon` (add the icon to `ui::Icon` if it is new) and `default_edge`, and
-   list it in `Panel::DOCKABLE`.
+   and `icon` (add the icon to `ui::Icon` if it is new), and list it in
+   `Panel::DOCKABLE`. Where it opens is the operator's choice (see
+   [The workspace](#the-workspace-is-three-columns-around-the-map)).
 2. Create `features/<name>.rs` (or a directory) with its state, `Message`,
    `update(&mut self, message, cx: &mut Context<Message>) -> Task<Message>`,
    and `view`, which returns a `ui::panel`.
@@ -617,6 +651,11 @@ replaces the file atomically.
   runtime works around this for `MAG_CAL_REPORT`
   (`services/runtime.rs`, `decode_mag_cal_report`); check for the same when
   you rely on another enum-carrying message.
+- **Groundhog does not request telemetry streams.** It shows what the
+  autopilot sends by default: `SYS_STATUS` (battery, sensor health),
+  `GPS_RAW_INT`, positions, attitude. A value that stays "–" may simply not
+  be streamed; on ArduPilot the `SR*_` parameters set the rates. Do not
+  assume a message arrives because the dialect has it.
 - **Never resend calibration commands.** Firmwares do not deduplicate them: a
   resent start restarts or repeats the calibration, and a resent ArduPilot
   orientation confirmation is refused once measuring has begun.

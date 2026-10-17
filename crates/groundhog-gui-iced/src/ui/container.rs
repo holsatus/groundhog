@@ -132,3 +132,8 @@ pub fn chip<'a, M: 'a>(label: impl IntoFragment<'a>, state: Chip) -> Element<'a,
 pub fn progress<'a>(done: f32, total: f32) -> ProgressBar<'a> {
     progress_bar(0.0..=total.max(f32::EPSILON), done).girth(size::PROGRESS)
 }
+
+/// A level, as `value` of `full`, filled in `tone`: a battery's charge.
+pub fn meter<'a>(value: f32, full: f32, tone: Tone) -> ProgressBar<'a> {
+    progress(value, full).style(style::meter(tone))
+}

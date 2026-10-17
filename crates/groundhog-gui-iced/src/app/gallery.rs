@@ -29,7 +29,10 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavAutopilot, MavModeFlag, MavParamType, MavSeverity, MavState, MavType},
+        enums::{
+            GpsFixType, MavAutopilot, MavModeFlag, MavParamType, MavSeverity, MavState,
+            MavSysStatusSensor, MavType, MissionState,
+        },
         messages,
     },
 };
@@ -76,10 +79,48 @@ fn fleet() -> Fleet {
         yaw: 1.2,
         ..Default::default()
     }));
+    // Every usual sensor present, the airspeed sensor unused, the compass
+    // failing, and so the pre-arm checks too.
+    let present = MavSysStatusSensor::_3D_GYRO
+        | MavSysStatusSensor::_3D_ACCEL
+        | MavSysStatusSensor::_3D_MAG
+        | MavSysStatusSensor::ABSOLUTE_PRESSURE
+        | MavSysStatusSensor::DIFFERENTIAL_PRESSURE
+        | MavSysStatusSensor::GPS
+        | MavSysStatusSensor::RC_RECEIVER
+        | MavSysStatusSensor::MAV_SYS_STATUS_AHRS
+        | MavSysStatusSensor::MOTOR_OUTPUTS
+        | MavSysStatusSensor::BATTERY
+        | MavSysStatusSensor::MAV_SYS_STATUS_PREARM_CHECK;
+    let enabled = present.difference(MavSysStatusSensor::DIFFERENTIAL_PRESSURE);
+    let healthy = present
+        .difference(MavSysStatusSensor::_3D_MAG)
+        .difference(MavSysStatusSensor::MAV_SYS_STATUS_PREARM_CHECK);
     observe(DefaultDialect::SysStatus(messages::SysStatus {
         voltage_battery: 15_820,
         current_battery: 1_240,
         battery_remaining: 76,
+        onboard_control_sensors_present: present,
+        onboard_control_sensors_enabled: enabled,
+        onboard_control_sensors_health: healthy,
+        ..Default::default()
+    }));
+    observe(DefaultDialect::GpsRawInt(messages::GpsRawInt {
+        fix_type: GpsFixType::_3dFix,
+        satellites_visible: 14,
+        eph: 80,
+        ..Default::default()
+    }));
+    observe(DefaultDialect::HomePosition(messages::HomePosition {
+        latitude: 554_650_000,
+        longitude: 104_100_000,
+        ..Default::default()
+    }));
+    // ArduPilot numbers the home slot 0: sequence 2 is the second item.
+    observe(DefaultDialect::MissionCurrent(messages::MissionCurrent {
+        seq: 2,
+        total: 4,
+        mission_state: MissionState::Active,
         ..Default::default()
     }));
 
@@ -141,6 +182,12 @@ fn fleet() -> Fleet {
     fleet
 }
 
+/// One step of the pointer, before a render.
+enum Pointer {
+    Move(iced::Point),
+    Press,
+}
+
 struct Gallery {
     directory: PathBuf,
 }
@@ -161,10 +208,33 @@ impl Gallery {
         element: Element<'_, Message>,
         cursor: Option<iced::Point>,
     ) {
+        let moves = cursor.map(Pointer::Move);
+        self.render_after(name, size, theme, element, moves);
+    }
+
+    /// Render `element` after the pointer did `steps`: shows what only
+    /// shows on hover, or in the middle of a drag.
+    fn render_after(
+        &self,
+        name: &str,
+        size: Size,
+        theme: &Theme,
+        element: Element<'_, Message>,
+        steps: impl IntoIterator<Item = Pointer>,
+    ) {
+        use iced::mouse;
+
         let path = self.directory.join(name);
         let mut simulator = iced_test::Simulator::with_size(Default::default(), size, element);
-        if let Some(cursor) = cursor {
-            simulator.point_at(cursor);
+        for step in steps {
+            let event = match step {
+                Pointer::Move(position) => {
+                    simulator.point_at(position);
+                    mouse::Event::CursorMoved { position }
+                }
+                Pointer::Press => mouse::Event::ButtonPressed(mouse::Button::Left),
+            };
+            let _ = simulator.simulate([iced::Event::Mouse(event)]);
         }
         let snapshot = simulator.snapshot(theme).expect("the interface renders");
 
@@ -210,7 +280,8 @@ async fn gallery() {
         high_latency: false,
         auto_reconnect: true,
         build: LinkBuild::Udp {
-            sock_addr: std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 14550),
+            // Any free port, so the gallery never collides with a real SITL.
+            sock_addr: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0),
             peer: None,
         },
     })));
@@ -236,18 +307,27 @@ async fn gallery() {
         plan: Some(SYSTEM),
         kind: MessageKind::AddWaypoint,
     }));
-    for panel in [
-        layout::Panel::Mission,
-        layout::Panel::Parameters,
-        layout::Panel::Logs,
+    // A panel in each of the three places.
+    for (panel, slot) in [
+        (layout::Panel::Mission, layout::Slot::Left),
+        (layout::Panel::Parameters, layout::Slot::Right),
+        (layout::Panel::Logs, layout::Slot::Middle),
+        (layout::Panel::Links, layout::Slot::Middle),
     ] {
-        let _ = app.update(Message::Layout(layout::Message::Toggle(panel)));
+        let _ = app.update(Message::Layout(layout::Message::Toggle(panel, slot)));
     }
 
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let _ = app.update(Message::Settings(settings_panel::Message::Theme(mode)));
         let theme = app.theme();
 
+        // What the grid's sensor reports in the application: the window,
+        // less its padding, the rail, and the gap beside the rail.
+        let grid = Size::new(
+            1600.0 - 3.0 * ui::space::S - ui::size::RAIL_BUTTON,
+            1000.0 - 2.0 * ui::space::S,
+        );
+        let _ = app.update(Message::Layout(layout::Message::Sized(grid)));
         gallery.render(
             &format!("window-{suffix}"),
             Size::new(1600.0, 1000.0),
@@ -276,6 +356,63 @@ async fn gallery() {
         }
     }
 
+    // Dragging the parameters (right column) by their title bar, to show
+    // where they would land: the bottom half of the vehicles pane (splitting
+    // it), the divider beneath it (an even share), its middle (a swap), and
+    // the right half of the log, in the row beneath the map (splitting it).
+    let _ = app.update(Message::Settings(settings_panel::Message::Theme(
+        ThemeMode::Dark,
+    )));
+    let grid = Size::new(
+        1600.0 - 3.0 * ui::space::S - ui::size::RAIL_BUTTON,
+        1000.0 - 2.0 * ui::space::S,
+    );
+    let _ = app.update(Message::Layout(layout::Message::Sized(grid)));
+    let origin = iced::Point::new(1600.0 - ui::space::S - 360.0 / 2.0, ui::space::S + 18.0);
+    let regions: Vec<(layout::Panel, iced::Rectangle)> = app
+        .layout
+        .panes()
+        .layout()
+        .pane_regions(layout::SPACING, layout::MIN_PANE, grid)
+        .into_iter()
+        .map(|(pane, region)| {
+            // The grid sits right of the rail, inside the window's padding.
+            let offset =
+                iced::Vector::new(2.0 * ui::space::S + ui::size::RAIL_BUTTON, ui::space::S);
+            (*app.layout.panes().get(pane).unwrap(), region + offset)
+        })
+        .collect();
+    let region = |panel| regions.iter().find(|(p, _)| *p == panel).unwrap().1;
+    let vehicles = region(layout::Panel::Vehicles);
+    for (name, at) in [
+        (
+            "drag-split",
+            iced::Point::new(vehicles.center_x(), vehicles.y + vehicles.height * 0.75),
+        ),
+        (
+            "drag-between",
+            iced::Point::new(vehicles.center_x(), vehicles.y + vehicles.height + 2.0),
+        ),
+        ("drag-swap", vehicles.center()),
+        ("drag-row", {
+            let logs = region(layout::Panel::Logs);
+            iced::Point::new(logs.x + logs.width * 0.75, logs.center_y())
+        }),
+    ] {
+        gallery.render_after(
+            name,
+            Size::new(1600.0, 1000.0),
+            &app.theme(),
+            app.view().boxed(),
+            [
+                Pointer::Move(origin),
+                Pointer::Press,
+                Pointer::Move(origin + iced::Vector::new(-40.0, 40.0)),
+                Pointer::Move(at),
+            ],
+        );
+    }
+
     // A saved link loaded into the editor, which would overwrite it.
     let sitl = app
         .backend
@@ -284,9 +421,27 @@ async fn gallery() {
         .find(|(_, config, _)| config.name == "SITL")
         .map(|(id, ..)| id.clone())
         .expect("the SITL link is saved");
-    let _ = app.update(Message::Links(link_panel::Message::EditLink(sitl)));
+    let _ = app.update(Message::Links(link_panel::Message::EditLink(sitl.clone())));
     gallery.render(
         "panel-links-overwrite-dark",
+        Size::new(560.0, 820.0),
+        &ThemeMode::Dark.theme(),
+        iced::widget::container(app.pane_body(layout::Panel::Links))
+            .style(style::pane)
+            .boxed(),
+    );
+
+    // The link connected. (Its details are in a tooltip, which shows only
+    // after a hover delay that a snapshot does not wait for.)
+    let _ = app.update(Message::Links(link_panel::Message::Connect(sitl.clone())));
+    for _ in 0..100 {
+        if app.backend.links().status(&sitl).is_connected() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    gallery.render(
+        "panel-links-connected-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
         iced::widget::container(app.pane_body(layout::Panel::Links))

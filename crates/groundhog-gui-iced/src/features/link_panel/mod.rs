@@ -9,17 +9,17 @@
 
 mod editor;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::{
     Alignment, Element, Length, Task, Widget,
-    widget::{Column, column, row, text::Ellipsis},
+    widget::{Column, column, container, row, text::Ellipsis, tooltip},
 };
 
 pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkField, LinkVariant};
 use groundhog_logic::{
     link::{LinkConfig, LinkId},
-    services::{self, LinkManager, LinkStatus},
+    services::{self, LinkManager, LinkStats, LinkStatus},
 };
 
 use super::notifications::{Notice, Notifications};
@@ -307,16 +307,27 @@ fn view_link<'a>(
         .hint("Delete the link")
         .on_press(Message::Delete(id.clone()));
 
-    let detail = status_detail(manager, id, &status);
+    let summary = summarize(
+        &status,
+        manager.stats(id),
+        manager.last_connected(id),
+        Instant::now(),
+    );
     let label = column![
         ui::text(&config.name).single_line(),
-        (!detail.is_empty()).then(|| ui::caption(detail).tone(Tone::Muted)),
+        ui::caption(summary.glance).tone(summary.tone),
     ]
-    .spacing(ui::space::XXS)
-    .width(Length::Fill);
+    .spacing(ui::space::XXS);
+
+    // The details are a hover away, so the row stays readable at a glance.
+    let label = if summary.details.is_empty() {
+        label.boxed()
+    } else {
+        ui::tooltip(label, summary.details.join("\n"), tooltip::Position::Bottom)
+    };
 
     row![
-        label,
+        container(label).width(Length::Fill),
         toggle.width(110.0).boxed(),
         edit.boxed(),
         delete.boxed()
@@ -326,38 +337,123 @@ fn view_link<'a>(
     .boxed()
 }
 
-/// A line on how the link is doing; empty while it is off.
-fn status_detail(manager: &LinkManager, id: &LinkId, status: &LinkStatus) -> String {
-    let now = Instant::now();
+/// A link connected for this long without receiving a frame is called
+/// silent: whatever is at the other end is not talking.
+const SILENT_AFTER: Duration = Duration::from_secs(3);
+
+/// What the operator sees of a link: a line to read at a glance, its tone,
+/// and the details behind it.
+#[derive(Debug, PartialEq)]
+struct Summary {
+    glance: String,
+    tone: Tone,
+    details: Vec<String>,
+}
+
+fn summarize(
+    status: &LinkStatus,
+    stats: Option<LinkStats>,
+    last_connected: Option<Instant>,
+    now: Instant,
+) -> Summary {
+    let summary = |glance: String, tone, details| Summary {
+        glance,
+        tone,
+        details,
+    };
+
     match status {
-        LinkStatus::Disconnected => String::new(),
-        LinkStatus::Connecting { attempt: 1 } => "Connecting…".to_string(),
-        LinkStatus::Connecting { attempt } => format!("Connecting (attempt {attempt})…"),
-        LinkStatus::Connected { .. } => match manager.stats(id) {
-            Some(stats) => {
-                let heard = stats.last_rx.map_or_else(
-                    || "nothing received yet".to_string(),
-                    |at| {
-                        format!(
-                            "last frame {:.1} s ago",
-                            now.duration_since(at).as_secs_f32()
-                        )
-                    },
-                );
+        LinkStatus::Disconnected => match last_connected {
+            Some(at) => summary(
                 format!(
-                    "Connected · {} in, {} out · {heard}",
-                    stats.rx_frames, stats.tx_frames
+                    "Last connected {} ago",
+                    span(now.saturating_duration_since(at))
+                ),
+                Tone::Muted,
+                Vec::new(),
+            ),
+            None => summary("Not connected".to_string(), Tone::Muted, Vec::new()),
+        },
+        LinkStatus::Connecting { attempt: 1 } => {
+            summary("Connecting…".to_string(), Tone::Accent, Vec::new())
+        }
+        LinkStatus::Connecting { attempt } => summary(
+            format!("Connecting (attempt {attempt})…"),
+            Tone::Accent,
+            Vec::new(),
+        ),
+        LinkStatus::Connected { since } => {
+            let connected = now.saturating_duration_since(*since);
+            let heard = stats
+                .and_then(|stats| stats.last_rx)
+                .map(|at| now.saturating_duration_since(at));
+            let silence = heard.unwrap_or(connected);
+
+            let mut details = vec![format!("Connected for {}", span(connected))];
+            details.extend(stats.map(traffic).into_iter().flatten());
+
+            if silence > SILENT_AFTER {
+                summary(
+                    format!("Connected, but silent for {}", span(silence)),
+                    Tone::Warning,
+                    details,
+                )
+            } else {
+                summary(
+                    format!("Connected for {}", span(connected)),
+                    Tone::Success,
+                    details,
                 )
             }
-            None => "Connected".to_string(),
-        },
+        }
         LinkStatus::Reconnecting {
-            error, retry_at, ..
-        } => format!(
-            "{error}; retrying in {:.0} s",
-            retry_at.saturating_duration_since(now).as_secs_f32().ceil()
+            error,
+            attempt,
+            retry_at,
+        } => summary(
+            format!(
+                "Connection lost, retrying in {}",
+                span(retry_at.saturating_duration_since(now))
+            ),
+            Tone::Warning,
+            vec![error.clone(), format!("Attempt {attempt}")],
         ),
-        LinkStatus::Failed(error) => format!("Failed: {error}"),
+        LinkStatus::Failed(error) => {
+            summary("Failed".to_string(), Tone::Danger, vec![error.clone()])
+        }
+    }
+}
+
+/// The traffic counters, as lines of a tooltip.
+fn traffic(stats: LinkStats) -> Vec<String> {
+    let errors = stats.read_errors + stats.parse_errors + stats.write_errors;
+    let total = stats.rx_frames + stats.tx_frames + errors;
+
+    let mut lines = vec![
+        format!("Received {} frames", stats.rx_frames),
+        format!("Sent {} frames", stats.tx_frames),
+    ];
+    lines.push(if errors == 0 {
+        "No errors".to_string()
+    } else {
+        format!(
+            "Errors: {} read, {} parse, {} write ({:.1} % of traffic)",
+            stats.read_errors,
+            stats.parse_errors,
+            stats.write_errors,
+            errors as f64 / total as f64 * 100.0
+        )
+    });
+    lines
+}
+
+/// A duration in its largest sensible unit: "4 s", "12 min", "3 h 5 min".
+fn span(duration: Duration) -> String {
+    let seconds = duration.as_secs_f32().ceil() as u64;
+    match seconds {
+        0..60 => format!("{seconds} s"),
+        60..3600 => format!("{} min", seconds / 60),
+        _ => format!("{} h {} min", seconds / 3600, seconds % 3600 / 60),
     }
 }
 
@@ -459,6 +555,74 @@ mod tests {
             panel.configurator.builder,
             LinkBuilder::Udp { ref port, .. } if port == "14550"
         ));
+    }
+
+    fn stats(rx_frames: u64, last_rx: Option<Instant>) -> LinkStats {
+        LinkStats {
+            rx_frames,
+            tx_frames: 10,
+            read_errors: 0,
+            parse_errors: 0,
+            write_errors: 0,
+            last_rx,
+        }
+    }
+
+    #[test]
+    fn a_healthy_link_reads_as_connected_with_traffic_behind_a_hover() {
+        let now = Instant::now();
+        let status = LinkStatus::Connected {
+            since: now - Duration::from_secs(150),
+        };
+
+        let summary = summarize(&status, Some(stats(90, Some(now))), None, now);
+        assert_eq!(summary.glance, "Connected for 2 min");
+        assert_eq!(summary.tone, Tone::Success);
+        assert_eq!(
+            summary.details,
+            [
+                "Connected for 2 min",
+                "Received 90 frames",
+                "Sent 10 frames",
+                "No errors"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_silent_link_warns_and_errors_show_their_rate() {
+        let now = Instant::now();
+        let status = LinkStatus::Connected {
+            since: now - Duration::from_secs(60),
+        };
+        let quiet = LinkStats {
+            parse_errors: 5,
+            ..stats(85, Some(now - Duration::from_secs(12)))
+        };
+
+        let summary = summarize(&status, Some(quiet), None, now);
+        assert_eq!(summary.glance, "Connected, but silent for 12 s");
+        assert_eq!(summary.tone, Tone::Warning);
+        assert_eq!(
+            summary.details.last().unwrap(),
+            "Errors: 0 read, 5 parse, 0 write (5.0 % of traffic)"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_link_says_when_it_was_last_connected() {
+        let now = Instant::now();
+        let never = summarize(&LinkStatus::Disconnected, None, None, now);
+        assert_eq!(never.glance, "Not connected");
+
+        let earlier = summarize(
+            &LinkStatus::Disconnected,
+            None,
+            Some(now - Duration::from_secs(3 * 3600 + 300)),
+            now,
+        );
+        assert_eq!(earlier.glance, "Last connected 3 h 5 min ago");
+        assert!(earlier.details.is_empty());
     }
 
     #[test]

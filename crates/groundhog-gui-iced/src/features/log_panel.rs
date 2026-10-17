@@ -99,8 +99,8 @@ impl Entry<'_> {
 }
 
 /// One line of a timeline of messages: where it came from, how severe it is,
-/// and what it says. Shared with the vehicle panel's list of status texts.
-pub fn timeline_row<'a, M: 'a>(
+/// and what it says.
+fn timeline_row<'a, M: 'a>(
     index: usize,
     source: String,
     severity: MavSeverity,

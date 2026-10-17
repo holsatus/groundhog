@@ -103,6 +103,40 @@ where
         }
     }
 
+    /// Draw only the title bar, on the pane's surface and in its border:
+    /// the compact preview of a pane being dragged. Returns `false`, drawing
+    /// nothing, for a pane without a title bar.
+    pub(super) fn draw_title_bar(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout,
+        viewport: &Rectangle,
+    ) -> bool {
+        let Some(title_bar) = &self.title_bar else {
+            return false;
+        };
+        let Some((title_bar_layout, title_bar_tree)) = layout.iter(&tree.children).nth(1) else {
+            return false;
+        };
+
+        let surface = theme.style(&self.class);
+        container::draw_background(renderer, &surface, title_bar_layout.bounds());
+        title_bar.draw(
+            title_bar_tree,
+            renderer,
+            theme,
+            style,
+            title_bar_layout,
+            mouse::Cursor::Unavailable,
+            viewport,
+            false,
+        );
+        true
+    }
+
     /// Draws the [`Content`] with the provided [`Renderer`] and [`Layout`].
     ///
     /// [`Renderer`]: core::Renderer

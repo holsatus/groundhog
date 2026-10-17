@@ -155,11 +155,25 @@ impl Outbound {
     }
 }
 
+/// Whether `frame`'s checksum does not match its message, as known to the
+/// dialect. Messages outside the dialect cannot be checked, and pass.
+fn is_corrupt(frame: &Frame<Versionless>) -> bool {
+    matches!(
+        frame.validate_checksum::<mavio::DefaultDialect>(),
+        Err(mavio::error::Error::Frame(
+            mavio::error::FrameError::Checksum
+        ))
+    )
+}
+
 /// Traffic counters of one link attachment.
 #[derive(Debug, Default)]
 struct LinkCounters {
     rx_frames: AtomicU64,
     tx_frames: AtomicU64,
+    read_errors: AtomicU64,
+    parse_errors: AtomicU64,
+    write_errors: AtomicU64,
     /// Milliseconds since the router's epoch at the last received frame, plus
     /// one (zero means never).
     last_rx: AtomicU64,
@@ -168,8 +182,16 @@ struct LinkCounters {
 /// A snapshot of one link's traffic counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkStats {
+    /// Frames received intact.
     pub rx_frames: u64,
     pub tx_frames: u64,
+    /// Reads from the transport that failed.
+    pub read_errors: u64,
+    /// Received data that did not parse as a frame, or a frame whose
+    /// checksum does not match its message.
+    pub parse_errors: u64,
+    /// Writes to the transport that failed.
+    pub write_errors: u64,
     /// When the last frame was received on this link, if ever.
     pub last_rx: Option<Instant>,
 }
@@ -451,6 +473,9 @@ impl MavlinkRouter {
         Some(LinkStats {
             rx_frames: counters.rx_frames.load(Ordering::Relaxed),
             tx_frames: counters.tx_frames.load(Ordering::Relaxed),
+            read_errors: counters.read_errors.load(Ordering::Relaxed),
+            parse_errors: counters.parse_errors.load(Ordering::Relaxed),
+            write_errors: counters.write_errors.load(Ordering::Relaxed),
             last_rx: last_rx
                 .checked_sub(1)
                 .map(|millis| self.inner.epoch + Duration::from_millis(millis)),
@@ -606,6 +631,7 @@ impl MavlinkRouter {
                             }
                             Err(error) => {
                                 failures += 1;
+                                tx_counters.write_errors.fetch_add(1, Ordering::Relaxed);
                                 log::error!("Failed to send MAVLink frame on {id:?}: {error}");
 
                                 if failures >= MAX_CONSECUTIVE_SEND_FAILURES {
@@ -638,7 +664,16 @@ impl MavlinkRouter {
                         match receiver.recv().await {
                             Ok(frame) => {
                                 consecutive_errors = 0;
-                                counters.rx_frames.fetch_add(1, Ordering::Relaxed);
+                                // A frame whose checksum does not match its
+                                // message was corrupted in transit. It is still
+                                // routed (decoding refuses it later), but it
+                                // counts as a parse error, not a good frame.
+                                let counter = if is_corrupt(&frame) {
+                                    &counters.parse_errors
+                                } else {
+                                    &counters.rx_frames
+                                };
+                                counter.fetch_add(1, Ordering::Relaxed);
                                 let millis = router.inner.epoch.elapsed().as_millis() as u64;
                                 counters.last_rx.store(millis + 1, Ordering::Relaxed);
 
@@ -652,6 +687,11 @@ impl MavlinkRouter {
                             }
                             Err(error) => {
                                 consecutive_errors += 1;
+                                let counter = match error {
+                                    mavio::error::Error::Io(_) => &counters.read_errors,
+                                    _ => &counters.parse_errors,
+                                };
+                                counter.fetch_add(1, Ordering::Relaxed);
                                 log::debug!("Receive error on {id:?}: {error:?}")
                             }
                         }
@@ -1062,6 +1102,40 @@ mod tests {
 
         let stats = router.link_stats(&id).expect("attached");
         assert!(stats.tx_frames >= 20);
+    }
+
+    #[tokio::test]
+    async fn frames_that_do_not_parse_are_counted() {
+        use tokio::io::AsyncWriteExt;
+
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let (mut peer, gcs) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(gcs);
+        let _guard = router.attach_reader_writer(id.clone(), reader, writer, false);
+
+        let frame = frame_from(SOURCE, 0, &Heartbeat::default());
+        let mut bytes = [0u8; 300];
+        let length = frame.serialize(&mut bytes).unwrap();
+        let mut corrupt = bytes[..length].to_vec();
+        // A payload byte changed in transit: the checksum no longer matches.
+        corrupt[12] ^= 0xff;
+
+        for chunk in [&bytes[..length], &corrupt, &bytes[..length]] {
+            AsyncWriteExt::write_all(&mut peer, chunk).await.unwrap();
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let stats = router.link_stats(&id).expect("attached");
+            if stats.rx_frames == 2 && stats.parse_errors == 1 {
+                assert_eq!(stats.read_errors, 0);
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{stats:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
