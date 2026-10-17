@@ -93,7 +93,7 @@ pub fn draw(
     let arrow_width = radius * 2.0 / 3.0;
 
     draw_dial(frame, center, radius, palette);
-    draw_arrow_head(frame, center, arrow_width, yaw, palette, false);
+    draw_arrow_head(frame, center, arrow_width, yaw, palette, 0.0);
 }
 
 /// The opaque compass card: a filled disc, its border, the tick ring, and the
@@ -234,7 +234,7 @@ pub(crate) fn draw_arrow_head(
     width: f32,
     yaw: f32,
     palette: &Palette,
-    outlined: bool,
+    ouline_width: f32,
 ) {
     // Half-width and half-height, in local coordinates centred on the dial.
     let half = width / 2.0;
@@ -259,7 +259,7 @@ pub(crate) fn draw_arrow_head(
             builder.close();
         });
 
-        if outlined {
+        if ouline_width > 0.0 {
             let outline = Path::new(|builder| {
                 builder.move_to(tip);
                 builder.line_to(Point::new(half, half));
@@ -270,7 +270,7 @@ pub(crate) fn draw_arrow_head(
 
             let stroke = Stroke::default()
                 .with_color(palette.background.strongest.text)
-                .with_width(6.0);
+                .with_width(ouline_width);
 
             frame.stroke(&outline, stroke);
         }

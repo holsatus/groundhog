@@ -413,6 +413,35 @@ async fn gallery() {
         );
     }
 
+    // Dragging a closed panel's rail button onto the middle of the
+    // vehicles pane: it has nothing to swap with, so it splits the half
+    // the cursor is on.
+    let (index, closed) = layout::Panel::DOCKABLE
+        .into_iter()
+        .enumerate()
+        .find(|(_, panel)| !app.layout.is_open(*panel))
+        .expect("a closed panel");
+    let button = iced::Point::new(
+        ui::space::S + ui::size::RAIL_BUTTON / 2.0,
+        ui::space::S
+            + index as f32 * (ui::size::RAIL_BUTTON + ui::space::S)
+            + ui::size::RAIL_BUTTON / 2.0,
+    );
+    let _ = app.update(Message::RailDragged(closed));
+    gallery.render_after(
+        "drag-rail",
+        Size::new(1600.0, 1000.0),
+        &app.theme(),
+        app.view().boxed(),
+        [
+            Pointer::Move(button),
+            Pointer::Press,
+            Pointer::Move(button + iced::Vector::new(40.0, 20.0)),
+            Pointer::Move(vehicles.center() + iced::Vector::new(0.0, 20.0)),
+        ],
+    );
+    let _ = app.update(Message::RailDropped);
+
     // A saved link loaded into the editor, which would overwrite it.
     let sitl = app
         .backend

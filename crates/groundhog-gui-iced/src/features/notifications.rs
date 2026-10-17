@@ -12,8 +12,8 @@ use std::{
 
 use groundhog_logic::SystemId;
 use iced::{
-    Alignment, Element, Length, Widget,
-    widget::{column, container, row},
+    Alignment, Element, Length, Widget, mouse,
+    widget::{column, container, mouse_area, row},
 };
 
 use crate::ui::{self, Icon, Tone, style};
@@ -192,15 +192,20 @@ impl Notifications {
                 .on_press(Message::Dismiss(toast.id))
                 .boxed();
 
-            container(
+            let toast = container(
                 row![body, dismiss]
                     .spacing(ui::space::M)
-                    .align_y(Alignment::Start),
+                    .align_y(Alignment::Center),
             )
             .padding([ui::space::S, ui::space::M])
             .width(Length::Fixed(340.0))
-            .style(style::toast(notice.level.tone()))
-            .boxed()
+            .style(style::toast(notice.level.tone()));
+
+            // A toast is opaque to the pointer: what lies beneath (the map)
+            // is not hovered, zoomed or dragged through it.
+            mouse_area(toast)
+                .interaction(mouse::Interaction::Idle)
+                .boxed()
         });
 
         column(toasts).spacing(ui::space::S).boxed()

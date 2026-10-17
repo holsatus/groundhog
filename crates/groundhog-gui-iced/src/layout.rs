@@ -4,8 +4,9 @@
 //! holds the map, with a row of panes beneath it, left to right. A panel
 //! opens at the end of the stack it is opened in (the bottom of a column,
 //! the right of the row) and takes exactly `1/(n + 1)` of a stack that held
-//! `n` panes, the others keeping their proportions. The map is fixed: it
-//! cannot be moved or closed.
+//! `n` panes, the others keeping their proportions. A panel can also be
+//! dragged in from its rail button, and lands where a dragged pane would.
+//! The map is fixed: it cannot be moved or closed.
 //!
 //! The side columns' widths and the row's height are kept in pixels, not
 //! fractions: when the window is resized, the map gives and takes the
@@ -370,7 +371,8 @@ impl Workspace {
         }
     }
 
-    /// Move `panel` to `destination`. Returns whether anything changed.
+    /// Move `panel` to `destination`, or open it there if it is closed.
+    /// Returns whether anything changed.
     fn place(&mut self, panel: Panel, destination: Destination) -> bool {
         if panel.is_fixed() {
             return false;
@@ -397,9 +399,11 @@ impl Workspace {
             }
             Destination::End(_) | Destination::Swap(_) => None,
         };
-        if neighbour == Some(panel) || !self.remove(panel) {
+        if neighbour == Some(panel) {
             return false;
         }
+        // An open panel moves; a closed one opens.
+        self.remove(panel);
 
         match destination {
             Destination::End(slot) => {
@@ -505,6 +509,9 @@ enum Destination {
 pub enum Message {
     Clicked(pane_grid::Pane),
     Dragged(pane_grid::DragEvent),
+    /// A panel dragged from outside the grid (a rail button) was dropped on
+    /// `Target`: it opens there, or moves there if it is open.
+    Placed(Panel, Target),
     Resized(pane_grid::ResizeEvent),
     /// Open the panel at the end of `slot`, or close it if it is open.
     Toggle(Panel, Slot),
@@ -526,6 +533,7 @@ impl Message {
         matches!(
             self,
             Message::Dragged(pane_grid::DragEvent::Dropped { .. })
+                | Message::Placed(..)
                 | Message::Resized(_)
                 | Message::Toggle(..)
                 | Message::Close(_)
@@ -633,6 +641,11 @@ impl Layout {
                 }
             }
             Message::Dragged(_) => {}
+            Message::Placed(panel, target) => {
+                if let Some(destination) = self.destination(target) {
+                    self.move_to(panel, destination);
+                }
+            }
             Message::Resized(event) => {
                 // The grid moves first; the workspace measures the result.
                 // Rearranging here would replace the split being dragged.
@@ -745,9 +758,30 @@ impl Layout {
         cursor: Point,
         regions: &BTreeMap<pane_grid::Pane, Rectangle>,
     ) -> Option<DropHint> {
-        let target = self.drop_target_at(dragged, cursor, regions)?;
+        self.hint_for(*self.panes.get(dragged)?, cursor, regions)
+    }
+
+    /// Where `panel`, dragged onto the grid from its rail button, would
+    /// land; see [`Layout::drop_hint`]. An open panel moves as if its pane
+    /// were dragged. A closed one opens, and has no pane to swap, so the
+    /// middle of a pane splits it like the rest of its half.
+    pub fn incoming_hint(
+        &self,
+        panel: Panel,
+        cursor: Point,
+        regions: &BTreeMap<pane_grid::Pane, Rectangle>,
+    ) -> Option<DropHint> {
+        self.hint_for(panel, cursor, regions)
+    }
+
+    fn hint_for(
+        &self,
+        dragging: Panel,
+        cursor: Point,
+        regions: &BTreeMap<pane_grid::Pane, Rectangle>,
+    ) -> Option<DropHint> {
+        let target = self.drop_target_at(dragging, cursor, regions)?;
         let destination = self.destination(target)?;
-        let dragging = *self.panes.get(dragged)?;
         if !self.workspace.clone().place(dragging, destination) {
             return None;
         }
@@ -899,11 +933,10 @@ impl Layout {
     /// The grid's drop target under `cursor`; see [`Layout::drop_hint`].
     fn drop_target_at(
         &self,
-        dragged: pane_grid::Pane,
+        dragging: Panel,
         cursor: Point,
         regions: &BTreeMap<pane_grid::Pane, Rectangle>,
     ) -> Option<Target> {
-        let dragging = *self.panes.get(dragged)?;
         if dragging.is_fixed() {
             return None;
         }
@@ -943,7 +976,7 @@ impl Layout {
             .iter()
             .find(|(_, region)| region.contains(cursor))
             .map(|(pane, region)| (*pane, *region))?;
-        if pane == dragged {
+        if self.pane_of(dragging) == Some(pane) {
             return None;
         }
         let relative = Point::new(
@@ -969,7 +1002,10 @@ impl Layout {
         } else {
             let middle = (0.5 - SWAP_ZONE / 2.0)..=(0.5 + SWAP_ZONE / 2.0);
             let (slot, _) = self.workspace.find(*self.panes.get(pane)?)?;
-            if middle.contains(&relative.x) && middle.contains(&relative.y) {
+            if self.is_open(dragging)
+                && middle.contains(&relative.x)
+                && middle.contains(&relative.y)
+            {
                 Region::Center
             } else if slot == Slot::Middle {
                 Region::Edge(if relative.x < 0.5 {
@@ -1204,6 +1240,51 @@ mod tests {
             pane: logs,
             target: hint.target,
         }));
+    }
+
+    #[test]
+    fn a_panel_dragged_in_from_the_rail_opens_where_it_is_dropped() {
+        let (mut layout, regions) = two_in_the_left_column();
+        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+
+        // A closed panel has nothing to swap with: the middle of a pane
+        // splits it by the half the cursor is on.
+        let below_middle = Point::new(vehicles.center_x(), vehicles.center_y() + 1.0);
+        let hint = layout
+            .incoming_hint(Panel::Logs, below_middle, &regions)
+            .expect("a target");
+        assert!(matches!(
+            hint.target,
+            Target::Pane(_, Region::Edge(Edge::Bottom))
+        ));
+        layout.update(Message::Placed(Panel::Logs, hint.target));
+        assert_eq!(
+            panels(&layout.workspace.left),
+            [Panel::Vehicles, Panel::Logs, Panel::Mission]
+        );
+        assert!(layout.is_dirty(), "a placed panel is saved");
+
+        // An open panel dragged in moves as its pane would: the middle of
+        // another swaps the two.
+        let regions = pane_regions(&layout);
+        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let hint = layout
+            .incoming_hint(Panel::Mission, vehicles.center(), &regions)
+            .expect("a target");
+        assert!(matches!(hint.target, Target::Pane(_, Region::Center)));
+        layout.update(Message::Placed(Panel::Mission, hint.target));
+        assert_eq!(
+            panels(&layout.workspace.left),
+            [Panel::Mission, Panel::Logs, Panel::Vehicles]
+        );
+
+        // Over its own pane, an open panel has nowhere to go.
+        let logs = pane_regions(&layout)[&layout.pane_of(Panel::Logs).unwrap()];
+        assert!(
+            layout
+                .incoming_hint(Panel::Logs, logs.center(), &pane_regions(&layout))
+                .is_none()
+        );
     }
 
     #[test]

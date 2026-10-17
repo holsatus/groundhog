@@ -318,22 +318,17 @@ impl MapLayer<Message> for Icons<'_> {
             let center = frame.view().to_screen(position.pos);
             let yaw = heading(vehicle);
 
-            if self.selected == Some(vehicle.system)
+            let outline_width = if self.selected == Some(vehicle.system)
                 || interaction.is_active(Self::handle(vehicle.system))
             {
-                frame.frame().stroke(
-                    &Path::circle(center, ICON_SIZE * 0.7),
-                    Stroke {
-                        style: Style::Solid(self.palette.primary.base.color),
-                        width: 2.0,
-                        ..Stroke::default()
-                    },
-                );
-            }
+                10.0
+            } else {
+                4.0
+            };
 
             let palette = self.palette;
             frame.frame().with_save(|frame| {
-                attitude::draw_arrow_head(frame, center, ICON_SIZE, yaw, &palette, true);
+                attitude::draw_arrow_head(frame, center, ICON_SIZE, yaw, &palette, outline_width);
             });
 
             let below = frame

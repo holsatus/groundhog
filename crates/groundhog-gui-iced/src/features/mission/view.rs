@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Height of a single mission-list row.
-const ROW_HEIGHT: f32 = 32.0;
+const ROW_HEIGHT: f32 = 34.0;
 
 /// A command in the command picker.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,25 +132,24 @@ impl MissionEditor {
 
         let list = self.view_list(plan, draft, current);
 
-        // With an item selected, the list and its editor share the height by
-        // what each needs, each scrolling on its own when cut short.
+        // With an item selected, the list and its editor share the height,
+        // each scrolling on its own.
         let body = match draft
             .selected
             .and_then(|id| draft.plan().get(id).map(|item| (id, item)))
         {
-            Some((id, item)) => ui::split_column(
-                list,
-                scrollable(view_editor(plan, draft, id, item, status, editable)),
-            ),
+            Some((id, item)) => column![
+                container(list).height(Length::FillPortion(1)),
+                scrollable(view_editor(plan, draft, id, item, status, editable))
+                    .height(Length::FillPortion(1)),
+            ],
             None => column![
-                container(list).height(Length::Fill),
+                list,
                 ui::caption("Select an item to edit it.").tone(Tone::Muted)
-            ]
-            .spacing(ui::space::M)
-            .boxed(),
+            ],
         };
 
-        ui::panel(column![header, body].spacing(ui::space::M))
+        ui::panel(column![header, body.spacing(ui::space::M)].spacing(ui::space::M))
     }
 
     /// The running transfer's progress and a cancel button.
@@ -200,7 +199,9 @@ impl MissionEditor {
         current: Option<usize>,
     ) -> Element<'a, Message> {
         if draft.plan().is_empty() {
-            return ui::caption("The plan is empty.").tone(Tone::Muted).boxed();
+            return container(ui::caption("The plan is empty.").tone(Tone::Muted))
+                .height(Length::Fill)
+                .boxed();
         }
 
         let selected = draft.selected;
@@ -239,8 +240,10 @@ impl MissionEditor {
         .item_height(|_| ROW_HEIGHT)
         .key(|(_, planned)| planned.id());
 
-        // Only as tall as its rows; its parent decides how much of that shows.
-        scrollable(list).width(Length::Fill).boxed()
+        scrollable(list)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .boxed()
     }
 }
 

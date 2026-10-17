@@ -123,7 +123,7 @@ are shared by all.
 | gui `features/` | One module per UI feature | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
 | gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
 | gui `app.rs` | Wiring at boot, message routing, effects, notice policy | everything | contain feature logic |
-| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, attitude) | iced | depend on the domain |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, attitude) | iced | depend on the domain |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and
@@ -314,7 +314,8 @@ application.
 top to bottom, and a row beneath the map that tiles them left to right. The
 map is fixed in the middle. A rail button opens its panel at the end of the
 left column (click), the row (middle-click or Ctrl/Cmd-click) or the right
-column (right-click or Shift-click); a panel joining `n` others takes
+column (right-click or Shift-click), or wherever its button is dragged
+onto the grid; a panel joining `n` others takes
 `1/(n + 1)` of its stack and the others keep their proportions. Clicking
 an open panel's button closes it.
 
@@ -329,6 +330,15 @@ dropped on the divider between two panes, it takes an even share of the
 stack; dropped on the map's left or right quarter, it opens that column,
 and anywhere else on the map, the row, but only while that stack is empty
 (a stack with panes is joined beside them).
+
+A rail button dragged onto the grid lands by the same rules
+(`Layout::incoming_hint`): the button is a `widget::drag_source`, which
+reports when the drag starts and ends and carries a label for the panel
+(its icon and name, styled as a tooltip) centred above the cursor; while it lasts the application
+hands the grid the hint with `PaneGrid::incoming`, so the grid highlights
+and reports the drop as it does for its own panes. An open panel moves as
+if its pane were dragged; a closed one opens, and since it has no place to
+swap, the middle of a pane splits it like the rest of its half.
 
 The columns' widths and the row's height are pixels, so resizing the window
 resizes the map. The `Workspace` is the persisted truth: the pane grid's

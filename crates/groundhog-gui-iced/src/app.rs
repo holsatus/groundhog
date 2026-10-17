@@ -46,7 +46,10 @@ use crate::{
         self, Icon,
         style::{self, ButtonKind},
     },
-    widget::pane_grid::{self, PaneGrid},
+    widget::{
+        drag_source::drag_source,
+        pane_grid::{self, PaneGrid},
+    },
 };
 
 /// The features that take a [`Context`], grouped so their state can be
@@ -71,6 +74,8 @@ pub struct Application {
     selected: Option<SystemId>,
     /// The keyboard modifiers held, for the rail's clicks.
     modifiers: keyboard::Modifiers,
+    /// The panel whose rail button is being dragged onto the grid.
+    rail_drag: Option<layout::Panel>,
     recorder: Option<TlogRecorder>,
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
@@ -92,6 +97,12 @@ pub enum Message {
     /// A rail button was clicked with the primary button; the modifiers
     /// held decide where its panel opens.
     Rail(layout::Panel),
+    /// A rail button is being dragged; the grid shows where its panel
+    /// would land.
+    RailDragged(layout::Panel),
+    /// The rail button's drag ended: dropped (the grid reports where, as a
+    /// layout message) or cancelled.
+    RailDropped,
     /// The keyboard modifiers changed.
     Modifiers(keyboard::Modifiers),
     Map(map::Message),
@@ -146,6 +157,7 @@ impl Application {
             fleet: Arc::default(),
             selected: None,
             modifiers: keyboard::Modifiers::default(),
+            rail_drag: None,
             recorder: None,
             notices,
             confirmation: None,
@@ -236,6 +248,14 @@ impl Application {
                     layout::Slot::Left
                 };
                 self.update(Message::Layout(layout::Message::Toggle(panel, slot)))
+            }
+            Message::RailDragged(panel) => {
+                self.rail_drag = Some(panel);
+                Task::none()
+            }
+            Message::RailDropped => {
+                self.rail_drag = None;
+                Task::none()
             }
             Message::Modifiers(modifiers) => {
                 self.modifiers = modifiers;
@@ -502,24 +522,46 @@ impl Application {
             .padding(ui::space::S)
             .style(style::workspace);
 
-        let toasts = container(self.notices.view().map(Message::Notifications))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_right(Length::Fill)
-            .align_bottom(Length::Fill)
-            .padding(ui::space::XL);
+        // Toasts pop up in the map's corner, unless a maximized pane hides
+        // the map.
+        let base = if self.map_is_shown() {
+            base.boxed()
+        } else {
+            stack![base, self.view_toasts(ui::space::XL)].boxed()
+        };
 
         container(confirm::view(
-            stack![base, toasts].boxed(),
+            base,
             self.confirmation.as_ref(),
             Message::Confirm,
         ))
     }
 
+    /// Whether the map is on screen: no other pane is maximized.
+    fn map_is_shown(&self) -> bool {
+        let panes = self.layout.panes();
+        panes
+            .maximized()
+            .is_none_or(|pane| panes.get(pane) == Some(&layout::Panel::Map))
+    }
+
+    /// The toasts, in the bottom-right corner of the space they are given,
+    /// `inset` from its edges.
+    fn view_toasts(&self, inset: f32) -> Element<'_, Message> {
+        container(self.notices.view().map(Message::Notifications))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_right(Length::Fill)
+            .align_bottom(Length::Fill)
+            .padding(inset)
+            .boxed()
+    }
+
     /// The rail: a button per panel, highlighted while it is open. Pressing
     /// an open panel's button closes it. A closed panel opens in the left,
     /// middle or right column by the mouse button pressed (or a plain,
-    /// Ctrl/Cmd or Shift click).
+    /// Ctrl/Cmd or Shift click), or where its button is dragged onto the
+    /// grid.
     fn view_rail(&self) -> Element<'_, Message> {
         let buttons = layout::Panel::DOCKABLE.into_iter().map(|panel| {
             let open = self.layout.is_open(panel);
@@ -535,17 +577,25 @@ impl Application {
                 .on_middle_press(toggle(layout::Slot::Middle))
                 .on_right_press(toggle(layout::Slot::Right));
 
-            let hint = if open {
-                format!("Close {}", panel.title())
-            } else {
-                format!(
-                    "Open {}\nClick: left column\n\
-                     Middle-click or Ctrl/Cmd-click: beneath the map\n\
-                     Right-click or Shift-click: right column",
-                    panel.title()
-                )
-            };
-            ui::tooltip(button, hint, tooltip::Position::Right)
+            // Dragged, the button becomes a label for the panel, styled as a tooltip.
+            let preview = container(
+                row![
+                    ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
+                    ui::text(panel.title())
+                ]
+                .spacing(ui::space::S)
+                .align_y(Alignment::Center),
+            )
+            .padding([ui::space::S, ui::space::M])
+            .style(style::tooltip);
+            let button = drag_source(
+                button,
+                preview,
+                Message::RailDragged(panel),
+                Message::RailDropped,
+            );
+
+            ui::tooltip(button, panel.title(), tooltip::Position::Right)
         });
 
         column(buttons).spacing(ui::space::S).boxed()
@@ -556,7 +606,7 @@ impl Application {
     /// pixels.
     fn view_panes(&self) -> impl Widget<Message> + '_ {
         let sized = |size| Message::Layout(layout::Message::Sized(size));
-        let grid = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
+        let mut grid = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
             // The map paints opaque tiles across its whole pane, which a rounded
             // container cannot clip; it draws its own frame instead (see
             // `map::Map::view`), and has no title bar to grab, so it cannot be
@@ -627,6 +677,13 @@ impl Application {
         .drop_target(|dragged, cursor, regions| self.layout.drop_hint(dragged, cursor, regions))
         .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
 
+        if let Some(panel) = self.rail_drag {
+            grid = grid.incoming(
+                move |cursor, regions| self.layout.incoming_hint(panel, cursor, regions),
+                move |target| Message::Layout(layout::Message::Placed(panel, target)),
+            );
+        }
+
         sensor(grid).on_show(sized).on_resize(sized)
     }
 
@@ -646,7 +703,11 @@ impl Application {
                 layers.plugin(&self.features.vehicles, context, Message::Vehicles);
                 layers.plugin(&self.features.mission, context, Message::Mission);
 
-                self.map.view(layers, Message::Map, &theme)
+                let map = self.map.view(layers, Message::Map, &theme);
+                // A `Stack` hides the pointer from the map only where an
+                // upper layer shows one: here, over the toasts, which are
+                // meant to hide it.
+                stack![map, self.view_toasts(ui::space::M)].boxed()
             }
             layout::Panel::Vehicles => self
                 .features

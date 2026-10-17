@@ -286,15 +286,22 @@ pub fn tooltip(theme: &Theme) -> container::Style {
     }
 }
 
-/// A notification toast, accented by its tone.
+/// How much of a toast's tone its background takes.
+const TOAST_TINT: f32 = 0.12;
+
+/// A notification toast, accented by its tone: bordered in it, on a
+/// background tinted with it. The background stays opaque, since toasts
+/// float over the map.
 pub fn toast(tone: Tone) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let palette = theme.palette();
+        let surface_pair = palette.background.weak;
 
         container::Style {
+            background: Some(mix(surface_pair.color, tone.color(palette), TOAST_TINT).into()),
             border: Border {
                 width: 2.0,
-                radius: WIDGET_RADIUS.into(),
+                radius: PANE_RADIUS.into(),
                 color: tone.color(palette),
             },
             shadow: Shadow {
@@ -302,9 +309,19 @@ pub fn toast(tone: Tone) -> impl Fn(&Theme) -> container::Style {
                 offset: Vector::new(0.0, 2.0),
                 blur_radius: 8.0,
             },
-            ..surface(palette.background.weak)
+            ..surface(surface_pair)
         }
     }
+}
+
+/// `base` with `amount` (0 to 1) of `tint` mixed in, opaque.
+fn mix(base: Color, tint: Color, amount: f32) -> Color {
+    let channel = |base: f32, tint: f32| base + (tint - base) * amount;
+    Color::from_rgb(
+        channel(base.r, tint.r),
+        channel(base.g, tint.g),
+        channel(base.b, tint.b),
+    )
 }
 
 /// A modal dialog.

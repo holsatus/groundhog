@@ -18,6 +18,8 @@
 //     pane lands and what is highlighted (`DropHint`, `Target::Between`); the
 //     hint is drawn over the dragged pane, whose preview shrinks to its title
 //     bar (`Content::draw_title_bar`)
+//   - `PaneGrid::incoming` takes a drag that started outside the grid: the
+//     grid draws its drop hint and reports where it was dropped
 //   - `State::rearrange` replaces the arrangement, keeping the `Pane` of every
 //     kept state (so pane widget state survives a rearrangement)
 //
@@ -138,6 +140,17 @@ pub struct DropHint {
 /// pane's region; `None` where it cannot be dropped.
 type DropTarget<'a> = Box<dyn Fn(Pane, Point, &BTreeMap<Pane, Rectangle>) -> Option<DropHint> + 'a>;
 
+/// Where something dragged from outside the grid lands, given the cursor
+/// and every pane's region; `None` where it cannot be dropped.
+type IncomingHint<'a> = Box<dyn Fn(Point, &BTreeMap<Pane, Rectangle>) -> Option<DropHint> + 'a>;
+
+/// A drag from outside the grid: where it would land, and the message a
+/// drop there produces.
+struct Incoming<'a, Message> {
+    hint: IncomingHint<'a>,
+    on_drop: Box<dyn Fn(Target) -> Message + 'a>,
+}
+
 const DRAG_DEADBAND_DISTANCE: f32 = 10.0;
 const THICKNESS_RATIO: f32 = 25.0;
 
@@ -207,6 +220,7 @@ where
     on_click: Option<Box<dyn Fn(Pane) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
     drop_target: Option<DropTarget<'a>>,
+    incoming: Option<Incoming<'a, Message>>,
     #[allow(clippy::type_complexity)]
     on_resize: Option<(f32, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     class: <Theme as Catalog>::Class<'a>,
@@ -247,6 +261,7 @@ where
             on_click: None,
             on_drag: None,
             drop_target: None,
+            incoming: None,
             on_resize: None,
             class: <Theme as Catalog>::default(),
             last_mouse_interaction: None,
@@ -309,6 +324,31 @@ where
     {
         self.drop_target = Some(Box::new(target));
         self
+    }
+
+    /// Take a drag that started outside the grid, such as a button dragged
+    /// onto it, for as long as the application keeps this set: `hint` gets
+    /// the cursor and every pane's region and returns where a drop there
+    /// lands and the area to highlight, or `None`. A release over a hint
+    /// publishes `on_drop` with its target; ending the drag anywhere else is
+    /// the application's to notice.
+    pub fn incoming<H, D>(mut self, hint: H, on_drop: D) -> Self
+    where
+        H: 'a + Fn(Point, &BTreeMap<Pane, Rectangle>) -> Option<DropHint>,
+        D: 'a + Fn(Target) -> Message,
+    {
+        self.incoming = Some(Incoming {
+            hint: Box::new(hint),
+            on_drop: Box::new(on_drop),
+        });
+        self
+    }
+
+    /// The incoming drag's hint under `cursor`, in a grid laid out at
+    /// `bounds`.
+    fn incoming_hint(&self, cursor: mouse::Cursor, bounds: Rectangle) -> Option<DropHint> {
+        let incoming = self.incoming.as_ref()?;
+        (incoming.hint)(cursor.position()?, &self.regions(bounds))
     }
 
     /// The custom drop target under `cursor` while `dragged` is dragged,
@@ -615,6 +655,20 @@ where
         } else {
             &None
         };
+
+        // A drag from outside: its hint follows the cursor, and a release
+        // over one drops it.
+        if let Some(incoming) = &self.incoming {
+            match event {
+                Event::Mouse(mouse::Event::CursorMoved { .. }) => shell.request_redraw(),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    if let Some(hint) = self.incoming_hint(cursor, layout.bounds()) {
+                        shell.publish((incoming.on_drop)(hint.target));
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let Memory { action, .. } = tree.state.downcast_mut();
         let picked_pane = action.picked_pane().map(|(pane, _)| pane);
@@ -932,13 +986,13 @@ where
 
         // Every seam to highlight: all picked seams while resizing, or the
         // hovered seam(s) otherwise. A corner grab highlights both seams.
-        let split_highlights = if dragged_pane.is_none() {
+        let split_highlights = if dragged_pane.is_none() && self.incoming.is_none() {
             self.split_highlights(action, node.as_ref(), layout, cursor, resize_leeway)
         } else {
             Vec::new()
         };
 
-        let pane_cursor = if picked_pane.is_some() {
+        let pane_cursor = if picked_pane.is_some() || self.incoming.is_some() {
             mouse::Cursor::Unavailable
         } else {
             cursor
@@ -1091,6 +1145,17 @@ where
                         ..renderer::Quad::default()
                     },
                     highlight.color,
+                );
+            }
+
+            if let Some(hint) = self.incoming_hint(cursor, layout.bounds()) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: hint.area,
+                        border: style.hovered_region.border,
+                        ..renderer::Quad::default()
+                    },
+                    style.hovered_region.background,
                 );
             }
         });

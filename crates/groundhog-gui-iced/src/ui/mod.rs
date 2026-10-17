@@ -21,7 +21,6 @@ mod button;
 mod container;
 pub mod icon;
 mod input;
-mod split;
 pub mod style;
 mod text;
 pub mod theme;
@@ -33,6 +32,5 @@ pub use container::{
 };
 pub use icon::Icon;
 pub use input::{checkbox, pick_list, text_input};
-pub use split::split_column;
 pub use style::{Chip, Tone, size, space};
 pub use text::{TextExt, caption, heading, mono, severity, text, title};
