@@ -1,9 +1,8 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use mav_param::{Ident, Value};
-use mavio::default_dialect::{
-    enums::MavProtocolCapability,
-    messages::{AutopilotVersion, ParamRequestList, ParamRequestRead, ParamSet, ParamValue},
+use mavio::default_dialect::messages::{
+    AutopilotVersion, ParamRequestList, ParamRequestRead, ParamSet, ParamValue,
 };
 use tokio::time::timeout;
 
@@ -12,13 +11,18 @@ use super::{
     locks::LockKey,
     router::MavlinkRouter,
 };
-use crate::foundation::MavlinkId;
+use crate::{foundation::MavlinkId, wire::param::ParamEncoding};
 
 const PARAM_SET_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_SET_RETRIES: u8 = 3;
 
 const PARAM_LIST_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_LIST_RETRIES: u8 = 3;
+
+/// The most missing parameters re-requested per idle round. Re-requesting
+/// hundreds at once floods a slow radio and mostly produces more losses; the
+/// round repeats while the vehicle keeps answering.
+const PARAM_REREQUEST_BATCH: usize = 32;
 
 impl MavlinkRouter {
     /// Set a parameter on `target` and wait for it to echo back its new value.
@@ -31,10 +35,9 @@ impl MavlinkRouter {
         target: MavlinkId,
         ident: Ident,
         value: Value,
-        cap: MavProtocolCapability,
+        encoding: ParamEncoding,
     ) -> Result<Value> {
-        let (param_value, param_type) =
-            crate::wire::param::to_wire(cap, value).ok_or(MavError::ParamEncoding)?;
+        let (param_value, param_type) = encoding.encode(value);
 
         // Ensure we are the only ones setting *this* parameter
         let _lock = self.lock_key(LockKey::Param(target, ident.clone())).await;
@@ -63,7 +66,8 @@ impl MavlinkRouter {
             )?;
 
             if let Ok(Some(reply)) = timeout(PARAM_SET_TIMEOUT, recv_value.next()).await {
-                return crate::wire::param::from_wire(cap, reply.param_value, reply.param_type)
+                return encoding
+                    .decode(reply.param_value, reply.param_type)
                     .ok_or(MavError::ParamEncoding);
             }
         }
@@ -124,16 +128,18 @@ impl MavlinkRouter {
                         // We do not know how many we are missing, so request all again
                         None => self.send_targeted(target, ParamRequestList::default())?,
                         Some(count) => {
-                            for index in 0..count {
-                                if !received.contains(&index) {
-                                    self.send_targeted(
-                                        target,
-                                        ParamRequestRead {
-                                            param_index: index as i16,
-                                            ..Default::default()
-                                        },
-                                    )?;
-                                }
+                            let missing = (0..count)
+                                .filter(|index| !received.contains(index))
+                                .take(PARAM_REREQUEST_BATCH);
+
+                            for index in missing {
+                                self.send_targeted_bulk(
+                                    target,
+                                    ParamRequestRead {
+                                        param_index: index as i16,
+                                        ..Default::default()
+                                    },
+                                )?;
                             }
                         }
                     }

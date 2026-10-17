@@ -140,6 +140,7 @@ pub struct LinkConfigurator {
     pub name: String,
     pub auto_connect: bool,
     pub high_latency: bool,
+    pub auto_reconnect: bool,
     pub builder: LinkBuilder,
     pub build: Option<LinkBuild>,
 }
@@ -150,6 +151,7 @@ impl LinkConfigurator {
             name,
             auto_connect: false,
             high_latency: false,
+            auto_reconnect: true,
             builder: builder.clone(),
             build: builder.try_build(),
         }
@@ -160,6 +162,7 @@ impl LinkConfigurator {
             name: self.name.clone(),
             auto_connect: self.auto_connect,
             high_latency: self.high_latency,
+            auto_reconnect: self.auto_reconnect,
             build: build.clone(),
         })
     }

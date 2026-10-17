@@ -1,3 +1,4 @@
+pub mod calibration;
 pub mod firmware;
 pub mod fleet;
 pub mod geo;

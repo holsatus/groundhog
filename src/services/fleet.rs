@@ -1,30 +1,73 @@
-//! Fleet-scoped entry point to the vehicle operations the UI drives.
-//!
-//! The application owns one [`MavlinkRouter`] and wraps it here, so features can
-//! start transactions against any vehicle without naming the middleware.
+//! The application's entry point to the fleet: the latest snapshot, and
+//! clients for operating vehicles.
 
-use crate::{foundation::MavlinkId, mavlink::MavlinkRouter};
+use std::sync::Arc;
 
-use super::VehicleClient;
+use tokio::sync::{mpsc, watch};
 
-/// A handle to the vehicle operations available to the application.
-///
-/// Wraps the MAVLink router so the UI layer can start transactions without
-/// depending on the middleware. Cheap to clone.
+use super::{VehicleClient, runtime::Input};
+use crate::{
+    domain::{SystemId, fleet::FleetSnapshot},
+    foundation::MavlinkId,
+    mavlink::MavlinkRouter,
+};
+
+/// A handle to the fleet runtime. Cheap to clone; every clone sees the same
+/// fleet.
 #[derive(Clone)]
-pub struct FleetServices {
+pub struct FleetHandle {
     router: MavlinkRouter,
+    inputs: mpsc::UnboundedSender<Input>,
+    snapshot: watch::Receiver<Arc<FleetSnapshot>>,
 }
 
-impl FleetServices {
-    pub fn new(router: &MavlinkRouter) -> Self {
+impl FleetHandle {
+    pub(super) fn new(
+        router: MavlinkRouter,
+        inputs: mpsc::UnboundedSender<Input>,
+        snapshot: watch::Receiver<Arc<FleetSnapshot>>,
+    ) -> Self {
         Self {
-            router: router.clone(),
+            router,
+            inputs,
+            snapshot,
         }
     }
 
-    /// A client for the vehicle at the given address.
-    pub fn vehicle(&self, target: MavlinkId) -> VehicleClient {
-        VehicleClient::new(&self.router, target)
+    /// The fleet as last published.
+    pub fn snapshot(&self) -> Arc<FleetSnapshot> {
+        self.snapshot.borrow().clone()
+    }
+
+    /// Wait until `system` appears in a published snapshot, for at most
+    /// `timeout`. Returns whether it did.
+    pub async fn wait_for(&self, system: SystemId, timeout: std::time::Duration) -> bool {
+        let mut snapshot = self.snapshot.clone();
+        let appeared = snapshot.wait_for(|fleet| fleet.contains(system));
+        matches!(tokio::time::timeout(timeout, appeared).await, Ok(Ok(_)))
+    }
+
+    /// A client for the vehicle `system`, addressing its autopilot.
+    pub fn vehicle(&self, system: SystemId) -> VehicleClient {
+        VehicleClient::new(self.clone(), system, None)
+    }
+
+    /// A client for one component of a vehicle, for per-component operations
+    /// such as parameters.
+    pub fn component(&self, address: MavlinkId) -> VehicleClient {
+        VehicleClient::new(
+            self.clone(),
+            SystemId::from(address.system),
+            Some(address.component),
+        )
+    }
+
+    pub(super) fn router(&self) -> &MavlinkRouter {
+        &self.router
+    }
+
+    pub(super) fn report(&self, input: Input) {
+        // The runtime only stops with the application.
+        let _ = self.inputs.send(input);
     }
 }

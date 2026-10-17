@@ -2,9 +2,14 @@
 //!
 //! [`Vehicle`] is a thin aggregator: each subsystem owns its slice of state and
 //! its `observe_*` fold, and `handle_message` dispatches each decoded frame to
-//! the right subsystem. Identity lives in [`identity`], attitude in
-//! [`attitude`], position and its trail in [`position`], battery in [`battery`],
-//! and status texts in [`status`].
+//! the right subsystem.
+//!
+//! This is *vehicle* state only — what the vehicle reported. The operator's
+//! drafts (mission plans, parameter edits) live with the features that edit
+//! them, so the fleet can be owned by a runtime off the UI thread and handed to
+//! the UI as cheap immutable snapshots. The heavier subsystems (trail, status
+//! log, per-component parameters) sit behind [`Arc`]s: cloning a vehicle for a
+//! snapshot shares them, and a mutation copies only the subsystem it touches.
 //!
 //! Scoping follows MAVLink's component model: vehicle-scoped flight and system
 //! state (identity, attitude, position, battery, mission progress) is folded
@@ -16,6 +21,8 @@
 
 pub mod attitude;
 pub mod battery;
+pub mod class;
+pub mod home;
 pub mod identity;
 pub mod mission;
 pub mod position;
@@ -24,13 +31,13 @@ pub mod status;
 pub use self::status::StatusText;
 
 use self::{
-    attitude::AttitudeState, battery::Battery, identity::Identity, mission::MissionProgress,
-    position::PositionTrack, status::StatusLog,
+    attitude::AttitudeState, battery::Battery, class::VehicleClass, home::Home, identity::Identity,
+    mission::VehicleMission, position::PositionTrack, status::StatusLog,
 };
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-use mav_param::{Ident, Value};
+use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
@@ -40,10 +47,12 @@ use mavio::{
 };
 
 use crate::{
-    domain::firmware::FlightMode,
-    domain::mission::{MissionPlan, MissionSync},
-    domain::parameter::{self, Parameters},
-    foundation::{BoxError, MavlinkId},
+    domain::calibration::{self, CalibrationUpdate, Feedback},
+    domain::firmware::{self, Firmware, FlightMode, MissionLayout},
+    domain::mission::OnboardMission,
+    domain::parameter::{DownloadState, Parameters},
+    foundation::MavlinkId,
+    wire::param::ParamEncoding,
 };
 
 /// Identifies a MAVLink system — i.e. a vehicle.
@@ -81,15 +90,15 @@ pub enum Liveness {
     Lost,
 }
 
-/// A component's own state: its parameters and the capabilities that govern
-/// how those parameters are encoded on the wire.
+/// A component's own state: its identity, parameters and the capabilities
+/// that govern how those parameters are encoded on the wire.
 ///
 /// Parameters are per component: a gimbal or companion computer has its own set
-/// under the same MAVLink system, decoded with its own
-/// [`MavProtocolCapability`].
+/// under the same MAVLink system, decoded with its own encoding.
 #[derive(Debug, Clone, Default)]
 pub struct ComponentState {
     capabilities: Option<MavProtocolCapability>,
+    autopilot: Option<MavAutopilot>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
     parameters: Parameters,
@@ -100,12 +109,22 @@ impl ComponentState {
         &self.parameters
     }
 
-    pub fn parameters_mut(&mut self) -> &mut Parameters {
-        &mut self.parameters
+    /// How this component encodes parameter values: as advertised in its
+    /// capabilities, else as its firmware is known to. `None` when neither
+    /// is known, in which case parameter writes must not be attempted.
+    pub fn param_encoding(&self) -> Option<ParamEncoding> {
+        self.capabilities
+            .and_then(ParamEncoding::advertised)
+            .or_else(|| {
+                self.autopilot
+                    .and_then(|autopilot| firmware::for_autopilot(autopilot).param_encoding())
+            })
     }
 
-    pub fn capabilities(&self) -> Option<MavProtocolCapability> {
-        self.capabilities
+    /// Re-decode parameters if what is known about the encoding changed.
+    fn refresh_encoding(&mut self) {
+        let encoding = self.param_encoding();
+        self.parameters.set_encoding(encoding);
     }
 }
 
@@ -118,18 +137,16 @@ pub struct Vehicle {
     autopilot: Option<u8>,
     pub identity: Identity,
     pub attitude: AttitudeState,
-    pub position: PositionTrack,
+    pub position: Arc<PositionTrack>,
     pub battery: Battery,
-    pub status: StatusLog,
-    /// The editable flight plan.
-    pub mission: MissionPlan,
-    /// Whether the plan matches the vehicle, and under which id.
-    pub mission_sync: MissionSync,
-    /// The vehicle's mission execution progress.
-    pub mission_progress: MissionProgress,
+    pub status: Arc<StatusLog>,
+    home_position: Option<Home>,
+    pub mission: VehicleMission,
     /// Per-component state (parameters, capabilities, names), keyed by the
     /// MAVLink component id.
-    components: BTreeMap<u8, ComponentState>,
+    components: BTreeMap<u8, Arc<ComponentState>>,
+    /// The latest calibration run, until dismissed.
+    pub calibration: Option<calibration::Session>,
     pub last_seen: Option<Instant>,
     pub liveness: Liveness,
 }
@@ -142,54 +159,25 @@ impl Vehicle {
         }
     }
 
-    fn component(&self, component: u8) -> Option<&ComponentState> {
-        self.components.get(&component)
-    }
-
     fn component_mut(&mut self, component: u8) -> &mut ComponentState {
-        self.components.entry(component).or_default()
+        Arc::make_mut(self.components.entry(component).or_default())
     }
 
-    /// The state of `component`, if it has been heard from. Exposed so the view
-    /// layer can render component details (vendor/model names).
+    /// The state of `component`, if it has been heard from.
     pub fn component_state(&self, component: u8) -> Option<&ComponentState> {
-        self.component(component)
+        self.components.get(&component).map(Arc::as_ref)
     }
 
     /// The component's parameter set, if that component has been heard from.
     pub fn parameters(&self, component: u8) -> Option<&Parameters> {
-        self.component(component).map(ComponentState::parameters)
+        self.component_state(component)
+            .map(ComponentState::parameters)
     }
 
-    /// The component's parameter set, created on demand.
-    pub fn parameters_mut(&mut self, component: u8) -> &mut Parameters {
-        self.component_mut(component).parameters_mut()
-    }
-
-    /// Fold an upload result onto the component's in-flight upload of `ident`.
-    ///
-    /// A result only updates parameter state the component already has: if the
-    /// component was never heard from, the outcome is
-    /// [`UploadOutcome::Ignored`] and nothing is touched. The result is only
-    /// read; the caller keeps ownership for diagnostics.
-    pub fn apply_parameter_upload(
-        &mut self,
-        component: u8,
-        ident: Ident,
-        requested: Value,
-        result: &Result<Value, BoxError>,
-    ) -> parameter::UploadOutcome {
-        if self.parameters(component).is_none() {
-            return parameter::UploadOutcome::Ignored;
-        }
-
-        self.parameters_mut(component)
-            .apply_upload_result(&ident, requested, result)
-    }
-
-    pub fn capabilities(&self, component: u8) -> Option<MavProtocolCapability> {
-        self.component(component)
-            .and_then(ComponentState::capabilities)
+    /// How `component` encodes parameter values, if known.
+    pub fn param_encoding(&self, component: u8) -> Option<ParamEncoding> {
+        self.component_state(component)
+            .and_then(ComponentState::param_encoding)
     }
 
     /// Every component heard from, in ascending id order.
@@ -238,51 +226,157 @@ impl Vehicle {
         self.autopilot.unwrap_or(1) == component
     }
 
-    /// The latest reported flight mode, resolved for the vehicle's firmware.
-    pub fn flight_mode(&self) -> FlightMode {
+    /// The firmware adapter for this vehicle.
+    pub fn firmware(&self) -> &'static dyn Firmware {
+        self.identity.firmware()
+    }
+
+    pub fn class(&self) -> VehicleClass {
+        self.identity.class()
+    }
+
+    /// The latest reported flight mode, if the firmware knows it.
+    pub fn flight_mode(&self) -> Option<FlightMode> {
         self.identity.flight_mode()
     }
 
     /// Whether the vehicle reports itself as armed, if it has sent a heartbeat.
     pub fn armed(&self) -> Option<bool> {
-        self.identity.armed()
+        self.identity.is_armed()
+    }
+
+    /// How this vehicle's firmware lays out missions.
+    pub fn mission_layout(&self) -> MissionLayout {
+        self.firmware().mission_layout()
+    }
+
+    /// The home position: as reported by `HOME_POSITION`, else as held in the
+    /// home slot of the last downloaded mission.
+    pub fn home(&self) -> Option<Home> {
+        self.home_position.or_else(|| {
+            let home = self.mission.onboard.as_ref()?.home.as_ref()?;
+            let position = home.position()?;
+            Some(Home {
+                position: crate::domain::geo::GeoPosition::new(position.lat, position.lon),
+                altitude_msl: position.alt_m,
+            })
+        })
+    }
+
+    /// The plan index the vehicle is executing, if known.
+    pub fn current_mission_index(&self) -> Option<usize> {
+        self.mission.progress.current_index(self.mission_layout())
+    }
+
+    /// A display name: vendor and model when known, else the class and id.
+    pub fn display_name(&self) -> String {
+        let state = self.component_state(self.default_parameter_component());
+        let vendor = state.and_then(|state| state.vendor_name.as_deref());
+        let model = state.and_then(|state| state.model_name.as_deref());
+
+        match (vendor, model) {
+            (Some(vendor), Some(model)) => format!("{vendor} {model} ({})", self.system.0),
+            (None, Some(model)) => format!("{model} ({})", self.system.0),
+            _ => format!("{} {}", self.class().name(), self.system.0),
+        }
+    }
+
+    /// Record the mission the vehicle holds after a transfer.
+    pub fn set_onboard_mission(&mut self, mission: OnboardMission) {
+        self.mission.onboard = Some(Arc::new(mission));
+    }
+
+    /// Apply what the operation running a calibration reports. Returns
+    /// whether it was applied: a vehicle whose firmware has no calibration
+    /// protocol cannot begin one.
+    pub fn update_calibration(&mut self, update: CalibrationUpdate) -> bool {
+        match update {
+            CalibrationUpdate::Begin(kind) => {
+                let Some(protocol) = self.firmware().calibration() else {
+                    return false;
+                };
+                self.calibration = Some(calibration::Session::new(
+                    kind,
+                    protocol.completes_on_ack(kind),
+                ));
+            }
+            CalibrationUpdate::Acknowledged(result) => match &mut self.calibration {
+                Some(session) => session.acknowledged(result),
+                None => return false,
+            },
+            CalibrationUpdate::Cancel => match &mut self.calibration {
+                Some(session) => session.cancel(),
+                None => return false,
+            },
+            CalibrationUpdate::Dismiss => {
+                if self
+                    .calibration
+                    .as_ref()
+                    .is_some_and(calibration::Session::is_running)
+                {
+                    return false;
+                }
+                self.calibration = None;
+            }
+        }
+        true
+    }
+
+    /// Fold the autopilot's feedback into a running calibration.
+    fn observe_calibration(&mut self, feedback: Feedback<'_>) {
+        let protocol = self.firmware().calibration();
+        if let (Some(protocol), Some(session)) = (protocol, &mut self.calibration)
+            && session.is_running()
+        {
+            protocol.observe(session, feedback);
+        }
+    }
+
+    /// Record a parameter list download's progress for `component`.
+    pub fn set_param_download(&mut self, component: u8, state: DownloadState) {
+        Arc::make_mut(self.components.entry(component).or_default())
+            .parameters
+            .set_download(state);
     }
 
     fn on_param_value(&mut self, component: u8, message: &messages::ParamValue) {
-        let cap = self.capabilities(component).unwrap_or_default();
-
-        let maybe_value =
-            crate::wire::param::from_wire(cap, message.param_value, message.param_type);
-
-        let Some(new_value) = maybe_value else {
-            log::error!("Unsupported type of parameter: {:?}", message.param_type);
-            return;
-        };
-
         let Ok(ident) = Ident::try_from(&message.param_id) else {
-            log::error!("Invalid parameter identifier: {:?}", message.param_id);
+            log::warn!("Invalid parameter identifier: {:?}", message.param_id);
             return;
         };
 
-        let parameters = self.parameters_mut(component);
+        let state = self.component_mut(component);
+        let encoding = state.param_encoding();
 
-        // Upload results are handled by `parameter::Message::ValueUploaded`: a
-        // reported value only refreshes the stored one, never the edit state.
-        parameters.observe_value(ident, new_value);
-
-        if message.param_index == u16::MAX {
-            return;
+        if let Err(error) = state.parameters.observe(
+            ident,
+            message.param_value,
+            message.param_type,
+            message.param_index,
+            message.param_count,
+            encoding,
+        ) {
+            log::warn!("Parameter {:?} skipped: {error}", message.param_id);
         }
-
-        // Keep track of how many we expect
-        parameters.note_loaded_index(message.param_index, message.param_count);
     }
 
-    pub fn handle_message(&mut self, time: Instant, component: u8, message: DefaultDialect) {
-        match &message {
+    /// Fold one decoded message from `component` into the vehicle. Returns a
+    /// status text the message completed, if any.
+    pub fn handle_message(
+        &mut self,
+        time: Instant,
+        component: u8,
+        message: &DefaultDialect,
+    ) -> Option<StatusText> {
+        match message {
             DefaultDialect::Heartbeat(message) => {
-                // Any heartbeat marks the component as present.
-                self.component_mut(component);
+                {
+                    let state = self.component_mut(component);
+                    if state.autopilot != Some(message.autopilot) {
+                        state.autopilot = Some(message.autopilot);
+                        state.refresh_encoding();
+                    }
+                }
 
                 if message.autopilot != MavAutopilot::Invalid {
                     // The conventional autopilot is component 1, and it takes
@@ -296,7 +390,7 @@ impl Vehicle {
                 // Only the autopilot's heartbeat describes the vehicle as a
                 // whole; a peripheral's must not overwrite type, mode or armed.
                 if self.autopilot == Some(component) {
-                    self.identity.observe_heartbeat(self.system, message);
+                    self.identity.observe_heartbeat(message);
                 }
             }
             DefaultDialect::AutopilotVersion(message) => {
@@ -304,115 +398,120 @@ impl Vehicle {
                 let state = self.component_mut(component);
                 if state.capabilities != Some(message.capabilities) {
                     log::debug!(
-                        "Received capabilities for {system:?} component {component}: {:b}",
+                        "Capabilities of {system:?} component {component}: {:?}",
                         message.capabilities
                     );
                     state.capabilities = Some(message.capabilities);
+                    state.refresh_encoding();
                 }
             }
             DefaultDialect::ComponentInformationBasic(message) => {
-                let system = self.system;
                 let state = self.component_mut(component);
 
-                if let Some(model_name) = string_from_cstring(&message.model_name)
-                    && !model_name.is_empty()
-                {
+                if let Some(model_name) = string_from_cstring(&message.model_name) {
                     state.model_name = Some(model_name)
                 }
-                if let Some(vendor_name) = string_from_cstring(&message.vendor_name)
-                    && !vendor_name.is_empty()
-                {
+                if let Some(vendor_name) = string_from_cstring(&message.vendor_name) {
                     state.vendor_name = Some(vendor_name)
                 }
 
                 if state.capabilities != Some(message.capabilities) {
-                    log::debug!(
-                        "Received capabilities for {system:?} component {component}: {:b}",
-                        message.capabilities
-                    );
                     state.capabilities = Some(message.capabilities);
+                    state.refresh_encoding();
                 }
             }
             DefaultDialect::ParamValue(message) => {
                 self.on_param_value(component, message);
             }
-            DefaultDialect::SysStatus(message) => {
-                if self.is_authoritative(component) {
-                    self.battery.observe_sys_status(message);
-                }
+            DefaultDialect::SysStatus(message) if self.is_authoritative(component) => {
+                self.battery.observe_sys_status(message);
             }
-            DefaultDialect::BatteryStatus(message) => {
-                if self.is_authoritative(component) {
-                    self.battery.observe_battery_status(message);
-                }
+            DefaultDialect::BatteryStatus(message) if self.is_authoritative(component) => {
+                self.battery.observe_battery_status(message);
             }
-            DefaultDialect::Attitude(message) => {
-                if self.is_authoritative(component) {
-                    self.attitude.observe_attitude(message);
-                }
+            DefaultDialect::Attitude(message) if self.is_authoritative(component) => {
+                self.attitude.observe_attitude(message);
             }
-            DefaultDialect::AttitudeQuaternion(message) => {
-                if self.is_authoritative(component) {
-                    self.attitude.observe_attitude_quaternion(message);
-                }
+            DefaultDialect::AttitudeQuaternion(message) if self.is_authoritative(component) => {
+                self.attitude.observe_attitude_quaternion(message);
             }
-            DefaultDialect::GlobalPositionInt(message) => {
-                if self.is_authoritative(component) {
-                    self.position.observe_global_position_int(message, time);
-                }
+            DefaultDialect::GlobalPositionInt(message) if self.is_authoritative(component) => {
+                Arc::make_mut(&mut self.position).observe_global_position_int(message, time);
             }
-            DefaultDialect::GlobalPositionIntCov(message) => {
-                if self.is_authoritative(component) {
-                    self.position.observe_global_position_int_cov(message, time);
-                }
+            DefaultDialect::GlobalPositionIntCov(message) if self.is_authoritative(component) => {
+                Arc::make_mut(&mut self.position).observe_global_position_int_cov(message, time);
             }
-            DefaultDialect::MissionCurrent(message) => {
-                if self.is_authoritative(component) {
-                    self.mission_progress.observe_current(message);
-                }
+            DefaultDialect::HomePosition(message) if self.is_authoritative(component) => {
+                self.home_position = Some(Home::from_message(message));
             }
-            DefaultDialect::MissionItemReached(message) => {
-                if self.is_authoritative(component) {
-                    self.mission_progress.observe_reached(message.seq);
-                }
+            DefaultDialect::MissionCurrent(message) if self.is_authoritative(component) => {
+                self.mission.progress.observe_current(message);
+            }
+            DefaultDialect::MissionItemReached(message) if self.is_authoritative(component) => {
+                self.mission.progress.observe_reached(message.seq);
             }
             DefaultDialect::Statustext(message) => {
-                if let Err(error) = self.status.observe_statustext(component, message, time) {
-                    log::warn!("Statustext from {} not valid utf8: {}", self.system, error);
+                let text =
+                    Arc::make_mut(&mut self.status).observe_statustext(component, message, time);
+                if let Some(text) = &text
+                    && self.is_authoritative(component)
+                {
+                    self.observe_calibration(Feedback::Text(text));
                 }
+                return text;
             }
             _ => (),
         }
+
+        if self.is_authoritative(component) {
+            self.observe_calibration(Feedback::Message(message));
+        }
+
+        None
     }
 }
 
-/// Decode a fixed-size, NUL-terminated MAVLink string, if it is valid UTF-8.
+/// Decode a fixed-size, NUL-terminated MAVLink string, if it is valid,
+/// non-empty UTF-8.
 fn string_from_cstring(cstring: &[u8]) -> Option<String> {
     let null = cstring
         .iter()
         .position(|c| *c == 0)
         .unwrap_or(cstring.len());
 
-    str::from_utf8(&cstring[..null]).map(str::to_string).ok()
+    str::from_utf8(&cstring[..null])
+        .ok()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavio::default_dialect::enums::{MavAutopilot, MavParamType, MissionState};
+    use mav_param::Value;
+    use mavio::default_dialect::enums::{MavModeFlag, MavParamType, MavType, MissionState};
 
     fn vehicle() -> Vehicle {
         Vehicle::new(SystemId(1))
     }
 
-    fn param_value(name: &str, value: f32) -> DefaultDialect {
+    fn heartbeat(autopilot: MavAutopilot) -> DefaultDialect {
+        DefaultDialect::Heartbeat(messages::Heartbeat {
+            type_: MavType::Quadrotor,
+            autopilot,
+            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+            ..Default::default()
+        })
+    }
+
+    fn param_value(name: &str, value: f32, param_type: MavParamType) -> DefaultDialect {
         let mut param_id = [0u8; 16];
         param_id[..name.len()].copy_from_slice(name.as_bytes());
 
         DefaultDialect::ParamValue(messages::ParamValue {
             param_id,
             param_value: value,
-            param_type: MavParamType::Real32,
+            param_type,
             param_count: 2,
             param_index: 0,
         })
@@ -435,7 +534,7 @@ mod tests {
         vehicle.handle_message(
             Instant::now(),
             1,
-            DefaultDialect::MissionCurrent(messages::MissionCurrent {
+            &DefaultDialect::MissionCurrent(messages::MissionCurrent {
                 seq: 2,
                 total: 8,
                 mission_state: MissionState::Active,
@@ -443,34 +542,66 @@ mod tests {
             }),
         );
 
-        assert_eq!(vehicle.mission_progress.current_seq, Some(2));
-        assert_eq!(vehicle.mission_progress.total, Some(8));
-        assert_eq!(vehicle.mission_progress.state, MissionState::Active);
+        assert_eq!(vehicle.mission.progress.current_seq, Some(2));
+        assert_eq!(vehicle.mission.progress.total, Some(8));
+        assert_eq!(vehicle.mission.progress.state, MissionState::Active);
     }
 
     #[test]
-    fn parameter_upload_result_for_an_unheard_component_is_ignored() {
+    fn the_current_index_follows_the_firmware_layout() {
         let mut vehicle = vehicle();
-
-        let ident = Ident::from_str_truncated("PARAM_ONE");
-        let outcome =
-            vehicle.apply_parameter_upload(1, ident, Value::F32(2.0), &Ok(Value::F32(2.0)));
-
-        assert_eq!(outcome, parameter::UploadOutcome::Ignored);
-        assert!(vehicle.parameters(1).is_none(), "no state was created");
-    }
-
-    #[test]
-    fn mission_item_reached_updates_current_seq() {
-        let mut vehicle = vehicle();
-
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
         vehicle.handle_message(
-            Instant::now(),
+            t,
             1,
-            DefaultDialect::MissionItemReached(messages::MissionItemReached { seq: 5 }),
+            &DefaultDialect::MissionCurrent(messages::MissionCurrent {
+                seq: 3,
+                ..Default::default()
+            }),
         );
 
-        assert_eq!(vehicle.mission_progress.current_seq, Some(5));
+        assert_eq!(
+            vehicle.current_mission_index(),
+            Some(2),
+            "ArduPilot seq 3 is plan item 2"
+        );
+    }
+
+    #[test]
+    fn ardupilot_parameters_decode_with_a_c_cast_before_capabilities_arrive() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        vehicle.handle_message(t, 1, &param_value("ARMING_CHECK", 1.0, MavParamType::Int32));
+
+        let value = vehicle
+            .parameters(1)
+            .unwrap()
+            .value(&Ident::from_str_truncated("ARMING_CHECK"));
+        assert_eq!(value, Some(Value::I32(1)));
+        assert_eq!(vehicle.param_encoding(1), Some(ParamEncoding::CCast));
+    }
+
+    #[test]
+    fn an_unknown_encoding_is_reported_as_unknown() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Generic));
+        vehicle.handle_message(t, 1, &param_value("P", 1.0, MavParamType::Real32));
+
+        assert_eq!(vehicle.param_encoding(1), None);
+
+        // Advertised capabilities settle it and re-decode the stored values.
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::AutopilotVersion(messages::AutopilotVersion {
+                capabilities: MavProtocolCapability::PARAM_ENCODE_BYTEWISE,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(vehicle.param_encoding(1), Some(ParamEncoding::Bytewise));
     }
 
     #[test]
@@ -478,8 +609,8 @@ mod tests {
         let mut vehicle = vehicle();
         let t = Instant::now();
 
-        vehicle.handle_message(t, 1, param_value("PARAM_A", 1.0));
-        vehicle.handle_message(t, 154, param_value("PARAM_B", 2.0));
+        vehicle.handle_message(t, 1, &param_value("PARAM_A", 1.0, MavParamType::Real32));
+        vehicle.handle_message(t, 154, &param_value("PARAM_B", 2.0, MavParamType::Real32));
 
         let autopilot = vehicle.parameters(1).expect("component 1 has parameters");
         assert!(
@@ -505,19 +636,11 @@ mod tests {
         let mut vehicle = vehicle();
         let t = Instant::now();
 
-        // The autopilot (component 1) establishes authoritative state.
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
         vehicle.handle_message(
             t,
             1,
-            DefaultDialect::Heartbeat(messages::Heartbeat {
-                autopilot: MavAutopilot::Ardupilotmega,
-                ..Default::default()
-            }),
-        );
-        vehicle.handle_message(
-            t,
-            1,
-            DefaultDialect::Attitude(messages::Attitude {
+            &DefaultDialect::Attitude(messages::Attitude {
                 roll: 1.0,
                 ..Default::default()
             }),
@@ -525,35 +648,17 @@ mod tests {
         vehicle.handle_message(
             t,
             1,
-            DefaultDialect::MissionCurrent(messages::MissionCurrent {
-                seq: 3,
-                ..Default::default()
-            }),
-        );
-        vehicle.handle_message(
-            t,
-            1,
-            DefaultDialect::SysStatus(messages::SysStatus {
+            &DefaultDialect::SysStatus(messages::SysStatus {
                 voltage_battery: 12_000,
                 ..Default::default()
             }),
         );
 
-        let autopilot_roll = vehicle
-            .attitude
-            .current
-            .as_ref()
-            .unwrap()
-            .attitude
-            .euler_angles()
-            .0;
-        let autopilot_voltage = vehicle.battery.state.as_ref().unwrap().voltage;
-
         // A peripheral's frames must not change any vehicle-scoped state.
         vehicle.handle_message(
             t,
             154,
-            DefaultDialect::Attitude(messages::Attitude {
+            &DefaultDialect::Attitude(messages::Attitude {
                 roll: 2.0,
                 ..Default::default()
             }),
@@ -561,25 +666,13 @@ mod tests {
         vehicle.handle_message(
             t,
             154,
-            DefaultDialect::MissionCurrent(messages::MissionCurrent {
-                seq: 9,
-                ..Default::default()
-            }),
-        );
-        vehicle.handle_message(
-            t,
-            154,
-            DefaultDialect::SysStatus(messages::SysStatus {
+            &DefaultDialect::SysStatus(messages::SysStatus {
                 voltage_battery: 9_000,
                 ..Default::default()
             }),
         );
 
-        assert_eq!(vehicle.mission_progress.current_seq, Some(3));
-        assert_eq!(
-            vehicle.battery.state.as_ref().unwrap().voltage,
-            autopilot_voltage
-        );
+        assert_eq!(vehicle.battery.primary().unwrap().voltage, Some(12.0));
         let roll = vehicle
             .attitude
             .current
@@ -588,7 +681,7 @@ mod tests {
             .attitude
             .euler_angles()
             .0;
-        assert!((roll - autopilot_roll).abs() < 1e-9);
+        assert!((roll - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -596,8 +689,8 @@ mod tests {
         let mut vehicle = vehicle();
         let t = Instant::now();
 
-        vehicle.handle_message(t, 1, statustext("auto"));
-        vehicle.handle_message(t, 154, statustext("gimbal"));
+        vehicle.handle_message(t, 1, &statustext("auto"));
+        vehicle.handle_message(t, 154, &statustext("gimbal"));
 
         let texts = &vehicle.status.texts;
         assert_eq!(texts.len(), 2);
@@ -605,5 +698,54 @@ mod tests {
         assert_eq!(texts[0].text, "auto");
         assert_eq!(texts[1].component, 154);
         assert_eq!(texts[1].text, "gimbal");
+    }
+
+    #[test]
+    fn snapshots_share_untouched_subsystems() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &statustext("before"));
+
+        let snapshot = vehicle.clone();
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt::default()),
+        );
+
+        assert!(
+            Arc::ptr_eq(&snapshot.status, &vehicle.status),
+            "untouched, shared"
+        );
+        assert!(
+            !Arc::ptr_eq(&snapshot.position, &vehicle.position),
+            "copied on write"
+        );
+        assert!(
+            snapshot.position.current.is_none(),
+            "the snapshot is unaffected"
+        );
+    }
+
+    #[test]
+    fn home_falls_back_to_the_mission_home_slot() {
+        let mut vehicle = vehicle();
+        assert!(vehicle.home().is_none());
+
+        vehicle.set_onboard_mission(OnboardMission {
+            items: Vec::new(),
+            home: Some(crate::domain::mission::MissionItem::home(
+                crate::domain::mission::Position {
+                    lat: 47.0,
+                    lon: 8.0,
+                    alt_m: 420.0,
+                },
+            )),
+            opaque_id: 0,
+        });
+
+        let home = vehicle.home().unwrap();
+        assert!((home.position.lat - 47.0).abs() < 1e-6);
+        assert_eq!(home.altitude_msl, 420.0);
     }
 }

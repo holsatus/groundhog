@@ -1,139 +1,175 @@
+//! The application root: composition, message routing, and policy.
+//!
+//! The root wires the layers together at boot, routes messages to features,
+//! applies the [`Effect`]s features request, and decides which fleet and link
+//! events become operator notices. It holds the latest fleet snapshot, which
+//! the fleet runtime publishes from off the UI thread.
+
 use std::{
+    collections::BTreeMap,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use iced::futures::StreamExt;
 use iced::{Element, Length, Subscription, Task, Theme, Widget};
+use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
-    config,
-    domain::SystemId,
-    domain::fleet::{Fleet, FleetEvent},
-    domain::vehicle::Liveness,
-    features::link_panel::{self, LinkPanel},
-    features::log_panel::{self, LogPanel},
-    features::map::{self, Map},
-    features::mission_panel::{self, MissionPanel},
-    features::parameter_panel::{self, ParameterPanel},
-    features::settings_panel,
-    features::vehicle_panel,
+    config::{self, ConfigWriter, Configuration},
+    domain::{
+        SystemId,
+        calibration::Phase,
+        fleet::{FleetEvent, FleetSnapshot},
+        vehicle::{Liveness, status},
+    },
+    features::{
+        Context, Effect, MapContext,
+        calibration::{self, CalibrationPanel},
+        confirm::{self, Answer, Confirmation},
+        link_panel::{self, LinkPanel},
+        log_panel::{self, LogPanel},
+        mission::{self, MissionEditor},
+        notifications::{self, Level, Notice, Notifications},
+        parameter_panel::{self, ParameterPanel},
+        settings_panel,
+        vehicles::{self, VehiclePanel, vehicle_name},
+    },
     layout::{self, Layout},
-    mavlink::{self, telemetry::Telemetry},
-    services::{FleetServices, LinkManager},
+    map::{self, LayerSet, Map},
+    mavlink::{self, MavlinkRouter},
+    services::{
+        FleetHandle, FleetUpdate, LinkEvent, LinkId, LinkManager, LinkStatus, RuntimeOptions,
+        TlogRecorder, runtime,
+    },
     style,
 };
 
+/// The features that take a [`Context`], grouped so their state can be
+/// borrowed apart from the context's.
+#[derive(Default)]
+struct Features {
+    vehicles: VehiclePanel,
+    mission: MissionEditor,
+    parameters: ParameterPanel,
+    calibration: CalibrationPanel,
+}
+
 pub struct Application {
-    pub(crate) layout: Layout,
-    pub(crate) map: Map,
-    pub(crate) link_panel: LinkPanel,
-    pub(crate) log_panel: LogPanel,
-    pub(crate) mission_panel: MissionPanel,
-    pub(crate) parameter_panel: ParameterPanel,
-    pub(crate) link_manager: LinkManager,
-    pub(crate) services: FleetServices,
-    pub(crate) configuration: config::Configuration,
-    pub(crate) fleet: Fleet,
+    layout: Layout,
+    map: Map,
+    configuration: Configuration,
+    config_writer: ConfigWriter,
+    router: MavlinkRouter,
+    services: FleetHandle,
+    /// The fleet as last published by the runtime.
+    fleet: Arc<FleetSnapshot>,
+    /// The vehicle the UI shows.
+    selected: Option<SystemId>,
+    link_manager: LinkManager,
+    /// Whether each link was last known connected, to word link notices.
+    link_connected: BTreeMap<LinkId, bool>,
+    /// Vehicles announced as lost, so only their recovery is announced.
+    lost: std::collections::BTreeSet<SystemId>,
+    recorder: Option<TlogRecorder>,
+    notices: Notifications,
+    confirmation: Option<Confirmation<Message>>,
+    features: Features,
+    link_panel: LinkPanel,
+    log_panel: LogPanel,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// The fleet runtime published.
+    Fleet(FleetUpdate),
+    /// A link's supervisor changed status.
+    Link(LinkEvent),
+    /// A configuration write finished.
+    ConfigurationSaved(Result<(), String>),
+
     Layout(layout::Message),
     Map(map::Message),
-    Link(link_panel::Message),
+    Vehicles(vehicles::Message),
+    Mission(mission::Message),
+    Parameters(parameter_panel::Message),
+    Calibration(calibration::Message),
+    Links(link_panel::Message),
     Logs(log_panel::Message),
-    /// A batch of MAVLink events, collected at most once per telemetry frame.
-    MavEvents(Vec<Telemetry>),
-    Mission(mission_panel::Message),
-    Parameter(parameter_panel::Message),
-    Vehicles(vehicle_panel::Message),
     Settings(settings_panel::Message),
-
-    SaveConfigurationToFile,
+    Notifications(notifications::Message),
+    Confirm(Answer),
 
     /// Debounce tick that flushes a pending layout save.
-    Tick,
-
-    /// Periodic liveness check for every vehicle in the fleet.
-    FleetTick(Instant),
-
-    /// Result of an asynchronous configuration write.
-    ConfigurationSaved(Result<(), String>),
+    LayoutSaveTick,
+    /// Refreshes time-dependent views (toast expiry, link countdowns).
+    Tick(Instant),
 }
-
-impl From<parameter_panel::Message> for Message {
-    fn from(value: parameter_panel::Message) -> Self {
-        Message::Parameter(value)
-    }
-}
-
-impl From<mission_panel::Message> for Message {
-    fn from(value: mission_panel::Message) -> Self {
-        Message::Mission(value)
-    }
-}
-
-impl From<settings_panel::Message> for Message {
-    fn from(value: settings_panel::Message) -> Self {
-        Message::Settings(value)
-    }
-}
-
-/// How often telemetry is allowed to reach `update` and rebuild the view/map.
-///
-/// This caps the redraw cadence, not the data rate: the router still dispatches
-/// every frame, the coalescing task only decodes off the UI thread, and
-/// `handle_mav_events` folds each batch into vehicle state inside `update`.
-/// So `update` — and therefore the view and the map overlay, which re-project
-/// and re-stroke every trail point — runs at most this often. 30 Hz is smooth
-/// for a GCS HUD and roughly halves overlay rasterisation work compared with
-/// 60 Hz. Map panning and zooming are input-driven inside `slippery` and are
-/// not affected by this throttle.
-const TELEMETRY_FRAME: Duration = Duration::from_millis(33);
 
 /// Idle time after the last layout change before the layout is persisted.
 const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 
 impl Application {
     pub fn boot() -> (Self, Task<Message>) {
-        let config = config::Configuration::initialize().unwrap_or_else(|e| {
-            log::error!("Unable to initialize configuration file: {}", e);
-            config::Configuration::default()
+        let mut notices = Notifications::default();
+
+        let configuration = Configuration::initialize().unwrap_or_else(|error| {
+            notices.push(Notice::error("Could not read the configuration").detail(error));
+            Configuration::default()
         });
 
-        let (client, events) = mavlink::MavlinkRouter::new(mavlink::DEFAULT_GCS_ID);
-        let services = FleetServices::new(&client);
-        let (link_manager, auto_connect) = LinkManager::from_configs(&client, config.links.clone());
-        let events = Task::stream(
-            mavlink::telemetry::coalesce(events, TELEMETRY_FRAME).map(Message::MavEvents),
-        );
+        // The runtime and supervisors are spawned here: boot runs inside the
+        // application's async runtime.
+        let (router, events) = MavlinkRouter::new(mavlink::DEFAULT_GCS_ID);
+        let (services, updates) = runtime::spawn(router.clone(), events, RuntimeOptions::default());
+        let (mut link_manager, auto_connect, link_events) =
+            LinkManager::new(&router, configuration.links.clone());
+        for id in &auto_connect {
+            link_manager.connect(id);
+        }
 
-        let auto_connect = Task::batch(
-            auto_connect
-                .into_iter()
-                .map(|id| Task::done(Message::Link(link_panel::Message::Connect(id)))),
-        );
+        let (config_writer, saved) = ConfigWriter::spawn();
 
-        let layout = config
+        let layout = configuration
             .layout
             .clone()
             .map_or_else(Layout::new, Layout::from_configuration);
 
-        let application = Application {
+        let mut application = Application {
             layout,
             map: Map::new(),
+            configuration,
+            config_writer,
+            router,
+            services,
+            fleet: Arc::default(),
+            selected: None,
+            link_manager,
+            link_connected: BTreeMap::new(),
+            lost: Default::default(),
+            recorder: None,
+            notices,
+            confirmation: None,
+            features: Features::default(),
             link_panel: LinkPanel::new(),
             log_panel: LogPanel::new(),
-            link_manager,
-            services,
-            configuration: config.clone(),
-            fleet: Fleet::default(),
-            mission_panel: MissionPanel::new(),
-            parameter_panel: ParameterPanel::new(),
         };
 
-        (application, Task::batch([events, auto_connect]))
+        if application.configuration.settings.record_telemetry {
+            application.start_recording();
+        }
+
+        let saved = futures::stream::unfold(saved, |mut saved| async move {
+            saved.recv().await.map(|outcome| (outcome, saved))
+        });
+
+        let tasks = Task::batch([
+            Task::stream(updates.into_stream()).map(Message::Fleet),
+            Task::stream(link_events.into_stream()).map(Message::Link),
+            Task::stream(saved).map(Message::ConfigurationSaved),
+        ]);
+
+        (application, tasks)
     }
 
     pub fn theme(&self) -> Theme {
@@ -148,288 +184,332 @@ impl Application {
         self.configuration.settings.scale_factor
     }
 
+    fn save_configuration(&self) {
+        self.config_writer.save(self.configuration.clone());
+    }
+
+    fn start_recording(&mut self) {
+        let Some(directory) = config::data_dir().map(|directory| directory.join("tlogs")) else {
+            self.notices
+                .push(Notice::error("No data directory to record telemetry into"));
+            return;
+        };
+
+        match TlogRecorder::start(&self.router, &directory) {
+            Ok(recorder) => self.recorder = Some(recorder),
+            Err(error) => self
+                .notices
+                .push(Notice::error("Could not start telemetry recording").detail(error)),
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SaveConfigurationToFile => self.save_configuration(),
+            Message::Fleet(update) => {
+                self.on_fleet(update);
+                Task::none()
+            }
+            Message::Link(event) => {
+                self.on_link(event);
+                Task::none()
+            }
             Message::ConfigurationSaved(result) => {
                 if let Err(error) = result {
-                    log::error!("Unable to save configuration file: {error}");
+                    self.notices
+                        .push(Notice::error("Could not save the configuration").detail(error));
                 }
                 Task::none()
             }
-            Message::Layout(message) => self.layout_message_update(message),
-            Message::Map(message) => self.map_message_update(message),
-            Message::Link(message) => self.link_message_update(message),
-            Message::Logs(message) => self.log_message_update(message),
-            Message::MavEvents(events) => self.handle_mav_events(events),
-            Message::Mission(message) => self.mission_message_update(message),
-            Message::Parameter(message) => self.parameter_message_update(message),
-            Message::Vehicles(message) => self.vehicle_message_update(message),
-            Message::Settings(message) => self.settings_message_update(message),
-            Message::Tick => {
+            Message::Layout(message) => {
+                if self.layout.update(message) {
+                    self.configuration.layout = Some(self.layout.configuration());
+                }
+                Task::none()
+            }
+            Message::Map(message) => self.map.update(message).map(Message::Map),
+            Message::Vehicles(message) => self.dispatch(Message::Vehicles, |features, cx| {
+                features.vehicles.update(message, cx)
+            }),
+            Message::Mission(message) => self.dispatch(Message::Mission, |features, cx| {
+                features.mission.update(message, cx)
+            }),
+            Message::Parameters(message) => self.dispatch(Message::Parameters, |features, cx| {
+                features.parameters.update(message, cx)
+            }),
+            Message::Calibration(message) => self.dispatch(Message::Calibration, |features, cx| {
+                features.calibration.update(message, cx)
+            }),
+            Message::Links(message) => {
+                let (task, event) =
+                    self.link_panel
+                        .update(message, &mut self.link_manager, &mut self.notices);
+
+                if let Some(link_panel::Event::LinksChanged(links)) = event {
+                    self.configuration.links = links;
+                    self.save_configuration();
+                }
+                task.map(Message::Links)
+            }
+            Message::Logs(message) => {
+                self.log_panel.update(message);
+                Task::none()
+            }
+            Message::Settings(message) => {
+                self.on_settings(message);
+                Task::none()
+            }
+            Message::Notifications(message) => {
+                self.notices.update(message);
+                Task::none()
+            }
+            Message::Confirm(answer) => match (answer, self.confirmation.take()) {
+                (Answer::Accept, Some(confirmation)) => Task::done(confirmation.accept),
+                _ => Task::none(),
+            },
+            Message::LayoutSaveTick => {
                 if self.layout.is_dirty() {
                     self.layout.clear_dirty();
-                    self.save_configuration()
-                } else {
-                    Task::none()
+                    self.save_configuration();
                 }
-            }
-            Message::FleetTick(now) => {
-                let events = self.fleet.tick(now);
-                Task::batch(
-                    events
-                        .into_iter()
-                        .map(|event| self.handle_fleet_event(event))
-                        .collect::<Vec<_>>(),
-                )
-            }
-        }
-    }
-
-    /// Write the current configuration to disk off the UI thread.
-    fn save_configuration(&self) -> Task<Message> {
-        let configuration = self.configuration.clone();
-        iced_runtime::task::blocking(move |mut sender| {
-            let result = configuration
-                .write_to_file()
-                .map_err(|error| error.to_string());
-            let _ = sender.try_send(Message::ConfigurationSaved(result));
-        })
-    }
-
-    /// Apply a layout change, snapshotting the arrangement when it changed.
-    ///
-    /// `Layout::update` maintains the dirty flag and revision; the root owns
-    /// only the snapshot and the debounce policy (see [`Message::Tick`] and
-    /// [`Application::subscription`]).
-    fn layout_message_update(&mut self, message: layout::Message) -> Task<Message> {
-        if self.layout.update(message) {
-            self.configuration.layout = Some(self.layout.configuration());
-        }
-
-        Task::none()
-    }
-
-    fn log_message_update(&mut self, message: log_panel::Message) -> Task<Message> {
-        self.log_panel.update(message);
-        Task::none()
-    }
-
-    fn vehicle_message_update(&mut self, message: vehicle_panel::Message) -> Task<Message> {
-        match message {
-            vehicle_panel::Message::SetPrimary(system) => {
-                let previous = self.fleet.primary();
-
-                if self.fleet.set_primary(system) {
-                    // The map's mission interaction derives from the displayed
-                    // vehicle: mid-drag, the outgoing vehicle's editor keeps
-                    // its drag armed, so a later switch back would teleport the
-                    // dragged waypoint on free mouse movement. Ending the
-                    // outgoing vehicle's drag keeps the state self-consistent.
-                    let drag_end =
-                        previous
-                            .filter(|previous| previous != &system)
-                            .map(|previous| {
-                                self.mission_message_update(mission_panel::Message {
-                                    system: previous,
-                                    kind: mission_panel::MessageKind::EndDrag,
-                                })
-                            });
-
-                    match drag_end {
-                        Some(drag_end) => Task::batch([drag_end]),
-                        None => Task::none(),
-                    }
-                } else {
-                    Task::none()
-                }
-            }
-            vehicle_panel::Message::Follow(follow) => {
-                let (task, _) = self.map.update(map::Message::Follow(follow));
-                task.map(Message::Map)
-            }
-        }
-    }
-
-    pub(crate) fn set_file_picker_path_config(&mut self, path: &Path) -> Task<Message> {
-        let Some(file_picker_path) = path.is_dir().then_some(path).or(path.parent()) else {
-            return Task::none();
-        };
-
-        self.configuration.file_picker_path = Some(file_picker_path.to_path_buf());
-        self.save_configuration()
-    }
-
-    fn map_message_update(&mut self, message: map::Message) -> Task<Message> {
-        let (map_task, event) = self.map.update(message);
-        let map_task = map_task.map(Message::Map);
-
-        // The map reports neutral interactions; translate each into the mission
-        // feature's vocabulary, addressed to the vehicle captured at emission.
-        let mission_task = match event {
-            Some(map::Event::Picked {
-                system,
-                marker,
-                position,
-            }) => self.mission_message_update(mission_panel::Message {
-                system,
-                kind: mission_panel::MessageKind::MapPicked { marker, position },
-            }),
-            Some(map::Event::Dragged {
-                system,
-                marker,
-                position,
-            }) => self.mission_message_update(mission_panel::Message {
-                system,
-                kind: mission_panel::MessageKind::MoveWaypointTo(marker, position),
-            }),
-            Some(map::Event::Released { system }) => {
-                self.mission_message_update(mission_panel::Message {
-                    system,
-                    kind: mission_panel::MessageKind::EndDrag,
-                })
-            }
-            None => Task::none(),
-        };
-
-        Task::batch([map_task, mission_task])
-    }
-
-    fn mission_message_update(&mut self, message: mission_panel::Message) -> Task<Message> {
-        let (task, event) = {
-            let mut ctx = mission_panel::Context {
-                services: &self.services,
-                fleet: &mut self.fleet,
-                file_picker_path: self.configuration.file_picker_path.as_deref(),
-            };
-
-            self.mission_panel.update(message, &mut ctx)
-        };
-
-        let task = task.map(Message::Mission);
-
-        match event {
-            Some(mission_panel::Event::SetFilePickerPath(path)) => {
-                Task::batch([task, self.set_file_picker_path_config(&path)])
-            }
-            None => task,
-        }
-    }
-
-    fn parameter_message_update(&mut self, message: parameter_panel::Message) -> Task<Message> {
-        let (task, event) = {
-            let mut ctx = parameter_panel::Context {
-                services: &self.services,
-                fleet: &mut self.fleet,
-                file_picker_path: self.configuration.file_picker_path.as_deref(),
-            };
-            self.parameter_panel.update(message, &mut ctx)
-        };
-
-        let task = task.map(Message::Parameter);
-
-        match event {
-            Some(parameter_panel::Event::SetFilePickerPath(path)) => {
-                Task::batch([task, self.set_file_picker_path_config(&path)])
-            }
-            None => task,
-        }
-    }
-
-    fn link_message_update(&mut self, message: link_panel::Message) -> Task<Message> {
-        let (task, event) = self.link_panel.update(message, &mut self.link_manager);
-        let task = task.map(Message::Link);
-
-        match event {
-            Some(link_panel::Event::LinksChanged(links)) => {
-                self.configuration.links = links;
-                Task::batch([task, Task::done(Message::SaveConfigurationToFile)])
-            }
-            None => task,
-        }
-    }
-
-    /// Apply an application setting and persist it. The theme is derived from
-    /// the configuration, so the new setting takes effect on the next frame.
-    fn settings_message_update(&mut self, message: settings_panel::Message) -> Task<Message> {
-        match message {
-            settings_panel::Message::SetTheme(mode) => {
-                if self.configuration.settings.theme != mode {
-                    self.configuration.settings.theme = mode;
-                    return Task::done(Message::SaveConfigurationToFile);
-                }
-            }
-            settings_panel::Message::SetScaleFactor(scale) => {
-                if self.configuration.settings.scale_factor != scale {
-                    self.configuration.settings.scale_factor = scale;
-                    return Task::done(Message::SaveConfigurationToFile);
-                }
-            }
-        }
-
-        Task::none()
-    }
-
-    /// Feed a batch of decoded telemetry into the fleet, in order, and turn what
-    /// the fleet reports back into application effects.
-    fn handle_mav_events(&mut self, events: Vec<Telemetry>) -> Task<Message> {
-        let mut tasks = Vec::new();
-
-        for event in events {
-            match event {
-                Telemetry::Message {
-                    source,
-                    received_at,
-                    decoded,
-                } => {
-                    for fleet_event in self.fleet.observe(source, received_at, decoded) {
-                        tasks.push(self.handle_fleet_event(fleet_event));
-                    }
-                }
-                Telemetry::LinkClosed(link_id) => {
-                    // Link closure is reconciled by the link manager, which
-                    // drops any handle the router no longer holds on the next
-                    // link message; no UI message is needed.
-                    log::info!("Link {link_id:?} closed");
-                }
-            }
-        }
-
-        Task::batch(tasks)
-    }
-
-    /// Translate one [`FleetEvent`] into the application's effects. Both the
-    /// telemetry path and the periodic [`Message::FleetTick`] use this, so an
-    /// event means the same thing regardless of which produced it.
-    fn handle_fleet_event(&self, event: FleetEvent) -> Task<Message> {
-        match event {
-            FleetEvent::Registered(system) => {
-                log::info!("New vehicle detected: {system:?}");
-                Task::done(Message::Parameter(parameter_panel::Message::Initialize(
-                    system,
-                )))
-            }
-            FleetEvent::LivenessChanged(system, liveness) => {
-                log_liveness(system, liveness);
                 Task::none()
             }
-            FleetEvent::PrimaryMoved(position) => {
-                if self.map.follow {
-                    Task::done(Message::Map(map::Message::SetViewPosition(position)))
-                } else {
-                    Task::none()
+            Message::Tick(now) => {
+                self.notices.update(notifications::Message::Tick(now));
+                Task::none()
+            }
+        }
+    }
+
+    /// Run a feature update with a fresh [`Context`], then apply the effects
+    /// it requested.
+    fn dispatch<M>(
+        &mut self,
+        wrap: fn(M) -> Message,
+        update: impl FnOnce(&mut Features, &mut Context<M>) -> Task<M>,
+    ) -> Task<Message>
+    where
+        M: Send + 'static,
+    {
+        let fleet = self.fleet.clone();
+        let mut context = Context::new(
+            &fleet,
+            &self.services,
+            &mut self.notices,
+            self.configuration.file_picker_path.as_deref(),
+            &self.configuration.settings,
+        );
+
+        let task = update(&mut self.features, &mut context).map(wrap);
+        let effects = context.into_effects();
+
+        for effect in effects {
+            self.apply(effect.map(wrap));
+        }
+
+        task
+    }
+
+    fn apply(&mut self, effect: Effect<Message>) {
+        match effect {
+            Effect::Confirm(confirmation) => self.confirmation = Some(confirmation),
+            Effect::SelectVehicle(system) => {
+                if self.fleet.contains(system) {
+                    self.selected = Some(system);
+                    self.follow_selected();
                 }
             }
+            Effect::CenterMap(position) => {
+                self.map.set_following(false);
+                self.map.center_on(position);
+            }
+            Effect::FollowVehicle(follow) => {
+                self.map.set_following(follow);
+                self.follow_selected();
+            }
+            Effect::RememberDirectory(path) => self.remember_directory(&path),
+        }
+    }
+
+    fn remember_directory(&mut self, path: &Path) {
+        let Some(directory) = path.is_dir().then_some(path).or(path.parent()) else {
+            return;
+        };
+
+        if self.configuration.file_picker_path.as_deref() != Some(directory) {
+            self.configuration.file_picker_path = Some(directory.to_path_buf());
+            self.save_configuration();
+        }
+    }
+
+    /// Keep the map on the selected vehicle, if following.
+    fn follow_selected(&mut self) {
+        if let Some(position) = self
+            .selected
+            .and_then(|system| self.fleet.vehicle(system))
+            .and_then(|vehicle| vehicle.position.current.as_ref())
+        {
+            self.map.follow_to(position.pos);
+        }
+    }
+
+    fn on_fleet(&mut self, update: FleetUpdate) {
+        self.fleet = update.snapshot;
+        self.features.mission.sync(&self.fleet);
+
+        for event in update.events {
+            self.on_fleet_event(event);
+        }
+
+        self.follow_selected();
+    }
+
+    /// Fleet events become selection changes and operator notices.
+    fn on_fleet_event(&mut self, event: FleetEvent) {
+        let name = |system| vehicle_name(&self.fleet, system);
+
+        let notice = match event {
+            FleetEvent::Registered(system) => {
+                if self.selected.is_none() {
+                    self.selected = Some(system);
+                }
+                Notice::info(format!("{} connected", name(system))).vehicle(system)
+            }
+            // A late vehicle shows in the vehicle panel; only losing and
+            // regaining contact are announced, so a flaky link does not
+            // flood the operator.
+            FleetEvent::LivenessChanged(system, liveness) => match liveness {
+                Liveness::Stale => return,
+                Liveness::Lost => {
+                    self.lost.insert(system);
+                    Notice::error(format!("Lost contact with {}", name(system))).vehicle(system)
+                }
+                Liveness::Active => {
+                    if !self.lost.remove(&system) {
+                        return;
+                    }
+                    Notice::success(format!("Contact with {} restored", name(system)))
+                        .vehicle(system)
+                }
+            },
+            FleetEvent::ArmedChanged(system, true) => {
+                Notice::warning(format!("{} armed", name(system))).vehicle(system)
+            }
+            FleetEvent::ArmedChanged(system, false) => {
+                Notice::info(format!("{} disarmed", name(system))).vehicle(system)
+            }
+            FleetEvent::ModeChanged(system, mode) => Notice::info(format!(
+                "{}: {} mode",
+                name(system),
+                mode.map_or("unknown", |mode| mode.name)
+            ))
+            .vehicle(system),
+            FleetEvent::StatusText(system, text) => {
+                // Status texts are in the vehicle's own log; only the serious
+                // ones are toasted, and not duplicated into the history.
+                let level = match status::rank(text.severity) {
+                    rank if rank <= status::rank(MavSeverity::Error) => Level::Error,
+                    rank if rank <= status::rank(MavSeverity::Warning) => Level::Warning,
+                    _ => return,
+                };
+                self.notices.toast(
+                    Notice::new(level, format!("{}: {}", name(system), text.text)).vehicle(system),
+                );
+                return;
+            }
+            FleetEvent::OnboardMissionStale(system) => Notice::warning(format!(
+                "The mission on {} was changed elsewhere",
+                name(system)
+            ))
+            .detail("Download it to see the vehicle's current mission.")
+            .vehicle(system),
+            FleetEvent::CalibrationFinished(system, kind, phase) => {
+                let subject = format!("{kind} calibration of {}", name(system));
+                match phase {
+                    Phase::Succeeded => Notice::success(format!("{subject} succeeded")),
+                    Phase::Failed(reason) => {
+                        Notice::error(format!("{subject} failed")).detail(reason)
+                    }
+                    Phase::Cancelled => Notice::info(format!("{subject} cancelled")),
+                    Phase::Starting | Phase::Running => return,
+                }
+                .vehicle(system)
+            }
+        };
+
+        self.notices.push(notice);
+    }
+
+    fn on_link(&mut self, event: LinkEvent) {
+        let was_connected = self.link_connected.get(&event.id).copied().unwrap_or(false);
+        let connected = event.status.is_connected();
+        self.link_connected.insert(event.id.clone(), connected);
+
+        let notice = match &event.status {
+            LinkStatus::Connected { .. } if !was_connected => {
+                Some(Notice::success(format!("Link {} connected", event.name)))
+            }
+            LinkStatus::Reconnecting { error, .. } if was_connected => Some(
+                Notice::warning(format!("Link {} lost; reconnecting", event.name)).detail(error),
+            ),
+            LinkStatus::Failed(error) => {
+                Some(Notice::error(format!("Link {} failed", event.name)).detail(error))
+            }
+            _ => None,
+        };
+
+        if let Some(notice) = notice {
+            self.notices.push(notice);
+        }
+    }
+
+    fn on_settings(&mut self, message: settings_panel::Message) {
+        let settings = &mut self.configuration.settings;
+        let before = *settings;
+
+        match message {
+            settings_panel::Message::Theme(mode) => settings.theme = mode,
+            settings_panel::Message::ScaleFactor(scale) => settings.scale_factor = scale,
+            settings_panel::Message::DefaultAltitude(altitude) => {
+                settings.default_waypoint_altitude_m = altitude;
+            }
+            settings_panel::Message::RecordTelemetry(record) => {
+                settings.record_telemetry = record;
+                if record && self.recorder.is_none() {
+                    self.start_recording();
+                } else if !record && let Some(recorder) = self.recorder.take() {
+                    recorder.stop();
+                }
+            }
+        }
+
+        if self.configuration.settings != before {
+            self.save_configuration();
         }
     }
 
     pub fn view(&self) -> impl Widget<Message> + '_ {
-        iced::widget::row![
+        let base: Element<'_, Message> = iced::widget::row![
             self.view_rail(),
             iced::widget::rule::vertical(1.0),
             self.view_panes()
         ]
         .spacing(0)
+        .boxed();
+
+        let toasts = iced::widget::container(self.notices.view().map(Message::Notifications))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_right(Length::Fill)
+            .align_bottom(Length::Fill)
+            .padding(16);
+
+        let with_toasts: Element<'_, Message> = iced::widget::stack![base, toasts].boxed();
+
+        iced::widget::container(confirm::view(
+            with_toasts,
+            self.confirmation.as_ref(),
+            Message::Confirm,
+        ))
     }
 
     fn view_rail(&self) -> Element<'_, Message> {
@@ -466,7 +546,8 @@ impl Application {
         let panes = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
             // The map paints opaque tiles across its whole pane, which a rounded
             // container cannot clip; it draws its own frame instead (see
-            // `map::view`). Every other pane is a rounded card split by a rule.
+            // `map::Map::view`). Every other pane is a rounded card split by a
+            // rule.
             let body: Element<'_, Message> = if panel.is_fixed() {
                 self.pane_body(*panel)
             } else {
@@ -557,56 +638,69 @@ impl Application {
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
         let theme = self.theme();
+        let fleet: &FleetSnapshot = &self.fleet;
 
         match panel {
             layout::Panel::Map => {
-                let primary = self.fleet.primary();
-                let dragging = self.mission_panel.dragging(primary);
-                self.map
-                    .view(self.fleet.vehicles(), primary, dragging, &theme)
-                    .map(Message::Map)
-                    .boxed()
+                let context = MapContext {
+                    fleet,
+                    selected: self.selected,
+                    palette: *theme.palette(),
+                };
+
+                let mut layers = LayerSet::new();
+                layers.plugin(&self.features.vehicles, context, Message::Vehicles);
+                layers.plugin(&self.features.mission, context, Message::Mission);
+
+                self.map.view(layers, Message::Map, &theme)
             }
-            layout::Panel::Vehicles => vehicle_panel::view(
-                self.fleet.vehicles(),
-                self.fleet.primary(),
-                self.map.follow,
-                &theme,
-            )
-            .map(Message::Vehicles)
-            .boxed(),
+            layout::Panel::Vehicles => self
+                .features
+                .vehicles
+                .view(fleet, self.selected, self.map.is_following(), &theme)
+                .map(Message::Vehicles)
+                .boxed(),
             layout::Panel::Parameters => self
-                .parameter_panel
-                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
-                .map(Message::Parameter)
+                .features
+                .parameters
+                .view(fleet, self.selected, &theme)
+                .map(Message::Parameters)
+                .boxed(),
+            layout::Panel::Calibration => self
+                .features
+                .calibration
+                .view(fleet, self.selected, &theme)
+                .map(Message::Calibration)
                 .boxed(),
             layout::Panel::Mission => self
-                .mission_panel
-                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                .features
+                .mission
+                .view(fleet, self.selected, &theme)
                 .map(Message::Mission)
                 .boxed(),
             layout::Panel::Links => iced::widget::column![
-                self.link_panel.view_editor().map(Message::Link),
+                self.link_panel.view_editor().map(Message::Links),
                 self.link_panel
                     .view_status(&self.link_manager)
-                    .map(Message::Link),
+                    .map(Message::Links),
             ]
             .spacing(10.0)
             .boxed(),
             layout::Panel::Logs => self
                 .log_panel
-                .view(self.fleet.vehicles(), self.fleet.primary(), &theme)
+                .view(fleet, self.selected, &self.notices, &theme)
                 .map(Message::Logs)
                 .boxed(),
-            layout::Panel::Settings => settings_panel::view(&self.configuration.settings)
-                .map(Message::Settings)
-                .boxed(),
+            layout::Panel::Settings => settings_panel::view(
+                &self.configuration.settings,
+                self.recorder.as_ref().map(TlogRecorder::path),
+            )
+            .map(Message::Settings)
+            .boxed(),
         }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let fleet_tick = iced::time::every(Duration::from_millis(500)).map(Message::FleetTick);
-
         // Trailing debounce for layout persistence: the timer is restarted on
         // every layout change (the revision is part of the subscription
         // identity), so the write happens `LAYOUT_SAVE_DEBOUNCE` after the last
@@ -614,20 +708,22 @@ impl Application {
         let layout_tick = if self.layout.is_dirty() {
             iced::time::every(LAYOUT_SAVE_DEBOUNCE)
                 .with(self.layout.revision())
-                .map(|_| Message::Tick)
+                .map(|_| Message::LayoutSaveTick)
         } else {
             Subscription::none()
         };
 
-        Subscription::batch([fleet_tick, layout_tick])
-    }
-}
+        // Time-dependent views only need refreshing while they show something.
+        let active_links = self
+            .link_manager
+            .entries()
+            .any(|(_, _, status)| status.is_active());
+        let refresh = if self.notices.has_toasts() || active_links {
+            iced::time::every(Duration::from_secs(1)).map(Message::Tick)
+        } else {
+            Subscription::none()
+        };
 
-/// Log a liveness transition, louder the further a vehicle drifts.
-fn log_liveness(system: SystemId, liveness: Liveness) {
-    match liveness {
-        Liveness::Lost => log::warn!("Vehicle {system:?} lost"),
-        Liveness::Stale => log::info!("Vehicle {system:?} is stale"),
-        Liveness::Active => log::info!("Vehicle {system:?} is active"),
+        Subscription::batch([layout_tick, refresh])
     }
 }

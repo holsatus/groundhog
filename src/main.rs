@@ -5,6 +5,7 @@ mod features;
 mod foundation;
 mod layout;
 mod link;
+mod map;
 mod mavlink;
 mod services;
 mod storage;

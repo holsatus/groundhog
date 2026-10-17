@@ -15,7 +15,14 @@ pub struct LinkConfig {
     /// Use a slower heartbeat for this link, to save bandwidth on expensive
     /// links such as satellite.
     pub high_latency: bool,
+    /// Reopen the transport when it fails, with backoff, until disconnected.
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
     pub build: LinkBuild,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The parsed, serialisable description of how to open a link.

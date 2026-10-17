@@ -12,7 +12,7 @@ use super::{
     error::{MavError, Result},
     locks::LockKey,
     recv::MavlinkMessage,
-    router::MavlinkRouter,
+    router::{MavlinkRouter, Priority},
 };
 use crate::foundation::MavlinkId;
 
@@ -103,8 +103,8 @@ impl Command {
 
     fn send(&self, router: &MavlinkRouter, target: MavlinkId) -> Result<()> {
         match self {
-            Command::Long(command) => router.route(target, command),
-            Command::Int(command) => router.route(target, command),
+            Command::Long(command) => router.route(target, command, Priority::Control),
+            Command::Int(command) => router.route(target, command, Priority::Control),
         }
     }
 }
@@ -142,14 +142,12 @@ pub struct CommandRequest {
 
 impl CommandRequest {
     /// How long to wait for an ACK before resending.
-    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
         self
     }
 
     /// How many times to resend the command if no ACK is received.
-    #[allow(dead_code)] // Builder option not used by the UI yet
     pub fn retries(mut self, retries: u8) -> Self {
         self.retries = retries;
         self
@@ -279,7 +277,7 @@ impl Drop for Pending {
                 target_component: self.target.component,
                 command: self.kind,
             };
-            _ = self.router.route(self.target, &cancel);
+            _ = self.router.route(self.target, &cancel, Priority::Control);
         }
     }
 }

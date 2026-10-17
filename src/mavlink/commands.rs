@@ -41,3 +41,38 @@ pub fn pause_continue(pause: bool) -> Command {
     }
     .into()
 }
+
+/// `MAV_CMD_COMPONENT_ARM_DISARM`. `force` overrides the arming checks
+/// (`param2 = 21196`), so it must only ever follow an explicit operator choice.
+pub fn arm_disarm(arm: bool, force: bool) -> Command {
+    CommandLong {
+        command: MavCmd::ComponentArmDisarm,
+        param1: if arm { 1.0 } else { 0.0 },
+        param2: if force { 21196.0 } else { 0.0 },
+        ..Default::default()
+    }
+    .into()
+}
+
+/// `MAV_CMD_DO_SET_MODE` with the given base mode, custom mode and sub mode.
+pub fn set_mode(base_mode: f32, custom_mode: f32, custom_sub_mode: f32) -> Command {
+    CommandLong {
+        command: MavCmd::DoSetMode,
+        param1: base_mode,
+        param2: custom_mode,
+        param3: custom_sub_mode,
+        ..Default::default()
+    }
+    .into()
+}
+
+/// `MAV_CMD_DO_SET_MISSION_CURRENT` - continue the mission at wire sequence
+/// `seq`. Acknowledged, unlike the legacy `MISSION_SET_CURRENT` message.
+pub fn set_mission_current(seq: u16) -> Command {
+    CommandLong {
+        command: MavCmd::DoSetMissionCurrent,
+        param1: seq as f32,
+        ..Default::default()
+    }
+    .into()
+}

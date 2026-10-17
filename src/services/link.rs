@@ -1,70 +1,133 @@
-//! Link lifecycle: a headless manager owning the configured links and the
-//! transports behind them.
+//! Link lifecycle: the configured links, and a supervisor per connected link.
 //!
-//! The manager is the store and the connect/disconnect/reconcile controller for
-//! links. It owns the live [`LinkGuard`]s, so it lives here in the services
-//! layer rather than in the link layer (which would recreate the cycle the
-//! link/middleware split just broke) or the domain. The UI is a thin adapter
-//! over this type.
+//! [`LinkManager`] is the store of configured links. Connecting a link spawns
+//! a supervisor task that owns the transport: it opens it, attaches it to the
+//! router, waits for it to fail, and — unless the link is configured not to —
+//! reopens it with backoff. A USB serial adapter that is unplugged and
+//! replugged, or a TCP peer that restarts, comes back on its own.
+//!
+//! The supervisor publishes its [`LinkStatus`]; the manager reads it on demand,
+//! so the status the UI shows is always the supervisor's own. Every status
+//! change is also sent as a [`LinkEvent`], which wakes the UI and lets it
+//! notify the operator.
 
-use std::{collections::BTreeMap, future::Future};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
+
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     link::{LinkConfig, LinkId},
-    mavlink::{LinkGuard, MavlinkRouter},
+    mavlink::{LinkStats, MavlinkRouter},
 };
 
+/// How long an open may take before it counts as failed.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest wait between reconnection attempts.
+const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
 /// The connection state of one configured link.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LinkStatus {
     Disconnected,
-    Connecting,
-    Connected,
+    /// Opening the transport.
+    Connecting {
+        attempt: u32,
+    },
+    Connected {
+        since: Instant,
+    },
+    /// The transport failed or was lost; another attempt follows at `retry_at`.
+    Reconnecting {
+        error: String,
+        attempt: u32,
+        retry_at: Instant,
+    },
+    /// The transport failed and the link does not reconnect on its own.
     Failed(String),
 }
 
-/// The outcome of an attempted link attach.
-///
-/// Opaque to the UI: it only carries the value back to [`LinkManager::apply`],
-/// which is the only place that inspects it. Named for what it is, not when it
-/// fires: this value is the outcome of a [`LinkManager::connect`], not a stream
-/// event like [`crate::mavlink::Event`].
-#[derive(Debug, Clone)]
-pub struct LinkUpdate(LinkUpdateKind);
+impl LinkStatus {
+    /// Whether a supervisor is running for the link (connected or trying).
+    pub fn is_active(&self) -> bool {
+        !matches!(self, LinkStatus::Disconnected | LinkStatus::Failed(_))
+    }
 
-#[derive(Debug, Clone)]
-enum LinkUpdateKind {
-    Connected(LinkId, LinkGuard),
-    Failed(LinkId, String),
+    pub fn is_connected(&self) -> bool {
+        matches!(self, LinkStatus::Connected { .. })
+    }
 }
 
-/// One configured link, its optional live attachment, and its connection state.
+/// A link's status changed.
+#[derive(Debug, Clone)]
+pub struct LinkEvent {
+    pub id: LinkId,
+    pub name: String,
+    pub status: LinkStatus,
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A running supervisor.
+struct Session {
+    status: watch::Receiver<LinkStatus>,
+    _task: AbortOnDrop,
+}
+
+/// One configured link and its supervisor, if connected.
 struct LinkEntry {
     config: LinkConfig,
-    handle: Option<LinkGuard>,
-    status: LinkStatus,
+    session: Option<Session>,
 }
 
-/// Owns the configured links and their connection lifecycle.
-///
-/// The manager holds a clone of the router every link is attached to, so a
-/// connect future can carry its own clone into the task and outlive the borrow
-/// of the manager that started it.
+/// Owns the configured links and their supervisors.
 pub struct LinkManager {
     router: MavlinkRouter,
     links: BTreeMap<LinkId, LinkEntry>,
     /// Source of fresh link ids; never derived from the display name.
     next_id: u64,
+    events: mpsc::UnboundedSender<LinkEvent>,
+}
+
+/// The stream of [`LinkEvent`]s from a [`LinkManager`]'s supervisors.
+pub struct LinkEvents(mpsc::UnboundedReceiver<LinkEvent>);
+
+impl LinkEvents {
+    pub async fn next(&mut self) -> Option<LinkEvent> {
+        self.0.recv().await
+    }
+
+    /// The events as a stream, for a UI runtime to drive.
+    pub fn into_stream(self) -> impl futures::Stream<Item = LinkEvent> + Send + 'static {
+        futures::stream::unfold(self, |mut events| async move {
+            events.next().await.map(|event| (event, events))
+        })
+    }
 }
 
 impl LinkManager {
     /// Build a manager from the persisted links, returning it along with the
-    /// ids of the links marked for auto-connect.
-    pub fn from_configs(router: &MavlinkRouter, configs: Vec<LinkConfig>) -> (Self, Vec<LinkId>) {
+    /// ids of the links marked for auto-connect and the event stream.
+    pub fn new(
+        router: &MavlinkRouter,
+        configs: Vec<LinkConfig>,
+    ) -> (Self, Vec<LinkId>, LinkEvents) {
+        let (events, receiver) = mpsc::unbounded_channel();
         let mut manager = Self {
             router: router.clone(),
             links: BTreeMap::new(),
             next_id: 0,
+            events,
         };
 
         let mut auto_connect = Vec::new();
@@ -77,13 +140,12 @@ impl LinkManager {
                 id,
                 LinkEntry {
                     config,
-                    handle: None,
-                    status: LinkStatus::Disconnected,
+                    session: None,
                 },
             );
         }
 
-        (manager, auto_connect)
+        (manager, auto_connect, LinkEvents(receiver))
     }
 
     /// Mint an opaque link id that does not depend on the display name.
@@ -92,114 +154,73 @@ impl LinkManager {
         LinkId::new(&format!("link-{:04}", self.next_id))
     }
 
-    /// Start connecting `id`, or refuse when it is already connecting or
-    /// connected.
+    /// Start supervising `id`. Returns `false` (and does nothing) for an
+    /// unknown link or one that is already active, so a double-click on
+    /// Connect never attaches a second transport.
     ///
-    /// Refusal is what keeps a double-click on Connect from attaching a second
-    /// reader/writer pair: the caller spawns a task only when this returns a
-    /// future. The returned future is `'static`: it carries a router clone and
-    /// the link's parsed build, so it can run after the borrow of the manager
-    /// that produced it has ended.
-    ///
-    /// The entry is marked [`LinkStatus::Connecting`] immediately, and the
-    /// caller is assumed to poll the future to completion while the application
-    /// runs (the UI drives it as a task). A future dropped before it lands
-    /// leaves the entry stuck in `Connecting`: [`LinkManager::reconcile`] only
-    /// repairs entries that hold a handle, and there is no handle yet, so
-    /// reconnecting the same id is refused until the entry is removed or
-    /// re-saved.
-    pub fn connect(
-        &mut self,
-        id: &LinkId,
-    ) -> Option<impl Future<Output = LinkUpdate> + Send + 'static> {
-        let (build, high_latency) = {
-            let entry = self.links.get_mut(id)?;
-
-            if matches!(entry.status, LinkStatus::Connecting | LinkStatus::Connected) {
-                return None;
-            }
-
-            entry.status = LinkStatus::Connecting;
-            (entry.config.build.clone(), entry.config.high_latency)
+    /// Must be called within an async runtime.
+    pub fn connect(&mut self, id: &LinkId) -> bool {
+        let Some(entry) = self.links.get_mut(id) else {
+            return false;
         };
 
-        let router = self.router.clone();
-        let id = id.clone();
-
-        Some(async move {
-            match crate::link::open(build).await {
-                Ok((reader, writer)) => {
-                    let handle =
-                        router.attach_reader_writer(id.clone(), reader, writer, high_latency);
-                    LinkUpdate(LinkUpdateKind::Connected(id, handle))
-                }
-                Err(error) => LinkUpdate(LinkUpdateKind::Failed(id, error.to_string())),
-            }
-        })
-    }
-
-    /// Fold a landed connect outcome back into the link's state.
-    pub fn apply(&mut self, update: LinkUpdate) {
-        match update.0 {
-            LinkUpdateKind::Connected(id, handle) => {
-                if let Some(entry) = self.links.get_mut(&id) {
-                    entry.handle = Some(handle);
-                    entry.status = LinkStatus::Connected;
-                }
-            }
-            LinkUpdateKind::Failed(id, error) => {
-                log::error!("Connect failed for {id:?}: {error}");
-                if let Some(entry) = self.links.get_mut(&id) {
-                    entry.handle = None;
-                    entry.status = LinkStatus::Failed(error);
-                }
-            }
+        if entry
+            .session
+            .as_ref()
+            .is_some_and(|session| session.status.borrow().is_active())
+        {
+            return false;
         }
+
+        let (status_tx, status_rx) = watch::channel(LinkStatus::Connecting { attempt: 1 });
+        let task = tokio::spawn(supervise(
+            self.router.clone(),
+            id.clone(),
+            entry.config.clone(),
+            status_tx,
+            self.events.clone(),
+        ));
+
+        entry.session = Some(Session {
+            status: status_rx,
+            _task: AbortOnDrop(task),
+        });
+        true
     }
 
-    /// Drop the live attachment of `id`, if any.
+    /// Stop the link's supervisor, closing its transport.
     pub fn disconnect(&mut self, id: &LinkId) {
-        if let Some(entry) = self.links.get_mut(id) {
-            drop(entry.handle.take());
-            entry.status = LinkStatus::Disconnected;
+        if let Some(entry) = self.links.get_mut(id)
+            && entry.session.take().is_some()
+        {
+            let _ = self.events.send(LinkEvent {
+                id: id.clone(),
+                name: entry.config.name.clone(),
+                status: LinkStatus::Disconnected,
+            });
         }
     }
 
-    /// Drop handles the router no longer knows about.
-    ///
-    /// `LinkClosed` rides the lossy telemetry ring, so a stored handle can
-    /// outlive the attachment it names. A handle to a link the router has
-    /// detached — however that detach happened — is nonsense, and keeping it
-    /// would block a re-attach forever; this reconciles within one call.
-    ///
-    /// Only entries that hold a handle are repaired. An entry stuck in
-    /// [`LinkStatus::Connecting`] because its connect future was dropped has no
-    /// handle to compare against the router, so this deliberately leaves it
-    /// alone; see [`LinkManager::connect`].
-    pub fn reconcile(&mut self) {
-        for (id, entry) in &mut self.links {
-            if entry.handle.is_some() && !self.router.is_attached(id) {
-                log::info!("link {id:?} was lost by the router; reconciling");
-                entry.handle = None;
-                entry.status = LinkStatus::Disconnected;
-            }
-        }
-    }
-
-    /// Whether `id` has a live guard on an attachment the router still holds.
-    pub fn is_connected(&self, id: &LinkId) -> bool {
+    /// The link's current status.
+    pub fn status(&self, id: &LinkId) -> LinkStatus {
         self.links
             .get(id)
-            .is_some_and(|entry| entry.handle.is_some() && self.router.is_attached(id))
+            .and_then(|entry| entry.session.as_ref())
+            .map(|session| session.status.borrow().clone())
+            .unwrap_or(LinkStatus::Disconnected)
+    }
+
+    /// Traffic counters of the link's current attachment.
+    pub fn stats(&self, id: &LinkId) -> Option<LinkStats> {
+        self.router.link_stats(id)
     }
 
     /// Add a link, or update the existing one with the same name in place.
     ///
     /// Reusing the id of a same-named link keeps its identity stable across
     /// edits; any live connection is dropped, since the configuration it was
-    /// attached under no longer applies. Saving always mutates the set (an add
-    /// or a replace), so the caller persists unconditionally.
-    pub fn save(&mut self, config: LinkConfig) {
+    /// attached under no longer applies. Returns the link's id.
+    pub fn save(&mut self, config: LinkConfig) -> LinkId {
         let existing = self
             .links
             .iter()
@@ -207,19 +228,21 @@ impl LinkManager {
             .map(|(id, _)| id.clone());
         let id = existing.unwrap_or_else(|| self.fresh_id());
 
+        self.disconnect(&id);
         self.links.insert(
-            id,
+            id.clone(),
             LinkEntry {
                 config,
-                handle: None,
-                status: LinkStatus::Disconnected,
+                session: None,
             },
         );
+        id
     }
 
     /// Remove a configured link, dropping any live connection with it.
     /// Reports whether a link was actually removed.
     pub fn remove(&mut self, id: &LinkId) -> bool {
+        self.disconnect(id);
         self.links.remove(id).is_some()
     }
 
@@ -234,8 +257,84 @@ impl LinkManager {
     /// The configured links with their status, for the view.
     pub fn entries(&self) -> impl Iterator<Item = (&LinkId, &LinkConfig, LinkStatus)> {
         self.links
-            .iter()
-            .map(|(id, entry)| (id, &entry.config, entry.status.clone()))
+            .keys()
+            .map(|id| (id, &self.links[id].config, self.status(id)))
+    }
+}
+
+/// The wait before reconnection attempt `attempt` (1-based): 1 s, doubling,
+/// capped at [`MAX_BACKOFF`].
+fn backoff(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(4);
+    (Duration::from_secs(1) * 2u32.pow(exponent)).min(MAX_BACKOFF)
+}
+
+/// Own one link's transport until aborted.
+async fn supervise(
+    router: MavlinkRouter,
+    id: LinkId,
+    config: LinkConfig,
+    status: watch::Sender<LinkStatus>,
+    events: mpsc::UnboundedSender<LinkEvent>,
+) {
+    let publish = |state: LinkStatus| {
+        status.send_replace(state.clone());
+        let _ = events.send(LinkEvent {
+            id: id.clone(),
+            name: config.name.clone(),
+            status: state,
+        });
+    };
+
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        publish(LinkStatus::Connecting { attempt });
+
+        let opened = tokio::time::timeout(OPEN_TIMEOUT, crate::link::open(config.build.clone()))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "opening the transport timed out",
+                )))
+            });
+
+        let error = match opened {
+            Ok((reader, writer)) => {
+                let guard =
+                    router.attach_reader_writer(id.clone(), reader, writer, config.high_latency);
+                log::info!("Link {} connected", config.name);
+                publish(LinkStatus::Connected {
+                    since: Instant::now(),
+                });
+                attempt = 0;
+
+                // Held until the transport fails; dropping this task (a
+                // disconnect) drops the guard and closes the link.
+                guard.closed().await;
+                log::warn!("Link {} lost", config.name);
+                "the connection was lost".to_string()
+            }
+            Err(error) => {
+                log::warn!("Link {} failed to open: {error}", config.name);
+                error.to_string()
+            }
+        };
+
+        if !config.auto_reconnect {
+            publish(LinkStatus::Failed(error));
+            return;
+        }
+
+        let delay = backoff(attempt.max(1));
+        publish(LinkStatus::Reconnecting {
+            error,
+            attempt: attempt.max(1),
+            retry_at: Instant::now() + delay,
+        });
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -270,164 +369,151 @@ mod tests {
             name: name.to_string(),
             auto_connect: false,
             high_latency: false,
+            auto_reconnect: true,
             build: LinkBuild::Udp {
-                sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 14550),
+                sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
                 peer: None,
             },
         }
     }
 
-    fn manager() -> (LinkManager, MavlinkRouter) {
+    fn manager() -> (LinkManager, LinkEvents, MavlinkRouter) {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let (manager, _auto_connect) = LinkManager::from_configs(&router, Vec::new());
-        (manager, router)
+        let (manager, _auto_connect, events) = LinkManager::new(&router, Vec::new());
+        (manager, events, router)
+    }
+
+    async fn wait_for(events: &mut LinkEvents, done: impl Fn(&LinkStatus) -> bool) -> LinkStatus {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("a status change arrives")
+                .expect("the manager is alive");
+            if done(&event.status) {
+                return event.status;
+            }
+        }
     }
 
     #[test]
-    fn from_configs_loads_links_and_reports_auto_connect() {
+    fn backoff_doubles_up_to_the_cap() {
+        assert_eq!(backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff(2), Duration::from_secs(2));
+        assert_eq!(backoff(3), Duration::from_secs(4));
+        assert_eq!(backoff(10), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn new_loads_links_and_reports_auto_connect() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let auto = LinkConfig {
             auto_connect: true,
             ..config("auto")
         };
-        let manual = config("manual");
 
-        let (manager, auto_connect) = LinkManager::from_configs(&router, vec![auto, manual]);
+        let (manager, auto_connect, _) = LinkManager::new(&router, vec![auto, config("manual")]);
 
         assert_eq!(manager.configs().len(), 2);
         assert_eq!(auto_connect.len(), 1);
-
-        let auto_id = auto_connect[0].clone();
-        assert!(!manager.is_connected(&auto_id));
-
-        let names = manager
-            .entries()
-            .map(|(_, config, _)| config.name.clone())
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"auto".to_string()));
-        assert!(names.contains(&"manual".to_string()));
+        assert_eq!(manager.status(&auto_connect[0]), LinkStatus::Disconnected);
     }
 
     #[test]
     fn save_adds_then_updates_by_name_reusing_the_id() {
-        let (mut manager, _router) = manager();
+        let (mut manager, _, _) = manager();
 
-        manager.save(config("A"));
+        let first = manager.save(config("A"));
+        let second = manager.save(config("A"));
+        assert_eq!(first, second);
         assert_eq!(manager.configs().len(), 1);
-        let first_id = manager.entries().next().unwrap().0.clone();
 
-        // Saving the same name updates in place, keeping the id.
-        manager.save(config("A"));
-        assert_eq!(manager.configs().len(), 1);
-        let second_id = manager.entries().next().unwrap().0.clone();
-        assert_eq!(first_id, second_id);
-
-        // A different name adds a link with a fresh id.
         manager.save(config("B"));
         assert_eq!(manager.configs().len(), 2);
     }
 
     #[test]
     fn remove_drops_the_link_and_unknown_is_a_noop() {
-        let (mut manager, _router) = manager();
-
-        manager.save(config("A"));
-        let id = manager.entries().next().unwrap().0.clone();
+        let (mut manager, _, _) = manager();
+        let id = manager.save(config("A"));
 
         assert!(!manager.remove(&LinkId::new("does-not-exist")));
-        assert_eq!(manager.configs().len(), 1);
-
         assert!(manager.remove(&id));
         assert!(manager.configs().is_empty());
     }
 
     #[tokio::test]
-    async fn reconcile_drops_a_ghost_handle() {
-        let (mut manager, _router) = manager();
-        manager.save(config("A"));
-        let id = manager.entries().next().unwrap().0.clone();
+    async fn connect_attaches_and_disconnect_detaches() {
+        let (mut manager, mut events, router) = manager();
+        let id = manager.save(config("A"));
 
-        // A guard from a *different* router: the manager claims a live
-        // connection the router it talks to never attached. Such a handle can
-        // only be a ghost (for example a LinkClosed lost to the lossy ring).
-        let (other, _other_events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let (_peer, gcs) = tokio::io::duplex(4096);
-        let (reader, writer) = tokio::io::split(gcs);
-        let guard = other.attach_reader_writer(LinkId::new("other"), reader, writer, false);
-        manager.apply(LinkUpdate(LinkUpdateKind::Connected(id.clone(), guard)));
-
+        assert!(manager.connect(&id));
         assert!(
-            !manager.is_connected(&id),
-            "the router never attached this handle"
+            !manager.connect(&id),
+            "a live link refuses a second connect"
         );
-        let status = manager.entries().next().unwrap().2;
-        assert!(matches!(status, LinkStatus::Connected));
 
-        // One reconcile repairs the stored state to the router's reality.
-        manager.reconcile();
-        assert!(!manager.is_connected(&id));
-        let status = manager.entries().next().unwrap().2;
-        assert!(matches!(status, LinkStatus::Disconnected));
+        wait_for(&mut events, LinkStatus::is_connected).await;
+        assert!(manager.status(&id).is_connected());
+        assert!(router.is_attached(&id));
+
+        manager.disconnect(&id);
+        assert_eq!(manager.status(&id), LinkStatus::Disconnected);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!router.is_attached(&id), "the transport was closed");
     }
 
     #[tokio::test]
-    async fn connect_is_refused_while_a_link_is_live() {
-        let (mut manager, router) = manager();
-        manager.save(config("A"));
-        let id = manager.entries().next().unwrap().0.clone();
+    async fn a_failed_open_retries_with_backoff() {
+        let (mut manager, mut events, _router) = manager();
 
-        // Attach a real guard to a live transport, under the link's own id,
-        // like a landed connect would.
-        let (_peer, gcs) = tokio::io::duplex(4096);
-        let (reader, writer) = tokio::io::split(gcs);
-        let guard = router.attach_reader_writer(id.clone(), reader, writer, false);
-        manager.apply(LinkUpdate(LinkUpdateKind::Connected(id.clone(), guard)));
-
-        assert!(manager.is_connected(&id));
-
-        // The update must refuse outright: no future is produced at all, so no
-        // second attach could take place, and the existing handle stays.
-        assert!(
-            manager.connect(&id).is_none(),
-            "a live link must refuse a re-connect"
-        );
-        assert!(manager.is_connected(&id));
-    }
-
-    #[test]
-    fn connect_unknown_id_is_refused() {
-        let (mut manager, _router) = manager();
-        assert!(manager.connect(&LinkId::new("does-not-exist")).is_none());
-    }
-
-    #[tokio::test]
-    async fn connect_opens_a_transport_and_applies_the_guard() {
-        // A silent UDP peer gives the connected link somewhere to point.
-        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let peer_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, peer.local_addr().unwrap().port());
-
-        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-        let config = LinkConfig {
-            name: "A".into(),
-            auto_connect: false,
-            high_latency: false,
-            build: LinkBuild::Udp {
-                sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
-                peer: Some(peer_addr),
-            },
+        // Nothing listens on a TCP port we just released.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = match listener.local_addr().unwrap() {
+            std::net::SocketAddr::V4(addr) => addr,
+            _ => unreachable!(),
         };
-        let (mut manager, _auto_connect) = LinkManager::from_configs(&router, vec![config]);
-        let id = manager.entries().next().unwrap().0.clone();
+        drop(listener);
 
-        let update = manager.connect(&id).expect("the first connect is accepted");
+        let id = manager.save(LinkConfig {
+            build: LinkBuild::Tcp { sock_addr: addr },
+            ..config("tcp")
+        });
+        assert!(manager.connect(&id));
 
-        // The status is `Connecting` until the update lands.
-        let status = manager.entries().next().unwrap().2;
-        assert!(matches!(status, LinkStatus::Connecting));
+        let status = wait_for(&mut events, |status| {
+            matches!(status, LinkStatus::Reconnecting { .. })
+        })
+        .await;
+        assert!(matches!(
+            status,
+            LinkStatus::Reconnecting { attempt: 1, .. }
+        ));
+        assert!(manager.status(&id).is_active(), "still trying");
+    }
 
-        let update = update.await;
-        manager.apply(update);
+    #[tokio::test]
+    async fn without_auto_reconnect_a_failure_is_final() {
+        let (mut manager, mut events, _router) = manager();
 
-        assert!(manager.is_connected(&id));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = match listener.local_addr().unwrap() {
+            std::net::SocketAddr::V4(addr) => addr,
+            _ => unreachable!(),
+        };
+        drop(listener);
+
+        let id = manager.save(LinkConfig {
+            build: LinkBuild::Tcp { sock_addr: addr },
+            auto_reconnect: false,
+            ..config("tcp")
+        });
+        manager.connect(&id);
+
+        wait_for(&mut events, |status| {
+            matches!(status, LinkStatus::Failed(_))
+        })
+        .await;
+        assert!(!manager.status(&id).is_active());
+        assert!(manager.connect(&id), "a failed link can be connected again");
     }
 }

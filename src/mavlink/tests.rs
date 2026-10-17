@@ -6,14 +6,13 @@ use std::{
     time::Duration,
 };
 
-use futures::StreamExt;
 use mav_param::{Ident, Value};
 use mavio::{
     DefaultDialect,
     default_dialect::{
         enums::{
             MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
-            MavProtocolCapability, MavResult, MavSeverity, MavType,
+            MavResult, MavSeverity, MavType,
         },
         messages::{
             CommandAck, GlobalPositionInt, Heartbeat, MissionAck, MissionCount, MissionItemInt,
@@ -246,7 +245,7 @@ async fn concurrent_request_messages_queue_instead_of_starving() {
 async fn param_set_returns_echoed_value() {
     let (router, _guard, mut vehicle) = setup();
     let ident = Ident::try_from(b"TEST_PARAM").unwrap();
-    let cap = MavProtocolCapability::default();
+    let cap = crate::wire::param::ParamEncoding::Bytewise;
 
     let task = tokio::spawn({
         let router = router.clone();
@@ -327,7 +326,7 @@ async fn mission_download_transfers_all_items() {
         let router = router.clone();
         async move {
             router
-                .mission_download(VEHICLE, MavMissionType::Mission)
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
                 .await
         }
     });
@@ -353,7 +352,7 @@ async fn mission_download_transfers_all_items() {
     assert_eq!(ack.type_, MavMissionResult::MavMissionAccepted);
 
     let downloaded = task.await.unwrap().expect("download should succeed");
-    assert_eq!(downloaded.vehicle_id, 7);
+    assert_eq!(downloaded.opaque_id, 7);
     assert_eq!(downloaded.items.len(), 3);
     for (seq, item) in downloaded.items.iter().enumerate() {
         assert_eq!(item.seq, seq as u16);
@@ -371,7 +370,7 @@ async fn mission_upload_sends_items_and_returns_id() {
         let items = items.clone();
         async move {
             router
-                .mission_upload(VEHICLE, MavMissionType::Mission, &items)
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
                 .await
         }
     });
@@ -420,7 +419,7 @@ async fn mission_upload_answers_legacy_mission_request() {
         let items = items.clone();
         async move {
             router
-                .mission_upload(VEHICLE, MavMissionType::Mission, &items)
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
                 .await
         }
     });
@@ -467,7 +466,7 @@ async fn mission_download_retransmits_a_dropped_item_request() {
         let router = router.clone();
         async move {
             router
-                .mission_download(VEHICLE, MavMissionType::Mission)
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
                 .await
         }
     });
@@ -523,6 +522,181 @@ async fn mission_clear_reports_nack() {
         result,
         Err(MavError::MissionFailed(MavMissionResult::MavMissionDenied))
     ));
+}
+
+/// Another GCS on the network runs its own transfer with the same vehicle:
+/// replies addressed to it must not be taken as ours.
+#[tokio::test]
+async fn mission_download_ignores_traffic_for_another_gcs() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+
+    // A count for a different GCS (system 200) arrives first and is ignored.
+    vehicle
+        .send(&MissionCount {
+            target_system: 200,
+            target_component: 190,
+            count: 9,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    vehicle
+        .send(&MissionCount {
+            target_system: DEFAULT_GCS_ID.system,
+            target_component: DEFAULT_GCS_ID.component,
+            count: 1,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 3,
+        })
+        .await;
+
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+
+    // The other GCS's item (x = 999) is ignored; ours (x = 5) is taken.
+    vehicle
+        .send(&MissionItemInt {
+            target_system: 200,
+            ..mission_item(0, 999)
+        })
+        .await;
+    vehicle.send(&mission_item(0, 5)).await;
+
+    recv_ack(&mut vehicle).await;
+    let downloaded = task.await.unwrap().expect("download succeeds");
+    assert_eq!(downloaded.items.len(), 1);
+    assert_eq!(downloaded.items[0].x, 5);
+}
+
+/// A fence transfer finishing alongside a mission transfer must not end the
+/// mission transfer.
+#[tokio::test]
+async fn mission_upload_ignores_acks_for_another_mission_type() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![mission_item(0, 11)];
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(_) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionDenied,
+            mission_type: MavMissionType::Fence,
+            ..Default::default()
+        })
+        .await;
+
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    let DefaultDialect::MissionItemInt(_) = vehicle.recv().await else {
+        panic!("expected MISSION_ITEM_INT")
+    };
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 5,
+            ..Default::default()
+        })
+        .await;
+
+    assert_eq!(task.await.unwrap().expect("the fence ack is ignored"), 5);
+}
+
+/// Abandoning a download midway tells the vehicle, so its own transfer state
+/// machine does not wait for a GCS that has left.
+#[tokio::test]
+async fn an_abandoned_download_is_cancelled_on_the_vehicle() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    vehicle
+        .send(&MissionCount {
+            count: 4,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+
+    task.abort();
+    let _ = task.await;
+
+    let ack = recv_ack(&mut vehicle).await;
+    assert_eq!(ack.type_, MavMissionResult::MavMissionOperationCancelled);
+}
+
+#[tokio::test]
+async fn download_reports_progress_per_item() {
+    use std::sync::{Arc, Mutex};
+
+    let (router, _guard, mut vehicle) = setup();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let seen = seen.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &move |progress| {
+                    seen.lock().unwrap().push((progress.done, progress.total))
+                })
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    vehicle
+        .send(&MissionCount {
+            count: 2,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    for seq in 0..2 {
+        assert_eq!(recv_request_int(&mut vehicle).await, seq);
+        vehicle.send(&mission_item(seq, 1)).await;
+    }
+    recv_ack(&mut vehicle).await;
+    task.await.unwrap().unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![(0, 2), (1, 2), (2, 2)]);
 }
 
 // ----- frame replay harness -----
@@ -623,8 +797,7 @@ async fn replay_frames_drive_fleet_state() {
     }
 
     let (router, events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-    // `Pin<Box<_>>` is `Unpin`, which `StreamExt::next` needs.
-    let mut events = Box::pin(events);
+    let mut events = events;
     let _guard = router.attach_reader_writer(
         LinkId::new("replay"),
         BytesReader { bytes, pos: 0 },
@@ -638,12 +811,12 @@ async fn replay_frames_drive_fleet_state() {
     let mut folded = 0;
 
     while folded < script.len() {
-        match tokio::time::timeout_at(deadline, events.as_mut().next()).await {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(Event::Message(inbound))) => {
                 let Ok(message) = inbound.frame.decode::<DefaultDialect>() else {
                     continue;
                 };
-                fleet.observe(inbound.source_mav, inbound.received_at, Some(message));
+                fleet.observe(inbound.source_mav, inbound.received_at, Some(&message));
                 folded += 1;
             }
             Ok(Some(Event::LinkClosed(_))) => {}
@@ -660,7 +833,7 @@ async fn replay_frames_drive_fleet_state() {
     let vehicle = fleet
         .vehicle(SystemId::from(VEHICLE.system))
         .expect("vehicle should be registered");
-    assert_eq!(vehicle.identity.armed(), Some(true));
+    assert_eq!(vehicle.identity.is_armed(), Some(true));
 
     let pos = vehicle
         .position
@@ -673,14 +846,10 @@ async fn replay_frames_drive_fleet_state() {
 
     let battery = vehicle
         .battery
-        .state
-        .as_ref()
+        .primary()
         .expect("battery should be recorded");
-    assert!(
-        (battery.voltage - 12.0).abs() < 1e-6,
-        "voltage was {}",
-        battery.voltage
-    );
+    let voltage = battery.voltage.expect("voltage is known");
+    assert!((voltage - 12.0).abs() < 1e-6, "voltage was {voltage}");
 
     assert!(
         vehicle

@@ -6,9 +6,10 @@ use std::{
     },
 };
 
+use anyhow::Context;
 use directories::ProjectDirs;
 
-use crate::{foundation::BoxError, layout::LayoutConfig, link::LinkConfig, theme::ThemeMode};
+use crate::{layout::LayoutConfig, link::LinkConfig, theme::ThemeMode};
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
@@ -25,12 +26,17 @@ fn default_config_version() -> u32 {
 }
 
 /// Persisted application preferences.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Which palette to use.
     pub theme: ThemeMode,
     pub scale_factor: f32,
+    /// Record every received frame to a `.tlog` file per session.
+    pub record_telemetry: bool,
+    /// The altitude above home of the first waypoint of a plan. Later ones
+    /// take the altitude of the waypoint before them.
+    pub default_waypoint_altitude_m: f32,
 }
 
 impl Default for Settings {
@@ -38,7 +44,59 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::Dark,
             scale_factor: 1.0,
+            record_telemetry: true,
+            default_waypoint_altitude_m: crate::domain::mission::DEFAULT_WAYPOINT_ALTITUDE_M,
         }
+    }
+}
+
+/// Where application data (telemetry logs) is kept.
+pub fn data_dir() -> Option<PathBuf> {
+    PROJECT_DIRS
+        .as_ref()
+        .map(|dirs| dirs.data_dir().to_path_buf())
+}
+
+/// Persists configurations one at a time, in order, off the UI thread.
+///
+/// Saves are coalesced: while a write is in progress, only the newest of the
+/// configurations requested meanwhile is written next. Two saves can therefore
+/// never land out of order and leave an older configuration on disk.
+pub struct ConfigWriter {
+    latest: tokio::sync::watch::Sender<Option<Configuration>>,
+}
+
+impl ConfigWriter {
+    /// Start the writer on the current async runtime. The returned receiver
+    /// yields the outcome of each write.
+    pub fn spawn() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
+    ) {
+        let (latest, mut requests) = tokio::sync::watch::channel(None::<Configuration>);
+        let (outcomes, receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            while requests.changed().await.is_ok() {
+                let Some(configuration) = requests.borrow_and_update().clone() else {
+                    continue;
+                };
+
+                let outcome = tokio::task::spawn_blocking(move || configuration.write_to_file())
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+
+                let _ = outcomes.send(outcome);
+            }
+        });
+
+        (Self { latest }, receiver)
+    }
+
+    /// Persist `configuration` (or a newer one, if saved again meanwhile).
+    pub fn save(&self, configuration: Configuration) {
+        self.latest.send_replace(Some(configuration));
     }
 }
 
@@ -81,18 +139,18 @@ impl Default for Configuration {
 }
 
 impl Configuration {
-    fn config_path() -> Result<PathBuf, BoxError> {
+    fn config_path() -> anyhow::Result<PathBuf> {
         PROJECT_DIRS
             .as_ref()
             .map(|dirs| dirs.config_dir().join("config.ron"))
-            .ok_or_else(|| "no platform configuration directory is available".into())
+            .context("Unable to construct path to config.ron")
     }
 
-    pub fn initialize() -> Result<Self, BoxError> {
+    pub fn initialize() -> anyhow::Result<Self> {
         Self::initialize_at(&Self::config_path()?)
     }
 
-    pub fn write_to_file(&self) -> Result<(), BoxError> {
+    pub fn write_to_file(&self) -> anyhow::Result<()> {
         self.write_to_file_at(&Self::config_path()?)
     }
 
@@ -102,7 +160,7 @@ impl Configuration {
     /// Any other read error is propagated without touching the file. A file
     /// that reads but does not parse is moved aside (so it survives) before
     /// defaults are written.
-    fn initialize_at(path: &Path) -> Result<Self, BoxError> {
+    fn initialize_at(path: &Path) -> anyhow::Result<Self> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -151,7 +209,7 @@ impl Configuration {
     /// temp file, then rename it over the target. The temp file is unique per
     /// call, so concurrent saves cannot interleavingly corrupt one shared
     /// sidecar.
-    fn write_to_file_at(&self, path: &Path) -> Result<(), BoxError> {
+    fn write_to_file_at(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -246,6 +304,7 @@ mod tests {
             name: "Primary".to_string(),
             auto_connect: true,
             high_latency: true,
+            auto_reconnect: false,
             build: LinkBuild::Udp {
                 sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 14550),
                 peer: Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 14551)),

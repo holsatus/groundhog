@@ -4,7 +4,7 @@
 //! background. A regular pane is a single rounded, bordered surface: its header
 //! and body are transparent, so they share one colour, and a `rule` divides
 //! them. The map cannot work this way — it paints opaque tiles across its whole
-//! pane — so it draws its own frame instead (see `features::map`).
+//! pane — so it draws its own frame instead (see `map::Map::view`).
 
 use iced::{
     Border, Color, Shadow, Theme, Vector, border::Radius, theme::Palette, widget::container,
@@ -12,8 +12,8 @@ use iced::{
 use mavio::default_dialect::enums::MavSeverity;
 
 /// The corner radius of a pane, shared with the map's frame.
-pub(crate) const PANE_RADIUS: f32 = 10.0;
-pub(crate) const WIDGET_RADIUS: f32 = 6.0;
+pub(crate) const PANE_RADIUS: f32 = 8.0;
+pub(crate) const WIDGET_RADIUS: f32 = 4.0;
 
 /// The width of a pane's border, and the height of the header divider.
 pub(crate) const PANE_BORDER_WIDTH: f32 = 1.0;
@@ -124,6 +124,34 @@ pub fn list_brighter(theme: &Theme) -> container::Style {
     }
 }
 
+/// The state a [`chip`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    Done,
+    Current,
+    Pending,
+}
+
+/// A small rounded label for one step of a sequence.
+pub fn chip(theme: &Theme, chip: Chip) -> container::Style {
+    let palette = theme.palette();
+    let pair = match chip {
+        Chip::Done => palette.success.weak,
+        Chip::Current => palette.primary.base,
+        Chip::Pending => palette.background.weak,
+    };
+
+    container::Style {
+        background: Some(pair.color.into()),
+        text_color: Some(pair.text),
+        border: Border {
+            radius: WIDGET_RADIUS.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A floating tooltip.
 pub fn tooltip(theme: &Theme) -> container::Style {
     let palette = theme.palette();
@@ -196,6 +224,74 @@ pub fn marker_dragged() -> Color {
 /// The number label drawn on a mission marker.
 pub fn marker_label() -> Color {
     Color::BLACK
+}
+
+/// The selected or hovered mission marker.
+pub fn marker_selected() -> Color {
+    Color::from_rgb(0.45, 0.75, 1.0)
+}
+
+/// A vehicle's home marker.
+pub fn map_home() -> Color {
+    Color::from_rgb(1.0, 0.85, 0.2)
+}
+
+/// A notification toast, accented by its level.
+pub fn toast(theme: &Theme, level: crate::features::notifications::Level) -> container::Style {
+    use crate::features::notifications::Level;
+
+    let palette = theme.palette();
+    let accent = match level {
+        Level::Error => palette.danger.base.color,
+        Level::Warning => palette.warning.base.color,
+        Level::Success => palette.success.base.color,
+        Level::Info => palette.primary.base.color,
+    };
+
+    container::Style {
+        background: Some(palette.background.weak.color.into()),
+        text_color: Some(palette.background.weak.text),
+        border: Border {
+            width: 2.0,
+            radius: WIDGET_RADIUS.into(),
+            color: accent,
+        },
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.3),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A modal dialog.
+pub fn dialog(theme: &Theme) -> container::Style {
+    let palette = theme.palette();
+
+    container::Style {
+        background: Some(palette.background.weakest.color.into()),
+        text_color: Some(palette.background.weakest.text),
+        border: Border {
+            width: 1.0,
+            radius: PANE_RADIUS.into(),
+            color: palette.background.strongest.color,
+        },
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.4),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The dimmed backdrop behind a modal dialog.
+pub fn backdrop(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::BLACK.scale_alpha(0.45).into()),
+        ..container::Style::default()
+    }
 }
 
 pub mod pick_list {

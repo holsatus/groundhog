@@ -22,6 +22,8 @@ pub enum Panel {
     Mission,
     #[serde(rename = "Parameters")]
     Parameters,
+    #[serde(rename = "Calibration")]
+    Calibration,
     #[serde(rename = "Links")]
     Links,
     #[serde(rename = "Logs")]
@@ -97,10 +99,11 @@ impl From<pane_grid::Configuration<Panel>> for LayoutConfig {
 
 impl Panel {
     /// Panels offered on the rail, in order. The map is not one of them.
-    pub const DOCKABLE: [Panel; 6] = [
+    pub const DOCKABLE: [Panel; 7] = [
         Panel::Vehicles,
         Panel::Mission,
         Panel::Parameters,
+        Panel::Calibration,
         Panel::Links,
         Panel::Logs,
         Panel::Settings,
@@ -112,6 +115,7 @@ impl Panel {
             Panel::Vehicles => "Vehicles",
             Panel::Mission => "Mission",
             Panel::Parameters => "Parameters",
+            Panel::Calibration => "Calibration",
             Panel::Links => "Links",
             Panel::Logs => "Log",
             Panel::Settings => "Settings",
@@ -125,6 +129,7 @@ impl Panel {
             Panel::Vehicles => "V",
             Panel::Mission => "M",
             Panel::Parameters => "P",
+            Panel::Calibration => "K",
             Panel::Links => "C",
             Panel::Logs => "L",
             Panel::Settings => "S",
@@ -151,7 +156,6 @@ pub enum Message {
     Clicked(pane_grid::Pane),
     Dragged(pane_grid::DragEvent),
     Resized(pane_grid::ResizeEvent),
-    /// Open a dockable panel (no-op if already open).
     Open(Panel),
     Close(pane_grid::Pane),
     Maximize(pane_grid::Pane),

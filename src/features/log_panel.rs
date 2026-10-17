@@ -1,10 +1,12 @@
-//! The log panel: a merged, filterable view of vehicles' status messages.
+//! The log panel: one timeline of vehicles' status texts and the GCS's own
+//! notices.
 //!
 //! Messages from every vehicle are shown together (tagged with the vehicle) so
-//! that alerts from a non-focused vehicle are not missed. The scope can be
-//! narrowed to the focused vehicle, and a minimum severity can be applied.
+//! that alerts from a non-selected vehicle are not missed. The scope can be
+//! narrowed to the selected vehicle or to the GCS, and a minimum severity can
+//! be applied.
 
-use std::collections::BTreeMap;
+use std::time::Instant;
 
 use iced::{
     Alignment, Element, Length, Theme, Widget,
@@ -12,26 +14,32 @@ use iced::{
 };
 use mavio::default_dialect::enums::MavSeverity;
 
+use super::notifications::{Level, Notice, Notifications};
 use crate::{
-    domain::SystemId,
-    domain::vehicle::{StatusText, Vehicle, status},
+    domain::{
+        SystemId,
+        fleet::FleetSnapshot,
+        vehicle::{StatusText, status},
+    },
     style,
     widget::virtualized::virtual_list,
 };
 
-/// Which vehicles' messages to show.
+/// Which messages to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     All,
-    Focused,
+    Selected,
+    Gcs,
 }
 
 impl std::fmt::Display for Scope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Scope::All => f.write_str("All vehicles"),
-            Scope::Focused => f.write_str("Focused vehicle"),
-        }
+        f.write_str(match self {
+            Scope::All => "Everything",
+            Scope::Selected => "Selected vehicle",
+            Scope::Gcs => "Ground station",
+        })
     }
 }
 
@@ -57,6 +65,7 @@ impl Default for Filter {
     }
 }
 
+#[derive(Default)]
 pub struct LogPanel {
     filter: Filter,
 }
@@ -67,11 +76,42 @@ pub enum Message {
     SetMinSeverity(MavSeverity),
 }
 
+/// One line of the timeline.
+#[derive(Clone, Copy)]
+enum Entry<'a> {
+    Vehicle(SystemId, &'a StatusText),
+    Gcs(&'a Notice),
+}
+
+impl Entry<'_> {
+    fn at(&self) -> Instant {
+        match self {
+            Entry::Vehicle(_, text) => text.at,
+            Entry::Gcs(notice) => notice.at,
+        }
+    }
+
+    fn severity(&self) -> MavSeverity {
+        match self {
+            Entry::Vehicle(_, text) => text.severity,
+            Entry::Gcs(notice) => severity_of(notice.level),
+        }
+    }
+}
+
+/// Where a GCS notice ranks among status text severities.
+fn severity_of(level: Level) -> MavSeverity {
+    match level {
+        Level::Error => MavSeverity::Error,
+        Level::Warning => MavSeverity::Warning,
+        Level::Success => MavSeverity::Notice,
+        Level::Info => MavSeverity::Info,
+    }
+}
+
 impl LogPanel {
     pub fn new() -> Self {
-        Self {
-            filter: Filter::default(),
-        }
+        Self::default()
     }
 
     pub fn update(&mut self, message: Message) {
@@ -83,36 +123,44 @@ impl LogPanel {
 
     pub fn view<'a>(
         &'a self,
-        vehicles: &'a BTreeMap<SystemId, Vehicle>,
-        focused: Option<SystemId>,
+        fleet: &'a FleetSnapshot,
+        selected: Option<SystemId>,
+        notices: &'a Notifications,
         theme: &Theme,
     ) -> Element<'a, Message> {
-        let mut entries = self.entries(vehicles, focused);
+        let mut entries = self.entries(fleet, selected, notices);
 
         if entries.len() > MAX_ENTRIES {
             entries.drain(..entries.len() - MAX_ENTRIES);
         }
 
-        let entries = entries
-            .into_iter()
-            .enumerate()
-            .map(|(index, (id, status))| (index, id, status))
-            .collect::<Vec<_>>();
-
+        let entries = entries.into_iter().enumerate().collect::<Vec<_>>();
         let palette = *theme.palette();
 
-        let list = virtual_list(entries, move |&(index, id, status)| {
-            let color = style::severity_color(palette, status.severity);
+        let list = virtual_list(entries, move |&(index, entry)| {
+            let color = style::severity_color(palette, entry.severity());
+
+            let (source, message) = match entry {
+                Entry::Vehicle(id, status) => (
+                    format!("{}:{}", id.0, status.component),
+                    status.text.clone(),
+                ),
+                Entry::Gcs(notice) => (
+                    "GCS".to_string(),
+                    match &notice.detail {
+                        Some(detail) => format!("{}: {detail}", notice.title),
+                        None => notice.title.clone(),
+                    },
+                ),
+            };
 
             container(
                 row![
-                    text(format!("{}:{}", id.0, status.component)).width(Length::Fixed(72.0)),
-                    text(format!("{:?}", status.severity))
+                    text(source).width(Length::Fixed(72.0)),
+                    text(format!("{:?}", entry.severity()))
                         .color(color)
                         .width(Length::Fixed(96.0)),
-                    text(&status.text)
-                        .width(Length::Fill)
-                        .wrapping(Wrapping::None),
+                    text(message).width(Length::Fill).wrapping(Wrapping::None),
                 ]
                 .spacing(8.0),
             )
@@ -125,7 +173,7 @@ impl LogPanel {
             .boxed()
         })
         .item_height(|_| LOG_ROW_HEIGHT)
-        .key(|(_, id, status)| (*id, status.component, status.at))
+        .key(|(index, entry)| (*index, entry.at()))
         .spacing(0.0);
 
         let list = scrollable(list)
@@ -137,7 +185,7 @@ impl LogPanel {
             text("Show:"),
             pick_list(
                 Some(self.filter.scope),
-                [Scope::All, Scope::Focused],
+                [Scope::All, Scope::Selected, Scope::Gcs],
                 |scope| scope.to_string(),
             )
             .on_select(Message::SetScope),
@@ -159,38 +207,43 @@ impl LogPanel {
             .boxed()
     }
 
-    /// Collect the messages matching the current filter, oldest first.
+    /// The entries matching the filter, oldest first.
     fn entries<'a>(
         &self,
-        vehicles: &'a BTreeMap<SystemId, Vehicle>,
-        focused: Option<SystemId>,
-    ) -> Vec<(SystemId, &'a StatusText)> {
+        fleet: &'a FleetSnapshot,
+        selected: Option<SystemId>,
+        notices: &'a Notifications,
+    ) -> Vec<Entry<'a>> {
         let mut entries = Vec::new();
 
-        let mut push = |id: SystemId, vehicle: &'a Vehicle| {
-            for status in &vehicle.status.texts {
-                if status::rank(status.severity) <= status::rank(self.filter.min_severity) {
-                    entries.push((id, status));
-                }
-            }
+        let vehicles = match self.filter.scope {
+            Scope::All => true,
+            Scope::Selected => true,
+            Scope::Gcs => false,
         };
 
-        match self.filter.scope {
-            Scope::All => {
-                for (id, vehicle) in vehicles {
-                    push(*id, vehicle);
+        if vehicles {
+            for vehicle in fleet.vehicles() {
+                if self.filter.scope == Scope::Selected && Some(vehicle.system) != selected {
+                    continue;
                 }
-            }
-            Scope::Focused => {
-                if let Some(id) = focused
-                    && let Some(vehicle) = vehicles.get(&id)
-                {
-                    push(id, vehicle);
-                }
+                entries.extend(
+                    vehicle
+                        .status
+                        .texts
+                        .iter()
+                        .map(|text| Entry::Vehicle(vehicle.system, text)),
+                );
             }
         }
 
-        entries.sort_by_key(|(_, status)| status.at);
+        if self.filter.scope != Scope::Selected {
+            entries.extend(notices.history().map(Entry::Gcs));
+        }
+
+        let threshold = status::rank(self.filter.min_severity);
+        entries.retain(|entry| status::rank(entry.severity()) <= threshold);
+        entries.sort_by_key(Entry::at);
         entries
     }
 }

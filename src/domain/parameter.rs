@@ -1,126 +1,61 @@
+//! Parameters: what a component reports, and the operator's pending edits.
+//!
+//! [`Parameters`] is vehicle state: the values a component reported, kept with
+//! their raw wire form so they can be re-decoded if the component's encoding
+//! only becomes known later. [`ParamEdit`] is operator state: a typed-in value
+//! and the fate of its upload. The two live in different places — the first in
+//! the fleet, the second in the parameter feature — and meet only when an
+//! upload result is folded in.
+
 use std::collections::{BTreeMap, HashSet};
 
 use mav_param::{Ident, Value};
+use mavio::default_dialect::enums::MavParamType;
 
-use crate::foundation::BoxError;
+use crate::wire::param::ParamEncoding;
 
-#[derive(Clone, Debug)]
-pub struct Parameter {
+/// A plain set of parameter values, as read from or written to a file.
+pub type ParamValues = BTreeMap<Ident, Value>;
+
+/// One parameter as its component reported it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportedParam {
     value: Value,
-    state: ParamState,
+    raw: f32,
+    raw_type: MavParamType,
 }
 
-#[derive(Clone, Debug)]
-pub enum ParamState {
-    Unchanged,
-    Changed {
-        value: Option<Value>,
-        status: ChangedStatus,
-    },
-    Uploading {
-        value: Value,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChangedStatus {
-    None,
-    Failed,
-    Rejected,
-}
-
-impl Parameter {
-    pub fn new(value: Value) -> Self {
-        Parameter {
-            value,
-            state: ParamState::Unchanged,
-        }
-    }
-
-    /// The last value reported by (or accepted for) the target.
+impl ReportedParam {
+    /// The value, decoded with the component's encoding.
     pub fn value(&self) -> Value {
         self.value
     }
-
-    /// The local edit state relative to [`Parameter::value`].
-    pub fn state(&self) -> &ParamState {
-        &self.state
-    }
-
-    /// Fold a freshly parsed edit buffer into the state. An unparseable buffer
-    /// or a value equal to the current one clears any pending change.
-    pub fn set_edited(&mut self, value: Option<Value>) {
-        if value != Some(self.value) {
-            self.state = ParamState::Changed {
-                value,
-                status: ChangedStatus::None,
-            };
-        } else {
-            self.state = ParamState::Unchanged
-        }
-    }
-
-    /// Discard a pending change. The reported value is left untouched.
-    pub fn reset(&mut self) {
-        self.state = ParamState::Unchanged;
-    }
-
-    /// Mark this parameter as being uploaded with `value`.
-    pub fn begin_upload(&mut self, value: Value) {
-        self.state = ParamState::Uploading { value };
-    }
-
-    /// The target accepted the upload and now reports `value`.
-    pub fn upload_succeeded(&mut self, value: Value) {
-        self.value = value;
-        self.state = ParamState::Unchanged;
-    }
-
-    /// The target rejected the upload, reporting `reported`; keep `requested`.
-    pub fn upload_rejected(&mut self, reported: Value, requested: Value) {
-        self.value = reported;
-        self.state = ParamState::Changed {
-            value: Some(requested),
-            status: ChangedStatus::Rejected,
-        };
-    }
-
-    /// The upload transport failed; keep `requested`.
-    pub fn upload_failed(&mut self, requested: Value) {
-        self.state = ParamState::Changed {
-            value: Some(requested),
-            status: ChangedStatus::Failed,
-        };
-    }
-
-    /// Record the value the target currently reports, without touching the
-    /// local edit state.
-    fn observe_value(&mut self, value: Value) {
-        self.value = value;
-    }
 }
 
-/// The outcome of folding an upload result onto a parameter.
-#[derive(Debug, Clone, PartialEq)]
-pub enum UploadOutcome {
-    /// No upload of the same requested value was in flight; ignored.
-    Ignored,
-    /// The target reports the requested value: accepted.
-    Accepted,
-    /// The target set a different value than requested (clamped/rejected).
-    Clamped(Value),
-    /// The transport did not deliver a verdict.
-    Failed,
+/// Where a component's parameter list download stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DownloadState {
+    #[default]
+    Idle,
+    InProgress,
+    Complete,
+    Failed(String),
 }
 
+/// The parameters of one component.
 #[derive(Debug, Clone, Default)]
 pub struct Parameters {
-    map: BTreeMap<Ident, Parameter>,
-    loading_state: LoadingState,
+    map: BTreeMap<Ident, ReportedParam>,
+    loading: LoadingState,
+    /// The encoding values are decoded with, once known (advertised by the
+    /// component, or implied by its firmware). Until then values are decoded
+    /// bytewise for display, and writes are refused.
+    encoding: Option<ParamEncoding>,
+    download: DownloadState,
 }
 
 impl Parameters {
-    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &Parameter)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &ReportedParam)> {
         self.map.iter()
     }
 
@@ -128,103 +63,102 @@ impl Parameters {
         self.map.len()
     }
 
-    pub fn get(&self, id: &Ident) -> Option<&Parameter> {
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn get(&self, id: &Ident) -> Option<&ReportedParam> {
         self.map.get(id)
     }
 
-    pub fn get_mut(&mut self, id: &Ident) -> Option<&mut Parameter> {
-        self.map.get_mut(id)
-    }
-
-    /// Insert a parameter with an initial value, replacing any existing one.
-    pub fn insert(&mut self, id: Ident, value: Value) -> Option<Parameter> {
-        self.map.insert(id, Parameter::new(value))
+    pub fn value(&self, id: &Ident) -> Option<Value> {
+        self.map.get(id).map(ReportedParam::value)
     }
 
     pub fn loading(&self) -> &LoadingState {
-        &self.loading_state
+        &self.loading
     }
 
-    /// Clear the set of received parameter indices, matching the state before a
-    /// fresh list download. The expected count is left in place.
-    pub fn reset_loading(&mut self) {
-        self.loading_state.has_loaded.clear();
+    pub fn download(&self) -> &DownloadState {
+        &self.download
     }
 
-    /// Insert a parameter if it is unseen, otherwise just refresh its reported
-    /// value.
-    pub fn observe_value(&mut self, id: Ident, value: Value) {
-        match self.map.entry(id) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                _ = entry.insert(Parameter::new(value));
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().observe_value(value);
-            }
+    /// Every value, for saving to a file.
+    pub fn values(&self) -> ParamValues {
+        self.map
+            .iter()
+            .map(|(ident, param)| (ident.clone(), param.value))
+            .collect()
+    }
+
+    /// Record a reported value, decoded with `encoding` (or bytewise for
+    /// display while the encoding is unknown).
+    pub fn observe(
+        &mut self,
+        ident: Ident,
+        raw: f32,
+        raw_type: MavParamType,
+        index: u16,
+        count: u16,
+        encoding: Option<ParamEncoding>,
+    ) -> Result<(), UnsupportedType> {
+        // Keep every stored value decoded the same way as this one.
+        self.set_encoding(encoding);
+
+        let value = encoding
+            .unwrap_or(ParamEncoding::Bytewise)
+            .decode(raw, raw_type)
+            .ok_or(UnsupportedType(raw_type))?;
+
+        self.map.insert(
+            ident,
+            ReportedParam {
+                value,
+                raw,
+                raw_type,
+            },
+        );
+
+        // Unsolicited echoes (of a set) carry index 65535 and say nothing
+        // about the list.
+        if index != u16::MAX {
+            self.loading.note(index, count);
         }
+
+        Ok(())
     }
 
-    /// Record that parameter `index` of an expected `count` has arrived, and log
-    /// completion once the final index is seen.
-    pub fn note_loaded_index(&mut self, index: u16, count: u16) {
-        if count == 0 {
+    /// Re-decode every value under `encoding`, now that it is known. A no-op
+    /// when it matches the current one.
+    pub fn set_encoding(&mut self, encoding: Option<ParamEncoding>) {
+        if encoding == self.encoding {
             return;
         }
 
-        self.loading_state.has_loaded.insert(index);
-        self.loading_state.expected_count = count;
-
-        if index + 1 == count {
-            let got = self.loading_state.has_loaded.len();
-            let exp = count;
-            if got >= exp as usize {
-                log::info!("Loaded total of {got} parameters");
-            } else {
-                log::warn!("Expected {exp} parameters, got {got}");
+        self.encoding = encoding;
+        let decoder = encoding.unwrap_or(ParamEncoding::Bytewise);
+        for param in self.map.values_mut() {
+            if let Some(value) = decoder.decode(param.raw, param.raw_type) {
+                param.value = value;
             }
         }
     }
 
-    /// Fold an upload result onto the in-flight upload of `ident`.
-    ///
-    /// Only an upload that is in flight with the *same* `requested` value may
-    /// land: a result for an unknown ident or a stale, mismatched, or absent
-    /// upload returns [`UploadOutcome::Ignored`] and touches nothing. The
-    /// result is only read: the caller keeps ownership, so diagnostics can
-    /// still inspect the error.
-    pub fn apply_upload_result(
-        &mut self,
-        ident: &Ident,
-        requested: Value,
-        result: &Result<Value, BoxError>,
-    ) -> UploadOutcome {
-        let Some(param) = self.map.get_mut(ident) else {
-            return UploadOutcome::Ignored;
-        };
-
-        if !matches!(param.state(), ParamState::Uploading { value } if *value == requested) {
-            return UploadOutcome::Ignored;
+    /// Note that a list download started or ended.
+    pub fn set_download(&mut self, state: DownloadState) {
+        if state == DownloadState::InProgress {
+            self.loading.has_loaded.clear();
         }
-
-        match result {
-            Ok(value) if *value == requested => {
-                param.upload_succeeded(*value);
-                UploadOutcome::Accepted
-            }
-            Ok(reported) => {
-                param.upload_rejected(*reported, requested);
-                UploadOutcome::Clamped(*reported)
-            }
-            Err(_) => {
-                param.upload_failed(requested);
-                UploadOutcome::Failed
-            }
-        }
+        self.download = state;
     }
 }
 
-/// Used to track which parameters in a continuous sequence have been received.
-/// Any that are missing can be re-requested afterwards
+/// A parameter type that cannot be represented, such as a 64-bit integer.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("unsupported parameter type {0:?}")]
+pub struct UnsupportedType(pub MavParamType);
+
+/// Which parameters of an advertised list have arrived.
 #[derive(Debug, Clone, Default)]
 pub struct LoadingState {
     has_loaded: HashSet<u16>,
@@ -232,6 +166,14 @@ pub struct LoadingState {
 }
 
 impl LoadingState {
+    fn note(&mut self, index: u16, count: u16) {
+        if count == 0 || index >= count {
+            return;
+        }
+        self.has_loaded.insert(index);
+        self.expected_count = count;
+    }
+
     /// How many parameters have been received so far.
     pub fn loaded(&self) -> usize {
         self.has_loaded.len()
@@ -241,36 +183,135 @@ impl LoadingState {
     pub fn expected(&self) -> u16 {
         self.expected_count
     }
+
+    pub fn is_complete(&self) -> bool {
+        self.expected_count > 0 && self.has_loaded.len() >= self.expected_count as usize
+    }
+}
+
+/// What became of an upload, once its result is folded in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditStatus {
+    /// Typed in, not uploaded.
+    Pending,
+    /// An upload of the value is in flight.
+    Uploading,
+    /// The component set a different value than requested (clamped or
+    /// refused).
+    Rejected { reported: Value },
+    /// The upload did not complete.
+    Failed(String),
+}
+
+/// The operator's pending change to one parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamEdit {
+    /// The text as typed, kept verbatim so partial input survives.
+    pub text: String,
+    /// The text parsed as the parameter's type, if it parses.
+    pub value: Option<Value>,
+    pub status: EditStatus,
+}
+
+impl ParamEdit {
+    /// An edit of a parameter currently at `current` to `text`, or `None` when
+    /// `text` parses to the current value (nothing to change).
+    pub fn new(current: Value, text: String) -> Option<ParamEdit> {
+        let value = value_parse_as(current, &text);
+
+        if value == Some(current) {
+            return None;
+        }
+
+        Some(ParamEdit {
+            text,
+            value,
+            status: EditStatus::Pending,
+        })
+    }
+
+    /// An edit to `value`, as loaded from a file.
+    pub fn to_value(value: Value) -> ParamEdit {
+        ParamEdit {
+            text: value_to_string(value),
+            value: Some(value),
+            status: EditStatus::Pending,
+        }
+    }
+
+    /// The value to upload, if the edit is ready to be uploaded.
+    pub fn uploadable(&self) -> Option<Value> {
+        match self.status {
+            EditStatus::Uploading => None,
+            _ => self.value,
+        }
+    }
+
+    pub fn is_uploading(&self) -> bool {
+        self.status == EditStatus::Uploading
+    }
+
+    /// Fold an upload result in. Returns `true` when the edit is done (the
+    /// component now holds the requested value) and should be dropped.
+    pub fn finish_upload(&mut self, requested: Value, result: Result<Value, String>) -> bool {
+        match result {
+            Ok(reported) if reported == requested => true,
+            Ok(reported) => {
+                self.status = EditStatus::Rejected { reported };
+                false
+            }
+            Err(error) => {
+                self.status = EditStatus::Failed(error);
+                false
+            }
+        }
+    }
 }
 
 pub fn value_type_matches(lhs: Value, rhs: Value) -> bool {
-    use mav_param::Value;
-
-    matches!(
-        (lhs, rhs),
-        (Value::U8(_), Value::U8(_))
-            | (Value::I8(_), Value::I8(_))
-            | (Value::U16(_), Value::U16(_))
-            | (Value::I16(_), Value::I16(_))
-            | (Value::U32(_), Value::U32(_))
-            | (Value::I32(_), Value::I32(_))
-            | (Value::F32(_), Value::F32(_))
-    )
+    std::mem::discriminant(&lhs) == std::mem::discriminant(&rhs)
 }
 
-pub fn value_parse_as(kind: Value, string: &str) -> Option<Value> {
-    use mav_param::Value;
+/// Parse `text` as a value of the same type as `kind`.
+pub fn value_parse_as(kind: Value, text: &str) -> Option<Value> {
+    let text = text.trim();
     let value = match kind {
-        Value::U8(_) => Value::U8(string.parse::<u8>().ok()?),
-        Value::I8(_) => Value::I8(string.parse::<i8>().ok()?),
-        Value::U16(_) => Value::U16(string.parse::<u16>().ok()?),
-        Value::I16(_) => Value::I16(string.parse::<i16>().ok()?),
-        Value::U32(_) => Value::U32(string.parse::<u32>().ok()?),
-        Value::I32(_) => Value::I32(string.parse::<i32>().ok()?),
-        Value::F32(_) => Value::F32(string.parse::<f32>().ok()?),
+        Value::U8(_) => Value::U8(text.parse::<u8>().ok()?),
+        Value::I8(_) => Value::I8(text.parse::<i8>().ok()?),
+        Value::U16(_) => Value::U16(text.parse::<u16>().ok()?),
+        Value::I16(_) => Value::I16(text.parse::<i16>().ok()?),
+        Value::U32(_) => Value::U32(text.parse::<u32>().ok()?),
+        Value::I32(_) => Value::I32(text.parse::<i32>().ok()?),
+        Value::F32(_) => Value::F32(text.parse::<f32>().ok().filter(|value| value.is_finite())?),
     };
 
     Some(value)
+}
+
+/// A value formatted for display and editing.
+pub fn value_to_string(value: Value) -> String {
+    match value {
+        Value::U8(v) => v.to_string(),
+        Value::I8(v) => v.to_string(),
+        Value::U16(v) => v.to_string(),
+        Value::I16(v) => v.to_string(),
+        Value::U32(v) => v.to_string(),
+        Value::I32(v) => v.to_string(),
+        Value::F32(v) => v.to_string(),
+    }
+}
+
+/// The display name of a value's type, e.g. `"f32"`.
+pub fn value_type_name(value: Value) -> &'static str {
+    match value {
+        Value::U8(_) => "u8",
+        Value::I8(_) => "i8",
+        Value::U16(_) => "u16",
+        Value::I16(_) => "i16",
+        Value::U32(_) => "u32",
+        Value::I32(_) => "i32",
+        Value::F32(_) => "f32",
+    }
 }
 
 /// The namespace a parameter name belongs to: the prefix before the first
@@ -283,120 +324,101 @@ pub fn group_of(ident: &Ident) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// The ident every test below uses for its in-flight parameter.
     fn ident() -> Ident {
         Ident::from_str_truncated("PARAM_ONE")
     }
 
-    /// A set holding one parameter registered at `initial`, left `Uploading`
-    /// the given `requested` value.
-    fn uploading(requested: Value) -> (Parameters, Ident) {
-        let ident = ident();
+    #[test]
+    fn a_late_encoding_re_decodes_every_value() {
         let mut parameters = Parameters::default();
-        parameters.insert(ident.clone(), Value::F32(1.0));
+        // ArduPilot sends INT32 1 as the float 1.0 (C cast).
         parameters
-            .get_mut(&ident)
-            .expect("just inserted")
-            .begin_upload(requested);
-        (parameters, ident)
+            .observe(ident(), 1.0, MavParamType::Int32, 0, 1, None)
+            .unwrap();
+        assert_eq!(
+            parameters.value(&ident()),
+            Some(Value::I32(1.0f32.to_bits() as i32)),
+            "decoded bytewise while the encoding is unknown"
+        );
+        assert_eq!(parameters.encoding, None);
+
+        parameters.set_encoding(Some(ParamEncoding::CCast));
+        assert_eq!(parameters.value(&ident()), Some(Value::I32(1)));
     }
 
     #[test]
-    fn upload_result_echoed_is_accepted() {
-        let (mut parameters, ident) = uploading(Value::F32(2.0));
-
-        let outcome = parameters.apply_upload_result(&ident, Value::F32(2.0), &Ok(Value::F32(2.0)));
-
-        assert_eq!(outcome, UploadOutcome::Accepted);
-        let param = parameters.get(&ident).unwrap();
-        assert_eq!(param.value(), Value::F32(2.0));
-        assert!(matches!(param.state(), ParamState::Unchanged));
-    }
-
-    #[test]
-    fn upload_result_reported_value_clamped_is_rejected() {
-        let (mut parameters, ident) = uploading(Value::F32(5.0));
-
-        // The target clamped the request to `3.0`.
-        let outcome = parameters.apply_upload_result(&ident, Value::F32(5.0), &Ok(Value::F32(3.0)));
-
-        assert_eq!(outcome, UploadOutcome::Clamped(Value::F32(3.0)));
-        let param = parameters.get(&ident).unwrap();
-        assert_eq!(param.value(), Value::F32(3.0), "the reported value is kept");
-        match param.state() {
-            ParamState::Changed { value, status } => {
-                assert_eq!(*value, Some(Value::F32(5.0)), "the request stays pending");
-                assert_eq!(*status, ChangedStatus::Rejected);
-            }
-            state => panic!("expected Changed(Rejected), got {state:?}"),
-        }
-    }
-
-    #[test]
-    fn upload_result_transport_error_fails() {
-        let (mut parameters, ident) = uploading(Value::F32(7.0));
-
-        let outcome =
-            parameters.apply_upload_result(&ident, Value::F32(7.0), &Err("timeout".into()));
-
-        assert_eq!(outcome, UploadOutcome::Failed);
-        let param = parameters.get(&ident).unwrap();
-        assert_eq!(param.value(), Value::F32(1.0), "the target set nothing");
-        match param.state() {
-            ParamState::Changed { value, status } => {
-                assert_eq!(*value, Some(Value::F32(7.0)), "the request stays pending");
-                assert_eq!(*status, ChangedStatus::Failed);
-            }
-            state => panic!("expected Changed(Failed), got {state:?}"),
-        }
-    }
-
-    #[test]
-    fn upload_result_without_an_in_flight_upload_is_ignored() {
+    fn echoes_do_not_count_towards_the_list() {
         let mut parameters = Parameters::default();
-        let ident = ident();
-        parameters.insert(ident.clone(), Value::F32(1.0));
-
-        let outcome = parameters.apply_upload_result(&ident, Value::F32(9.0), &Ok(Value::F32(9.0)));
-
-        assert_eq!(outcome, UploadOutcome::Ignored);
-        // Ignored means untouched: no verdict may be recorded.
-        let param = parameters.get(&ident).unwrap();
-        assert_eq!(param.value(), Value::F32(1.0));
-        assert!(matches!(param.state(), ParamState::Unchanged));
+        parameters
+            .observe(
+                ident(),
+                2.0,
+                MavParamType::Real32,
+                u16::MAX,
+                5,
+                Some(ParamEncoding::CCast),
+            )
+            .unwrap();
+        assert_eq!(parameters.loading().loaded(), 0);
+        assert_eq!(parameters.value(&ident()), Some(Value::F32(2.0)));
     }
 
     #[test]
-    fn upload_result_for_a_mismatched_in_flight_value_is_ignored() {
-        let (mut parameters, ident) = uploading(Value::F32(5.0));
+    fn loading_tracks_completion() {
+        let mut parameters = Parameters::default();
+        for index in 0..3 {
+            let name = Ident::from_str_truncated(&format!("P{index}"));
+            parameters
+                .observe(
+                    name,
+                    0.0,
+                    MavParamType::Real32,
+                    index,
+                    3,
+                    Some(ParamEncoding::CCast),
+                )
+                .unwrap();
+        }
+        assert!(parameters.loading().is_complete());
 
-        // Only `5.0` is in flight; a result claimed for `9.0` is stale.
-        let outcome = parameters.apply_upload_result(&ident, Value::F32(9.0), &Ok(Value::F32(9.0)));
-
-        assert_eq!(outcome, UploadOutcome::Ignored);
-        let param = parameters.get(&ident).unwrap();
-        assert_eq!(param.value(), Value::F32(1.0));
-        assert!(matches!(
-            param.state(),
-            ParamState::Uploading { value } if *value == Value::F32(5.0)
-        ));
+        parameters.set_download(DownloadState::InProgress);
+        assert!(
+            !parameters.loading().is_complete(),
+            "a new download starts over"
+        );
     }
 
     #[test]
-    fn upload_result_for_an_unknown_ident_is_ignored() {
-        let (mut parameters, word) = uploading(Value::F32(2.0));
+    fn an_edit_to_the_current_value_is_no_edit() {
+        assert!(ParamEdit::new(Value::F32(1.0), "1.0".into()).is_none());
+        let edit = ParamEdit::new(Value::F32(1.0), "2".into()).unwrap();
+        assert_eq!(edit.value, Some(Value::F32(2.0)));
+        let partial = ParamEdit::new(Value::U8(1), "30".into()).unwrap();
+        assert_eq!(partial.value, Some(Value::U8(30)));
+        let invalid = ParamEdit::new(Value::U8(1), "300".into()).unwrap();
+        assert_eq!(invalid.value, None, "out of range keeps the text only");
+        assert_eq!(invalid.uploadable(), None);
+    }
 
-        let missing = Ident::from_str_truncated("PARAM_MISSING");
-        let outcome =
-            parameters.apply_upload_result(&missing, Value::F32(2.0), &Ok(Value::F32(2.0)));
+    #[test]
+    fn upload_results_fold_into_the_edit() {
+        let mut edit = ParamEdit::new(Value::F32(1.0), "5".into()).unwrap();
+        edit.status = EditStatus::Uploading;
+        assert_eq!(edit.uploadable(), None, "no double upload");
 
-        assert_eq!(outcome, UploadOutcome::Ignored);
-        // The in-flight upload of the known ident keeps its state.
-        let param = parameters.get(&word).unwrap();
-        assert!(matches!(
-            param.state(),
-            ParamState::Uploading { value } if *value == Value::F32(2.0)
-        ));
+        assert!(!edit.finish_upload(Value::F32(5.0), Ok(Value::F32(3.0))));
+        assert_eq!(
+            edit.status,
+            EditStatus::Rejected {
+                reported: Value::F32(3.0)
+            }
+        );
+
+        assert!(!edit.finish_upload(Value::F32(5.0), Err("timed out".into())));
+        assert!(matches!(edit.status, EditStatus::Failed(_)));
+        assert_eq!(edit.uploadable(), Some(Value::F32(5.0)), "can retry");
+
+        assert!(edit.finish_upload(Value::F32(5.0), Ok(Value::F32(5.0))));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Vehicle attitude.
 
 use mavio::default_dialect::messages;
-use nalgebra::{Quaternion, UnitQuaternion};
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 #[derive(Debug, Clone, Default)]
 pub struct AttitudeState {
@@ -11,6 +11,10 @@ pub struct AttitudeState {
 #[derive(Clone, Debug)]
 pub struct Attitude {
     pub attitude: UnitQuaternion<f32>,
+
+    // TODO: Do something with this information
+    #[allow(unused)]
+    pub angular_rate: Vector3<f32>,
 }
 
 impl AttitudeState {
@@ -19,6 +23,7 @@ impl AttitudeState {
         // aerospace 3-2-1 (Z-Y-X) convention, matching `from_euler_angles`.
         self.current = Some(Attitude {
             attitude: UnitQuaternion::from_euler_angles(message.roll, message.pitch, message.yaw),
+            angular_rate: Vector3::new(message.rollspeed, message.pitchspeed, message.yawspeed),
         });
     }
 
@@ -29,6 +34,7 @@ impl AttitudeState {
             attitude: UnitQuaternion::from_quaternion(Quaternion::new(
                 message.q1, message.q2, message.q3, message.q4,
             )),
+            angular_rate: Vector3::new(message.rollspeed, message.pitchspeed, message.yawspeed),
         });
     }
 }

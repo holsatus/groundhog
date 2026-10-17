@@ -2,25 +2,24 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use futures::{Stream, stream};
 use mavio::{
     Frame,
     default_dialect::{enums::MavCmd, messages::CommandAck},
     prelude::{V2, Versionless},
-    protocol::FrameBuilder,
+    protocol::{FrameBuilder, Payload},
 };
-use tokio::sync::{Semaphore, SemaphorePermit, broadcast, mpsc};
+use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::{
     Targeted,
     acks::PendingAckMap,
-    dedup::Dedup,
+    dedup::{Dedup, PacketKey},
     error::{MavError, Result},
     io::{new_async_receiver, new_async_sender},
     lock,
@@ -41,6 +40,9 @@ const PARAM_SET_PERMITS: usize = 4;
 /// Consecutive failed sends the writer task tolerates before it gives up and
 /// cancels the link. The reader task's tail performs the actual teardown.
 const MAX_CONSECUTIVE_SEND_FAILURES: u32 = 10;
+
+/// Consecutive transport read errors after which the reader gives up.
+const MAX_CONSECUTIVE_READ_ERRORS: u32 = 10;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 /// Reduced cadence for high-latency links (as QGroundControl does), to save
@@ -73,9 +75,29 @@ pub(super) const MISSION_ITEM_TIMEOUT: Duration = Duration::from_millis(250);
 const HIGH_LATENCY_ITEM_FACTOR: u32 = 8;
 const HIGH_LATENCY_ACK_FACTOR: u32 = 3;
 
-/// Bound on buffered application events. When the UI falls behind, the channel
-/// drops the oldest events so the freshest telemetry is what reaches it.
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Bound on router events waiting for the consumer.
+///
+/// The channel is lossless: when it is full, the link reader tasks wait for
+/// room, which pushes back on the transports (TCP flow control; datagram and
+/// serial buffers overflow at the OS instead). The consumer folds a message in
+/// microseconds, so the bound is only reached if the consumer is stuck.
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+/// Outbound queue bounds per link. Control traffic (heartbeats, commands,
+/// mission and parameter transactions) overtakes bulk traffic (parameter
+/// re-requests), so a burst of bulk frames never delays a command.
+const CONTROL_QUEUE_CAPACITY: usize = 256;
+const BULK_QUEUE_CAPACITY: usize = 1024;
+
+/// Which outbound queue a frame joins on its link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Priority {
+    /// Heartbeats, commands and transaction traffic: always sent first.
+    #[default]
+    Control,
+    /// Bulk traffic that tolerates delay, such as parameter re-requests.
+    Bulk,
+}
 
 /// A decoded inbound MAVLink message, along with where it came from.
 #[derive(Debug)]
@@ -86,40 +108,95 @@ pub struct InboundMessage {
     pub frame: Frame<Versionless>,
 }
 
-/// Events emitted from the router to the application.
+/// Events emitted from the router to its consumer.
 #[derive(Debug, Clone)]
 pub enum Event {
     Message(Arc<InboundMessage>),
     LinkClosed(LinkId),
 }
 
+/// The receiving end of the router's lossless event channel.
+pub type EventReceiver = mpsc::Receiver<Event>;
+
 struct MessageFilter {
     filter: Box<dyn Fn(&InboundMessage) -> bool + Send>,
     tx: mpsc::UnboundedSender<Arc<InboundMessage>>,
 }
 
+/// A message encoded for the wire, waiting in an outbound queue. The frame is
+/// assembled by the writer task, so sequence numbers are assigned in the order
+/// frames actually leave, whatever their priority.
+struct Outbound {
+    payload: Payload,
+    crc_extra: u8,
+}
+
+impl Outbound {
+    fn encode(message: &dyn mavio::Message) -> Result<Self> {
+        Ok(Outbound {
+            payload: message
+                .encode(mavio::protocol::MavLinkVersion::V2)
+                .map_err(|error| MavError::Encode(format!("{error:?}")))?,
+            crc_extra: message.crc_extra(),
+        })
+    }
+
+    fn into_frame(self, gcs: MavlinkId, sequence: u8) -> Frame<Versionless> {
+        FrameBuilder::new()
+            .version(V2)
+            .sequence(sequence)
+            .system_id(gcs.system)
+            .component_id(gcs.component)
+            .message_id(self.payload.id())
+            .payload(self.payload.bytes())
+            .crc_extra(self.crc_extra)
+            .build()
+            .into_versionless()
+    }
+}
+
+/// Traffic counters of one link attachment.
+#[derive(Debug, Default)]
+struct LinkCounters {
+    rx_frames: AtomicU64,
+    tx_frames: AtomicU64,
+    /// Milliseconds since the router's epoch at the last received frame, plus
+    /// one (zero means never).
+    last_rx: AtomicU64,
+}
+
+/// A snapshot of one link's traffic counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkStats {
+    pub rx_frames: u64,
+    pub tx_frames: u64,
+    /// When the last frame was received on this link, if ever.
+    pub last_rx: Option<Instant>,
+}
+
 struct Link {
-    sequence: AtomicU8,
-    tx: mpsc::UnboundedSender<Frame<Versionless>>,
+    control: mpsc::Sender<Outbound>,
+    bulk: mpsc::Sender<Outbound>,
     generation: u64,
     /// Whether this transport's latency warrants the scaled mission-transfer
     /// timeouts ([`MavlinkRouter::transfer_timeouts`]).
     high_latency: bool,
+    counters: Arc<LinkCounters>,
 }
 
 impl Link {
-    fn send(&self, gcs: MavlinkId, message: &dyn mavio::Message) -> Result<()> {
-        let frame = FrameBuilder::new()
-            .system_id(gcs.system)
-            .component_id(gcs.component)
-            .version(V2)
-            .sequence(self.sequence.fetch_add(1, Ordering::Relaxed))
-            .message(message)
-            .map_err(|error| MavError::Encode(format!("{error:?}")))?
-            .build()
-            .into_versionless();
+    fn send(&self, message: &dyn mavio::Message, priority: Priority) -> Result<()> {
+        let outbound = Outbound::encode(message)?;
 
-        self.tx.send(frame).map_err(|_| MavError::NoLink)
+        let queue = match priority {
+            Priority::Control => &self.control,
+            Priority::Bulk => &self.bulk,
+        };
+
+        queue.try_send(outbound).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => MavError::LinkCongested,
+            mpsc::error::TrySendError::Closed(_) => MavError::NoLink,
+        })
     }
 }
 
@@ -143,11 +220,12 @@ struct MessageRouteMap {
 
 struct MavlinkRouterInner {
     gcs_id: MavlinkId,
-    events: broadcast::Sender<Event>,
+    epoch: Instant,
+    events: mpsc::Sender<Event>,
     links: Mutex<BTreeMap<LinkId, Link>>,
     next_link_generation: AtomicU64,
     routes: Mutex<MessageRouteMap>,
-    /// The cross-link duplicate suppression used by [`MavlinkRouter::dispatch`],
+    /// The cross-link duplicate suppression used by [`MavlinkRouter::handle_frame`],
     /// keyed per source, with reset guards.
     dedup: Dedup,
     filters: Mutex<MessageFilterMap>,
@@ -158,13 +236,17 @@ struct MavlinkRouterInner {
 
 impl MavlinkRouter {
     /// Create a new router stamping outbound frames with `gcs_id`, along with
-    /// the stream of events for the application.
-    pub fn new(gcs_id: MavlinkId) -> (Self, impl Stream<Item = Event> + Send + 'static) {
-        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    /// the receiving end of its lossless event channel.
+    ///
+    /// Exactly one consumer drains the events. Transactions do not depend on
+    /// it: they install their own filters (see [`MavlinkRouter::receive_filtered`]).
+    pub fn new(gcs_id: MavlinkId) -> (Self, EventReceiver) {
+        let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
         let router = Self {
             inner: Arc::new(MavlinkRouterInner {
                 gcs_id,
+                epoch: Instant::now(),
                 links: Mutex::default(),
                 next_link_generation: AtomicU64::new(0),
                 routes: Mutex::default(),
@@ -177,20 +259,12 @@ impl MavlinkRouter {
             }),
         };
 
-        let events = stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                        log::warn!("MAVLink event backlog overflowed; dropped {dropped} events");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        });
+        (router, rx)
+    }
 
-        (router, events)
+    /// The identity stamped on every outbound frame.
+    pub fn gcs_id(&self) -> MavlinkId {
+        self.inner.gcs_id
     }
 
     /// Whether a transaction for `key` is currently in flight or queued.
@@ -203,7 +277,13 @@ impl MavlinkRouter {
     /// Send a message to `target`, filling in the target fields.
     pub fn send_targeted<M: Targeted>(&self, target: MavlinkId, mut message: M) -> Result<()> {
         message.set_target(target);
-        self.route(target, &message)
+        self.route(target, &message, Priority::Control)
+    }
+
+    /// Like [`MavlinkRouter::send_targeted`], on the bulk queue.
+    pub fn send_targeted_bulk<M: Targeted>(&self, target: MavlinkId, mut message: M) -> Result<()> {
+        message.set_target(target);
+        self.route(target, &message, Priority::Bulk)
     }
 
     /// Acquire the lock for `key`, waiting in line if it is already held.
@@ -268,7 +348,12 @@ impl MavlinkRouter {
 
     /// Send a message towards `target` on the link it was most recently heard on.
     /// If the target has not been heard from, the message is sent on all links.
-    pub(super) fn route(&self, target: MavlinkId, message: &dyn mavio::Message) -> Result<()> {
+    pub(super) fn route(
+        &self,
+        target: MavlinkId,
+        message: &dyn mavio::Message,
+        priority: Priority,
+    ) -> Result<()> {
         let best = self.best_link_for(target);
         let links = lock(&self.inner.links);
 
@@ -279,7 +364,7 @@ impl MavlinkRouter {
 
         // Send on the link that is known to be best for this target
         if let Some(link) = best.and_then(|id| links.get(&id)) {
-            return link.send(self.inner.gcs_id, message);
+            return link.send(message, priority);
         }
 
         // Unknown target: broadcast on all links to ensure arrival. The
@@ -288,7 +373,7 @@ impl MavlinkRouter {
         let mut delivered = false;
         let mut last_error = MavError::NoLink;
         for link in links.values() {
-            match link.send(self.inner.gcs_id, message) {
+            match link.send(message, priority) {
                 Ok(()) => delivered = true,
                 Err(error) => last_error = error,
             }
@@ -297,13 +382,15 @@ impl MavlinkRouter {
         if delivered { Ok(()) } else { Err(last_error) }
     }
 
-    fn send_on_link<M: mavio::Message>(&self, link: &LinkId, message: &M) -> Result<()> {
+    fn send_on_link(&self, link: &LinkId, message: &dyn mavio::Message) -> Result<()> {
         lock(&self.inner.links)
             .get(link)
             .ok_or(MavError::NoLink)?
-            .send(self.inner.gcs_id, message)
+            .send(message, Priority::Control)
     }
 
+    /// The link a frame towards `target` should take: the one that most
+    /// recently delivered the *first* copy of a frame from it.
     fn best_link_for(&self, target: MavlinkId) -> Option<LinkId> {
         let routes = lock(&self.inner.routes);
         let pick = |filter: &dyn Fn(&MavlinkId) -> bool| {
@@ -350,11 +437,30 @@ impl MavlinkRouter {
     /// Reports what the router itself tracks: a dropped guard's teardown and a
     /// failed transport both detach the link, even before the application has
     /// seen the corresponding event.
+    #[cfg(test)]
     pub fn is_attached(&self, link: &LinkId) -> bool {
         lock(&self.inner.links).contains_key(link)
     }
 
-    fn handle_frame(&self, link: &LinkId, frame: Frame<Versionless>) {
+    /// The traffic counters of `link`'s current attachment, if attached.
+    pub fn link_stats(&self, link: &LinkId) -> Option<LinkStats> {
+        let links = lock(&self.inner.links);
+        let counters = &links.get(link)?.counters;
+        let last_rx = counters.last_rx.load(Ordering::Relaxed);
+
+        Some(LinkStats {
+            rx_frames: counters.rx_frames.load(Ordering::Relaxed),
+            tx_frames: counters.tx_frames.load(Ordering::Relaxed),
+            last_rx: last_rx
+                .checked_sub(1)
+                .map(|millis| self.inner.epoch + Duration::from_millis(millis)),
+        })
+    }
+
+    /// Process one inbound frame from `link`: route bookkeeping, duplicate
+    /// suppression, ACK routing and transaction filters. Returns the event for
+    /// the consumer, or `None` for a duplicate.
+    fn handle_frame(&self, link: &LinkId, frame: Frame<Versionless>) -> Option<Event> {
         let source = MavlinkId {
             system: frame.system_id(),
             component: frame.component_id(),
@@ -365,38 +471,44 @@ impl MavlinkRouter {
             source_mav: source,
             received_at: Instant::now(),
             frame,
-        });
+        })
     }
 
-    fn dispatch(&self, inbound: InboundMessage) {
-        let sequence = inbound.frame.sequence();
-        let inbound = Arc::new(inbound);
+    fn dispatch(&self, inbound: InboundMessage) -> Option<Event> {
+        let packet = PacketKey {
+            sequence: inbound.frame.sequence(),
+            message_id: inbound.frame.message_id(),
+            checksum: inbound.frame.checksum(),
+        };
 
-        // Hearing a frame on a link proves that link is alive, so the route
-        // table is updated before the duplicate check: an inbound duplicate
-        // still influences which link is best for further traffic.
+        // Cross-link duplicate suppression: the same packet reaching state
+        // consumers twice would double-fold into vehicle state (duplicated
+        // statustexts, doubled trail points). Only the first arriving copy
+        // advances.
+        if self
+            .inner
+            .dedup
+            .seen_before(inbound.source_mav, packet, inbound.received_at)
+        {
+            log::trace!(
+                "Dropping duplicate packet {packet:?} from {:?} on {:?}",
+                inbound.source_mav,
+                inbound.source_link
+            );
+            return None;
+        }
+
+        // Only a first-arriving copy refreshes the route: with redundant links
+        // the duplicate always lands on the slower one, which must not become
+        // the preferred path for commands. A link that only ever delivers
+        // duplicates takes over as soon as the faster link stops delivering.
         lock(&self.inner.routes)
             .map
             .entry(inbound.source_mav)
             .or_default()
             .insert(inbound.source_link.clone(), inbound.received_at);
 
-        // Cross-link duplicate suppression: the same packet reaching state
-        // consumers twice would double-fold into vehicle state (duplicated
-        // statustexts, doubled trail points). Only the first arriving copy
-        // advances; the needed ordering above is unaffected.
-        if self
-            .inner
-            .dedup
-            .seen_sequence_before(inbound.source_mav, sequence, inbound.received_at)
-        {
-            log::debug!(
-                "Dropping duplicate packet sequence {sequence} from {:?} on {:?}",
-                inbound.source_mav,
-                inbound.source_link
-            );
-            return;
-        }
+        let inbound = Arc::new(inbound);
 
         if let Ok(ack) = inbound.frame.decode_message::<CommandAck>() {
             self.inner
@@ -408,24 +520,27 @@ impl MavlinkRouter {
             !(waiter.filter)(&inbound) || waiter.tx.send(inbound.clone()).is_ok()
         });
 
-        _ = self.inner.events.send(Event::Message(inbound));
+        Some(Event::Message(inbound))
     }
 
-    fn remove_link(&self, link: &LinkId, generation: u64) {
+    /// Detach `link` if its current attachment is `generation`, returning
+    /// whether it did.
+    fn remove_link(&self, link: &LinkId, generation: u64) -> bool {
         {
             let mut links = lock(&self.inner.links);
             match links.get(link) {
                 Some(existing) if existing.generation == generation => {
                     links.remove(link);
                 }
-                _ => return,
+                _ => return false,
             }
         }
 
         for links in lock(&self.inner.routes).map.values_mut() {
             links.remove(link);
         }
-        _ = self.inner.events.send(Event::LinkClosed(link.clone()));
+
+        true
     }
 
     /// Attach a new transport. It stays attached until the returned handle is
@@ -438,7 +553,9 @@ impl MavlinkRouter {
         high_latency: bool,
     ) -> LinkGuard {
         let cancel = CancellationToken::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Frame<Versionless>>();
+        let (control_tx, mut control_rx) = mpsc::channel::<Outbound>(CONTROL_QUEUE_CAPACITY);
+        let (bulk_tx, mut bulk_rx) = mpsc::channel::<Outbound>(BULK_QUEUE_CAPACITY);
+        let counters = Arc::new(LinkCounters::default());
 
         let generation = self
             .inner
@@ -448,27 +565,45 @@ impl MavlinkRouter {
         lock(&self.inner.links).insert(
             link_id.clone(),
             Link {
-                tx,
-                sequence: AtomicU8::new(0),
+                control: control_tx,
+                bulk: bulk_tx,
                 generation,
                 high_latency,
+                counters: counters.clone(),
             },
         );
 
-        // Writer: drains the outbound queue into the transport. Repeated send
-        // failures mean the transport is gone: the reader task's tail performs
-        // the teardown, so give up sending after a bounded streak.
+        // Writer: drains the outbound queues into the transport, control
+        // first. Repeated send failures mean the transport is gone: the
+        // reader task's tail performs the teardown, so give up sending after a
+        // bounded streak.
         let mut sender = new_async_sender(writer);
         let token = cancel.clone();
         let id = link_id.clone();
+        let gcs = self.inner.gcs_id;
+        let tx_counters = counters.clone();
         tokio::spawn(async move {
             token
                 .run_until_cancelled(async {
                     let mut failures = 0;
+                    let mut sequence: u8 = 0;
 
-                    while let Some(frame) = rx.recv().await {
+                    loop {
+                        let outbound = tokio::select! {
+                            biased;
+                            Some(outbound) = control_rx.recv() => outbound,
+                            Some(outbound) = bulk_rx.recv() => outbound,
+                            else => break,
+                        };
+
+                        let frame = outbound.into_frame(gcs, sequence);
+                        sequence = sequence.wrapping_add(1);
+
                         match sender.send(&frame).await {
-                            Ok(_) => failures = 0,
+                            Ok(_) => {
+                                failures = 0;
+                                tx_counters.tx_frames.fetch_add(1, Ordering::Relaxed);
+                            }
                             Err(error) => {
                                 failures += 1;
                                 log::error!("Failed to send MAVLink frame on {id:?}: {error}");
@@ -490,7 +625,6 @@ impl MavlinkRouter {
         });
 
         // Reader: decodes inbound frames and dispatches them
-        let mut consecutive_errors = 0;
         let mut receiver = new_async_receiver(reader);
         let router = self.clone();
         let token = cancel.clone();
@@ -498,13 +632,23 @@ impl MavlinkRouter {
         tokio::spawn(async move {
             token
                 .run_until_cancelled(async {
-                    while consecutive_errors < 10 {
-                        let result = receiver.recv().await;
+                    let mut consecutive_errors = 0;
 
-                        match result {
+                    while consecutive_errors < MAX_CONSECUTIVE_READ_ERRORS {
+                        match receiver.recv().await {
                             Ok(frame) => {
                                 consecutive_errors = 0;
-                                router.handle_frame(&id, frame)
+                                counters.rx_frames.fetch_add(1, Ordering::Relaxed);
+                                let millis = router.inner.epoch.elapsed().as_millis() as u64;
+                                counters.last_rx.store(millis + 1, Ordering::Relaxed);
+
+                                if let Some(event) = router.handle_frame(&id, frame) {
+                                    // Lossless: wait for room rather than drop.
+                                    // A closed channel means nobody consumes
+                                    // events any more, which is not an error
+                                    // for the transactions.
+                                    let _ = router.inner.events.send(event).await;
+                                }
                             }
                             Err(error) => {
                                 consecutive_errors += 1;
@@ -517,7 +661,9 @@ impl MavlinkRouter {
                 .await;
 
             token.cancel();
-            router.remove_link(&id, generation);
+            if router.remove_link(&id, generation) {
+                let _ = router.inner.events.send(Event::LinkClosed(id)).await;
+            }
         });
 
         // Heartbeat: announces our presence on this link
@@ -542,9 +688,17 @@ impl MavlinkRouter {
                             ..Default::default()
                         };
 
-                        if let Err(error) = router.send_on_link(&id, &heartbeat) {
-                            log::warn!("heartbeat stopped on {id:?}: {error}");
-                            break;
+                        match router.send_on_link(&id, &heartbeat) {
+                            Ok(()) => {}
+                            // A momentarily full queue is not a dead link: the
+                            // writer is draining, and the next beat retries.
+                            Err(MavError::LinkCongested) => {
+                                log::debug!("heartbeat skipped on congested {id:?}");
+                            }
+                            Err(error) => {
+                                log::warn!("heartbeat stopped on {id:?}: {error}");
+                                break;
+                            }
                         }
                     }
                 })
@@ -555,31 +709,50 @@ impl MavlinkRouter {
             token.cancel();
         });
 
-        LinkGuard(Arc::new(cancel.drop_guard()))
+        LinkGuard {
+            _keep_alive: Arc::new(cancel.clone().drop_guard()),
+            closed: cancel,
+        }
     }
 }
 
 /// Keeps a link alive. The link is closed when the last clone is dropped.
 #[derive(Debug, Clone)]
-pub struct LinkGuard(#[allow(unused)] Arc<DropGuard>);
+pub struct LinkGuard {
+    _keep_alive: Arc<DropGuard>,
+    closed: CancellationToken,
+}
+
+impl LinkGuard {
+    /// Resolves once the attachment has been torn down, for whatever reason:
+    /// a transport failure, or another clone of this guard being dropped.
+    pub async fn closed(&self) {
+        self.closed.cancelled().await
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mavlink::DEFAULT_GCS_ID;
-    use futures::StreamExt;
+    use mavio::default_dialect::messages::Attitude;
     use mavio::dialects::minimal::messages::Heartbeat;
 
-    fn link_with_receiver() -> (Link, mpsc::UnboundedReceiver<Frame<Versionless>>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// A link whose queues are drained by the returned receivers (or not, if
+    /// they are dropped).
+    fn link_with_receiver() -> (Link, mpsc::Receiver<Outbound>, mpsc::Receiver<Outbound>) {
+        let (control, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (bulk, bulk_rx) = mpsc::channel(BULK_QUEUE_CAPACITY);
         (
             Link {
-                sequence: AtomicU8::new(0),
-                tx,
+                control,
+                bulk,
                 generation: 0,
                 high_latency: false,
+                counters: Arc::default(),
             },
-            rx,
+            control_rx,
+            bulk_rx,
         )
     }
 
@@ -587,6 +760,28 @@ mod tests {
         system: 42,
         component: 7,
     };
+
+    const SOURCE: MavlinkId = MavlinkId {
+        system: 9,
+        component: 1,
+    };
+
+    /// Build an inbound frame from `source` with packet `sequence`.
+    fn frame_from(
+        source: MavlinkId,
+        sequence: u8,
+        message: &dyn mavio::Message,
+    ) -> Frame<Versionless> {
+        FrameBuilder::new()
+            .system_id(source.system)
+            .component_id(source.component)
+            .version(V2)
+            .sequence(sequence)
+            .message(message)
+            .unwrap()
+            .build()
+            .into_versionless()
+    }
 
     #[test]
     fn heartbeat_interval_slows_for_high_latency() {
@@ -599,11 +794,10 @@ mod tests {
     fn broadcast_succeeds_when_at_least_one_link_delivers() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
 
-        // One healthy link (receiver kept alive) and one dead link (receiver
+        // One healthy link (receivers kept alive) and one dead link (receivers
         // dropped, so its `send` fails).
-        let (healthy, _healthy_rx) = link_with_receiver();
-        let (dead, dead_rx) = link_with_receiver();
-        drop(dead_rx);
+        let (healthy, _healthy_control, _healthy_bulk) = link_with_receiver();
+        let (dead, _, _) = link_with_receiver();
 
         {
             let mut links = lock(&router.inner.links);
@@ -612,17 +806,19 @@ mod tests {
         }
 
         // Unknown target: broadcast. A single delivery is enough to succeed.
-        assert!(router.route(UNKNOWN, &Heartbeat::default()).is_ok());
+        assert!(
+            router
+                .route(UNKNOWN, &Heartbeat::default(), Priority::Control)
+                .is_ok()
+        );
     }
 
     #[test]
     fn broadcast_fails_when_every_link_fails() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
 
-        let (a, rx_a) = link_with_receiver();
-        let (b, rx_b) = link_with_receiver();
-        drop(rx_a);
-        drop(rx_b);
+        let (a, _, _) = link_with_receiver();
+        let (b, _, _) = link_with_receiver();
 
         {
             let mut links = lock(&router.inner.links);
@@ -630,7 +826,35 @@ mod tests {
             links.insert(LinkId::new("b"), b);
         }
 
-        assert!(router.route(UNKNOWN, &Heartbeat::default()).is_err());
+        assert!(
+            router
+                .route(UNKNOWN, &Heartbeat::default(), Priority::Control)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_full_queue_reports_congestion_not_a_dead_link() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (link, _control_rx, _bulk_rx) = link_with_receiver();
+        lock(&router.inner.links).insert(LinkId::new("slow"), link);
+
+        for _ in 0..BULK_QUEUE_CAPACITY {
+            router
+                .route(UNKNOWN, &Heartbeat::default(), Priority::Bulk)
+                .expect("room in the bulk queue");
+        }
+
+        assert!(matches!(
+            router.route(UNKNOWN, &Heartbeat::default(), Priority::Bulk),
+            Err(MavError::LinkCongested)
+        ));
+        // A full bulk queue leaves control traffic unaffected.
+        assert!(
+            router
+                .route(UNKNOWN, &Heartbeat::default(), Priority::Control)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -638,7 +862,7 @@ mod tests {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let id = LinkId::new("link");
 
-        let (newer, _newer_rx) = link_with_receiver();
+        let (newer, _control, _bulk) = link_with_receiver();
         lock(&router.inner.links).insert(
             id.clone(),
             Link {
@@ -648,58 +872,12 @@ mod tests {
         );
 
         // A stale reader (generation 1) must not evict the generation-2 link.
-        router.remove_link(&id, 1);
+        assert!(!router.remove_link(&id, 1));
         assert!(lock(&router.inner.links).contains_key(&id));
 
         // The matching generation removes it.
-        router.remove_link(&id, 2);
+        assert!(router.remove_link(&id, 2));
         assert!(!lock(&router.inner.links).contains_key(&id));
-    }
-
-    #[tokio::test]
-    async fn event_stream_drops_oldest_on_overflow() {
-        let (router, events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-
-        // Overflow the bounded channel without polling the stream.
-        let total = EVENT_CHANNEL_CAPACITY + 10;
-        for i in 0..total {
-            let _ = router
-                .inner
-                .events
-                .send(Event::LinkClosed(LinkId::new(&i.to_string())));
-        }
-
-        // Close the sender so the stream ends once its buffer is drained.
-        drop(router);
-
-        let ids: Vec<LinkId> = events
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .filter_map(|event| match event {
-                Event::LinkClosed(id) => Some(id),
-                Event::Message(_) => None,
-            })
-            .collect();
-
-        // Exactly `total - EVENT_CHANNEL_CAPACITY` oldest events were dropped,
-        // and the newest event still reaches the stream.
-        assert_eq!(ids.first(), Some(&LinkId::new("10")));
-        let newest = (total - 1).to_string();
-        assert_eq!(ids.last(), Some(&LinkId::new(&newest)));
-    }
-
-    /// Build an inbound frame from `source` with packet `sequence`.
-    fn frame_from(source: MavlinkId, sequence: u8) -> Frame<Versionless> {
-        FrameBuilder::new()
-            .system_id(source.system)
-            .component_id(source.component)
-            .version(V2)
-            .sequence(sequence)
-            .message(&Heartbeat::default())
-            .unwrap()
-            .build()
-            .into_versionless()
     }
 
     #[test]
@@ -708,54 +886,102 @@ mod tests {
 
         let (tx, mut waiter) = mpsc::unbounded_channel();
         router.insert_waiter(|_| true, tx);
-        let mut events = router.inner.events.subscribe();
 
-        let source = MavlinkId {
-            system: 9,
-            component: 1,
-        };
         let link_a = LinkId::new("a");
         let link_b = LinkId::new("b");
 
         // The same packet heard on two links: delivered to consumers exactly
-        // once, while both links are recorded as alive for the source.
-        router.handle_frame(&link_a, frame_from(source, 7));
-        router.handle_frame(&link_b, frame_from(source, 7));
+        // once.
+        let first = router.handle_frame(&link_a, frame_from(SOURCE, 7, &Heartbeat::default()));
+        let second = router.handle_frame(&link_b, frame_from(SOURCE, 7, &Heartbeat::default()));
 
+        assert!(
+            matches!(first, Some(Event::Message(_))),
+            "the first copy is emitted"
+        );
+        assert!(second.is_none(), "the duplicate is not emitted");
         assert!(waiter.try_recv().is_ok(), "the first copy is delivered");
         assert!(
             waiter.try_recv().is_err(),
             "the duplicate must not reach consumers again"
         );
-        assert!(
-            matches!(events.try_recv(), Ok(Event::Message(_))),
-            "the first copy is broadcast"
-        );
-        assert!(events.try_recv().is_err(), "the duplicate is not broadcast");
-
-        let routes = lock(&router.inner.routes);
-        let heard_on = routes.map.get(&source).expect("source routed");
-        assert!(heard_on.contains_key(&link_a), "first link recorded");
-        assert!(
-            heard_on.contains_key(&link_b),
-            "duplicate still proved the second link alive"
-        );
-        drop(routes);
 
         // A different sequence is never a duplicate.
-        router.handle_frame(&link_a, frame_from(source, 8));
-        assert!(waiter.try_recv().is_ok());
+        assert!(
+            router
+                .handle_frame(&link_a, frame_from(SOURCE, 8, &Heartbeat::default()))
+                .is_some()
+        );
 
         // Window semantics: after another 192 distinct sequences the ring has
         // evicted the original one, so it may be delivered again.
         for seq in 9..=200u8 {
-            router.handle_frame(&link_b, frame_from(source, seq));
+            router.handle_frame(&link_b, frame_from(SOURCE, seq, &Heartbeat::default()));
         }
-        router.handle_frame(&link_a, frame_from(source, 7));
         assert!(
-            waiter.try_recv().is_ok(),
+            router
+                .handle_frame(&link_a, frame_from(SOURCE, 7, &Heartbeat::default()))
+                .is_some(),
             "an evicted sequence passes again"
         );
+    }
+
+    /// Autopilots number packets per channel: two links to one vehicle carry
+    /// different packets with colliding sequence numbers, and none of them may
+    /// be dropped as a duplicate.
+    #[test]
+    fn independent_channel_sequences_are_all_delivered() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (radio, lte) = (LinkId::new("radio"), LinkId::new("lte"));
+
+        let mut delivered = 0;
+        let total = 2000u32;
+        for i in 0..total {
+            let attitude = Attitude {
+                time_boot_ms: i,
+                ..Default::default()
+            };
+            let heartbeat = Heartbeat {
+                custom_mode: i,
+                ..Default::default()
+            };
+            delivered += usize::from(
+                router
+                    .handle_frame(&radio, frame_from(SOURCE, i as u8, &heartbeat))
+                    .is_some(),
+            );
+            delivered += usize::from(
+                router
+                    .handle_frame(
+                        &lte,
+                        frame_from(SOURCE, (i as u8).wrapping_add(37), &attitude),
+                    )
+                    .is_some(),
+            );
+        }
+
+        assert_eq!(delivered, 2 * total as usize);
+    }
+
+    /// With redundant links the duplicate of every packet lands on the slower
+    /// link; the faster one must stay the preferred route.
+    #[test]
+    fn the_link_delivering_first_copies_is_the_preferred_route() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (fast, slow) = (LinkId::new("fast"), LinkId::new("slow"));
+
+        for seq in 0..20u8 {
+            router.handle_frame(&fast, frame_from(SOURCE, seq, &Heartbeat::default()));
+            std::thread::sleep(Duration::from_millis(1));
+            router.handle_frame(&slow, frame_from(SOURCE, seq, &Heartbeat::default()));
+        }
+        assert_eq!(router.best_link_for(SOURCE), Some(fast.clone()));
+
+        // When the fast link goes quiet, the slow one's copies become first
+        // copies, and it takes over.
+        std::thread::sleep(Duration::from_millis(1));
+        router.handle_frame(&slow, frame_from(SOURCE, 100, &Heartbeat::default()));
+        assert_eq!(router.best_link_for(SOURCE), Some(slow));
     }
 
     #[tokio::test]
@@ -778,6 +1004,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn link_closed_is_delivered_losslessly_and_guard_reports_it() {
+        let (router, mut events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let (peer, gcs) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(gcs);
+        let guard = router.attach_reader_writer(id.clone(), reader, writer, false);
+
+        // The transport dies: EOF on every read.
+        drop(peer);
+
+        tokio::time::timeout(Duration::from_secs(2), guard.closed())
+            .await
+            .expect("the guard observes the teardown");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("an event arrives")
+            .expect("the channel is open");
+        assert!(matches!(event, Event::LinkClosed(closed) if closed == id));
+    }
+
+    #[tokio::test]
+    async fn frames_carry_monotonic_sequences_across_priorities() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let (peer, gcs) = tokio::io::duplex(1 << 16);
+        let (reader, writer) = tokio::io::split(gcs);
+        let _guard = router.attach_reader_writer(id.clone(), reader, writer, false);
+
+        for index in 0..20 {
+            let priority = if index % 2 == 0 {
+                Priority::Bulk
+            } else {
+                Priority::Control
+            };
+            router
+                .route(UNKNOWN, &Heartbeat::default(), priority)
+                .unwrap();
+        }
+
+        let (peer_reader, _peer_writer) = tokio::io::split(peer);
+        let mut receiver = new_async_receiver(peer_reader);
+        let mut previous: Option<u8> = None;
+        for _ in 0..20 {
+            let frame = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(previous) = previous {
+                assert_eq!(frame.sequence(), previous.wrapping_add(1));
+            }
+            previous = Some(frame.sequence());
+        }
+
+        let stats = router.link_stats(&id).expect("attached");
+        assert!(stats.tx_frames >= 20);
+    }
+
+    #[tokio::test]
     async fn send_failures_cancel_the_link_connection() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let id = LinkId::new("link");
@@ -793,9 +1080,7 @@ mod tests {
         // its token, and the reader task's tail runs the teardown.
         drop(peer);
         for _ in 0..MAX_CONSECUTIVE_SEND_FAILURES {
-            router
-                .send_on_link(&id, &Heartbeat::default())
-                .expect("the writer queue accepted the frame");
+            let _ = router.send_on_link(&id, &Heartbeat::default());
         }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -825,12 +1110,12 @@ mod tests {
         // and the writer's own queue stays connected, so only the heartbeat
         // notices. Keeping the original sender alive is what stops the writer
         // from seeing its channel close and tearing the link down itself.
-        let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+        let (dead_tx, dead_rx) = mpsc::channel(1);
         drop(dead_rx);
         let _live_tx = {
             let mut links = lock(&router.inner.links);
             let link = links.get_mut(&id).expect("just attached");
-            std::mem::replace(&mut link.tx, dead_tx)
+            std::mem::replace(&mut link.control, dead_tx)
         };
 
         // Let the heartbeat task's first tick run and give up.
@@ -852,8 +1137,8 @@ mod tests {
         };
 
         // Fast link known as the best route: baselines.
-        let (fast, _fast_rx) = link_with_receiver();
-        let (slow, _slow_rx) = link_with_receiver();
+        let (fast, _fast_control, _fast_bulk) = link_with_receiver();
+        let (slow, _slow_control, _slow_bulk) = link_with_receiver();
         let slow = Link {
             high_latency: true,
             ..slow

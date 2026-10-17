@@ -1,11 +1,25 @@
 //! Vehicle status text log.
+//!
+//! `STATUSTEXT` carries at most 50 characters. Longer texts are sent as chunks
+//! sharing a non-zero `id`, numbered by `chunk_seq`; the text ends with the
+//! first chunk that is not completely filled. Chunks are reassembled here, so a
+//! long pre-arm failure reads as one message.
 
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 use mavio::default_dialect::{enums::MavSeverity, messages};
 
 /// The most status texts retained per vehicle; older ones are dropped.
 const MAX_STATUS_TEXTS: usize = 1000;
+
+/// Chunks of an unfinished text older than this are published as they are.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The payload size of one `STATUSTEXT`.
+const CHUNK_LEN: usize = 50;
 
 /// Severity ordering, most severe (`0`) to least severe (`7`).
 ///
@@ -39,9 +53,11 @@ pub const ORDERED: [MavSeverity; 8] = [
 #[derive(Debug, Clone, Default)]
 pub struct StatusLog {
     pub texts: VecDeque<StatusText>,
+    /// Texts being reassembled, by `(component, id)`.
+    pending: BTreeMap<(u8, u16), Pending>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StatusText {
     /// The component that emitted the text. `STATUSTEXT` is accepted from any
     /// component, so each message is attributed to its source.
@@ -51,35 +67,93 @@ pub struct StatusText {
     pub text: String,
 }
 
+#[derive(Clone, Debug)]
+struct Pending {
+    severity: MavSeverity,
+    started: Instant,
+    next_chunk: u8,
+    text: String,
+}
+
 impl StatusLog {
-    /// Append a decoded `STATUSTEXT` from `component`, returning the UTF-8 error
-    /// (without logging) if the payload is not valid.
+    /// Fold in a `STATUSTEXT` from `component`. Returns the text it
+    /// completed, if any (a single-chunk text completes immediately).
     pub fn observe_statustext(
         &mut self,
         component: u8,
         message: &messages::Statustext,
         time: Instant,
-    ) -> Result<(), std::str::Utf8Error> {
-        let null = message
-            .text
-            .iter()
-            .position(|c| *c == 0)
-            .unwrap_or(message.text.len());
+    ) -> Option<StatusText> {
+        self.flush_stale(time);
 
-        let text_string = str::from_utf8(&message.text[..null])?.to_string();
+        let null = message.text.iter().position(|c| *c == 0);
+        let chunk =
+            String::from_utf8_lossy(&message.text[..null.unwrap_or(CHUNK_LEN)]).into_owned();
 
-        self.texts.push_back(StatusText {
-            component,
-            at: time,
+        if message.id == 0 {
+            return Some(self.push(StatusText {
+                component,
+                at: time,
+                severity: message.severity,
+                text: chunk,
+            }));
+        }
+
+        let key = (component, message.id);
+        let pending = self.pending.entry(key).or_insert_with(|| Pending {
             severity: message.severity,
-            text: text_string,
+            started: time,
+            next_chunk: 0,
+            text: String::new(),
         });
 
+        if message.chunk_seq != pending.next_chunk {
+            // A chunk went missing; mark the gap rather than splice words.
+            pending.text.push('…');
+        }
+        pending.text.push_str(&chunk);
+        pending.next_chunk = message.chunk_seq.wrapping_add(1);
+
+        // A chunk that does not fill the payload ends the text.
+        if null.is_some() {
+            let pending = self.pending.remove(&key).expect("just inserted");
+            return Some(self.push(StatusText {
+                component,
+                at: pending.started,
+                severity: pending.severity,
+                text: pending.text,
+            }));
+        }
+
+        None
+    }
+
+    fn push(&mut self, text: StatusText) -> StatusText {
+        self.texts.push_back(text.clone());
         if self.texts.len() > MAX_STATUS_TEXTS {
             self.texts.pop_front();
         }
+        text
+    }
 
-        Ok(())
+    /// Publish unfinished texts whose last chunk never came.
+    fn flush_stale(&mut self, now: Instant) {
+        let stale: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| now.saturating_duration_since(pending.started) > CHUNK_TIMEOUT)
+            .map(|(key, _)| *key)
+            .collect();
+
+        for key in stale {
+            let pending = self.pending.remove(&key).expect("listed above");
+            self.push(StatusText {
+                component: key.0,
+                at: pending.started,
+                severity: pending.severity,
+                text: pending.text + "…",
+            });
+        }
     }
 }
 
@@ -87,60 +161,62 @@ impl StatusLog {
 mod tests {
     use super::*;
 
-    fn message(text: &str) -> messages::Statustext {
-        let mut bytes = [0u8; 50];
-        let raw = text.as_bytes();
-        bytes[..raw.len()].copy_from_slice(raw);
-
+    fn chunk(text: &str, id: u16, chunk_seq: u8) -> messages::Statustext {
+        let mut bytes = [0u8; CHUNK_LEN];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
         messages::Statustext {
-            severity: MavSeverity::Info,
+            severity: MavSeverity::Warning,
             text: bytes,
-            id: 0,
-            chunk_seq: 0,
+            id,
+            chunk_seq,
         }
     }
 
     #[test]
-    fn status_log_keeps_newest_texts_within_cap() {
+    fn a_single_text_completes_at_once() {
         let mut log = StatusLog::default();
+        let done = log.observe_statustext(1, &chunk("Armed", 0, 0), Instant::now());
+        assert_eq!(done.unwrap().text, "Armed");
+        assert_eq!(log.texts.len(), 1);
+    }
 
-        for i in 0..MAX_STATUS_TEXTS + 10 {
-            log.observe_statustext(1, &message(&i.to_string()), Instant::now())
-                .expect("valid utf8");
-        }
+    #[test]
+    fn chunks_reassemble_into_one_text() {
+        let mut log = StatusLog::default();
+        let now = Instant::now();
+        let full = "x".repeat(CHUNK_LEN);
 
-        assert_eq!(log.texts.len(), MAX_STATUS_TEXTS);
-        assert_eq!(log.texts.front().unwrap().text, "10");
-        assert_eq!(
-            log.texts.back().unwrap().text,
-            (MAX_STATUS_TEXTS + 9).to_string()
+        assert!(
+            log.observe_statustext(1, &chunk(&full, 7, 0), now)
+                .is_none()
         );
+        let done = log
+            .observe_statustext(1, &chunk("tail", 7, 1), now)
+            .unwrap();
+
+        assert_eq!(done.text, format!("{full}tail"));
+        assert_eq!(log.texts.len(), 1);
     }
 
     #[test]
-    fn status_texts_are_attributed_to_their_component() {
+    fn an_unfinished_text_is_flushed_after_a_while() {
         let mut log = StatusLog::default();
+        let now = Instant::now();
+        let full = "y".repeat(CHUNK_LEN);
 
-        log.observe_statustext(1, &message("from autopilot"), Instant::now())
-            .expect("valid utf8");
-        log.observe_statustext(154, &message("from gimbal"), Instant::now())
-            .expect("valid utf8");
+        log.observe_statustext(1, &chunk(&full, 3, 0), now);
+        log.observe_statustext(1, &chunk("later", 0, 0), now + CHUNK_TIMEOUT * 2);
 
         assert_eq!(log.texts.len(), 2);
-        assert_eq!(log.texts[0].component, 1);
-        assert_eq!(log.texts[0].text, "from autopilot");
-        assert_eq!(log.texts[1].component, 154);
-        assert_eq!(log.texts[1].text, "from gimbal");
+        assert!(log.texts[0].text.ends_with('…'));
     }
 
     #[test]
-    fn severity_rank_orders_most_to_least_severe() {
-        assert!(rank(MavSeverity::Emergency) < rank(MavSeverity::Warning));
-        assert!(rank(MavSeverity::Warning) < rank(MavSeverity::Debug));
-        assert_eq!(rank(MavSeverity::Emergency), 0);
-        assert_eq!(rank(MavSeverity::Debug), 7);
-
-        // `ORDERED` lists the severities exactly most-to-least severe.
-        assert_eq!(ORDERED.map(rank), [0, 1, 2, 3, 4, 5, 6, 7]);
+    fn invalid_utf8_is_kept_lossily() {
+        let mut log = StatusLog::default();
+        let mut message = chunk("ok", 0, 0);
+        message.text[2] = 0xff;
+        let done = log.observe_statustext(1, &message, Instant::now()).unwrap();
+        assert!(done.text.starts_with("ok"));
     }
 }

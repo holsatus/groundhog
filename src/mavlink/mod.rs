@@ -26,11 +26,13 @@ mod mission;
 mod param;
 mod recv;
 mod router;
-pub mod telemetry;
 mod transaction;
 
 pub use error::MavError;
-pub use router::{Event, LinkGuard, MavlinkRouter};
+pub use mission::TransferProgress;
+#[cfg(test)]
+pub use router::LinkGuard;
+pub use router::{Event, EventReceiver, LinkStats, MavlinkRouter};
 pub use transaction::Command;
 
 /// The GCS's default MAVLink identity, stamped on outbound frames.

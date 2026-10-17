@@ -17,7 +17,7 @@
 //! follows the application theme.
 
 use iced::{
-    Color, Font, Pixels, Point, Radians,
+    Font, Pixels, Point, Radians,
     alignment::Vertical,
     theme::Palette,
     widget::canvas::{Fill, Frame, LineCap, Path, Stroke, Style, Text, path::Arc},
@@ -57,7 +57,7 @@ pub fn overlay(frame: &mut Frame, roll: f32, pitch: f32, yaw: f32, palette: &Pal
 /// The dial shrinks so the instrument's full reach — the arc band included —
 /// stays inset from the pane edges, and is clamped so it remains legible on a
 /// small pane and does not dominate a large one.
-fn placement(size: iced::Size) -> (Point, f32) {
+pub(crate) fn placement(size: iced::Size) -> (Point, f32) {
     let fit = (size.width.min(size.height) / 2.0 - OVERLAY_MARGIN) / ARC_REACH;
     let radius = fit.clamp(MIN_DIAL_RADIUS, MAX_DIAL_RADIUS);
 
@@ -184,7 +184,7 @@ fn draw_attitude_arc(
             zero_bearing + MAX_ATTITUDE_DEG,
         ),
         Stroke {
-            style: Style::Solid(palette.background.weakest.color),
+            style: Style::Solid(palette.background.base.color),
             width,
             line_cap: LineCap::Butt,
             ..Stroke::default()
@@ -268,13 +268,15 @@ pub(crate) fn draw_arrow_head(
                 builder.close();
             });
 
-            let stroke = Stroke::default().with_color(Color::WHITE).with_width(4.0);
+            let stroke = Stroke::default()
+                .with_color(palette.background.strongest.text)
+                .with_width(6.0);
 
             frame.stroke(&outline, stroke);
         }
 
         frame.fill(&right_half, Fill::from(palette.danger.base.color));
-        frame.fill(&left_half, Fill::from(palette.danger.weak.color));
+        frame.fill(&left_half, Fill::from(palette.danger.strong.color));
     });
 }
 

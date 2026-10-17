@@ -10,25 +10,43 @@ use nalgebra::Vector3;
 
 use crate::domain::geo::{GeoPosition, LATLON_SCALE};
 
-pub const GLOBAL_POSITION_MAX_LEN: usize = 1000;
-pub const GLOBAL_POSITION_MAX_AGE: Duration = Duration::from_secs(60 * 15);
+/// The most points kept in a trail.
+pub const TRAIL_MAX_LEN: usize = 1000;
+/// Points older than this (relative to the newest) are dropped first.
+pub const TRAIL_MAX_AGE: Duration = Duration::from_secs(60 * 15);
 
 #[derive(Debug, Clone, Default)]
 pub struct PositionTrack {
     pub current: Option<GlobalPosition>,
+    /// Where the vehicle has been, oldest first, thinned to [`TRAIL_MAX_LEN`].
     pub trail: VecDeque<GlobalPosition>,
+    /// Velocity in north/east/down, metres per second.
     pub velocity_ned: Option<Vector3<f32>>,
+    /// Altitude above mean sea level, metres.
     pub altitude_msl: Option<f32>,
+    revision: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct GlobalPosition {
     pub at: Instant,
+    /// Altitude above home, metres.
     pub alt_agl: f32,
     pub pos: GeoPosition,
 }
 
 impl PositionTrack {
+    /// Bumped on every new fix, for caches keyed on the trail.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Horizontal speed over ground, metres per second.
+    pub fn ground_speed(&self) -> Option<f32> {
+        self.velocity_ned
+            .map(|velocity| (velocity.x * velocity.x + velocity.y * velocity.y).sqrt())
+    }
+
     pub fn observe_global_position_int(
         &mut self,
         message: &messages::GlobalPositionInt,
@@ -40,14 +58,14 @@ impl PositionTrack {
                 message.lat as f64 * LATLON_SCALE,
                 message.lon as f64 * LATLON_SCALE,
             ),
-            alt_agl: message.relative_alt as f32 * 1e-3,
+            alt_agl: message.relative_alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(
             message.vx as f32 / 100.,
             message.vy as f32 / 100.,
             message.vz as f32 / 100.,
-        )); // [cm/s]
-        self.altitude_msl = Some(message.alt as f32 / 1000.); // [mm]
+        ));
+        self.altitude_msl = Some(message.alt as f32 / 1000.);
     }
 
     pub fn observe_global_position_int_cov(
@@ -61,101 +79,81 @@ impl PositionTrack {
                 message.lat as f64 * LATLON_SCALE,
                 message.lon as f64 * LATLON_SCALE,
             ),
-            alt_agl: message.relative_alt as f32 * 1e-3,
+            alt_agl: message.relative_alt as f32 / 1000.0,
         });
-        self.velocity_ned = Some(Vector3::new(
-            message.vx / 100.,
-            message.vy / 100.,
-            message.vz / 100.,
-        )); // [cm/s]
-        self.altitude_msl = Some(message.alt as f32 / 1000.); // [mm]
+        self.velocity_ned = Some(Vector3::new(message.vx, message.vy, message.vz));
+        self.altitude_msl = Some(message.alt as f32 / 1000.);
     }
 
     pub fn register(&mut self, position: GlobalPosition) {
         self.current = Some(position.clone());
         self.trail.push_back(position);
-        if self.trail.len() > GLOBAL_POSITION_MAX_LEN {
+        if self.trail.len() > TRAIL_MAX_LEN {
             self.prune_one();
         }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Drop one point from the trail according to the retention policy.
     ///
-    /// The trail is bounded by [`GLOBAL_POSITION_MAX_LEN`]; on overflow this
-    /// compaction step chooses which point to discard so memory stays bounded
-    /// without visibly changing the drawn track. It first drops points that are
-    /// trivially disposable — when fewer than three remain, or the oldest is
-    /// older than [`GLOBAL_POSITION_MAX_AGE`] — then, among the remaining
-    /// interior points, removes the one that deviates least from the polyline
-    /// through its neighbours (a shoelace-area cost, weighted by the time span
-    /// it bridges).
-    ///
-    /// This is the domain's retention policy, not a view concern: it is what
-    /// keeps a long flight's history affordable, and the map simply draws
-    /// whatever the trail holds.
+    /// Points older than [`TRAIL_MAX_AGE`] (measured against the newest point,
+    /// so the policy is a function of the data alone) go first. Otherwise the
+    /// interior point that deviates least from the line through its
+    /// neighbours is removed (a triangle-area cost weighted by the time span
+    /// it bridges), which keeps the drawn track's shape while memory stays
+    /// bounded.
     fn prune_one(&mut self) {
-        // Plain closure so the early `return`s below exit the pruning step.
-        (|| {
-            if self.trail.len() < 3 {
-                self.trail.pop_front();
-                return;
+        if self.trail.len() < 3 {
+            self.trail.pop_front();
+            return;
+        }
+
+        let newest = self.trail.back().map(|position| position.at);
+        if let (Some(oldest), Some(newest)) = (self.trail.front(), newest)
+            && newest.saturating_duration_since(oldest.at) > TRAIL_MAX_AGE
+        {
+            self.trail.pop_front();
+            return;
+        }
+
+        let mut prune_idx: Option<(usize, f32)> = None;
+
+        for index in 1..self.trail.len() - 1 {
+            let (prev, eval, next) = (
+                &self.trail[index - 1],
+                &self.trail[index],
+                &self.trail[index + 1],
+            );
+
+            // Never bridge a long gap: those points mark where the track broke.
+            if eval.at.saturating_duration_since(prev.at) > Duration::from_secs(20) {
+                continue;
             }
 
-            if let Some(oldest) = self.trail.front()
-                && oldest.at.elapsed() > GLOBAL_POSITION_MAX_AGE
-            {
-                self.trail.pop_front();
-                return;
+            // Shoelace triangle area on degrees: locally proportional to the
+            // projected area, which is all the argmin needs.
+            let area = (prev.pos.lon * (eval.pos.lat - next.pos.lat)
+                + eval.pos.lon * (next.pos.lat - prev.pos.lat)
+                + next.pos.lon * (prev.pos.lat - eval.pos.lat))
+                .abs();
+
+            // Cost is weighed by the span of time between the outer points
+            let span = next.at.saturating_duration_since(prev.at);
+            let cost = (area as f32) * (1.0 + span.as_secs_f32());
+
+            if prune_idx.is_none_or(|(_, best)| cost < best) {
+                prune_idx = Some((index, cost));
             }
+        }
 
-            let mut prune_idx: Option<(usize, f32)> = None;
-            let mut prev = self.trail[0].clone();
-            let mut eval = self.trail[1].clone();
-
-            // Enumerate starting from index 2 up to the end of the list
-            for (next_idx, next) in self.trail.iter().enumerate().skip(2) {
-                // Do not allow the time gap between two points to be too large
-                if eval.at.duration_since(prev.at) > Duration::from_secs(20) {
-                    prev = eval;
-                    eval = next.clone();
-                    continue;
-                }
-
-                // Shoelace formula triangle area, computed on degrees rather
-                // than projected coordinates. Web-Mercator x is a positive
-                // constant times longitude, and locally y is an affine function
-                // of latitude, so this differs from the projected area only by a
-                // constant positive factor: the argmin below — and therefore the
-                // pruned point — is unchanged. (The old `* 1e6` y-scaling was a
-                // constant factor and has been dropped.)
-                let area = (prev.pos.lon * (eval.pos.lat - next.pos.lat)
-                    + eval.pos.lon * (next.pos.lat - prev.pos.lat)
-                    + next.pos.lon * (prev.pos.lat - eval.pos.lat))
-                    .abs();
-
-                // Cost is dynamically weighed by the span of time beteen the outer points
-                let span = next.at.saturating_duration_since(prev.at);
-                let cost = (area as f32) * (1.0 + span.as_secs_f32());
-
-                match prune_idx {
-                    Some((_, other_cost)) => {
-                        if cost < other_cost {
-                            prune_idx = Some((next_idx - 1, cost));
-                        }
-                    }
-                    None => prune_idx = Some((next_idx - 1, cost)),
-                }
-
-                prev = eval;
-                eval = next.clone();
+        match prune_idx {
+            Some((index, _)) => {
+                self.trail.remove(index);
             }
-
-            if let Some((idx, _)) = prune_idx {
-                self.trail.remove(idx);
-            } else {
+            None => {
                 self.trail.pop_front();
             }
-        })();
+        }
     }
 }
 
@@ -207,7 +205,7 @@ mod tests {
     fn trail_never_exceeds_max_len() {
         let mut track = PositionTrack::default();
 
-        for i in 0..GLOBAL_POSITION_MAX_LEN + 50 {
+        for i in 0..TRAIL_MAX_LEN + 50 {
             track.register(position(
                 Instant::now(),
                 47.0 + i as f64 * 1e-3,
@@ -215,14 +213,14 @@ mod tests {
             ));
         }
 
-        assert_eq!(track.trail.len(), GLOBAL_POSITION_MAX_LEN);
+        assert_eq!(track.trail.len(), TRAIL_MAX_LEN);
     }
 
     #[test]
     fn stale_point_older_than_max_age_is_dropped() {
         let mut track = PositionTrack::default();
 
-        let old = Instant::now() - (GLOBAL_POSITION_MAX_AGE + Duration::from_secs(1));
+        let old = Instant::now() - (TRAIL_MAX_AGE + Duration::from_secs(1));
         track.register(position(old, 47.0, 8.0));
         track.register(position(Instant::now(), 47.1, 8.1));
         track.register(position(Instant::now(), 47.2, 8.2));

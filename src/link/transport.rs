@@ -2,10 +2,7 @@
 //! router works with ([`BoxedReader`]/[`BoxedWriter`] and the
 //! [`DynAsyncReader`]/[`DynAsyncWriter`] traits).
 
-use std::{
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use crate::foundation::ArcError;
 
@@ -52,26 +49,20 @@ pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcErr
         LinkBuild::Udp { sock_addr, peer } => {
             let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
 
-            if let Some(peer) = peer {
+            let shared = match peer {
                 // GCS-initiated: connect to the fixed peer at open, so
                 // outbound frames are delivered before the peer has spoken. A
                 // failed connect fails the open, like a failed TCP connect.
-                socket.connect(peer).await.map_err(arc)?;
-            } else {
-                // Listen mode: multi-peer sourced reads stay deferred — the
-                // first datagram locks the socket to its sender.
-                log::info!(
-                    "UDP link at {sock_addr:?} is listening: outbound frames are discarded \
-                     until a peer sends the first datagram"
-                );
-            }
+                Some(peer) => {
+                    socket.connect(peer).await.map_err(arc)?;
+                    super::udp::UdpShared::connected(socket)
+                }
+                // Listen mode: serve every peer that sends to this port.
+                None => super::udp::UdpShared::listening(socket),
+            };
 
-            // The connected flag matches reality from the start: in peer mode
-            // the connected socket sends and receives immediately, so the
-            // writer never pretends to deliver frames it cannot deliver.
-            let socket = Arc::new((socket, AtomicBool::new(peer.is_some())));
-            let reader = super::udp::UdpReader::new(socket.clone());
-            let writer = super::udp::UdpWriter::new(socket);
+            let reader = super::udp::UdpReader::new(shared.clone());
+            let writer = super::udp::UdpWriter::new(shared);
             Ok((BoxedReader::new(reader), BoxedWriter::new(writer)))
         }
         LinkBuild::Serial { port, baud } => {

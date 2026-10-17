@@ -12,7 +12,7 @@ rust-ini = "0.21.3"
 # two sources (incompatible types). The exact revision is fixed by the committed
 # Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
 # dependency first.
-iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image", "debug"] }
+iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image"] }
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
 # Direct dependency for the `mav` middleware, which must not depend on the GUI
@@ -20,7 +20,7 @@ iced_runtime = { git = "https://github.com/iced-rs/iced" }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a8115bd1a9ac2779685184c954ee6" }
-mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-common", "tokio"] }
+mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-ardupilotmega", "tokio"] }
 async-trait = "0.1.89"
 tokio = { version = "1.51.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util = "0.7.18"
@@ -38,3 +38,9 @@ ron = "0.12.1"
 nalgebra = "0.34.2"
 num_enum = "0.7.6"
 thiserror = "2.0.18"
+anyhow = "1.0.104"
+
+[dev-dependencies]
+# Headless widget tests (event propagation through composed widgets). Same bare
+# git source as `iced`, so it shares the revision pinned by Cargo.lock.
+iced_test = { git = "https://github.com/iced-rs/iced" }

@@ -6,6 +6,8 @@ use crate::foundation::MavlinkId;
 pub enum MavError {
     #[error("no link available to reach the target")]
     NoLink,
+    #[error("the link's outbound queue is full")]
+    LinkCongested,
     #[error("timed out waiting for a response")]
     Timeout,
     #[error("command rejected with result {0:?}")]
@@ -18,6 +20,8 @@ pub enum MavError {
     ParamEncoding,
     #[error("mission operation failed: {0:?}")]
     MissionFailed(MavMissionResult),
+    #[error("the vehicle sent an invalid mission: {0}")]
+    MissionProtocol(String),
     #[error("a required resource was not available")]
     ResourceClosed,
 }

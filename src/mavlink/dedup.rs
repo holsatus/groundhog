@@ -4,6 +4,13 @@
 //! shared upstream). Folding it twice would double-count into vehicle state
 //! (duplicated status texts, doubled trail points), so the first arriving copy
 //! of a packet from a source wins and the rest are dropped.
+//!
+//! A packet is identified by its [`PacketKey`]: the sequence number *and* the
+//! message id and frame checksum. The sequence alone is not enough: autopilots
+//! keep one sequence counter per channel, so two links to the same vehicle
+//! carry different packets whose sequence numbers collide all the time. The
+//! checksum covers the sequence, message id and payload, so a forwarded copy of
+//! a packet matches it exactly while an unrelated packet practically never does.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -42,11 +49,19 @@ const SEQUENCE_RESET_GAP: Duration = Duration::from_secs(10);
 /// sequence enters it, and the normal rule continues from there.
 const MAX_CONSECUTIVE_DROPS: u8 = 8;
 
+/// What identifies one packet from a source, for duplicate detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PacketKey {
+    pub sequence: u8,
+    pub message_id: u32,
+    pub checksum: u16,
+}
+
 /// The duplicate-suppression state of one source: its most recent inbound
-/// packet sequences, plus when a frame from it was last accepted into state.
+/// packets, plus when a frame from it was last accepted into state.
 #[derive(Debug)]
 struct SequenceWindow {
-    sequences: VecDeque<u8>,
+    sequences: VecDeque<PacketKey>,
     /// When a frame from this source was last accepted (as opposed to
     /// dropped): a long silence flushes the window for a sequence reset.
     last_accepted: Instant,
@@ -72,21 +87,16 @@ pub(super) struct Dedup {
 }
 
 impl Dedup {
-    /// Record the packet sequence of a source and report whether an identical
-    /// sequence is already inside [`DUPLICATE_WINDOW`], i.e. the frame is a
-    /// cross-link duplicate.
+    /// Record a packet of a source and report whether an identical packet is
+    /// already inside [`DUPLICATE_WINDOW`], i.e. the frame is a cross-link
+    /// duplicate.
     ///
     /// Two guards keep a sender's sequence reset (reboot) from being mistaken
     /// for duplicates: a [`SEQUENCE_RESET_GAP`]-sized silence since the last
     /// accepted frame flushes the window outright, and
     /// [`MAX_CONSECUTIVE_DROPS`] consecutive dropped frames force the next one
     /// through, which resynchronizes the window.
-    pub(super) fn seen_sequence_before(
-        &self,
-        source: MavlinkId,
-        sequence: u8,
-        now: Instant,
-    ) -> bool {
+    pub(super) fn seen_before(&self, source: MavlinkId, packet: PacketKey, now: Instant) -> bool {
         let mut seen = lock(&self.seen);
         let window = seen
             .entry(source)
@@ -100,7 +110,7 @@ impl Dedup {
             window.consecutive_drops = 0;
         }
 
-        if window.sequences.contains(&sequence) {
+        if window.sequences.contains(&packet) {
             // Within the intact window, this is a cross-link duplicate.
             window.consecutive_drops += 1;
 
@@ -117,7 +127,7 @@ impl Dedup {
             window.consecutive_drops = 0;
         }
 
-        window.sequences.push_back(sequence);
+        window.sequences.push_back(packet);
         while window.sequences.len() > DUPLICATE_WINDOW {
             window.sequences.pop_front();
         }
@@ -135,26 +145,34 @@ mod tests {
         component: 1,
     };
 
+    fn packet(sequence: u8) -> PacketKey {
+        PacketKey {
+            sequence,
+            message_id: 0,
+            checksum: 0xbeef,
+        }
+    }
+
     #[test]
     fn a_long_gap_flushes_the_window_for_a_sequence_reset() {
         let dedup = Dedup::default();
         let t0 = Instant::now();
 
         // Warm the window with sequence 0; a repeat inside the window drops.
-        assert!(!dedup.seen_sequence_before(SOURCE, 0, t0));
-        assert!(dedup.seen_sequence_before(SOURCE, 0, t0));
+        assert!(!dedup.seen_before(SOURCE, packet(0), t0));
+        assert!(dedup.seen_before(SOURCE, packet(0), t0));
 
         // After a presumed-lost-sized silence the same sequence passes: the
         // sender's counter has reset (reboot), so it is not an old packet.
         let after_gap = t0 + SEQUENCE_RESET_GAP;
         assert!(
-            !dedup.seen_sequence_before(SOURCE, 0, after_gap),
+            !dedup.seen_before(SOURCE, packet(0), after_gap),
             "the long gap must flush the window"
         );
 
         // Immediately after, the normal duplicate rule applies again.
         assert!(
-            dedup.seen_sequence_before(SOURCE, 0, after_gap),
+            dedup.seen_before(SOURCE, packet(0), after_gap),
             "the freshly accepted sequence drops if repeated normally"
         );
     }
@@ -166,12 +184,12 @@ mod tests {
         // Accept sequence 7 once so it sits in the window; its repeats then
         // repeat at a rate that cannot trip the long-gap flush.
         let mut now = Instant::now();
-        assert!(!dedup.seen_sequence_before(SOURCE, 7, now));
+        assert!(!dedup.seen_before(SOURCE, packet(7), now));
 
         for attempt in 0..(MAX_CONSECUTIVE_DROPS - 1) {
             now += Duration::from_millis(10);
             assert!(
-                dedup.seen_sequence_before(SOURCE, 7, now),
+                dedup.seen_before(SOURCE, packet(7), now),
                 "drop {attempt} must still apply the normal duplicate rule"
             );
         }
@@ -180,12 +198,35 @@ mod tests {
         // and the frame is accepted, which resynchronizes it.
         now += Duration::from_millis(10);
         assert!(
-            !dedup.seen_sequence_before(SOURCE, 7, now),
+            !dedup.seen_before(SOURCE, packet(7), now),
             "the threshold consecutive drop must be accepted"
         );
 
         // And the normal rule continues from the resynchronized window.
         now += Duration::from_millis(10);
-        assert!(dedup.seen_sequence_before(SOURCE, 7, now));
+        assert!(dedup.seen_before(SOURCE, packet(7), now));
+    }
+
+    #[test]
+    fn colliding_sequences_of_different_packets_are_not_duplicates() {
+        let dedup = Dedup::default();
+        let now = Instant::now();
+
+        // Two channels of one autopilot: same sequence, different packets.
+        let heartbeat = PacketKey {
+            sequence: 42,
+            message_id: 0,
+            checksum: 0x1111,
+        };
+        let attitude = PacketKey {
+            sequence: 42,
+            message_id: 30,
+            checksum: 0x2222,
+        };
+
+        assert!(!dedup.seen_before(SOURCE, heartbeat, now));
+        assert!(!dedup.seen_before(SOURCE, attitude, now));
+        // The forwarded copy of either still drops.
+        assert!(dedup.seen_before(SOURCE, attitude, now));
     }
 }

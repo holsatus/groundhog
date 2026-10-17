@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 pub type ArcError = Arc<dyn std::error::Error + Send + Sync + 'static>;
-pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// A MAVLink *address*: the system/component pair a frame is sent to or comes
 /// from.

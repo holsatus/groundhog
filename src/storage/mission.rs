@@ -1,16 +1,36 @@
 //! Import and export of missions in the "QGC WPL 110" plain-text format.
 //!
+//! By convention (QGroundControl, Mission Planner) the first row of a WPL file
+//! is the home position, and the plan starts at row 1 — the same layout as
+//! ArduPilot's home slot. Files are therefore read and written through the
+//! mission codec with a home slot, which also keeps jump targets pointing at
+//! the right rows.
+//!
 //! WPL predates the `_INT` MAVLink frames: it stores latitude/longitude as
-//! degrees and uses the float global frames. Our typed model requires the
-//! global-INT frames for positional commands, so the frame is normalized on the
-//! way in (`0/3/10 -> 5/6/11`) and back out.
+//! degrees and uses the float global frames. Positional frames are normalized
+//! to their `_INT` counterparts on the way in (`0/3/10 -> 5/6/11`) and back out.
 
 use mavio::default_dialect::{
     enums::{MavCmd, MavFrame, MavMissionType},
     messages::MissionItemInt,
 };
 
-use crate::domain::mission::{LATLON_SCALE, MissionItem, is_positional_command};
+use crate::domain::{
+    firmware::MissionLayout,
+    geo::LATLON_SCALE,
+    mission::{MissionItem, codec},
+};
+
+/// The layout of a WPL file: home in row 0.
+const WPL_LAYOUT: MissionLayout = MissionLayout { home_slot: true };
+
+/// A mission read from a WPL file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WplMission {
+    /// The home row, if the file had one besides the plan.
+    pub home: Option<MissionItem>,
+    pub items: Vec<MissionItem>,
+}
 
 const HEADER: &str = "QGC WPL 110";
 
@@ -32,19 +52,19 @@ impl WplError {
     }
 }
 
-/// Serialize `items` as a "QGC WPL 110" document.
-pub fn write_wpl(items: &[MissionItem]) -> String {
+/// Serialize a plan as a "QGC WPL 110" document, with `home` (or a zero
+/// placeholder) in row 0.
+pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> String {
     let mut out = String::from(HEADER);
     out.push('\n');
 
-    for (seq, item) in items.iter().enumerate() {
-        let wire = item.to_wire(seq as u16, MavMissionType::Mission);
+    for wire in codec::encode(items, home, WPL_LAYOUT, MavMissionType::Mission) {
         let frame = export_frame(wire.frame, wire.command);
 
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            seq,
-            if seq == 0 { 1 } else { 0 },
+            wire.seq,
+            if wire.seq == 0 { 1 } else { 0 },
             frame as u16,
             wire.command as u16,
             wire.param1,
@@ -54,7 +74,7 @@ pub fn write_wpl(items: &[MissionItem]) -> String {
             wire.x as f64 * LATLON_SCALE,
             wire.y as f64 * LATLON_SCALE,
             wire.z,
-            u8::from(wire.autocontinue != 0),
+            wire.autocontinue,
         ));
     }
 
@@ -62,9 +82,9 @@ pub fn write_wpl(items: &[MissionItem]) -> String {
 }
 
 /// Parse a "QGC WPL 110" document. Blank lines are ignored; the header must be
-/// the first non-blank line.
-pub fn parse_wpl(text: &str) -> Result<Vec<MissionItem>, WplError> {
-    let mut items = Vec::new();
+/// the first non-blank line; the first row is home.
+pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
+    let mut rows = Vec::new();
     let mut header_seen = false;
 
     for (index, raw) in text.lines().enumerate() {
@@ -81,14 +101,21 @@ pub fn parse_wpl(text: &str) -> Result<Vec<MissionItem>, WplError> {
             continue;
         }
 
-        items.push(parse_row(line, line_number)?);
+        let mut row = parse_row(line, line_number)?;
+        // The index column is advisory; rows are taken in file order.
+        row.seq = rows.len() as u16;
+        rows.push(row);
     }
 
     if !header_seen {
         return Err(WplError::at(1, "missing 'QGC WPL <version>' header"));
     }
 
-    Ok(items)
+    let mission = codec::decode(&rows, 0, WPL_LAYOUT);
+    Ok(WplMission {
+        home: mission.home,
+        items: mission.items,
+    })
 }
 
 fn validate_header(line: &str) -> Result<(), String> {
@@ -102,7 +129,7 @@ fn validate_header(line: &str) -> Result<(), String> {
     }
 }
 
-fn parse_row(line: &str, line_number: usize) -> Result<MissionItem, WplError> {
+fn parse_row(line: &str, line_number: usize) -> Result<MissionItemInt, WplError> {
     let fields: Vec<&str> = line.split('\t').collect();
 
     if fields.len() != 12 {
@@ -158,7 +185,7 @@ fn parse_row(line: &str, line_number: usize) -> Result<MissionItem, WplError> {
     let alt = float(10, "altitude")? as f32;
     let autocontinue = integer(11, "autocontinue")? != 0;
 
-    let wire = MissionItemInt {
+    Ok(MissionItemInt {
         frame: import_frame(frame, command),
         command,
         autocontinue: u8::from(autocontinue),
@@ -169,10 +196,14 @@ fn parse_row(line: &str, line_number: usize) -> Result<MissionItem, WplError> {
         x: (lat / LATLON_SCALE).round() as i32,
         y: (lon / LATLON_SCALE).round() as i32,
         z: alt,
+        mission_type: MavMissionType::Mission,
         ..Default::default()
-    };
+    })
+}
 
-    Ok(MissionItem::from_wire(&wire))
+/// Whether `command` carries a location, per the command table.
+fn is_positional_command(command: MavCmd) -> bool {
+    crate::domain::mission::command::spec_of(command).is_some_and(|spec| spec.is_positional())
 }
 
 /// Map our global-INT frame back to the float global frame WPL uses.
@@ -206,66 +237,72 @@ fn import_frame(frame: MavFrame, command: MavCmd) -> MavFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::mission::{MissionCommand, Position};
+    use crate::domain::mission::Position;
 
     fn waypoint(lat: f64, lon: f64) -> MissionItem {
-        MissionItem {
-            frame: MavFrame::GlobalInt,
-            autocontinue: true,
-            command: MissionCommand::Waypoint {
-                pos: Position {
-                    lat,
-                    lon,
-                    alt_m: 120.0,
-                },
-                hold_s: 3.0,
-                accept_radius_m: 1.5,
-                pass_radius_m: 2.5,
-                yaw_deg: Some(90.0),
-            },
-        }
+        let mut item = MissionItem::waypoint(Position {
+            lat,
+            lon,
+            alt_m: 120.0,
+        });
+        item.frame = MavFrame::GlobalInt;
+        item.params = [3.0, 1.5, 2.5, 90.0];
+        item
     }
 
     #[test]
-    fn mixed_list_round_trips() {
-        let items = vec![
-            waypoint(47.4, 8.5),
-            MissionItem {
-                frame: MavFrame::Mission,
-                autocontinue: true,
-                command: MissionCommand::ConditionDelay { seconds: 4.0 },
-            },
-            MissionItem {
-                frame: MavFrame::Mission,
-                autocontinue: false,
-                command: MissionCommand::Unknown {
-                    command: MavCmd::DoSetServo,
-                    params: [1.0, 2.0, 3.0, 4.0],
-                    x: 123,
-                    y: -456,
-                    z: 78.0,
-                    frame: MavFrame::Mission,
-                },
-            },
-        ];
+    fn mixed_list_round_trips_with_its_home() {
+        let mut delay = MissionItem::new(MavCmd::ConditionDelay, None);
+        delay.params[0] = 4.0;
 
-        let text = write_wpl(&items);
+        let mut servo = MissionItem::new(MavCmd::DoSetServo, None);
+        servo.autocontinue = false;
+        servo.params = [1.0, 2.0, 3.0, 4.0];
+        servo.x = 123;
+        servo.y = -456;
+        servo.z = 78.0;
+
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = 0.0;
+
+        let items = vec![waypoint(47.4, 8.5), delay, servo, jump];
+        let home = MissionItem::home(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 400.0,
+        });
+
+        let text = write_wpl(&items, Some(&home));
         let parsed = parse_wpl(&text).expect("round trip should parse");
 
-        assert_eq!(parsed, items);
+        assert_eq!(parsed.items, items);
+        assert_eq!(parsed.home, Some(home));
     }
 
     #[test]
-    fn frame_zero_waypoint_imports_as_typed_global_int() {
+    fn the_jump_column_is_a_file_row_number() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = 0.0; // the first plan item
+        let text = write_wpl(&[waypoint(1.0, 1.0), jump], None);
+
+        let jump_row = text.lines().nth(3).unwrap();
+        let target: f32 = jump_row.split('\t').nth(4).unwrap().parse().unwrap();
+        assert_eq!(target, 1.0, "row 1, after home");
+    }
+
+    #[test]
+    fn row_zero_is_home_and_frames_import_as_int() {
         let text = "QGC WPL 110\n\
-                    0\t1\t0\t16\t0\t0\t0\t0\t47.4\t8.5\t120\t1\n";
+                    0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n\
+                    1\t0\t3\t16\t0\t0\t0\t0\t47.4\t8.5\t120\t1\n";
 
-        let items = parse_wpl(text).expect("valid file");
-        assert_eq!(items.len(), 1);
+        let mission = parse_wpl(text).expect("valid file");
+        assert!(mission.home.is_some());
+        assert_eq!(mission.items.len(), 1);
 
-        let item = &items[0];
-        assert_eq!(item.frame, MavFrame::GlobalInt);
-        assert!(matches!(item.command, MissionCommand::Waypoint { .. }));
+        let item = &mission.items[0];
+        assert_eq!(item.frame, MavFrame::GlobalRelativeAltInt);
+        assert!(item.position().is_some());
     }
 
     #[test]
@@ -291,7 +328,8 @@ mod tests {
 
     #[test]
     fn header_only_yields_empty_mission() {
-        let items = parse_wpl("QGC WPL 110\n").expect("valid header");
-        assert!(items.is_empty());
+        let mission = parse_wpl("QGC WPL 110\n").expect("valid header");
+        assert!(mission.items.is_empty());
+        assert!(mission.home.is_none());
     }
 }
