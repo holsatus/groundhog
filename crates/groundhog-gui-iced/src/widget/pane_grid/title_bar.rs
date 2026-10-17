@@ -301,8 +301,11 @@ where
 
         tree.children[0].translation = Vector::ZERO;
 
+        // The title and the controls are centred vertically, so a title
+        // shorter than the controls does not sit at the top of the bar.
         for child in &mut tree.children {
-            child.translation += Vector::new(self.padding.left, self.padding.top);
+            let centre = (inner_size.height - child.size.height).max(0.0) / 2.0;
+            child.translation += Vector::new(self.padding.left, self.padding.top + centre);
         }
 
         tree.size = inner_size.expand(self.padding);

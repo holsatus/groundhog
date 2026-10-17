@@ -13,6 +13,7 @@
 //     as a pick area
 //   - `State::configuration()` snapshots the current arrangement back into a
 //     `Configuration<T>`, the inverse of `with_configuration`
+//   - `TitleBar` centres its title and controls vertically
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the

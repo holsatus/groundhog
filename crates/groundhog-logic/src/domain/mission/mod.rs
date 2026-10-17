@@ -3,6 +3,8 @@
 //! - [`MissionItem`]: one item in wire form, losslessly, with meaning layered
 //!   on by the [`command`] table.
 //! - [`MissionPlan`]: the editable list of items, with stable [`ItemId`]s.
+//! - [`MissionDraft`]: the operator's plan for a vehicle, kept against what
+//!   the vehicle holds.
 //! - [`OnboardMission`]: what a vehicle reported having, as last transferred.
 //! - [`codec`]: plan ↔ wire under a firmware's [`MissionLayout`].
 //!
@@ -10,9 +12,11 @@
 
 pub mod codec;
 pub mod command;
+mod draft;
 mod item;
 mod plan;
 
+pub use draft::{MissionDraft, SyncStatus};
 pub use item::{Field, FieldKind, FieldView, MissionItem, Position};
 pub use plan::{ItemId, MissionPlan};
 

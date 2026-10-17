@@ -9,8 +9,7 @@ mod config;
 mod features;
 mod layout;
 mod map;
-mod style;
-mod theme;
+mod ui;
 mod widget;
 
 use app::Application;

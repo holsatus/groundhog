@@ -66,6 +66,9 @@ impl LinkStatus {
 pub struct LinkEvent {
     pub id: LinkId,
     pub name: String,
+    /// The status before this change, so a reaction can tell a lost
+    /// connection from a failed first attempt.
+    pub previous: LinkStatus,
     pub status: LinkStatus,
 }
 
@@ -191,11 +194,12 @@ impl LinkManager {
     /// Stop the link's supervisor, closing its transport.
     pub fn disconnect(&mut self, id: &LinkId) {
         if let Some(entry) = self.links.get_mut(id)
-            && entry.session.take().is_some()
+            && let Some(session) = entry.session.take()
         {
             let _ = self.events.send(LinkEvent {
                 id: id.clone(),
                 name: entry.config.name.clone(),
+                previous: session.status.borrow().clone(),
                 status: LinkStatus::Disconnected,
             });
         }
@@ -278,10 +282,11 @@ async fn supervise(
     events: mpsc::UnboundedSender<LinkEvent>,
 ) {
     let publish = |state: LinkStatus| {
-        status.send_replace(state.clone());
+        let previous = status.send_replace(state.clone());
         let _ = events.send(LinkEvent {
             id: id.clone(),
             name: config.name.clone(),
+            previous,
             status: state,
         });
     };
@@ -386,13 +391,20 @@ mod tests {
     }
 
     async fn wait_for(events: &mut LinkEvents, done: impl Fn(&LinkStatus) -> bool) -> LinkStatus {
+        wait_for_event(events, done).await.status
+    }
+
+    async fn wait_for_event(
+        events: &mut LinkEvents,
+        done: impl Fn(&LinkStatus) -> bool,
+    ) -> LinkEvent {
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), events.next())
                 .await
                 .expect("a status change arrives")
                 .expect("the manager is alive");
             if done(&event.status) {
-                return event.status;
+                return event;
             }
         }
     }
@@ -462,6 +474,21 @@ mod tests {
         assert_eq!(manager.status(&id), LinkStatus::Disconnected);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!router.is_attached(&id), "the transport was closed");
+    }
+
+    #[tokio::test]
+    async fn events_carry_the_status_they_replace() {
+        let (mut manager, mut events, _router) = manager();
+        let id = manager.save(config("A"));
+
+        manager.connect(&id);
+        let connected = wait_for_event(&mut events, LinkStatus::is_connected).await;
+        assert!(matches!(connected.previous, LinkStatus::Connecting { .. }));
+
+        manager.disconnect(&id);
+        let disconnected =
+            wait_for_event(&mut events, |status| *status == LinkStatus::Disconnected).await;
+        assert!(disconnected.previous.is_connected());
     }
 
     #[tokio::test]

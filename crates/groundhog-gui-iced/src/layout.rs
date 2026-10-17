@@ -5,7 +5,10 @@
 //! close control. Dockable panels are opened from the rail and return to it
 //! when closed.
 
-use crate::widget::pane_grid::{self, Axis as PaneAxis, Edge};
+use crate::{
+    ui::Icon,
+    widget::pane_grid::{self, Axis as PaneAxis, Edge},
+};
 
 /// A view that can occupy a pane in the workspace grid.
 ///
@@ -122,17 +125,17 @@ impl Panel {
         }
     }
 
-    /// A short placeholder for the rail button. Icons land here later.
-    pub fn badge(self) -> &'static str {
+    /// The panel's icon on the rail.
+    pub fn icon(self) -> Icon {
         match self {
-            Panel::Map => "M",
-            Panel::Vehicles => "V",
-            Panel::Mission => "M",
-            Panel::Parameters => "P",
-            Panel::Calibration => "K",
-            Panel::Links => "C",
-            Panel::Logs => "L",
-            Panel::Settings => "S",
+            Panel::Map => Icon::Map,
+            Panel::Vehicles => Icon::Vehicle,
+            Panel::Mission => Icon::Mission,
+            Panel::Parameters => Icon::Parameters,
+            Panel::Calibration => Icon::Calibration,
+            Panel::Links => Icon::Links,
+            Panel::Logs => Icon::Log,
+            Panel::Settings => Icon::Settings,
         }
     }
 
@@ -156,7 +159,8 @@ pub enum Message {
     Clicked(pane_grid::Pane),
     Dragged(pane_grid::DragEvent),
     Resized(pane_grid::ResizeEvent),
-    Open(Panel),
+    /// Close the panel if it is open, else open it.
+    Toggle(Panel),
     Close(pane_grid::Pane),
     Maximize(pane_grid::Pane),
     Restore,
@@ -173,7 +177,7 @@ impl Message {
             self,
             Message::Dragged(pane_grid::DragEvent::Dropped { .. })
                 | Message::Resized(_)
-                | Message::Open(_)
+                | Message::Toggle(_)
                 | Message::Close(_)
         )
     }
@@ -291,19 +295,25 @@ impl Layout {
             }
             Message::Dragged(_) => {}
             Message::Resized(event) => self.panes.resize(event.split, event.ratio),
-            Message::Open(panel) => self.open(panel),
-            Message::Close(pane) => {
-                if self.panes.get(pane) == Some(&Panel::Map) {
-                    return;
-                }
-                if let Some((_, sibling)) = self.panes.close(pane)
-                    && self.focus == Some(pane)
-                {
-                    self.focus = Some(sibling);
-                }
-            }
+            Message::Toggle(panel) => match self.pane_of(panel) {
+                Some(pane) => self.close(pane),
+                None => self.open(panel),
+            },
+            Message::Close(pane) => self.close(pane),
             Message::Maximize(pane) => self.panes.maximize(pane),
             Message::Restore => self.panes.restore(),
+        }
+    }
+
+    /// Close `pane`, unless it holds the fixed map.
+    fn close(&mut self, pane: pane_grid::Pane) {
+        if self.panes.get(pane).is_some_and(|panel| panel.is_fixed()) {
+            return;
+        }
+        if let Some((_, sibling)) = self.panes.close(pane)
+            && self.focus == Some(pane)
+        {
+            self.focus = Some(sibling);
         }
     }
 
@@ -348,6 +358,21 @@ mod tests {
         // The rebuilt layout snapshots to the same structure.
         let reserialized = ron::to_string(&rebuilt.configuration()).expect("serialize");
         assert_eq!(serialized, reserialized);
+    }
+
+    #[test]
+    fn toggling_opens_and_closes_a_panel_but_never_the_map() {
+        let mut layout = Layout::new();
+        assert!(!layout.is_open(Panel::Logs));
+
+        assert!(layout.update(Message::Toggle(Panel::Logs)));
+        assert!(layout.is_open(Panel::Logs));
+
+        assert!(layout.update(Message::Toggle(Panel::Logs)));
+        assert!(!layout.is_open(Panel::Logs));
+
+        layout.update(Message::Toggle(Panel::Map));
+        assert!(layout.is_open(Panel::Map), "the map is fixed");
     }
 
     #[test]

@@ -162,7 +162,8 @@ impl<M> MapLayer<M> for Chrome {
     }
 
     fn revision(&self) -> Option<u64> {
-        // Only the view (size) changes these.
+        // Only the view (size) and the theme change these, and the engine
+        // keys every cache on both.
         Some(0)
     }
 
@@ -176,8 +177,8 @@ impl<M> MapLayer<M> for Chrome {
                 draw_rounded_frame(
                     frame,
                     size,
-                    crate::style::PANE_RADIUS,
-                    crate::style::PANE_BORDER_WIDTH,
+                    crate::ui::style::PANE_RADIUS,
+                    crate::ui::style::PANE_BORDER_WIDTH,
                     background,
                     border,
                 );

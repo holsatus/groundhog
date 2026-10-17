@@ -13,17 +13,18 @@ use groundhog_logic::{
     services::Result,
 };
 use iced::{
-    Alignment, Element, Length, Task, Theme, Widget,
-    widget::{button, column, container, pick_list, row, rule, scrollable, text, text::Wrapping},
+    Alignment, Element, Length, Task, Widget,
+    widget::{column, row, scrollable},
 };
 
 use super::{
-    Context, Effect, confirm::Confirmation, notifications::Notice, operations::Operations,
+    Context, Effect, confirm::Confirmation, log_panel::timeline_row, notifications::Notice,
+    operations::Operations,
 };
-use crate::{style, widget::virtualized::virtual_list};
-
-/// Height of a single status row: one line of text plus the container padding.
-const STATUS_ROW_HEIGHT: f32 = 26.0;
+use crate::{
+    ui::{self, TextExt, Tone},
+    widget::virtualized::virtual_list,
+};
 
 /// The commands the panel runs, one of each kind per vehicle at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,7 +84,7 @@ impl VehiclePanel {
                 }
             }
             Message::RequestArm(system, arm) => {
-                let name = vehicle_name(cx.fleet, system);
+                let name = cx.fleet.vehicle_name(system);
                 let confirmation = if arm {
                     Confirmation::new(
                         format!("Arm {name}?"),
@@ -123,7 +124,7 @@ impl VehiclePanel {
                 );
             }
             Message::RequestModeKind(system, kind) => {
-                let name = vehicle_name(cx.fleet, system);
+                let name = cx.fleet.vehicle_name(system);
                 let (title, accept) = match kind {
                     ModeKind::ReturnToLaunch => (format!("Return {name} to launch?"), "Return"),
                     ModeKind::Land => (format!("Land {name} here?"), "Land"),
@@ -157,7 +158,7 @@ impl VehiclePanel {
                         Notice::error(format!(
                             "{} {} failed",
                             command.verb(),
-                            vehicle_name(cx.fleet, system)
+                            cx.fleet.vehicle_name(system)
                         ))
                         .detail(error)
                         .vehicle(system),
@@ -174,106 +175,55 @@ impl VehiclePanel {
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,
         follow: bool,
-        theme: &Theme,
     ) -> Element<'a, Message> {
-        let mut header = row![
-            iced::widget::checkbox(follow)
-                .label("Follow")
-                .on_toggle(Message::Follow)
-        ]
-        .spacing(10.0)
-        .align_y(Alignment::Center);
-
-        if !fleet.is_empty() {
-            let picker = pick_list(selected, fleet.ids().collect::<Vec<_>>(), move |id| {
+        let picker = (!fleet.is_empty()).then(|| {
+            ui::pick_list(selected, fleet.ids().collect::<Vec<_>>(), move |id| {
                 fleet.vehicle(*id).map_or_else(
-                    || "Unknown vehicle".to_string(),
+                    || fleet.vehicle_name(*id),
                     |vehicle| {
                         format!(
                             "{} ({})",
                             vehicle.display_name(),
-                            liveness_label(vehicle.liveness)
+                            liveness(vehicle.liveness).0
                         )
                     },
                 )
             })
             .on_select(Message::Select)
-            .style(style::pick_list::default)
-            .width(Length::Fill);
-            header = header.push(picker.boxed());
-        }
+        });
+
+        let header = row![
+            ui::checkbox("Follow", follow).on_toggle(Message::Follow),
+            picker
+        ]
+        .spacing(ui::space::M)
+        .align_y(Alignment::Center);
 
         let Some(vehicle) = selected.and_then(|id| fleet.vehicle(id)) else {
-            return container(
+            return ui::panel(
                 column![
                     header,
-                    rule::horizontal(1.0),
-                    text("No vehicle. Connect a link to begin.")
+                    ui::divider(),
+                    ui::text("No vehicle. Connect a link to begin.").tone(Tone::Muted)
                 ]
-                .spacing(10.0),
-            )
-            .padding(8.0)
-            .width(Length::Fill)
-            .boxed();
+                .spacing(ui::space::M),
+            );
         };
 
-        let mut contents = column![
-            header,
-            rule::horizontal(1.0),
-            self.view_status(vehicle, theme),
-            rule::horizontal(1.0),
-            self.view_controls(vehicle),
-            rule::horizontal(1.0),
-            view_telemetry(vehicle),
-            rule::horizontal(1.0),
-        ]
-        .spacing(10.0)
-        .width(Length::Fill);
-
-        contents = contents.push(view_status_texts(vehicle, theme));
-
-        container(contents).padding(8.0).width(Length::Fill).boxed()
-    }
-
-    fn view_status<'a>(&self, vehicle: &'a Vehicle, theme: &Theme) -> Element<'a, Message> {
-        let palette = theme.palette();
-        let (liveness, liveness_color) = match vehicle.liveness {
-            Liveness::Active => ("active", palette.success.base.color),
-            Liveness::Stale => ("stale", palette.warning.base.color),
-            Liveness::Lost => ("lost", palette.danger.base.color),
-        };
-
-        let armed = match vehicle.armed() {
-            Some(true) => text("ARMED").color(palette.danger.base.color),
-            Some(false) => text("disarmed"),
-            None => text("unknown"),
-        };
-
-        let mode = vehicle
-            .flight_mode()
-            .map_or_else(|| "unknown".to_string(), |mode| mode.name.to_string());
-
-        let state = vehicle
-            .identity
-            .mav_state
-            .map_or_else(|| "unknown".to_string(), |state| format!("{state:?}"));
-
-        column![
-            row![
-                cell("Link", text(liveness).color(liveness_color)),
-                cell("Armed", armed),
-                cell("Mode", text(mode)),
+        ui::panel(
+            column![
+                header,
+                ui::divider(),
+                view_status(vehicle),
+                ui::divider(),
+                self.view_controls(vehicle),
+                ui::divider(),
+                view_telemetry(vehicle),
+                ui::divider(),
+                view_status_texts(vehicle),
             ]
-            .spacing(10.0),
-            row![
-                cell("Firmware", text(vehicle.firmware().name())),
-                cell("Type", text(vehicle.class().name())),
-                cell("State", text(state)),
-            ]
-            .spacing(10.0),
-        ]
-        .spacing(6.0)
-        .boxed()
+            .spacing(ui::space::M),
+        )
     }
 
     fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> Element<'a, Message> {
@@ -283,20 +233,14 @@ impl VehiclePanel {
         let class = vehicle.class();
 
         let arm = match vehicle.armed() {
-            Some(true) => button(text(if busy(Command::Disarm) {
-                "Disarming…"
-            } else {
-                "Disarm"
-            }))
-            .style(button::danger)
-            .on_press_maybe((!busy(Command::Disarm)).then_some(Message::RequestArm(system, false))),
-            _ => button(text(if busy(Command::Arm) {
-                "Arming…"
-            } else {
-                "Arm"
-            }))
-            .style(button::primary)
-            .on_press_maybe((!busy(Command::Arm)).then_some(Message::RequestArm(system, true))),
+            Some(true) => ui::button("Disarm")
+                .danger()
+                .busy(busy(Command::Disarm), "Disarming…")
+                .on_press(Message::RequestArm(system, false)),
+            _ => ui::button("Arm")
+                .primary()
+                .busy(busy(Command::Arm), "Arming…")
+                .on_press(Message::RequestArm(system, true)),
         };
 
         let modes: Vec<FlightMode> = firmware
@@ -306,38 +250,77 @@ impl VehiclePanel {
             .copied()
             .collect();
 
-        let mode_picker = pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
+        let mode_picker = ui::pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
             .placeholder("Mode")
-            .on_select(move |mode| Message::SetMode(system, mode))
-            .style(style::pick_list::default)
-            .width(Length::Fill);
+            .on_select(move |mode| Message::SetMode(system, mode));
 
         let quick = |kind: ModeKind, label: &'static str| {
-            button(text(label))
-                .style(style::button::transparent)
+            ui::button(label)
                 .on_press_maybe(
                     (firmware.mode_of_kind(class, kind).is_some() && !busy(Command::SetMode))
                         .then_some(Message::RequestModeKind(system, kind)),
                 )
+                .boxed()
         };
 
         column![
-            row![arm, mode_picker]
-                .spacing(6.0)
+            row![arm.boxed(), mode_picker]
+                .spacing(ui::space::S)
                 .align_y(Alignment::Center),
-            row![
+            ui::toolbar([
                 quick(ModeKind::ReturnToLaunch, "Return"),
                 quick(ModeKind::Land, "Land"),
-                button(text("Locate"))
-                    .style(style::button::transparent)
-                    .on_press(Message::Locate(system)),
-            ]
-            .spacing(6.0)
-            .wrap(),
+                ui::button("Locate")
+                    .on_press(Message::Locate(system))
+                    .boxed(),
+            ]),
         ]
-        .spacing(6.0)
+        .spacing(ui::space::S)
         .boxed()
     }
+}
+
+/// Values shown three to a row, so they line up in columns.
+fn stats<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut rows = column![].spacing(ui::space::S);
+    let mut cells = cells.into_iter().peekable();
+    while cells.peek().is_some() {
+        let mut line: Vec<Element<'a, Message>> = cells.by_ref().take(3).collect();
+        // Short rows keep the columns' widths.
+        while line.len() < 3 {
+            line.push(ui::stat("", ui::text("")));
+        }
+        rows = rows.push(row(line).spacing(ui::space::M));
+    }
+    rows.boxed()
+}
+
+fn view_status(vehicle: &Vehicle) -> Element<'_, Message> {
+    let (liveness, tone) = liveness(vehicle.liveness);
+
+    let armed = match vehicle.armed() {
+        Some(true) => ui::text("ARMED").tone(Tone::Danger),
+        Some(false) => ui::text("disarmed"),
+        None => ui::text("unknown").tone(Tone::Muted),
+    };
+
+    let mode = vehicle
+        .flight_mode()
+        .map_or_else(|| "unknown".to_string(), |mode| mode.name.to_string());
+
+    let state = vehicle
+        .identity
+        .mav_state
+        .map_or_else(|| "unknown".to_string(), |state| format!("{state:?}"));
+
+    stats(vec![
+        ui::stat("Link", ui::text(liveness).tone(tone)),
+        ui::stat("Armed", armed),
+        ui::stat("Mode", ui::text(mode)),
+        ui::stat("Firmware", ui::text(vehicle.firmware().name())),
+        ui::stat("Type", ui::text(vehicle.class().name())),
+        ui::stat("State", ui::text(state)),
+    ])
 }
 
 fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
@@ -378,60 +361,31 @@ fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
         .and_then(|battery| battery.remaining)
         .map_or_else(unknown, |percent| format!("{percent:.0} %"));
 
-    column![
-        row![
-            cell("Roll", text(roll)),
-            cell("Pitch", text(pitch)),
-            cell("Heading", text(yaw)),
-        ]
-        .spacing(10.0),
-        row![
-            cell("Altitude", text(altitude)),
-            cell("Speed", text(speed)),
-            cell("Battery", text(remaining)),
-        ]
-        .spacing(10.0),
-        row![
-            cell("Voltage", text(voltage)),
-            cell("Current", text(current)),
-            cell("", text("")),
-        ]
-        .spacing(10.0),
-    ]
-    .spacing(6.0)
-    .boxed()
+    stats(vec![
+        ui::stat("Roll", ui::text(roll)),
+        ui::stat("Pitch", ui::text(pitch)),
+        ui::stat("Heading", ui::text(yaw)),
+        ui::stat("Altitude", ui::text(altitude)),
+        ui::stat("Speed", ui::text(speed)),
+        ui::stat("Battery", ui::text(remaining)),
+        ui::stat("Voltage", ui::text(voltage)),
+        ui::stat("Current", ui::text(current)),
+    ])
 }
 
-fn view_status_texts<'a>(vehicle: &'a Vehicle, theme: &Theme) -> Element<'a, Message> {
-    let palette = *theme.palette();
+fn view_status_texts(vehicle: &Vehicle) -> Element<'_, Message> {
     let entries = vehicle.status.texts.iter().enumerate().collect::<Vec<_>>();
 
-    let list = virtual_list(entries, move |&(index, status)| {
-        let color = style::severity_color(palette, status.severity);
-
-        container(
-            row![
-                text(format!("{:?}", status.severity))
-                    .color(color)
-                    .width(Length::Fixed(96.0)),
-                text(format!("[c{}]", status.component)).width(Length::Fixed(56.0)),
-                text(&status.text)
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::None),
-            ]
-            .spacing(8.0),
+    let list = virtual_list(entries, |&(index, status)| {
+        timeline_row(
+            index,
+            format!("c{}", status.component),
+            status.severity,
+            status.text.clone(),
         )
-        .style(if index % 2 == 0 {
-            style::list_default
-        } else {
-            style::list_brighter
-        })
-        .padding(2)
-        .boxed()
     })
-    .item_height(|_| STATUS_ROW_HEIGHT)
-    .key(|(_, status)| (status.component, status.at))
-    .spacing(0.0);
+    .item_height(|_| ui::size::LIST_ROW)
+    .key(|(_, status)| (status.component, status.at));
 
     scrollable(list)
         .anchor_bottom()
@@ -440,26 +394,11 @@ fn view_status_texts<'a>(vehicle: &'a Vehicle, theme: &Theme) -> Element<'a, Mes
         .boxed()
 }
 
-/// A labelled value, sharing a row equally with its siblings.
-fn cell<'a>(label: &'a str, value: iced::widget::Text<'a>) -> Element<'a, Message> {
-    let value = value.wrapping(Wrapping::None).ellipsis(text::Ellipsis::End);
-    container(column![text(label).size(11), value].spacing(1))
-        .width(Length::FillPortion(1))
-        .boxed()
-}
-
-/// A short, legible marker for a vehicle's liveness.
-fn liveness_label(liveness: Liveness) -> &'static str {
+/// A short, legible marker for a vehicle's liveness, and its tone.
+fn liveness(liveness: Liveness) -> (&'static str, Tone) {
     match liveness {
-        Liveness::Active => "active",
-        Liveness::Stale => "stale",
-        Liveness::Lost => "lost",
+        Liveness::Active => ("active", Tone::Success),
+        Liveness::Stale => ("stale", Tone::Warning),
+        Liveness::Lost => ("lost", Tone::Danger),
     }
-}
-
-/// How notices and dialogs name a vehicle.
-pub fn vehicle_name(fleet: &FleetSnapshot, system: SystemId) -> String {
-    fleet
-        .vehicle(system)
-        .map_or_else(|| format!("vehicle {}", system.0), Vehicle::display_name)
 }

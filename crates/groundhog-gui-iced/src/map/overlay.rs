@@ -155,6 +155,24 @@ impl State {
     }
 }
 
+/// A value identifying `theme`'s colours, for cache keys: layers draw in
+/// colours from the theme, so cached geometry is stale once it changes.
+fn theme_key(theme: &Theme) -> u64 {
+    let seed = theme.seed();
+    let mut hasher = DefaultHasher::new();
+    for color in [
+        seed.background,
+        seed.text,
+        seed.primary,
+        seed.success,
+        seed.warning,
+        seed.danger,
+    ] {
+        color.into_rgba8().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
     type State = State;
 
@@ -293,12 +311,13 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
         &self,
         state: &State,
         renderer: &Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let view = self.view(bounds);
         let view_key = view.key();
+        let theme_key = theme_key(theme);
         let mut caches = state.caches.borrow_mut();
         let mut drawn = HashSet::with_capacity(self.layers.len());
 
@@ -317,7 +336,7 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
                 match layer.revision() {
                     Some(revision) => {
                         let mut hasher = DefaultHasher::new();
-                        (revision, view_key, interaction).hash(&mut hasher);
+                        (revision, view_key, theme_key, interaction).hash(&mut hasher);
                         let key = hasher.finish();
 
                         let entry = caches.entry(id).or_default();
@@ -397,6 +416,15 @@ mod tests {
     use slippery::{Geodetic, Zoom};
 
     const LAYER: LayerId = LayerId::new("test");
+
+    #[test]
+    fn cached_layers_are_keyed_on_the_theme() {
+        use crate::ui::theme::ThemeMode;
+
+        let dark = theme_key(&ThemeMode::Dark.theme());
+        assert_eq!(dark, theme_key(&ThemeMode::Dark.theme()), "stable");
+        assert_ne!(dark, theme_key(&ThemeMode::Light.theme()));
+    }
     const MARKER: HandleId = HandleId(7);
 
     #[derive(Debug, Clone, PartialEq)]

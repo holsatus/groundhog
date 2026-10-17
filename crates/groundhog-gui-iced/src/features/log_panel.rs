@@ -16,13 +16,16 @@ use groundhog_logic::{
     },
 };
 use iced::{
-    Alignment, Element, Length, Theme, Widget,
-    widget::{container, pick_list, row, scrollable, text, text::Wrapping},
+    Alignment, Element, Length,
+    widget::{column, row, scrollable},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
 use super::notifications::{Level, Notice, Notifications};
-use crate::{style, widget::virtualized::virtual_list};
+use crate::{
+    ui::{self, TextExt},
+    widget::virtualized::virtual_list,
+};
 
 /// Which messages to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +47,6 @@ impl std::fmt::Display for Scope {
 
 /// The largest number of messages rendered at once; older ones are dropped.
 const MAX_ENTRIES: usize = 2000;
-
-/// Height of a single log row: one line of text plus the container padding.
-const LOG_ROW_HEIGHT: f32 = 26.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Filter {
@@ -98,6 +98,25 @@ impl Entry<'_> {
     }
 }
 
+/// One line of a timeline of messages: where it came from, how severe it is,
+/// and what it says. Shared with the vehicle panel's list of status texts.
+pub fn timeline_row<'a, M: 'a>(
+    index: usize,
+    source: String,
+    severity: MavSeverity,
+    message: String,
+) -> Element<'a, M> {
+    ui::list_row(
+        index,
+        row![
+            ui::text(source).width(Length::Fixed(72.0)),
+            ui::severity(severity).width(Length::Fixed(96.0)),
+            ui::text(message).single_line().width(Length::Fill),
+        ]
+        .spacing(ui::space::M),
+    )
+}
+
 /// Where a GCS notice ranks among status text severities.
 fn severity_of(level: Level) -> MavSeverity {
     match level {
@@ -125,7 +144,6 @@ impl LogPanel {
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,
         notices: &'a Notifications,
-        theme: &Theme,
     ) -> Element<'a, Message> {
         let mut entries = self.entries(fleet, selected, notices);
 
@@ -134,76 +152,57 @@ impl LogPanel {
         }
 
         let entries = entries.into_iter().enumerate().collect::<Vec<_>>();
-        let palette = *theme.palette();
-
-        let list = virtual_list(entries, move |&(index, entry)| {
-            let color = style::severity_color(palette, entry.severity());
-
-            let (source, message) = match entry {
-                Entry::Vehicle(id, status) => (
-                    format!("{}:{}", id.0, status.component),
-                    status.text.clone(),
-                ),
-                Entry::Gcs(notice) => (
-                    "GCS".to_string(),
-                    match &notice.detail {
-                        Some(detail) => format!("{}: {detail}", notice.title),
-                        None => notice.title.clone(),
-                    },
-                ),
-            };
-
-            container(
-                row![
-                    text(source).width(Length::Fixed(72.0)),
-                    text(format!("{:?}", entry.severity()))
-                        .color(color)
-                        .width(Length::Fixed(96.0)),
-                    text(message).width(Length::Fill).wrapping(Wrapping::None),
-                ]
-                .spacing(8.0),
-            )
-            .style(if index % 2 == 0 {
-                style::list_default
-            } else {
-                style::list_brighter
-            })
-            .padding(2)
-            .boxed()
+        let list = virtual_list(entries, |&(index, entry)| match entry {
+            Entry::Vehicle(system, status) => timeline_row(
+                index,
+                format!("{}:{}", system.0, status.component),
+                status.severity,
+                status.text.clone(),
+            ),
+            Entry::Gcs(notice) => timeline_row(
+                index,
+                "GCS".to_string(),
+                entry.severity(),
+                match &notice.detail {
+                    Some(detail) => format!("{}: {detail}", notice.title),
+                    None => notice.title.clone(),
+                },
+            ),
         })
-        .item_height(|_| LOG_ROW_HEIGHT)
-        .key(|(index, entry)| (*index, entry.at()))
-        .spacing(0.0);
-
-        let list = scrollable(list)
-            .anchor_bottom()
-            .height(Length::Fill)
-            .width(Length::Fill);
+        .item_height(|_| ui::size::LIST_ROW)
+        .key(|(index, entry)| (*index, entry.at()));
 
         let controls = row![
-            text("Show:"),
-            pick_list(
+            ui::text("Show"),
+            ui::pick_list(
                 Some(self.filter.scope),
                 [Scope::All, Scope::Selected, Scope::Gcs],
-                |scope| scope.to_string(),
+                Scope::to_string,
             )
-            .on_select(Message::SetScope),
-            text("min severity:"),
-            pick_list(
+            .on_select(Message::SetScope)
+            .width(Length::Fixed(200.0)),
+            ui::text("at least"),
+            ui::pick_list(
                 Some(self.filter.min_severity),
                 status::ORDERED,
                 |severity| format!("{severity:?}"),
             )
-            .on_select(Message::SetMinSeverity),
+            .on_select(Message::SetMinSeverity)
+            .width(Length::Fixed(140.0)),
         ]
-        .spacing(8.0)
+        .spacing(ui::space::M)
         .align_y(Alignment::Center);
 
-        container(iced::widget::column![controls, list].spacing(6.0))
-            .padding(6.0)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .boxed()
+        ui::panel(
+            column![
+                controls,
+                scrollable(list)
+                    .anchor_bottom()
+                    .height(Length::Fill)
+                    .width(Length::Fill)
+            ]
+            .spacing(ui::space::S),
+        )
     }
 
     /// The entries matching the filter, oldest first.

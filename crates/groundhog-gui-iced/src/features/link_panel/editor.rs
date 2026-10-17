@@ -103,6 +103,46 @@ impl LinkBuilder {
     }
 }
 
+/// A text field of a network link's draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkField {
+    Address,
+    Port,
+    /// The UDP peer to send to; empty for a listening link.
+    Peer,
+}
+
+impl LinkBuilder {
+    /// Set a text field. A field the variant does not have is ignored.
+    pub fn set_field(&mut self, field: LinkField, value: String) {
+        let target = match (self, field) {
+            (LinkBuilder::Tcp { addr, .. } | LinkBuilder::Udp { addr, .. }, LinkField::Address) => {
+                addr
+            }
+            (LinkBuilder::Tcp { port, .. } | LinkBuilder::Udp { port, .. }, LinkField::Port) => {
+                port
+            }
+            (LinkBuilder::Udp { peer, .. }, LinkField::Peer) => peer,
+            _ => return,
+        };
+        *target = value;
+    }
+
+    /// Choose the serial port; ignored for network links.
+    pub fn select_serial_port(&mut self, selected: String) {
+        if let LinkBuilder::Serial { port, .. } = self {
+            *port = Some(selected);
+        }
+    }
+
+    /// Choose the serial baud rate; ignored for network links.
+    pub fn select_baud(&mut self, selected: u32) {
+        if let LinkBuilder::Serial { baud, .. } = self {
+            *baud = selected;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkVariant {
     Tcp,
@@ -145,6 +185,29 @@ pub struct LinkConfigurator {
     pub build: Option<LinkBuild>,
 }
 
+impl LinkBuilder {
+    /// The draft of an existing link, for editing it.
+    pub fn from_build(build: &LinkBuild) -> LinkBuilder {
+        match build {
+            LinkBuild::Tcp { sock_addr } => LinkBuilder::Tcp {
+                addr: sock_addr.ip().to_string(),
+                port: sock_addr.port().to_string(),
+            },
+            LinkBuild::Udp { sock_addr, peer } => LinkBuilder::Udp {
+                addr: sock_addr.ip().to_string(),
+                port: sock_addr.port().to_string(),
+                peer: peer.map(|peer| peer.to_string()).unwrap_or_default(),
+            },
+            LinkBuild::Serial { port, baud } => LinkBuilder::Serial {
+                port: Some(port.clone()),
+                baud: *baud,
+                // Detected when the operator opens the port list.
+                available_ports: Vec::new(),
+            },
+        }
+    }
+}
+
 impl LinkConfigurator {
     pub fn new(builder: LinkBuilder, name: String) -> LinkConfigurator {
         LinkConfigurator {
@@ -155,6 +218,24 @@ impl LinkConfigurator {
             builder: builder.clone(),
             build: builder.try_build(),
         }
+    }
+
+    /// A draft of `config`, to change it and save it again.
+    pub fn from_config(config: &LinkConfig) -> LinkConfigurator {
+        LinkConfigurator {
+            name: config.name.clone(),
+            auto_connect: config.auto_connect,
+            high_latency: config.high_latency,
+            auto_reconnect: config.auto_reconnect,
+            builder: LinkBuilder::from_build(&config.build),
+            build: Some(config.build.clone()),
+        }
+    }
+
+    /// Change the draft's builder, and parse it again.
+    pub fn edit_builder(&mut self, edit: impl FnOnce(&mut LinkBuilder)) {
+        edit(&mut self.builder);
+        self.build = self.builder.try_build();
     }
 
     pub fn parse(&self) -> Option<LinkConfig> {
@@ -181,6 +262,60 @@ mod tests {
 
         assert_eq!(sock_addr, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 14550));
         assert_eq!(peer, None, "an empty draft peer is a listening link");
+    }
+
+    #[test]
+    fn a_saved_link_comes_back_as_its_own_draft() {
+        let builds = [
+            LinkBuild::Tcp {
+                sock_addr: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 5760),
+            },
+            LinkBuild::Udp {
+                sock_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 14550),
+                peer: Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), 14551)),
+            },
+            LinkBuild::Serial {
+                port: "/dev/ttyACM0".into(),
+                baud: 57_600,
+            },
+        ];
+
+        for build in builds {
+            let config = LinkConfig {
+                name: "Saved".into(),
+                auto_connect: true,
+                high_latency: true,
+                auto_reconnect: false,
+                build,
+            };
+            let draft = LinkConfigurator::from_config(&config);
+
+            // The fields parse back to the same link, and so does the draft.
+            let rebuilt = draft.builder.try_build().expect("the draft parses");
+            assert_eq!(format!("{rebuilt:?}"), format!("{:?}", config.build));
+            let saved = draft.parse().expect("the draft saves");
+            assert_eq!(format!("{saved:?}"), format!("{config:?}"));
+        }
+    }
+
+    #[test]
+    fn fields_edit_their_variant_only() {
+        let mut configurator = LinkConfigurator::new(LinkBuilder::default_tcp(), "A".into());
+        configurator.edit_builder(|builder| builder.set_field(LinkField::Port, "5761".into()));
+        let Some(LinkBuild::Tcp { sock_addr }) = configurator.build else {
+            panic!("the edited draft builds a TCP link");
+        };
+        assert_eq!(sock_addr, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5761));
+
+        // TCP links have no peer, nor a baud rate.
+        configurator.edit_builder(|builder| {
+            builder.set_field(LinkField::Peer, "1.2.3.4:5".into());
+            builder.select_baud(9_600);
+        });
+        assert!(matches!(configurator.build, Some(LinkBuild::Tcp { .. })));
+
+        configurator.edit_builder(|builder| builder.set_field(LinkField::Port, "port".into()));
+        assert!(configurator.build.is_none(), "an unparseable port");
     }
 
     #[test]

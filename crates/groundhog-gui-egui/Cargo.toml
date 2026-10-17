@@ -1,0 +1,31 @@
+[package]
+name = "groundhog-gui-egui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "groundhog-egui"
+path = "src/main.rs"
+
+[dependencies]
+groundhog-logic = { path = "../groundhog-logic" }
+
+log.workspace = true
+futures.workspace = true
+mav-param.workspace = true
+mavio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+
+# egui 0.36 is what egui_dock (dockable panes) and walkers' 0.62 line (map
+# widget) are built for; all three must stay on the same minor version.
+egui = "0.36"
+egui_dock = "0.21"
+walkers = "0.62"
+eframe = "0.36"
+
+env_logger = "0.11.10"
+rfd = "0.17.2"
+directories = "6.0.0"
+ron = "0.12.1"
+anyhow = "1.0.104"

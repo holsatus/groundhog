@@ -1,7 +1,12 @@
 use std::time::Instant;
 
 use groundhog_logic::{
-    Backend, BackendOptions, MavlinkId, domain::fleet::Fleet, services::FleetHandle,
+    Backend, BackendOptions, MavlinkId,
+    domain::{
+        fleet::Fleet,
+        mission::{MissionItem, Position},
+    },
+    services::FleetHandle,
 };
 use mavio::default_dialect::{
     enums::{MavAutopilot, MavModeFlag, MavType},
@@ -122,7 +127,7 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
 
     env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
 
-    let plan = &draft(&editor, Some(A)).plan;
+    let plan = &draft(&editor, Some(A)).plan();
     let position = plan.items()[0].item.position().unwrap();
     assert!((position.lat - 47.4).abs() < 1e-6, "placed at the vehicle");
     assert_eq!(
@@ -143,7 +148,7 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(47.5, 8.5)),
     );
-    let plan = &draft(&editor, Some(A)).plan;
+    let plan = &draft(&editor, Some(A)).plan();
     assert_eq!(plan.items()[1].item.position().unwrap().alt_m, 120.0);
 }
 
@@ -158,7 +163,7 @@ async fn map_clicks_only_place_while_placing() {
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(1.0, 1.0)),
     );
-    assert!(draft(&editor, Some(A)).plan.is_empty());
+    assert!(draft(&editor, Some(A)).plan().is_empty());
 
     env.step(&mut editor, Some(A), MessageKind::TogglePlacing);
     env.step(
@@ -166,7 +171,7 @@ async fn map_clicks_only_place_while_placing() {
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(1.0, 1.0)),
     );
-    assert_eq!(draft(&editor, Some(A)).plan.len(), 1);
+    assert_eq!(draft(&editor, Some(A)).plan().len(), 1);
 }
 
 #[tokio::test]
@@ -180,7 +185,7 @@ async fn an_unmodified_draft_follows_the_onboard_mission() {
     );
 
     env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
-    assert!(draft(&editor, Some(A)).plan.matches(&[waypoint(1.0)]));
+    assert!(draft(&editor, Some(A)).plan().matches(&[waypoint(1.0)]));
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
         SyncStatus::Synced
@@ -189,7 +194,7 @@ async fn an_unmodified_draft_follows_the_onboard_mission() {
     // Another GCS uploads a different mission: still unmodified here, so the
     // draft follows.
     env.set_onboard(&mut editor, vec![waypoint(2.0), waypoint(3.0)], 2);
-    assert_eq!(draft(&editor, Some(A)).plan.len(), 2);
+    assert_eq!(draft(&editor, Some(A)).plan().len(), 2);
 }
 
 #[tokio::test]
@@ -205,7 +210,7 @@ async fn a_modified_draft_is_never_overwritten() {
     );
 
     env.set_onboard(&mut editor, vec![waypoint(9.0)], 2);
-    let plan = &draft(&editor, Some(A)).plan;
+    let plan = &draft(&editor, Some(A)).plan();
     assert_eq!(plan.len(), 2, "the operator's edit survives");
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
@@ -255,13 +260,13 @@ async fn edits_wait_for_a_running_transfer() {
 
     env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
     assert!(
-        draft(&editor, Some(A)).plan.is_empty(),
+        draft(&editor, Some(A)).plan().is_empty(),
         "refused during the download"
     );
 
     // The offline plan is unaffected by a vehicle's transfer.
     env.step(&mut editor, None, MessageKind::AddWaypoint);
-    assert_eq!(draft(&editor, None).plan.len(), 1);
+    assert_eq!(draft(&editor, None).plan().len(), 1);
 }
 
 #[tokio::test]
@@ -290,7 +295,7 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
         Some(A),
         MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission.clone()))),
     );
-    assert!(draft(&editor, Some(A)).plan.matches(&mission.items));
+    assert!(draft(&editor, Some(A)).plan().matches(&mission.items));
     assert!(!editor.transferring(A));
 
     // The same result again (a stale ticket) changes nothing.
@@ -300,7 +305,7 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
         Some(A),
         MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission))),
     );
-    assert!(draft(&editor, Some(A)).plan.is_empty());
+    assert!(draft(&editor, Some(A)).plan().is_empty());
 }
 
 #[tokio::test]
@@ -341,7 +346,7 @@ async fn drags_address_items_by_id() {
     env.step(&mut editor, None, MessageKind::AddWaypoint);
     env.step(&mut editor, None, MessageKind::AddWaypoint);
 
-    let first = draft(&editor, None).plan.items()[0].id();
+    let first = draft(&editor, None).plan().items()[0].id();
     env.step(&mut editor, None, MessageKind::MoveDown(first));
     env.step(
         &mut editor,
@@ -349,7 +354,7 @@ async fn drags_address_items_by_id() {
         MessageKind::Drop(first, GeoPosition::new(10.0, 20.0)),
     );
 
-    let plan = &draft(&editor, None).plan;
+    let plan = &draft(&editor, None).plan();
     assert_eq!(plan.index_of(first), Some(1));
     let moved = plan.get(first).unwrap().position().unwrap();
     assert!(
@@ -365,7 +370,7 @@ async fn drags_address_items_by_id() {
         None,
         MessageKind::Drop(first, GeoPosition::new(-5.0, -5.0)),
     );
-    let plan = &draft(&editor, None).plan;
+    let plan = &draft(&editor, None).plan();
     assert!(plan.items()[0].item.position().unwrap().lat > -1.0);
 }
 
@@ -374,7 +379,7 @@ async fn jumping_needs_a_synced_plan_and_a_confirmation() {
     let mut env = Env::new();
     let mut editor = MissionEditor::default();
     env.set_onboard(&mut editor, vec![waypoint(1.0), waypoint(2.0)], 1);
-    let second = draft(&editor, Some(A)).plan.items()[1].id();
+    let second = draft(&editor, Some(A)).plan().items()[1].id();
 
     let effects = env.step(
         &mut editor,

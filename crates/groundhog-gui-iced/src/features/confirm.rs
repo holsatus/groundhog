@@ -7,11 +7,11 @@
 //! operator accepts.
 
 use iced::{
-    Alignment, Element, Length, Theme, Widget,
-    widget::{button, center, column, container, mouse_area, opaque, row, space, stack, text},
+    Alignment, Element, Length, Widget,
+    widget::{center, column, container, mouse_area, opaque, row, space, stack},
 };
 
-use crate::style;
+use crate::ui::{self, style};
 
 /// A question to put to the operator, and the message to send on "yes".
 #[derive(Debug, Clone)]
@@ -74,31 +74,31 @@ pub fn view<'a, M: Clone + 'a>(
         return base;
     };
 
-    let accept_style = if confirmation.danger {
-        button::danger
-    } else {
-        button::primary
-    };
+    let accept = ui::button(confirmation.accept_label)
+        .kind(if confirmation.danger {
+            style::ButtonKind::Danger
+        } else {
+            style::ButtonKind::Primary
+        })
+        .on_press(answer(Answer::Accept));
 
     let dialog = container(
         column![
-            text(&confirmation.title).size(18),
-            text(&confirmation.body),
+            ui::title(&confirmation.title),
+            ui::text(&confirmation.body),
             row![
                 space::horizontal(),
-                button(text("Cancel"))
-                    .style(button::secondary)
-                    .on_press(answer(Answer::Dismiss)),
-                button(text(confirmation.accept_label))
-                    .style(accept_style)
-                    .on_press(answer(Answer::Accept)),
+                ui::button("Cancel")
+                    .on_press(answer(Answer::Dismiss))
+                    .boxed(),
+                accept.boxed(),
             ]
-            .spacing(8)
+            .spacing(ui::space::M)
             .align_y(Alignment::Center),
         ]
-        .spacing(12),
+        .spacing(ui::space::L),
     )
-    .padding(16)
+    .padding(ui::space::XL)
     .width(Length::Fixed(420.0))
     .style(style::dialog);
 
@@ -106,7 +106,7 @@ pub fn view<'a, M: Clone + 'a>(
         container(space::horizontal())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|theme: &Theme| style::backdrop(theme)),
+            .style(style::backdrop),
     )
     .on_press(answer(Answer::Dismiss));
 

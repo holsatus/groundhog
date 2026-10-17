@@ -3,9 +3,10 @@
 //! [`Parameters`] is vehicle state: the values a component reported, kept with
 //! their raw wire form so they can be re-decoded if the component's encoding
 //! only becomes known later. [`ParamEdit`] is operator state: a typed-in value
-//! and the fate of its upload. The two live in different places — the first in
-//! the fleet, the second in the parameter feature — and meet only when an
-//! upload result is folded in.
+//! and the fate of its upload, collected per component in [`ParamEdits`]. The
+//! two live in different places — the first in the fleet, the second in the
+//! frontend — and meet only where an edit is compared with the reported value
+//! or an upload result is folded in.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -253,7 +254,7 @@ impl ParamEdit {
 
     /// Fold an upload result in. Returns `true` when the edit is done (the
     /// component now holds the requested value) and should be dropped.
-    pub fn finish_upload(&mut self, requested: Value, result: Result<Value, String>) -> bool {
+    fn finish_upload(&mut self, requested: Value, result: Result<Value, String>) -> bool {
         match result {
             Ok(reported) if reported == requested => true,
             Ok(reported) => {
@@ -265,6 +266,146 @@ impl ParamEdit {
                 false
             }
         }
+    }
+}
+
+/// The operator's pending edits to one component's parameters.
+///
+/// Uploads are the frontend's to run: [`ParamEdits::begin_upload`] hands out
+/// the value to send, and [`ParamEdits::finish_upload`] folds the result in.
+/// A frontend that lets the operator edit or reset a parameter while its
+/// upload is in flight should cancel that upload, so a late result cannot
+/// land on the newer edit.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParamEdits {
+    edits: BTreeMap<Ident, ParamEdit>,
+}
+
+/// How many entries of a parameter file became edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadSummary {
+    /// Values that differ from the reported ones, now pending edits.
+    pub changed: usize,
+    /// Values for parameters the component does not report, or of another
+    /// type than it reports.
+    pub skipped: usize,
+}
+
+/// How an upload ended, as folded into the edits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UploadOutcome {
+    /// The component holds the requested value; the edit is done and gone.
+    Set,
+    /// The component holds `reported` instead (clamped or refused). The edit
+    /// stays, marked [`EditStatus::Rejected`].
+    Rejected { requested: Value, reported: Value },
+    /// The upload did not complete. The edit stays, marked
+    /// [`EditStatus::Failed`], and can be retried.
+    Failed(String),
+}
+
+impl ParamEdits {
+    pub fn get(&self, ident: &Ident) -> Option<&ParamEdit> {
+        self.edits.get(ident)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &ParamEdit)> {
+        self.edits.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.edits.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    /// The operator typed `text` for `ident`, which the component reports at
+    /// `current`. Text that parses to the current value, or a parameter the
+    /// component does not report, leaves no edit.
+    pub fn edit(&mut self, ident: Ident, current: Option<Value>, text: String) {
+        match current.and_then(|current| ParamEdit::new(current, text)) {
+            Some(edit) => {
+                self.edits.insert(ident, edit);
+            }
+            None => {
+                self.edits.remove(&ident);
+            }
+        }
+    }
+
+    /// Drop the edit of `ident`. Returns whether there was one.
+    pub fn reset(&mut self, ident: &Ident) -> bool {
+        self.edits.remove(ident).is_some()
+    }
+
+    /// Turn values loaded from a file into edits, where they differ from what
+    /// the component reports (`None`: it reports nothing yet). Values of
+    /// parameters it does not report, or of another type, are skipped: a file
+    /// cannot add parameters, nor change their type.
+    pub fn load(&mut self, reported: Option<&Parameters>, loaded: &ParamValues) -> LoadSummary {
+        let mut summary = LoadSummary {
+            changed: 0,
+            skipped: 0,
+        };
+
+        for (ident, value) in loaded {
+            match reported.and_then(|reported| reported.value(ident)) {
+                Some(current) if value_type_matches(current, *value) => {
+                    if current != *value {
+                        self.edits
+                            .insert(ident.clone(), ParamEdit::to_value(*value));
+                        summary.changed += 1;
+                    }
+                }
+                _ => summary.skipped += 1,
+            }
+        }
+
+        summary
+    }
+
+    /// The edits that can be uploaded now: parsed, and not uploading.
+    pub fn uploadable(&self) -> impl Iterator<Item = (&Ident, Value)> {
+        self.edits
+            .iter()
+            .filter_map(|(ident, edit)| Some((ident, edit.uploadable()?)))
+    }
+
+    /// Mark the edit of `ident` as uploading and return the value to send,
+    /// or `None` when there is nothing to upload (no edit, text that does not
+    /// parse, or an upload already in flight).
+    pub fn begin_upload(&mut self, ident: &Ident) -> Option<Value> {
+        let edit = self.edits.get_mut(ident)?;
+        let value = edit.uploadable()?;
+        edit.status = EditStatus::Uploading;
+        Some(value)
+    }
+
+    /// Fold the result of uploading `requested` to `ident` in: what the
+    /// component reported holding afterwards, or why the upload failed.
+    /// `None` when the edit is gone (reset meanwhile).
+    pub fn finish_upload<E: std::fmt::Display>(
+        &mut self,
+        ident: &Ident,
+        requested: Value,
+        result: Result<Value, E>,
+    ) -> Option<UploadOutcome> {
+        let edit = self.edits.get_mut(ident)?;
+        let outcome = match &result {
+            Ok(reported) if *reported == requested => UploadOutcome::Set,
+            Ok(reported) => UploadOutcome::Rejected {
+                requested,
+                reported: *reported,
+            },
+            Err(error) => UploadOutcome::Failed(error.to_string()),
+        };
+
+        if edit.finish_upload(requested, result.map_err(|error| error.to_string())) {
+            self.edits.remove(ident);
+        }
+        Some(outcome)
     }
 }
 
@@ -400,25 +541,120 @@ mod tests {
         assert_eq!(invalid.uploadable(), None);
     }
 
-    #[test]
-    fn upload_results_fold_into_the_edit() {
-        let mut edit = ParamEdit::new(Value::F32(1.0), "5".into()).unwrap();
-        edit.status = EditStatus::Uploading;
-        assert_eq!(edit.uploadable(), None, "no double upload");
+    fn reported(params: &[(&str, f32)]) -> Parameters {
+        let mut parameters = Parameters::default();
+        for (index, (name, value)) in params.iter().enumerate() {
+            parameters
+                .observe(
+                    Ident::from_str_truncated(name),
+                    *value,
+                    MavParamType::Real32,
+                    index as u16,
+                    params.len() as u16,
+                    Some(ParamEncoding::CCast),
+                )
+                .unwrap();
+        }
+        parameters
+    }
 
-        assert!(!edit.finish_upload(Value::F32(5.0), Ok(Value::F32(3.0))));
+    #[test]
+    fn editing_back_to_the_reported_value_drops_the_edit() {
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), Some(Value::F32(1.0)), "2".into());
+        assert_eq!(edits.len(), 1);
+
+        edits.edit(ident(), Some(Value::F32(1.0)), "1.0".into());
+        assert!(edits.is_empty());
+
+        edits.edit(ident(), None, "2".into());
+        assert!(edits.is_empty(), "an unreported parameter takes no edit");
+    }
+
+    #[test]
+    fn unparseable_text_is_kept_but_not_uploadable() {
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), Some(Value::F32(1.0)), "abc".into());
+
+        assert_eq!(edits.get(&ident()).unwrap().text, "abc");
+        assert_eq!(edits.uploadable().count(), 0);
+        assert_eq!(edits.begin_upload(&ident()), None);
+    }
+
+    #[test]
+    fn uploads_fold_their_results_into_the_edits() {
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), Some(Value::F32(1.0)), "5".into());
+
+        let requested = edits.begin_upload(&ident()).unwrap();
+        assert_eq!(requested, Value::F32(5.0));
+        assert_eq!(edits.begin_upload(&ident()), None, "already uploading");
+
+        // The vehicle clamps the value: the edit stays, marked rejected.
+        let outcome = edits.finish_upload(&ident(), requested, Ok::<_, String>(Value::F32(3.0)));
         assert_eq!(
-            edit.status,
-            EditStatus::Rejected {
+            outcome,
+            Some(UploadOutcome::Rejected {
+                requested,
                 reported: Value::F32(3.0)
+            })
+        );
+        assert!(matches!(
+            edits.get(&ident()).unwrap().status,
+            EditStatus::Rejected { .. }
+        ));
+
+        // A failure keeps the edit too, ready for a retry.
+        let requested = edits.begin_upload(&ident()).unwrap();
+        let outcome = edits.finish_upload(&ident(), requested, Err("timed out"));
+        assert_eq!(outcome, Some(UploadOutcome::Failed("timed out".into())));
+
+        // Retried and accepted: the edit is done.
+        let requested = edits.begin_upload(&ident()).unwrap();
+        let outcome = edits.finish_upload(&ident(), requested, Ok::<_, String>(requested));
+        assert_eq!(outcome, Some(UploadOutcome::Set));
+        assert!(edits.is_empty());
+
+        // A result for an edit that is gone changes nothing.
+        let late = edits.finish_upload(&ident(), requested, Ok::<_, String>(requested));
+        assert_eq!(late, None);
+    }
+
+    #[test]
+    fn loading_a_file_creates_edits_for_differences_only() {
+        let reported = reported(&[("PARAM_ONE", 1.0), ("PARAM_TWO", 2.0), ("PARAM_THREE", 3.0)]);
+        let loaded: ParamValues = [
+            ("PARAM_ONE", Value::F32(1.0)),
+            ("PARAM_TWO", Value::F32(4.0)),
+            // Another type than the component reports.
+            ("PARAM_THREE", Value::U8(1)),
+            ("UNKNOWN", Value::F32(0.0)),
+        ]
+        .into_iter()
+        .map(|(name, value)| (Ident::from_str_truncated(name), value))
+        .collect();
+
+        let mut edits = ParamEdits::default();
+        let summary = edits.load(Some(&reported), &loaded);
+
+        assert_eq!(
+            summary,
+            LoadSummary {
+                changed: 1,
+                skipped: 2
             }
         );
+        let two = edits.get(&Ident::from_str_truncated("PARAM_TWO")).unwrap();
+        assert_eq!(two.value, Some(Value::F32(4.0)));
 
-        assert!(!edit.finish_upload(Value::F32(5.0), Err("timed out".into())));
-        assert!(matches!(edit.status, EditStatus::Failed(_)));
-        assert_eq!(edit.uploadable(), Some(Value::F32(5.0)), "can retry");
-
-        assert!(edit.finish_upload(Value::F32(5.0), Ok(Value::F32(5.0))));
+        let mut none = ParamEdits::default();
+        let summary = none.load(None, &loaded);
+        assert_eq!(
+            summary.skipped,
+            loaded.len(),
+            "nothing reported, nothing to change"
+        );
+        assert!(none.is_empty());
     }
 
     #[test]

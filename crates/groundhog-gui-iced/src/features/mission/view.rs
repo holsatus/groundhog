@@ -14,17 +14,16 @@ use groundhog_logic::{
     },
 };
 use iced::{
-    Alignment, Element, Length, Theme, Widget,
-    alignment::Vertical,
-    widget::{
-        Button, Column, Space, button, checkbox, column, container, pick_list, progress_bar, row,
-        scrollable, text, text::Ellipsis, text::Wrapping, text_input,
-    },
+    Alignment, Element, Length, Widget,
+    widget::{Column, Space, column, container, row, scrollable},
 };
 use mavio::default_dialect::enums::MavCmd;
 
 use super::{Draft, Message, MessageKind, MissionEditor, Operation, PlanKey, SyncStatus};
-use crate::{style, widget::virtualized::virtual_list};
+use crate::{
+    ui::{self, TextExt, Tone},
+    widget::virtualized::virtual_list,
+};
 
 /// Height of a single mission-list row.
 const ROW_HEIGHT: f32 = 32.0;
@@ -57,7 +56,6 @@ impl MissionEditor {
         &'a self,
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,
-        theme: &Theme,
     ) -> Element<'a, Message> {
         let plan: PlanKey = selected.filter(|system| fleet.contains(*system));
         let Some(draft) = self.displayed(plan) else {
@@ -69,124 +67,89 @@ impl MissionEditor {
         let transferring = plan.is_some_and(|system| self.transferring(system));
         let editable = !transferring;
 
-        let vehicle_action = |label: &'static str, kind: Option<MessageKind>| {
-            Button::new(text(label))
-                .style(style::button::transparent)
-                .on_press_maybe(
-                    kind.filter(|_| plan.is_some() && !transferring)
-                        .map(message),
-                )
+        let vehicle_action = |label: &'static str, kind: MessageKind| {
+            ui::button(label)
+                .on_press_maybe((plan.is_some() && !transferring).then(|| message(kind)))
+                .boxed()
         };
-
-        let toolbar = row![
-            vehicle_action("Download", Some(MessageKind::Download { confirmed: false })),
-            vehicle_action("Upload", Some(MessageKind::Upload { confirmed: false })),
-            vehicle_action(
-                "Clear vehicle",
-                Some(MessageKind::Clear { confirmed: false })
-            ),
-            vehicle_action("Start", Some(MessageKind::Start { confirmed: false })),
-            vehicle_action("Pause", Some(MessageKind::Pause)),
-            vehicle_action("Resume", Some(MessageKind::Resume)),
-        ]
-        .spacing(6.0)
-        .wrap();
-
         let edit_action = |label: &'static str, kind: MessageKind| {
-            Button::new(text(label))
-                .style(style::button::transparent)
+            ui::button(label)
                 .on_press_maybe(editable.then(|| message(kind)))
+                .boxed()
         };
 
-        let placing = draft.placing;
-        let editing = row![
+        let transfers = ui::toolbar([
+            vehicle_action("Download", MessageKind::Download { confirmed: false }),
+            vehicle_action("Upload", MessageKind::Upload { confirmed: false }),
+            vehicle_action("Clear vehicle", MessageKind::Clear { confirmed: false }),
+            vehicle_action("Start", MessageKind::Start { confirmed: false }),
+            vehicle_action("Pause", MessageKind::Pause),
+            vehicle_action("Resume", MessageKind::Resume),
+        ]);
+
+        let editing = ui::toolbar([
             edit_action("Add waypoint", MessageKind::AddWaypoint),
-            Button::new(text(if placing {
+            ui::button(if draft.placing {
                 "Placing… (click map)"
             } else {
                 "Place on map"
-            }))
-            .style(if placing {
-                button::primary
-            } else {
-                style::button::transparent
             })
-            .on_press_maybe(editable.then(|| message(MessageKind::TogglePlacing))),
+            .chosen(draft.placing)
+            .on_press_maybe(editable.then(|| message(MessageKind::TogglePlacing)))
+            .boxed(),
             edit_action("Discard plan", MessageKind::Discard),
             edit_action("Save…", MessageKind::SaveDialog),
             edit_action("Load…", MessageKind::LoadDialog),
-        ]
-        .spacing(6.0)
-        .wrap();
+        ]);
 
-        let palette = theme.palette();
-        let (status_text, status_color) = match status {
-            SyncStatus::Offline => ("Offline plan".to_string(), palette.secondary.base.color),
-            SyncStatus::Unknown => (
-                "Vehicle mission not downloaded".to_string(),
-                palette.secondary.base.color,
-            ),
-            SyncStatus::Synced => (
-                "Synced with the vehicle".to_string(),
-                palette.success.base.color,
-            ),
-            SyncStatus::Modified => (
-                "Modified (not uploaded)".to_string(),
-                palette.warning.base.color,
-            ),
+        let (status_text, tone) = match status {
+            SyncStatus::Offline => ("Offline plan", Tone::Muted),
+            SyncStatus::Unknown => ("Vehicle mission not downloaded", Tone::Muted),
+            SyncStatus::Synced => ("Synced with the vehicle", Tone::Success),
+            SyncStatus::Modified => ("Modified (not uploaded)", Tone::Warning),
             SyncStatus::VehicleChanged => (
-                "The vehicle's mission was changed elsewhere; download it".to_string(),
-                palette.danger.base.color,
+                "The vehicle's mission was changed elsewhere; download it",
+                Tone::Danger,
             ),
         };
-
-        let count = match draft.plan.len() {
+        let count = match draft.plan().len() {
             1 => "1 item".to_string(),
             count => format!("{count} items"),
         };
-        let mut header = column![
-            toolbar,
-            editing,
-            text(format!("{status_text} · {count}")).color(status_color)
-        ]
-        .spacing(6.0);
 
-        if let Some(system) = plan
-            && let Some(progress) = self.view_progress(system, message)
-        {
-            header = header.push(progress);
-        }
+        let header = column![
+            transfers,
+            editing,
+            ui::text(format!("{status_text} · {count}")).tone(tone),
+            plan.and_then(|system| self.view_progress(system, message)),
+        ]
+        .spacing(ui::space::S);
 
         let current = plan
             .and_then(|system| fleet.vehicle(system))
             .filter(|_| status == SyncStatus::Synced)
             .and_then(|vehicle| vehicle.current_mission_index());
 
-        let list = self.view_list(plan, draft, current, theme);
+        let list = self.view_list(plan, draft, current);
 
         // With an item selected, the list and its editor share the height,
         // each scrolling on its own.
-        let body: Element<'_, Message> = match draft
+        let body = match draft
             .selected
-            .and_then(|id| draft.plan.get(id).map(|item| (id, item)))
+            .and_then(|id| draft.plan().get(id).map(|item| (id, item)))
         {
             Some((id, item)) => column![
                 container(list).height(Length::FillPortion(1)),
                 scrollable(view_editor(plan, draft, id, item, status, editable))
                     .height(Length::FillPortion(1)),
-            ]
-            .spacing(8.0)
-            .boxed(),
-            None => column![list, text("Select an item to edit it.").size(12)]
-                .spacing(8.0)
-                .boxed(),
+            ],
+            None => column![
+                list,
+                ui::caption("Select an item to edit it.").tone(Tone::Muted)
+            ],
         };
 
-        container(column![header, body].spacing(8.0))
-            .padding(8.0)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .boxed()
+        ui::panel(column![header, body.spacing(ui::space::M)].spacing(ui::space::M))
     }
 
     /// The running transfer's progress and a cancel button.
@@ -200,10 +163,6 @@ impl MissionEditor {
             .find(|operation| self.operations.is_running(&(system, *operation)))?;
 
         let progress = self.operations.progress(&(system, operation));
-        let (done, total) = progress.map_or((0.0, 1.0), |progress| {
-            (f32::from(progress.done), f32::from(progress.total.max(1)))
-        });
-
         let label = match progress {
             Some(progress) => format!(
                 "{}: {}/{}",
@@ -213,20 +172,21 @@ impl MissionEditor {
             ),
             None => format!("{}…", operation.describe()),
         };
+        let (done, total) = progress.map_or((0.0, 1.0), |progress| {
+            (f32::from(progress.done), f32::from(progress.total))
+        });
 
         Some(
             row![
-                column![
-                    text(label).size(12),
-                    progress_bar(0.0..=total, done).girth(6.0)
-                ]
-                .spacing(2)
-                .width(Length::Fill),
-                button(text("Cancel"))
-                    .style(button::danger)
-                    .on_press(message(MessageKind::Cancel(operation))),
+                column![ui::caption(label), ui::progress(done, total)]
+                    .spacing(ui::space::XXS)
+                    .width(Length::Fill),
+                ui::button("Cancel")
+                    .danger()
+                    .on_press(message(MessageKind::Cancel(operation)))
+                    .boxed(),
             ]
-            .spacing(8.0)
+            .spacing(ui::space::M)
             .align_y(Alignment::Center)
             .boxed(),
         )
@@ -237,52 +197,39 @@ impl MissionEditor {
         plan: PlanKey,
         draft: &'a Draft,
         current: Option<usize>,
-        theme: &Theme,
     ) -> Element<'a, Message> {
-        if draft.plan.is_empty() {
-            return container(text("The plan is empty.").size(12))
+        if draft.plan().is_empty() {
+            return container(ui::caption("The plan is empty.").tone(Tone::Muted))
                 .height(Length::Fill)
                 .boxed();
         }
 
-        let current_color = theme.palette().success.base.color;
         let selected = draft.selected;
 
-        let list = virtual_list(draft.plan.items().iter().enumerate(), move |entry| {
+        let list = virtual_list(draft.plan().items().iter().enumerate(), move |entry| {
             let &(index, planned) = entry;
             let id = planned.id();
             let item = &planned.item;
 
             let content = row![
-                text(format!("{}", index + 1)).width(Length::Fixed(32.0)),
-                text(item.name())
-                    .wrapping(Wrapping::None)
-                    .ellipsis(Ellipsis::End)
+                ui::text(format!("{}", index + 1)).width(Length::Fixed(32.0)),
+                ui::text(item.name())
+                    .single_line()
                     .width(Length::Fixed(130.0)),
-                text(summary(item))
-                    .wrapping(Wrapping::None)
-                    .ellipsis(Ellipsis::End)
-                    .width(Length::Fill),
-                text(if current == Some(index) {
-                    "▶ current"
+                ui::text(summary(item)).single_line().width(Length::Fill),
+                ui::text(if current == Some(index) {
+                    "current"
                 } else {
                     ""
                 })
-                .color(current_color)
+                .tone(Tone::Success)
                 .width(Length::Fixed(72.0)),
             ]
-            .spacing(8.0)
-            .align_y(Vertical::Center);
+            .spacing(ui::space::M)
+            .align_y(Alignment::Center);
 
-            let style: fn(&Theme, button::Status) -> button::Style = if selected == Some(id) {
-                button::primary
-            } else {
-                style::button::transparent
-            };
-
-            button(content)
-                .style(style)
-                .padding(4)
+            ui::button_with(content)
+                .chosen(selected == Some(id))
                 .width(Length::Fill)
                 .on_press(Message {
                     plan,
@@ -291,8 +238,7 @@ impl MissionEditor {
                 .boxed()
         })
         .item_height(|_| ROW_HEIGHT)
-        .key(|(_, planned)| planned.id())
-        .spacing(0.0);
+        .key(|(_, planned)| planned.id());
 
         scrollable(list)
             .height(Length::Fill)
@@ -310,7 +256,7 @@ fn view_editor<'a>(
     editable: bool,
 ) -> Element<'a, Message> {
     let message = move |kind| Message { plan, kind };
-    let index = draft.plan.index_of(id).unwrap_or_default();
+    let index = draft.plan().index_of(id).unwrap_or_default();
 
     let mut choices: Vec<CommandChoice> = SPECS
         .iter()
@@ -320,36 +266,32 @@ fn view_editor<'a>(
         choices.insert(0, CommandChoice(item.command));
     }
 
-    let command = pick_list(
+    let command = ui::pick_list(
         Some(CommandChoice(item.command)),
         choices,
         CommandChoice::to_string,
     )
-    .on_select(move |choice: CommandChoice| message(MessageKind::ChangeCommand(id, choice.0)))
-    .style(style::pick_list::default)
-    .width(Length::Fill);
+    .on_select(move |choice: CommandChoice| message(MessageKind::ChangeCommand(id, choice.0)));
 
-    let mut fields = Column::<Element<'a, Message>>::new().spacing(4.0);
-    for view in item.fields() {
-        fields = fields.push(
+    let fields = item.fields().into_iter().map(|view| {
+        ui::field(
+            view.label,
             row![
-                text(view.label).width(Length::Fixed(150.0)),
                 field_widget(view, draft.edits.get(&view.field), id, plan),
-                text(view.units).width(Length::Fixed(40.0)),
+                ui::caption(view.units).width(Length::Fixed(32.0)),
             ]
-            .spacing(6.0)
-            .align_y(Vertical::Center)
-            .boxed(),
-        );
-    }
+            .spacing(ui::space::S)
+            .align_y(Alignment::Center),
+        )
+    });
 
     let action = |label: &'static str, kind: Option<MessageKind>| {
-        Button::new(text(label))
-            .style(style::button::transparent)
+        ui::button(label)
             .on_press_maybe(kind.filter(|_| editable).map(message))
+            .boxed()
     };
 
-    let actions = row![
+    let actions = ui::toolbar([
         action("Move up", Some(MessageKind::MoveUp(id))),
         action("Move down", Some(MessageKind::MoveDown(id))),
         action("Remove", Some(MessageKind::Remove(id))),
@@ -361,23 +303,18 @@ fn view_editor<'a>(
             }),
         ),
         action("Deselect", Some(MessageKind::Select(None))),
-    ]
-    .spacing(6.0)
-    .wrap();
+    ]);
 
-    container(
+    ui::card(
         column![
-            row![text(format!("Item {}", index + 1)).size(16), command]
-                .spacing(8.0)
+            row![ui::title(format!("Item {}", index + 1)), command]
+                .spacing(ui::space::M)
                 .align_y(Alignment::Center),
-            fields,
+            Column::with_children(fields).spacing(ui::space::XS),
             actions,
         ]
-        .spacing(6.0),
+        .spacing(ui::space::S),
     )
-    .padding(8.0)
-    .style(style::inner_container)
-    .boxed()
 }
 
 /// The widget for one field: text for numbers, a checkbox for flags, a
@@ -394,7 +331,7 @@ fn field_widget<'a>(
     };
 
     match view.kind {
-        FieldKind::Bool => checkbox(view.value != 0.0)
+        FieldKind::Bool => iced::widget::checkbox(view.value != 0.0)
             .on_toggle(move |on| edit(if on { "1" } else { "0" }.to_string()))
             .boxed(),
         FieldKind::Choice(options) => {
@@ -408,10 +345,8 @@ fn field_widget<'a>(
                 .find(|choice| f64::from(choice.0) == view.value);
 
             match selected {
-                Some(selected) => pick_list(Some(selected), options, Choice::to_string)
+                Some(selected) => ui::pick_list(Some(selected), options, Choice::to_string)
                     .on_select(move |choice: Choice| edit(choice.0.to_string()))
-                    .style(style::pick_list::default)
-                    .width(Length::Fill)
                     .boxed(),
                 // A value outside the known choices (from another planner):
                 // edit it as a number rather than hide it.
@@ -441,11 +376,7 @@ fn number_input<'a>(
         ""
     };
 
-    text_input(placeholder, value)
-        .on_input(edit)
-        .style(style::text_input::default)
-        .width(Length::Fill)
-        .boxed()
+    ui::text_input(placeholder, value).on_input(edit).boxed()
 }
 
 fn format_value(view: FieldView) -> String {

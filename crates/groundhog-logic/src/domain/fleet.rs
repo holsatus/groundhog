@@ -30,7 +30,7 @@ use crate::{
         calibration::{CalibrationKind, CalibrationUpdate, Phase, Session},
         firmware::FlightMode,
         mission::OnboardMission,
-        parameter::DownloadState,
+        parameter::{DownloadState, Parameters},
         vehicle::{Liveness, StatusText, Vehicle, class::VehicleClass},
     },
 };
@@ -49,8 +49,13 @@ pub enum FleetEvent {
     /// A vehicle was seen for the first time.
     Registered(SystemId),
     /// A vehicle's liveness changed, as the fleet ages vehicles or a fresh frame
-    /// arrives.
-    LivenessChanged(SystemId, Liveness),
+    /// arrives. A vehicle recovers straight to active, so `from` tells a
+    /// recovery after a loss from one after a stale spell.
+    LivenessChanged {
+        system: SystemId,
+        from: Liveness,
+        to: Liveness,
+    },
     /// The vehicle armed (`true`) or disarmed.
     ArmedChanged(SystemId, bool),
     /// The vehicle changed flight mode (`None`: a mode the firmware adapter
@@ -75,6 +80,20 @@ pub struct FleetSnapshot {
 impl FleetSnapshot {
     pub fn vehicle(&self, id: SystemId) -> Option<&Vehicle> {
         self.vehicles.get(&id).map(Arc::as_ref)
+    }
+
+    /// The parameters of the component at `address`, if it has been heard
+    /// from.
+    pub fn parameters(&self, address: MavlinkId) -> Option<&Parameters> {
+        self.vehicle(address.system_id())?
+            .parameters(address.component)
+    }
+
+    /// How to name a vehicle to the operator: its [`Vehicle::display_name`],
+    /// or its system id when the snapshot does not hold it (yet, or any more).
+    pub fn vehicle_name(&self, id: SystemId) -> String {
+        self.vehicle(id)
+            .map_or_else(|| format!("vehicle {}", id.0), Vehicle::display_name)
     }
 
     /// Every vehicle, in system id order.
@@ -182,8 +201,12 @@ impl Fleet {
             // from the liveness source arrives; a brand-new vehicle is already
             // `Active`, so it does not emit a recovery here.
             if vehicle.liveness != Liveness::Active {
+                events.push(FleetEvent::LivenessChanged {
+                    system: id,
+                    from: vehicle.liveness,
+                    to: Liveness::Active,
+                });
                 vehicle.liveness = Liveness::Active;
-                events.push(FleetEvent::LivenessChanged(id, Liveness::Active));
             }
         }
 
@@ -244,8 +267,12 @@ impl Fleet {
 
             if liveness != vehicle.liveness {
                 let vehicle = Arc::make_mut(vehicle);
+                events.push(FleetEvent::LivenessChanged {
+                    system: *id,
+                    from: vehicle.liveness,
+                    to: liveness,
+                });
                 vehicle.liveness = liveness;
-                events.push(FleetEvent::LivenessChanged(*id, liveness));
 
                 if liveness == Liveness::Lost
                     && let Some(session) = vehicle.calibration.as_mut()
@@ -498,6 +525,17 @@ mod tests {
     }
 
     #[test]
+    fn vehicles_are_named_even_when_unknown() {
+        let mut fleet = Fleet::default();
+        register(&mut fleet, A, Instant::now());
+        let snapshot = fleet.snapshot();
+
+        let known = snapshot.vehicle(A).unwrap().display_name();
+        assert_eq!(snapshot.vehicle_name(A), known);
+        assert_eq!(snapshot.vehicle_name(SystemId(9)), "vehicle 9");
+    }
+
+    #[test]
     fn tick_transitions_stale_then_lost_edge_triggered() {
         let mut fleet = Fleet::default();
         let t0 = Instant::now();
@@ -510,7 +548,11 @@ mod tests {
         let stale = fleet.tick(t0 + Duration::from_secs(5));
         assert!(matches!(
             stale.as_slice(),
-            [FleetEvent::LivenessChanged(A, Liveness::Stale)]
+            [FleetEvent::LivenessChanged {
+                system: A,
+                from: Liveness::Active,
+                to: Liveness::Stale
+            }]
         ));
 
         // Still stale: no repeated event.
@@ -520,7 +562,11 @@ mod tests {
         let lost = fleet.tick(t0 + Duration::from_secs(11));
         assert!(matches!(
             lost.as_slice(),
-            [FleetEvent::LivenessChanged(A, Liveness::Lost)]
+            [FleetEvent::LivenessChanged {
+                system: A,
+                from: Liveness::Stale,
+                to: Liveness::Lost
+            }]
         ));
 
         // And it stays lost without further events.
@@ -538,7 +584,11 @@ mod tests {
         let events = fleet.observe(source(A), t0 + Duration::from_secs(11), None);
 
         assert_eq!(fleet.vehicle(A).unwrap().liveness, Liveness::Active);
-        assert!(events.contains(&FleetEvent::LivenessChanged(A, Liveness::Active)));
+        assert!(events.contains(&FleetEvent::LivenessChanged {
+            system: A,
+            from: Liveness::Lost,
+            to: Liveness::Active
+        }));
     }
 
     #[test]
@@ -554,10 +604,18 @@ mod tests {
         };
         let events = fleet.observe(companion, t0 + Duration::from_secs(6), None);
         assert_eq!(fleet.vehicle(A).unwrap().liveness, Liveness::Stale);
-        assert!(!events.contains(&FleetEvent::LivenessChanged(A, Liveness::Active)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FleetEvent::LivenessChanged { .. }))
+        );
 
         let events = fleet.observe(source(A), t0 + Duration::from_secs(7), None);
-        assert!(events.contains(&FleetEvent::LivenessChanged(A, Liveness::Active)));
+        assert!(events.contains(&FleetEvent::LivenessChanged {
+            system: A,
+            from: Liveness::Stale,
+            to: Liveness::Active
+        }));
     }
 
     #[test]

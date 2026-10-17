@@ -90,25 +90,6 @@ impl Env {
 }
 
 #[tokio::test]
-async fn editing_back_to_the_reported_value_drops_the_edit() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
-    let mut panel = ParameterPanel::default();
-
-    env.step(
-        &mut panel,
-        Message::Edit(ADDRESS, ident("GAIN"), "2.5".into()),
-    );
-    let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
-    assert_eq!(edit.value, Some(Value::F32(2.5)));
-
-    env.step(
-        &mut panel,
-        Message::Edit(ADDRESS, ident("GAIN"), "1".into()),
-    );
-    assert!(panel.edit(ADDRESS, &ident("GAIN")).is_none());
-}
-
-#[tokio::test]
 async fn unparseable_text_is_kept_but_not_uploadable() {
     let mut env = Env::new(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
@@ -192,24 +173,28 @@ async fn editing_supersedes_an_upload_in_flight() {
 }
 
 #[tokio::test]
-async fn loading_a_file_creates_edits_for_differences_only() {
-    let env = Env::new(&[("GAIN", 1.0), ("RATE", 2.0)]);
+async fn a_loaded_file_becomes_edits_and_a_notice() {
+    let mut env = Env::new(&[("GAIN", 1.0), ("RATE", 2.0)]);
     let mut panel = ParameterPanel::default();
 
     let mut loaded = ParamValues::new();
     loaded.insert(ident("GAIN"), Value::F32(1.0)); // unchanged
     loaded.insert(ident("RATE"), Value::F32(4.0)); // changed
     loaded.insert(ident("MISSING"), Value::F32(1.0)); // unknown
-    loaded.insert(ident("GAIN"), Value::F32(1.0));
 
-    let snapshot = env.fleet.snapshot();
-    let (changed, skipped) = panel.load_edits(&snapshot, ADDRESS, &loaded);
-    assert_eq!((changed, skipped), (1, 1));
+    let path = PathBuf::from("params.param");
+    let effects = env.step(&mut panel, Message::Loaded(path, ADDRESS, Ok(loaded)));
+
     assert_eq!(
         panel.edit(ADDRESS, &ident("RATE")).unwrap().value,
         Some(Value::F32(4.0))
     );
     assert!(panel.edit(ADDRESS, &ident("GAIN")).is_none());
+
+    let notice = env.notices.history().last().unwrap();
+    assert_eq!(notice.level, Level::Success);
+    assert_eq!(notice.title, "Loaded 1 changed parameters");
+    assert!(matches!(effects.as_slice(), [Effect::RememberDirectory(_)]));
 }
 
 #[tokio::test]

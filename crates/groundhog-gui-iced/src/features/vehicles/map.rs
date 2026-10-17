@@ -281,9 +281,9 @@ impl MapLayer<Message> for Homes<'_> {
             frame.circle(
                 home.position,
                 9.0,
-                crate::style::map_home().scale_alpha(alpha),
+                crate::ui::style::map_home().scale_alpha(alpha),
             );
-            frame.label(home.position, "H", 12.0, crate::style::marker_label());
+            frame.label(home.position, "H", 12.0, crate::ui::style::marker_label());
         }
     }
 }

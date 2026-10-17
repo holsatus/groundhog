@@ -17,7 +17,7 @@ use crate::{
         Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer,
         MapPlugin, MapView,
     },
-    style,
+    ui::style,
 };
 
 /// Screen-space hit radius of an item marker.
@@ -81,13 +81,13 @@ impl MapLayer<Message> for Route<'_> {
     }
 
     fn revision(&self) -> Option<u64> {
-        Some(self.draft.plan.revision())
+        Some(self.draft.plan().revision())
     }
 
     fn draw(&self, frame: &mut MapFrame<'_>, _interaction: Interaction) {
         let positions = self
             .draft
-            .plan
+            .plan()
             .route()
             .map(|(_, _, position)| GeoPosition::new(position.lat, position.lon));
 
@@ -138,7 +138,7 @@ impl MapLayer<Message> for Markers<'_> {
     fn revision(&self) -> Option<u64> {
         let mut hasher = DefaultHasher::new();
         (
-            self.draft.plan.revision(),
+            self.draft.plan().revision(),
             self.draft.selected,
             self.current,
         )
@@ -148,7 +148,7 @@ impl MapLayer<Message> for Markers<'_> {
 
     fn draw(&self, frame: &mut MapFrame<'_>, interaction: Interaction) {
         // Loiter circles, to scale: they show the airspace the vehicle uses.
-        for planned in self.draft.plan.items() {
+        for planned in self.draft.plan().items() {
             if let (Some(position), Some(radius_m)) =
                 (planned.item.position(), loiter_radius(&planned.item))
             {
@@ -167,7 +167,7 @@ impl MapLayer<Message> for Markers<'_> {
             }
         }
 
-        for (index, id, position) in self.draft.plan.route() {
+        for (index, id, position) in self.draft.plan().route() {
             let at = GeoPosition::new(position.lat, position.lon);
             let handle = handle_of(id);
 
@@ -188,7 +188,7 @@ impl MapLayer<Message> for Markers<'_> {
 
     fn handles(&self, _view: &MapView) -> Vec<Handle> {
         self.draft
-            .plan
+            .plan()
             .route()
             .map(|(_, id, position)| {
                 let handle = Handle::at(
@@ -226,22 +226,19 @@ impl MapLayer<Message> for Markers<'_> {
 
 #[cfg(test)]
 mod tests {
-    use groundhog_logic::domain::mission::{MissionPlan, Position};
+    use groundhog_logic::domain::mission::Position;
 
     use super::*;
 
     fn draft(placing: bool) -> Draft {
-        let mut plan = MissionPlan::default();
-        plan.push(MissionItem::waypoint(Position {
+        let mut draft = Draft::new(None);
+        draft.plan_mut().push(MissionItem::waypoint(Position {
             lat: 47.0,
             lon: 8.0,
             alt_m: 50.0,
         }));
-        Draft {
-            plan,
-            placing,
-            ..Draft::default()
-        }
+        draft.placing = placing;
+        draft
     }
 
     fn markers(draft: &Draft, editable: bool) -> Markers<'_> {
@@ -261,7 +258,7 @@ mod tests {
     fn gestures_become_mission_edits() {
         let draft = draft(false);
         let layer = markers(&draft, true);
-        let item = draft.plan.items()[0].id();
+        let item = draft.plan().items()[0].id();
         let handle = handle_of(item);
         let at = GeoPosition::new(1.0, 2.0);
 

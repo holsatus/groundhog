@@ -15,8 +15,8 @@ use groundhog_logic::{
     services::{Error, Result},
 };
 use iced::{
-    Alignment, Element, Length, Task, Theme, Widget,
-    widget::{button, column, container, progress_bar, row, rule, scrollable, space, text},
+    Alignment, Element, Length, Task, Widget,
+    widget::{Column, column, row, scrollable, space},
 };
 
 use super::{
@@ -24,9 +24,7 @@ use super::{
     notifications::Notice,
     operations::{Operations, Ticket},
 };
-use crate::style;
-
-use super::vehicles::vehicle_name;
+use crate::ui::{self, Chip, TextExt, Tone};
 
 /// How many of the vehicle's calibration texts the panel shows.
 const MESSAGES: usize = 6;
@@ -113,34 +111,19 @@ impl CalibrationPanel {
         &'a self,
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,
-        theme: &Theme,
     ) -> Element<'a, Message> {
         let Some(vehicle) = selected.and_then(|id| fleet.vehicle(id)) else {
-            return padded(text("No vehicle. Connect a link to begin.").boxed());
+            return ui::empty("No vehicle. Connect a link to begin.");
         };
 
         let firmware = vehicle.firmware();
         let kinds = vehicle.calibration_kinds();
         if kinds.is_empty() {
-            return padded(
-                text(format!(
-                    "Calibration is not available for {} vehicles.",
-                    firmware.name()
-                ))
-                .boxed(),
-            );
+            return ui::empty(format!(
+                "Calibration is not available for {} vehicles.",
+                firmware.name()
+            ));
         }
-
-        let palette = theme.palette();
-        let mut contents = column![
-            row![
-                text(vehicle.display_name()).size(16),
-                space::horizontal(),
-                text(firmware.name()).size(12),
-            ]
-            .align_y(Alignment::Center)
-        ]
-        .spacing(10.0);
 
         let blocker = if vehicle.armed() == Some(true) {
             Some("Disarm the vehicle to calibrate.")
@@ -149,13 +132,6 @@ impl CalibrationPanel {
         } else {
             None
         };
-        if let Some(blocker) = blocker {
-            contents = contents.push(text(blocker).color(palette.warning.base.color).boxed());
-        }
-
-        if let Some(session) = &vehicle.calibration {
-            contents = contents.push(self.view_session(vehicle, session, theme));
-        }
 
         let running = vehicle
             .calibration
@@ -164,77 +140,82 @@ impl CalibrationPanel {
         let can_start =
             blocker.is_none() && !running && !self.is_busy(vehicle.system, Action::Start);
 
-        contents = contents.push(rule::horizontal(1.0).boxed());
-        for kind in kinds {
-            contents = contents.push(
-                row![
-                    column![
-                        text(kind.title()).size(14),
-                        text(kind.preparation()).size(12),
-                    ]
-                    .spacing(2.0)
+        let calibrations = kinds.into_iter().map(|kind| {
+            row![
+                column![ui::text(kind.title()), ui::caption(kind.preparation())]
+                    .spacing(ui::space::XXS)
                     .width(Length::Fill),
-                    button(text("Start"))
-                        .style(button::primary)
-                        .on_press_maybe(can_start.then_some(Message::Start(vehicle.system, kind))),
-                ]
-                .spacing(10.0)
-                .align_y(Alignment::Center)
-                .boxed(),
-            );
-        }
-
-        scrollable(container(contents).padding(8.0).width(Length::Fill))
-            .height(Length::Fill)
+                ui::button("Start")
+                    .primary()
+                    .on_press_maybe(can_start.then_some(Message::Start(vehicle.system, kind)))
+                    .boxed(),
+            ]
+            .spacing(ui::space::M)
+            .align_y(Alignment::Center)
             .boxed()
+        });
+
+        let contents = column![
+            row![
+                ui::title(vehicle.display_name()),
+                space::horizontal(),
+                ui::caption(firmware.name()).tone(Tone::Muted),
+            ]
+            .align_y(Alignment::Center),
+            blocker.map(|blocker| ui::text(blocker).tone(Tone::Warning)),
+            vehicle
+                .calibration
+                .as_ref()
+                .map(|session| self.view_session(vehicle, session)),
+            ui::divider(),
+            Column::with_children(calibrations).spacing(ui::space::M),
+        ]
+        .spacing(ui::space::M);
+
+        scrollable(ui::panel(contents)).height(Length::Fill).boxed()
     }
 
-    fn view_session<'a>(
-        &self,
-        vehicle: &'a Vehicle,
-        session: &'a Session,
-        theme: &Theme,
-    ) -> Element<'a, Message> {
-        let palette = theme.palette();
+    fn view_session<'a>(&self, vehicle: &'a Vehicle, session: &'a Session) -> Element<'a, Message> {
         let system = vehicle.system;
         let controls = vehicle.calibration_controls();
+        let running = session.is_running();
 
-        let (phase, color) = match &session.phase {
-            Phase::Starting => ("Starting…", palette.background.base.text),
-            Phase::Running => ("Running", palette.primary.base.color),
-            Phase::Succeeded => ("Done", palette.success.base.color),
-            Phase::Failed(_) => ("Failed", palette.danger.base.color),
-            Phase::Cancelled => ("Cancelled", palette.warning.base.color),
+        let (phase, tone) = match &session.phase {
+            Phase::Starting => ("Starting…", Tone::Muted),
+            Phase::Running => ("Running", Tone::Accent),
+            Phase::Succeeded => ("Done", Tone::Success),
+            Phase::Failed(_) => ("Failed", Tone::Danger),
+            Phase::Cancelled => ("Cancelled", Tone::Warning),
         };
 
         let mut card = column![
             row![
-                text(session.kind.title()).size(16),
+                ui::title(session.kind.title()),
                 space::horizontal(),
-                text(phase).color(color),
+                ui::text(phase).tone(tone),
             ]
             .align_y(Alignment::Center)
         ]
-        .spacing(8.0);
+        .spacing(ui::space::M);
 
-        if session.is_running() || session.progress.is_some() {
+        if running || session.progress.is_some() {
             let progress = session.progress.map_or(0.0, f32::from);
-            card = card.push(progress_bar(0.0..=100.0, progress).girth(6.0).boxed());
+            card = card.push(ui::progress(progress, 100.0).boxed());
         }
 
         if let Phase::Failed(reason) = &session.phase {
-            card = card.push(text(reason).color(palette.danger.base.color).boxed());
+            card = card.push(ui::text(reason).tone(Tone::Danger).boxed());
         }
 
-        if session.is_running() {
-            card = card.push(text(session.instruction.text()).size(15).boxed());
+        if running {
+            card = card.push(ui::text(session.instruction.text()).boxed());
 
             if controls.confirm {
-                let busy = self.is_busy(system, Action::Confirm);
                 card = card.push(
-                    button(text(if busy { "Confirming…" } else { "In position" }))
-                        .style(button::primary)
-                        .on_press_maybe((!busy).then_some(Message::Confirm(system)))
+                    ui::button("In position")
+                        .primary()
+                        .busy(self.is_busy(system, Action::Confirm), "Confirming…")
+                        .on_press(Message::Confirm(system))
                         .boxed(),
                 );
             }
@@ -255,58 +236,51 @@ impl CalibrationPanel {
                 },
                 CompassStatus::Failed(reason) => format!("failed: {reason}"),
             };
-            card = card.push(
-                text(format!("Compass {}: {state}", compass.id + 1))
-                    .size(13)
-                    .boxed(),
-            );
+            card = card.push(ui::caption(format!("Compass {}: {state}", compass.id + 1)).boxed());
         }
 
         if session.needs_reboot && session.phase == Phase::Succeeded {
             card = card.push(
-                text("Reboot the autopilot to apply the new calibration.")
-                    .color(palette.warning.base.color)
+                ui::text("Reboot the autopilot to apply the new calibration.")
+                    .tone(Tone::Warning)
                     .boxed(),
             );
         }
 
         let skip = session.messages.len().saturating_sub(MESSAGES);
         for message in session.messages.iter().skip(skip) {
-            card = card.push(text(message).size(12).boxed());
+            card = card.push(ui::caption(message).boxed());
         }
 
-        let buttons = if session.is_running() {
+        let buttons = if running {
             let stoppable = controls.cancel;
-            let mut buttons = row![
-                button(text(if stoppable { "Cancel" } else { "Abandon" }))
-                    .style(button::danger)
+            row![
+                ui::button(if stoppable { "Cancel" } else { "Abandon" })
+                    .danger()
                     .on_press_maybe(
                         (!self.is_busy(system, Action::Cancel)).then_some(Message::Cancel(system))
                     )
+                    .boxed(),
+                (!stoppable).then(|| {
+                    ui::caption("The vehicle keeps waiting until it reboots or a new run starts.")
+                }),
             ]
-            .spacing(8.0)
-            .align_y(Alignment::Center);
-            if !stoppable {
-                buttons = buttons.push(
-                    text("The vehicle keeps waiting until it reboots or a new run starts.")
-                        .size(12)
-                        .boxed(),
-                );
-            }
-            buttons
         } else {
             row![
-                button(text("Dismiss"))
-                    .style(button::secondary)
+                ui::button("Dismiss")
                     .on_press(Message::Dismiss(system))
+                    .boxed()
             ]
         };
 
-        container(card.push(buttons.boxed()))
-            .padding(10.0)
-            .width(Length::Fill)
-            .style(style::inner_container)
-            .boxed()
+        ui::card(
+            card.push(
+                buttons
+                    .spacing(ui::space::M)
+                    .align_y(Alignment::Center)
+                    .boxed(),
+            ),
+        )
     }
 }
 
@@ -320,24 +294,16 @@ fn view_sides(session: &Session) -> Element<'_, Message> {
 
     let chips = Side::ALL.into_iter().map(|side| {
         let state = if session.sides.is_done(side) {
-            style::Chip::Done
+            Chip::Done
         } else if current == Some(side) && session.is_running() {
-            style::Chip::Current
+            Chip::Current
         } else {
-            style::Chip::Pending
+            Chip::Pending
         };
-
-        container(text(side.label()).size(12))
-            .padding([2.0, 8.0])
-            .style(move |theme: &Theme| style::chip(theme, state))
-            .boxed()
+        ui::chip(side.label(), state)
     });
 
-    row(chips).spacing(4.0).wrap().boxed()
-}
-
-fn padded(content: Element<'_, Message>) -> Element<'_, Message> {
-    container(content).padding(8.0).width(Length::Fill).boxed()
+    row(chips).spacing(ui::space::XS).wrap().boxed()
 }
 
 fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
@@ -355,7 +321,7 @@ fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
     cx.notices.push(
         Notice::error(format!(
             "{what} on {} failed",
-            vehicle_name(cx.fleet, system)
+            cx.fleet.vehicle_name(system)
         ))
         .detail(error)
         .vehicle(system),

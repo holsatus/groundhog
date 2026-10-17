@@ -6,7 +6,6 @@
 //! the fleet runtime publishes from off the UI thread.
 
 use std::{
-    collections::BTreeMap,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -19,10 +18,12 @@ use groundhog_logic::{
         fleet::{FleetEvent, FleetSnapshot},
         vehicle::{Liveness, status},
     },
-    link::LinkId,
     services::{FleetUpdate, LinkEvent, LinkStatus, TlogRecorder},
 };
-use iced::{Element, Length, Subscription, Task, Theme, Widget};
+use iced::{
+    Alignment, Element, Length, Padding, Subscription, Task, Theme, Widget,
+    widget::{Space, button, column, container, row, rule, stack, tooltip},
+};
 use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
@@ -37,11 +38,15 @@ use crate::{
         notifications::{self, Level, Notice, Notifications},
         parameter_panel::{self, ParameterPanel},
         settings_panel,
-        vehicles::{self, VehiclePanel, vehicle_name},
+        vehicles::{self, VehiclePanel},
     },
     layout::{self, Layout},
     map::{self, LayerSet, Map},
-    style,
+    ui::{
+        self, Icon,
+        style::{self, ButtonKind},
+    },
+    widget::pane_grid::{self, PaneGrid},
 };
 
 /// The features that take a [`Context`], grouped so their state can be
@@ -64,10 +69,6 @@ pub struct Application {
     fleet: Arc<FleetSnapshot>,
     /// The vehicle the UI shows.
     selected: Option<SystemId>,
-    /// Whether each link was last known connected, to word link notices.
-    link_connected: BTreeMap<LinkId, bool>,
-    /// Vehicles announced as lost, so only their recovery is announced.
-    lost: std::collections::BTreeSet<SystemId>,
     recorder: Option<TlogRecorder>,
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
@@ -122,7 +123,7 @@ impl Application {
             ..BackendOptions::default()
         });
 
-        let (config_writer, saved) = ConfigWriter::spawn();
+        let (config_writer, saved) = config::spawn_writer();
 
         let layout = configuration
             .layout
@@ -137,8 +138,6 @@ impl Application {
             backend,
             fleet: Arc::default(),
             selected: None,
-            link_connected: BTreeMap::new(),
-            lost: Default::default(),
             recorder: None,
             notices,
             confirmation: None,
@@ -357,7 +356,7 @@ impl Application {
 
     /// Fleet events become selection changes and operator notices.
     fn on_fleet_event(&mut self, event: FleetEvent) {
-        let name = |system| vehicle_name(&self.fleet, system);
+        let name = |system| self.fleet.vehicle_name(system);
 
         let notice = match event {
             FleetEvent::Registered(system) => {
@@ -369,19 +368,15 @@ impl Application {
             // A late vehicle shows in the vehicle panel; only losing and
             // regaining contact are announced, so a flaky link does not
             // flood the operator.
-            FleetEvent::LivenessChanged(system, liveness) => match liveness {
-                Liveness::Stale => return,
-                Liveness::Lost => {
-                    self.lost.insert(system);
+            FleetEvent::LivenessChanged { system, from, to } => match (from, to) {
+                (_, Liveness::Lost) => {
                     Notice::error(format!("Lost contact with {}", name(system))).vehicle(system)
                 }
-                Liveness::Active => {
-                    if !self.lost.remove(&system) {
-                        return;
-                    }
+                (Liveness::Lost, Liveness::Active) => {
                     Notice::success(format!("Contact with {} restored", name(system)))
                         .vehicle(system)
                 }
+                _ => return,
             },
             FleetEvent::ArmedChanged(system, true) => {
                 Notice::warning(format!("{} armed", name(system))).vehicle(system)
@@ -432,10 +427,7 @@ impl Application {
     }
 
     fn on_link(&mut self, event: LinkEvent) {
-        let was_connected = self.link_connected.get(&event.id).copied().unwrap_or(false);
-        let connected = event.status.is_connected();
-        self.link_connected.insert(event.id.clone(), connected);
-
+        let was_connected = event.previous.is_connected();
         let notice = match &event.status {
             LinkStatus::Connected { .. } if !was_connected => {
                 Some(Notice::success(format!("Link {} connected", event.name)))
@@ -480,160 +472,126 @@ impl Application {
     }
 
     pub fn view(&self) -> impl Widget<Message> + '_ {
-        let base: Element<'_, Message> = iced::widget::row![
-            self.view_rail(),
-            iced::widget::rule::vertical(1.0),
-            self.view_panes()
-        ]
-        .spacing(0)
-        .boxed();
+        // The rail and the panes float on the window's background, one gap
+        // apart from each other and from the window's edges.
+        let base = container(row![self.view_rail(), self.view_panes()].spacing(ui::space::S))
+            .padding(ui::space::S)
+            .style(style::workspace);
 
-        let toasts = iced::widget::container(self.notices.view().map(Message::Notifications))
+        let toasts = container(self.notices.view().map(Message::Notifications))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_right(Length::Fill)
             .align_bottom(Length::Fill)
-            .padding(16);
+            .padding(ui::space::XL);
 
-        let with_toasts: Element<'_, Message> = iced::widget::stack![base, toasts].boxed();
-
-        iced::widget::container(confirm::view(
-            with_toasts,
+        container(confirm::view(
+            stack![base, toasts].boxed(),
             self.confirmation.as_ref(),
             Message::Confirm,
         ))
     }
 
+    /// The rail: a button per panel, highlighted while it is open. Pressing
+    /// one opens its panel, or closes it if open.
     fn view_rail(&self) -> Element<'_, Message> {
-        let mut buttons = iced::widget::Column::new().spacing(4);
+        let buttons = layout::Panel::DOCKABLE.into_iter().map(|panel| {
+            let open = self.layout.is_open(panel);
+            let icon = ui::icon::icon(panel.icon(), ui::size::RAIL_ICON, ButtonKind::Subtle, true);
+            let button = button(container(icon).center(Length::Fill))
+                .padding(0)
+                .width(ui::size::RAIL_BUTTON)
+                .height(ui::size::RAIL_BUTTON)
+                .style(style::rail_button(open))
+                .on_press(Message::Layout(layout::Message::Toggle(panel)));
 
-        for panel in layout::Panel::DOCKABLE {
-            if self.layout.is_open(panel) {
-                continue;
-            }
+            let hint = if open {
+                format!("Close {}", panel.title())
+            } else {
+                format!("Open {}", panel.title())
+            };
+            ui::tooltip(button, hint, tooltip::Position::Right)
+        });
 
-            let button = iced::widget::button(
-                iced::widget::container(iced::widget::text(panel.badge()))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(36.0))
-            .on_press(Message::Layout(layout::Message::Open(panel)));
-
-            buttons = buttons.push(button);
-        }
-
-        iced::widget::container(buttons)
-            .width(Length::Fixed(44.0))
-            .height(Length::Fill)
-            .padding(4)
-            .style(style::rail)
-            .boxed()
+        column(buttons).spacing(ui::space::S).boxed()
     }
 
     fn view_panes(&self) -> impl Widget<Message> + '_ {
-        use crate::widget::pane_grid::{self, PaneGrid};
-
-        let panes = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
+        PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
             // The map paints opaque tiles across its whole pane, which a rounded
             // container cannot clip; it draws its own frame instead (see
-            // `map::Map::view`). Every other pane is a rounded card split by a
-            // rule.
-            let body: Element<'_, Message> = if panel.is_fixed() {
-                self.pane_body(*panel)
-            } else {
-                iced::widget::column![
-                    iced::widget::rule::horizontal(style::PANE_BORDER_WIDTH).style(style::divider),
-                    self.pane_body(*panel),
-                ]
-                .height(Length::Fill)
-                .boxed()
-            };
-
-            let mut content = pane_grid::Content::new(body);
-
-            if !panel.is_fixed() {
-                content = content.style(style::pane);
-            }
-
+            // `map::Map::view`), and has no title bar to grab, so it cannot be
+            // moved or closed.
             if panel.is_fixed() {
-                // Zero-height title bar: keeps the `Content` type uniform while
-                // leaving nothing to grab, so the map cannot be moved or closed.
-                let empty = iced::widget::Space::new()
-                    .height(Length::Fixed(0.0))
-                    .boxed();
-                content.title_bar(pane_grid::TitleBar::new(empty).padding(0))
-            } else {
-                let focused = self.layout.is_focused(pane);
-                let title = iced::widget::container(iced::widget::text(panel.title()))
-                    .padding(5.0)
-                    .boxed();
-
-                let maximize = if is_maximized {
-                    iced::widget::button(
-                        iced::widget::container(iced::widget::text("v")).center(20),
-                    )
-                    .padding(2)
-                    .on_press(Message::Layout(layout::Message::Restore))
-                } else {
-                    iced::widget::button(
-                        iced::widget::container(iced::widget::text("^")).center(20),
-                    )
-                    .padding(2)
-                    .on_press(Message::Layout(layout::Message::Maximize(pane)))
-                };
-
-                let close = iced::widget::button(
-                    iced::widget::container(iced::widget::text("x")).center(20),
-                )
-                .style(iced::widget::button::danger)
-                .padding(2)
-                .on_press(Message::Layout(layout::Message::Close(pane)));
-
-                let controls =
-                    iced::widget::container(iced::widget::row![maximize, close].spacing(4))
-                        .center_y(32);
-
-                let title_bar = pane_grid::TitleBar::new(title)
-                    .controls(pane_grid::Controls::new(controls))
-                    .padding(4)
-                    .style(move |theme| {
-                        if focused {
-                            style::title_bar_focused(theme)
-                        } else {
-                            style::title_bar(theme)
-                        }
-                    });
-
-                content.title_bar(title_bar)
+                let empty = Space::new().height(Length::Fixed(0.0)).boxed();
+                return pane_grid::Content::new(self.pane_body(*panel))
+                    .title_bar(pane_grid::TitleBar::new(empty).padding(0));
             }
+
+            // Every other pane is a rounded card, its header split off by a
+            // rule.
+            let body = column![
+                rule::horizontal(style::PANE_BORDER_WIDTH).style(style::pane_divider),
+                self.pane_body(*panel),
+            ]
+            .height(Length::Fill);
+
+            let layout = |message| Message::Layout(message);
+            let size = if is_maximized {
+                ui::icon_button(Icon::Minimize)
+                    .hint("Restore")
+                    .on_press(layout(layout::Message::Restore))
+            } else {
+                ui::icon_button(Icon::Maximize)
+                    .hint("Maximize")
+                    .on_press(layout(layout::Message::Maximize(pane)))
+            };
+            let close = ui::icon_button(Icon::Close)
+                .hint("Close")
+                .on_press(layout(layout::Message::Close(pane)));
+
+            let title = row![
+                ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
+                ui::text(panel.title())
+            ]
+            .spacing(ui::space::S)
+            .align_y(Alignment::Center);
+
+            let title_bar = pane_grid::TitleBar::new(title.boxed())
+                .controls(pane_grid::Controls::new(
+                    row![size.boxed(), close.boxed()].spacing(ui::space::XS),
+                ))
+                // The controls are as far from the bar's right edge as from
+                // its top and bottom; the title gets more room on the left.
+                // The pane's border is drawn over the bar's top and right
+                // edges, while the divider lies below it, so those sides add
+                // the border's width.
+                .padding(Padding {
+                    top: ui::space::XS + style::PANE_BORDER_WIDTH,
+                    right: ui::space::XS + style::PANE_BORDER_WIDTH,
+                    bottom: ui::space::XS,
+                    left: ui::space::M,
+                })
+                .style(style::title_bar(self.layout.is_focused(pane)));
+
+            pane_grid::Content::new(body.boxed())
+                .style(style::pane)
+                .title_bar(title_bar)
         })
         .width(Length::Fill)
         .height(Length::Fill)
-        .spacing(5)
+        .spacing(ui::space::S)
         .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
-        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
-
-        iced::widget::container(panes)
-            .padding(5.0)
-            .style(move |theme: &Theme| {
-                let palette = theme.palette();
-
-                iced::widget::container::Style {
-                    background: Some(palette.background.base.color.into()),
-                    ..iced::widget::container::Style::default()
-                }
-            })
+        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)))
     }
 
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
-        let theme = self.theme();
         let fleet: &FleetSnapshot = &self.fleet;
 
         match panel {
             layout::Panel::Map => {
+                let theme = self.theme();
                 let context = MapContext {
                     fleet,
                     selected: self.selected,
@@ -649,38 +607,35 @@ impl Application {
             layout::Panel::Vehicles => self
                 .features
                 .vehicles
-                .view(fleet, self.selected, self.map.is_following(), &theme)
+                .view(fleet, self.selected, self.map.is_following())
                 .map(Message::Vehicles)
                 .boxed(),
             layout::Panel::Parameters => self
                 .features
                 .parameters
-                .view(fleet, self.selected, &theme)
+                .view(fleet, self.selected)
                 .map(Message::Parameters)
                 .boxed(),
             layout::Panel::Calibration => self
                 .features
                 .calibration
-                .view(fleet, self.selected, &theme)
+                .view(fleet, self.selected)
                 .map(Message::Calibration)
                 .boxed(),
             layout::Panel::Mission => self
                 .features
                 .mission
-                .view(fleet, self.selected, &theme)
+                .view(fleet, self.selected)
                 .map(Message::Mission)
                 .boxed(),
-            layout::Panel::Links => iced::widget::column![
-                self.link_panel.view_editor().map(Message::Links),
-                self.link_panel
-                    .view_status(self.backend.links())
-                    .map(Message::Links),
-            ]
-            .spacing(10.0)
-            .boxed(),
+            layout::Panel::Links => self
+                .link_panel
+                .view(self.backend.links())
+                .map(Message::Links)
+                .boxed(),
             layout::Panel::Logs => self
                 .log_panel
-                .view(fleet, self.selected, &self.notices, &theme)
+                .view(fleet, self.selected, &self.notices)
                 .map(Message::Logs)
                 .boxed(),
             layout::Panel::Settings => settings_panel::view(
@@ -720,3 +675,6 @@ impl Application {
         Subscription::batch([layout_tick, refresh])
     }
 }
+
+#[cfg(test)]
+mod gallery;

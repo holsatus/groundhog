@@ -120,8 +120,9 @@ impl Interaction {
 ///
 /// Only [`id`](MapLayer::id) and [`draw`](MapLayer::draw) are required. A
 /// layer whose content changes rarely should report a
-/// [`revision`](MapLayer::revision): while it and the view are unchanged, the
-/// engine reuses the layer's previous geometry instead of drawing again.
+/// [`revision`](MapLayer::revision): while it, the view and the theme are
+/// unchanged, the engine reuses the layer's previous geometry instead of
+/// drawing again. The revision need not cover colours taken from the theme.
 pub trait MapLayer<Message> {
     fn id(&self) -> LayerId;
 

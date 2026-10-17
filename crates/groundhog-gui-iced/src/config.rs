@@ -1,23 +1,19 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        LazyLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::LazyLock,
 };
 
 use anyhow::Context;
 use directories::ProjectDirs;
-use groundhog_logic::link::LinkConfig;
+use groundhog_logic::{
+    link::LinkConfig,
+    persist::{SaveQueue, read_or_set_aside, write_atomic},
+};
 
-use crate::{layout::LayoutConfig, theme::ThemeMode};
+use crate::{layout::LayoutConfig, ui::theme::ThemeMode};
 
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
-
-/// Uniquifies the temp sidecar of each config save, so two concurrent
-/// writers never serialize into the same intermediate file.
-static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk configuration schema version.
 const CONFIG_VERSION: u32 = 2;
@@ -59,47 +55,21 @@ pub fn data_dir() -> Option<PathBuf> {
         .map(|dirs| dirs.data_dir().to_path_buf())
 }
 
-/// Persists configurations one at a time, in order, off the UI thread.
-///
-/// Saves are coalesced: while a write is in progress, only the newest of the
-/// configurations requested meanwhile is written next. Two saves can therefore
-/// never land out of order and leave an older configuration on disk.
-pub struct ConfigWriter {
-    latest: tokio::sync::watch::Sender<Option<Configuration>>,
-}
+/// Persists configurations one at a time, in order, off the UI thread (see
+/// [`SaveQueue`]).
+pub type ConfigWriter = SaveQueue<Configuration>;
 
-impl ConfigWriter {
-    /// Start the writer on the current async runtime. The returned receiver
-    /// yields the outcome of each write.
-    pub fn spawn() -> (
-        Self,
-        tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
-    ) {
-        let (latest, mut requests) = tokio::sync::watch::channel(None::<Configuration>);
-        let (outcomes, receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        tokio::spawn(async move {
-            while requests.changed().await.is_ok() {
-                let Some(configuration) = requests.borrow_and_update().clone() else {
-                    continue;
-                };
-
-                let outcome = tokio::task::spawn_blocking(move || configuration.write_to_file())
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|result| result.map_err(|error| error.to_string()));
-
-                let _ = outcomes.send(outcome);
-            }
-        });
-
-        (Self { latest }, receiver)
-    }
-
-    /// Persist `configuration` (or a newer one, if saved again meanwhile).
-    pub fn save(&self, configuration: Configuration) {
-        self.latest.send_replace(Some(configuration));
-    }
+/// Start the configuration writer on the current async runtime. The returned
+/// receiver yields the outcome of each write.
+pub fn spawn_writer() -> (
+    ConfigWriter,
+    tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
+) {
+    SaveQueue::spawn(|configuration: Configuration| {
+        configuration
+            .write_to_file()
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// The persisted application configuration.
@@ -163,76 +133,27 @@ impl Configuration {
     /// that reads but does not parse is moved aside (so it survives) before
     /// defaults are written.
     fn initialize_at(path: &Path) -> anyhow::Result<Self> {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let config = Self::default();
-                config.write_to_file_at(path)?;
-                return Ok(config);
-            }
-            Err(error) => return Err(error.into()),
+        let Some(config) = read_or_set_aside(path, |text| ron::from_str::<Configuration>(text))?
+        else {
+            let config = Self::default();
+            config.write_to_file_at(path)?;
+            return Ok(config);
         };
 
-        match ron::from_str::<Configuration>(&contents) {
-            Ok(config) => {
-                if config.version > CONFIG_VERSION {
-                    log::warn!(
-                        "Configuration at {} is version {} from a newer build (current {}); loading anyway",
-                        path.display(),
-                        config.version,
-                        CONFIG_VERSION
-                    );
-                }
-                Ok(config)
-            }
-            Err(error) => {
-                let backup = path.with_extension("ron.corrupt");
-                log::error!(
-                    "Could not parse configuration at {}: {error}; backing it up to {}",
-                    path.display(),
-                    backup.display()
-                );
-
-                if let Err(rename_error) = std::fs::rename(path, &backup) {
-                    log::error!(
-                        "Could not back up configuration to {}: {rename_error}",
-                        backup.display()
-                    );
-                }
-
-                let config = Self::default();
-                config.write_to_file_at(path)?;
-                Ok(config)
-            }
+        if config.version > CONFIG_VERSION {
+            log::warn!(
+                "Configuration at {} is version {} from a newer build (current {}); loading anyway",
+                path.display(),
+                config.version,
+                CONFIG_VERSION
+            );
         }
+        Ok(config)
     }
 
-    /// Write the configuration at `path` atomically: serialize to a sibling
-    /// temp file, then rename it over the target. The temp file is unique per
-    /// call, so concurrent saves cannot interleavingly corrupt one shared
-    /// sidecar.
     fn write_to_file_at(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-
         let serialized = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())?;
-
-        let tmp_path = path.with_extension(format!(
-            "ron.tmp-{}",
-            WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&tmp_path, serialized.as_bytes())?;
-
-        if let Err(error) = std::fs::rename(&tmp_path, path) {
-            // A failed save must not leak its unique sidecar behind.
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(error.into());
-        }
-
+        write_atomic(path, serialized.as_bytes())?;
         Ok(())
     }
 }

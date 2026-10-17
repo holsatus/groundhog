@@ -44,21 +44,26 @@ and error level for dependencies (see `groundhog-gui-iced/src/main.rs`).
 
 ## The architecture in one page
 
-The workspace has two crates, under `crates/`:
+The workspace has three crates, under `crates/`:
 
 | Crate | What it is | Depends on |
 |---|---|---|
 | `groundhog-logic` | The backend: all vehicle state and every rule about it, the middleware, the transports, and the vocabulary frontends name it with (`SystemId`, `MavlinkId`, `GeoPosition`, link descriptions) | `mavio`, `tokio` |
 | `groundhog-gui-iced` | The desktop frontend, built as the `groundhog` binary | `groundhog-logic`, `iced` |
+| `groundhog-gui-egui` | A second desktop frontend over the same backend, built as `groundhog-egui` (egui_dock panes, walkers map) | `groundhog-logic`, `egui` |
 
-A future frontend (a CLI, say) is another crate next to `groundhog-gui-iced`,
-depending on `groundhog-logic`. Paths in this file are relative to a crate's `src/`;
+Another frontend (a CLI, say) is another crate next to these, depending on
+`groundhog-logic`. Paths in this file are relative to a crate's `src/`;
 the crate is named where it is not obvious.
 
 ```
  gui-iced  features/  UI features: panels and map plugins            ┐
+           ui/        the toolkit: tokens, styles, icons, widgets      │
            map/       map engine: layers, hit-testing, gestures       ├─ UI thread (iced)
            app.rs     composition root, message routing, policy       ┘
+ gui-egui  features/  the same features, drawn with egui widgets      ┐
+           map/       walkers plugins for the same overlays           ├─ UI thread (egui)
+           app.rs     composition root, event policy                  ┘
     │ reads snapshots ▲            │ intents (operations)
     │                 │            ▼
  logic     services/  Backend, fleet runtime, vehicle client, links   ┐
@@ -68,6 +73,7 @@ the crate is named where it is not obvious.
            link/      transports: TCP, UDP, serial (private)          │
            wire/      pure codecs (private)                           ┘
            storage/   file formats (missions, parameters)
+           persist.rs safe writes of a frontend's own files
            lib.rs     SystemId and MavlinkId, shared by every layer
 ```
 
@@ -86,7 +92,8 @@ How data moves:
    last one.
 4. **The frontend** (`app.rs`, `features/`) starts one `Backend` at boot,
    keeps the latest snapshot, and holds only *operator* state: mission
-   drafts, parameter edits, the selected vehicle, view state. It changes
+   drafts and parameter edits (modelled by the logic crate's `MissionDraft`
+   and `ParamEdits`), the selected vehicle, view state. It changes
    vehicles only through operations on `services::VehicleClient`, never by
    mutating state. Results that change what a vehicle holds (a transferred
    mission, a parameter list) flow back through the runtime, so every reader
@@ -108,11 +115,13 @@ are shared by all.
 | logic `link/` | Link descriptions (`LinkId`, `LinkConfig`, `LinkBuild`, public); opening transports (private) | `mavio`, `tokio` | know about MAVLink messages |
 | logic `wire/` | Pure codecs (parameter encodings, coordinate scales) | `mavio` | hold state |
 | logic `mavlink/` | Router, duplicate suppression, transactions, outbound queues | `link`, `wire`, `mavio`, `tokio` | know about vehicles as state, or the UI |
-| logic `domain/` | Vehicle state and its folding, positions (`geo`), missions, parameters, firmware adapters, calibration protocols | `wire`, `mavio` types as vocabulary | do I/O, spawn tasks, call the middleware |
+| logic `domain/` | Vehicle state and its folding, positions (`geo`), missions, parameters, firmware adapters, calibration protocols; the operator models that are compared with vehicle state (`MissionDraft`, `ParamEdits`) | `wire`, `mavio` types as vocabulary | do I/O, spawn tasks, call the middleware |
 | logic `storage/` | File formats (WPL missions; INI/`.param`/`.params` parameters) | `domain` | touch the filesystem (callers do) |
+| logic `persist.rs` | Writing a frontend's own files: atomic replacement, setting unparseable files aside, ordered saves (`SaveQueue`) | `tokio` | know what is stored, or its format |
 | logic `services/` | `Backend`, fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `TransferProgress` and `LinkStats`, is fine |
 | gui `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
-| gui `features/` | One module per UI feature, plus shared UI building blocks | `services`, `domain`, `map`, `storage` | each other's state |
+| gui `features/` | One module per UI feature | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
+| gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
 | gui `app.rs` | Wiring at boot, message routing, effects, notice policy | everything | contain feature logic |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, attitude) | iced | depend on the domain |
 
@@ -136,8 +145,8 @@ change would undo it.
 ### The backend and the frontends are separate crates
 
 `groundhog-logic` holds every piece of vehicle state and every rule about it;
-`groundhog-gui-iced` holds presentation and operator state, and names vehicle
-state with the logic crate's own types. A frontend starts the backend with
+a frontend holds presentation and operator state, and names vehicle state
+with the logic crate's own types. A frontend starts the backend with
 `Backend::start(BackendOptions { links, .. })`, which wires the router, the
 fleet runtime and the link supervisors together and returns the
 `BackendEvents` streams to drive. From then on it reads snapshots through
@@ -152,6 +161,28 @@ would compute the same way belongs in the logic crate: the calibration panel,
 for example, asks `Vehicle::calibration_kinds` and
 `Vehicle::calibration_controls` instead of the firmware's command builders.
 
+The same goes for operator state whose rules every frontend would share:
+`domain::mission::MissionDraft` decides when a draft follows its vehicle
+and how it relates to it, and `domain::parameter::ParamEdits` folds typed
+text, loaded files and upload results into pending edits. A frontend keeps
+these in its own maps, next to what only it needs (selection, half-typed
+field text, which operations run). Events carry what they replace
+(`FleetEvent::LivenessChanged { from, to }`, `LinkEvent::previous`), so a
+frontend can word a notice without mirroring state to diff against.
+
+What stays in each frontend is shaped by its toolkit or its operator: the
+`Operations` set (its tasks are the toolkit's: iced `Task`s, or
+`tokio::spawn` with abort handles), message or intent plumbing, widgets,
+map layers, and the wording and loudness of notices. The backend must not
+decide those, because a headless client or a differently structured UI
+would decide them differently.
+
+`groundhog-gui-egui` is the second frontend this decision was made for:
+egui widgets, immediate-mode intents collected per frame, and walkers' map
+plugins over the same backend. It keeps its own configuration file
+(`config-egui.ron`) so two frontends can run at once without racing each
+other's writes.
+
 ### Vehicle state is owned off the UI thread
 
 `services/runtime.rs` owns the `Fleet` and publishes `Arc<FleetSnapshot>`.
@@ -165,9 +196,11 @@ also make the UI a pure function of data, which makes it easy to test.
 
 ### Vehicle state and operator state are separate
 
-The fleet holds only what vehicles *reported*. Mission drafts live in
-`features::mission`, and parameter edits (`domain::parameter::ParamEdit`) in
-`features::parameter_panel`.
+The fleet holds only what vehicles *reported*. Mission drafts
+(`domain::mission::MissionDraft`) and parameter edits
+(`domain::parameter::ParamEdits`) are held by the frontend, in
+`features::mission` and `features::parameter_panel`; the fleet never sees
+them.
 
 *Why:* an operator's draft must never be overwritten by telemetry, and
 planning must work with no vehicle at all (the offline plan). Whether a draft
@@ -259,7 +292,8 @@ The engine (`map/overlay.rs`) owns all pointer state in the canvas widget's own
 state: hover, press, drag (which keeps the map from panning), click detection,
 and escape-to-cancel. A drag can therefore never get stuck through lost
 events, and no application state is needed to track one. A layer reporting a
-`revision` is drawn from cache until that number or the view changes.
+`revision` is drawn from cache until that number, the view or the theme
+changes.
 
 ### Features talk to the application through a narrow contract
 
@@ -348,13 +382,38 @@ versions:
   thread before `update`. Give messages that carry
   large data a summary `Debug` (see `FleetUpdate`).
 - Long lists use `widget::virtualized::virtual_list` with fixed row heights.
-  Text in a fixed-height row must be single-line
-  (`.wrapping(Wrapping::None).ellipsis(Ellipsis::End)`).
+  Text in a fixed-height row must be single-line (`TextExt::single_line`).
 - Never block the UI thread. File I/O goes through
   `iced_runtime::task::blocking`, network work through services. `boot` and
   `update` run inside the async runtime, so `tokio::spawn` works there.
-- Colours come from the theme palette (`style.rs`), except map overlays,
+- Colours come from the theme palette (`ui/style.rs`), except map overlays,
   which use fixed colours that read well over any map tile.
+
+### The toolkit (`ui`)
+
+Views build widgets through `crate::ui`, never by styling raw iced widgets,
+so the look is decided in one place:
+
+- **Tokens:** gaps from `ui::space` (`XXS`…`XL`), sizes from `ui::size`.
+  No numeric spacing, padding or text size appears in a view.
+- **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::heading`, `ui::mono`;
+  colour by meaning with `.tone(Tone::Warning)` (`TextExt`), never a palette
+  slot, so a view needs no `&Theme`.
+- **Buttons** are built: `ui::button("Arm").primary().busy(arming, "Arming…")
+  .on_press(message).boxed()`. `.busy` swaps the label and refuses presses
+  while an operation runs; `.chosen(bool)` highlights a selected row or an
+  active mode; `.hint(..)` adds a tooltip. The builder is for actions in
+  views; window chrome that looks nothing like them (the rail) builds its
+  own buttons from a style in `ui/style.rs` (`rail_button`).
+- **Icons** are named, never loaded: `ui::icon_button(Icon::Upload)`. To add
+  one, put a Lucide SVG in `assets/icons/` and a line in the `icons!` list in
+  `ui/icon.rs` (see `assets/icons/README.md`).
+- **Layout:** `ui::panel` is every pane's body, `ui::empty` a panel with only
+  a reason; `ui::card`, `ui::card_list` (rows split by edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`,
+  `ui::toolbar`, `ui::list_row` (striped) cover the shared arrangements.
+
+When a second view would build something the same way, add it to `ui`
+rather than copying it.
 
 ### Operations from features
 
@@ -390,6 +449,11 @@ comes with a test that fails without the fix.
 | Widget composition | gui `map/mod.rs` tests | `iced_test::Simulator` delivers real events through the composed widgets; assert on event status and messages |
 | Features | gui `features/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
 
+The egui frontend's tests follow the same recipe, one `#[cfg(test)] mod
+tests` per feature module instead of separate files: for example
+`groundhog-gui-egui/src/features/mission.rs` drives the editor through its
+intents against a real backend and asserts on notices and effects.
+
 Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
 backend with `BackendOptions { bootstrap: false, .. }`; the snapshots they
 hand to the feature come from a `Fleet` they fold messages into with
@@ -405,6 +469,17 @@ whole `Application::view()` to PNG with `snapshot(..).matches_image(path)`.
 `matches_image` only writes the PNG when no file exists yet (the name gains a
 renderer suffix such as `-wgpu`); otherwise it compares against the existing
 one. Delete old snapshots before re-rendering.
+
+To *look at* the interface, render the gallery: every panel and the whole
+window, light and dark, with a synthetic vehicle (`app/gallery.rs`). It is
+an ignored test that needs its own configuration directory:
+
+```sh
+GROUNDHOG_GALLERY=/tmp/gallery XDG_CONFIG_HOME=/tmp/gallery/config \
+    XDG_DATA_HOME=/tmp/gallery/data cargo test -p groundhog-gui-iced gallery -- --ignored
+```
+
+Render it before and after a change to the look, and compare.
 
 ---
 
@@ -507,10 +582,11 @@ with a location), the file formats, and jump-target translation (for
 ### Add a UI panel
 
 1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
-   `badge` and `default_edge`, and list it in `Panel::DOCKABLE`.
+   `icon` (add the icon to `ui::Icon` if it is new) and `default_edge`, and
+   list it in `Panel::DOCKABLE`.
 2. Create `features/<name>.rs` (or a directory) with its state, `Message`,
    `update(&mut self, message, cx: &mut Context<Message>) -> Task<Message>`,
-   and `view`.
+   and `view`, which returns a `ui::panel`.
 3. In `app.rs`: add the state (to `Features` if it takes a `Context`), a
    `Message` variant routed through `dispatch`, and an arm in `pane_body`.
 
@@ -519,8 +595,9 @@ with a location), the file formats, and jump-target translation (for
 Add a field to `config::Settings` (it is `#[serde(default)]`, so old
 configurations still load), a message and a control in
 `features/settings_panel.rs`, and apply it in `Application::on_settings`.
-Configuration is persisted only through `ConfigWriter`, which writes one save
-at a time, newest last.
+Configuration is persisted only through `ConfigWriter` (a
+`persist::SaveQueue`), which writes one save at a time, newest last, and
+replaces the file atomically.
 
 ---
 

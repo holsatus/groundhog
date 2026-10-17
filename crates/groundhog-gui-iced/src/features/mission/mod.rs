@@ -1,27 +1,24 @@
 //! The mission feature: planning flight plans and transferring them.
 //!
-//! The editor keeps one draft per vehicle, plus an offline draft for planning
-//! with no vehicle selected. A draft is operator state: it changes only when
-//! the operator edits it, or when the vehicle's onboard mission changes while
-//! the draft is unmodified (a fresh download, or another GCS uploading). A
-//! modified draft is never overwritten behind the operator's back.
-//!
-//! Whether a draft matches the vehicle is derived, never tracked: the draft is
-//! compared with the onboard mission in the fleet snapshot. Items are
-//! addressed by [`ItemId`], so map drags and editor input stay attached to the
-//! item they started on whatever happens to the list meanwhile.
+//! The editor keeps one [`MissionDraft`] per vehicle, plus an offline draft
+//! for planning with no vehicle selected; the draft decides when it follows
+//! the vehicle and how it relates to it. Around each draft the editor keeps
+//! what only the UI needs: the selected item, half-typed field text, and
+//! whether map clicks place waypoints. Items are addressed by [`ItemId`], so
+//! map drags and editor input stay attached to the item they started on
+//! whatever happens to the list meanwhile.
 
 mod map;
 mod view;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use groundhog_logic::{
     SystemId,
     domain::{
         fleet::FleetSnapshot,
         geo::GeoPosition,
-        mission::{Field, ItemId, MissionItem, MissionPlan, OnboardMission, Position},
+        mission::{Field, ItemId, MissionDraft, MissionPlan, OnboardMission, SyncStatus},
     },
     services::{Result, TransferProgress},
     storage::mission::{WplMission, parse_wpl, write_wpl},
@@ -35,7 +32,6 @@ use super::{
     file_dialog,
     notifications::Notice,
     operations::{Operations, Ticket},
-    vehicles::vehicle_name,
 };
 
 /// Which draft: a vehicle's, or the offline plan (`None`).
@@ -76,28 +72,10 @@ impl Operation {
     }
 }
 
-/// How a draft relates to its vehicle's onboard mission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncStatus {
-    /// The offline plan: there is no vehicle to compare with.
-    Offline,
-    /// The vehicle's mission is not known (never downloaded).
-    Unknown,
-    Synced,
-    Modified,
-    /// The vehicle reports holding a mission other than the one last
-    /// transferred: someone else changed it.
-    VehicleChanged,
-}
-
 /// One draft and its editor state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Draft {
-    plan: MissionPlan,
-    /// The items the draft was last synced with.
-    base: Option<Vec<MissionItem>>,
-    /// The onboard mission last seen in a snapshot, to notice new ones.
-    seen: Option<Arc<OnboardMission>>,
+    mission: MissionDraft,
     selected: Option<ItemId>,
     /// In-progress text of the selected item's fields.
     edits: BTreeMap<Field, String>,
@@ -106,22 +84,29 @@ struct Draft {
 }
 
 impl Draft {
-    fn is_modified(&self) -> bool {
-        match &self.base {
-            Some(base) => !self.plan.matches(base),
-            None => !self.plan.is_empty(),
+    fn new(plan: PlanKey) -> Self {
+        Self {
+            mission: MissionDraft::new(plan),
+            selected: None,
+            edits: BTreeMap::new(),
+            placing: false,
         }
     }
 
-    /// Adopt `items` as both the plan and its base. Keeps item ids (and so
-    /// selection and in-flight drags) when the plan already holds them.
-    fn sync_to(&mut self, items: Vec<MissionItem>) {
-        if !self.plan.matches(&items) {
-            self.plan.set_items(items.iter().cloned());
-            self.selected = None;
-            self.edits.clear();
+    fn plan(&self) -> &MissionPlan {
+        self.mission.plan()
+    }
+
+    fn plan_mut(&mut self) -> &mut MissionPlan {
+        self.mission.plan_mut()
+    }
+
+    /// The plan's items were replaced: their ids, and so the selection, no
+    /// longer resolve.
+    fn replaced(&mut self, replaced: bool) {
+        if replaced {
+            self.select(None);
         }
-        self.base = Some(items);
     }
 
     fn select(&mut self, item: Option<ItemId>) {
@@ -140,7 +125,7 @@ pub struct MissionEditor {
 impl Default for MissionEditor {
     fn default() -> Self {
         let mut drafts = BTreeMap::new();
-        drafts.insert(None, Draft::default());
+        drafts.insert(None, Draft::new(None));
         Self {
             drafts,
             operations: Operations::default(),
@@ -213,51 +198,26 @@ impl MissionEditor {
         self.drafts.get(&selected)
     }
 
-    /// Fold a new fleet snapshot in: every vehicle gets a draft, and an
-    /// unmodified draft follows its vehicle's onboard mission.
+    /// The draft for `plan`, created on first use.
+    fn draft_mut(&mut self, plan: PlanKey) -> &mut Draft {
+        self.drafts.entry(plan).or_insert_with(|| Draft::new(plan))
+    }
+
+    /// Fold a new fleet snapshot in: every vehicle gets a draft, and each
+    /// draft follows its vehicle as [`MissionDraft::follow`] decides.
     pub fn sync(&mut self, fleet: &FleetSnapshot) {
-        for vehicle in fleet.vehicles() {
-            let draft = self.drafts.entry(Some(vehicle.system)).or_default();
-
-            let Some(onboard) = &vehicle.mission.onboard else {
-                continue;
-            };
-
-            if draft
-                .seen
-                .as_ref()
-                .is_some_and(|seen| Arc::ptr_eq(seen, onboard))
-            {
-                continue;
-            }
-
-            draft.seen = Some(onboard.clone());
-            if !draft.is_modified() {
-                draft.sync_to(onboard.items.clone());
-            }
+        for system in fleet.ids() {
+            let draft = self.draft_mut(Some(system));
+            let replaced = draft.mission.follow(fleet);
+            draft.replaced(replaced);
         }
     }
 
     /// How the draft for `plan` relates to its vehicle.
     pub fn status(&self, plan: PlanKey, fleet: &FleetSnapshot) -> SyncStatus {
-        let Some(system) = plan else {
-            return SyncStatus::Offline;
-        };
-        let Some(vehicle) = fleet.vehicle(system) else {
-            return SyncStatus::Unknown;
-        };
-        let Some(onboard) = &vehicle.mission.onboard else {
-            return SyncStatus::Unknown;
-        };
-
-        if vehicle.mission.onboard_is_stale() {
-            return SyncStatus::VehicleChanged;
-        }
-
-        match self.drafts.get(&plan) {
-            Some(draft) if !draft.plan.matches(&onboard.items) => SyncStatus::Modified,
-            _ => SyncStatus::Synced,
-        }
+        self.drafts
+            .get(&plan)
+            .map_or(SyncStatus::Unknown, |draft| draft.mission.status(fleet))
     }
 
     /// Whether a transfer is running for `system`.
@@ -337,8 +297,8 @@ impl MissionEditor {
                 match result {
                     Ok(mission) => {
                         let count = mission.items.len();
-                        let draft = self.drafts.entry(plan).or_default();
-                        draft.plan.set_items(mission.items);
+                        let draft = self.draft_mut(plan);
+                        draft.plan_mut().set_items(mission.items);
                         draft.select(None);
                         cx.notices.push(
                             Notice::success(format!("Loaded {count} mission items"))
@@ -368,59 +328,39 @@ impl MissionEditor {
             return;
         }
 
-        let fallback_position =
-            plan.and_then(|system| cx.fleet.vehicle(system))
-                .and_then(|vehicle| {
-                    vehicle
-                        .position
-                        .current
-                        .as_ref()
-                        .map(|position| position.pos)
-                        .or_else(|| vehicle.home().map(|home| home.position))
-                });
         let default_altitude = cx.settings.default_waypoint_altitude_m;
-        let draft = self.drafts.entry(plan).or_default();
+        let draft = self.draft_mut(plan);
 
         match kind {
             MessageKind::AddWaypoint => {
-                // At the last planned position (to be dragged from there),
-                // else at the vehicle. Never at the vehicle's altitude: on the
-                // ground that is zero.
-                let position = draft
-                    .plan
-                    .route()
-                    .last()
-                    .map(|(_, _, position)| GeoPosition::new(position.lat, position.lon))
-                    .or(fallback_position)
-                    .unwrap_or(GeoPosition::new(0.0, 0.0));
-                let id = push_waypoint(&mut draft.plan, position, default_altitude);
+                let id = draft.mission.add_waypoint(cx.fleet, default_altitude);
                 draft.select(Some(id));
             }
             MessageKind::PlaceAt(position) => {
                 if draft.placing {
-                    let id = push_waypoint(&mut draft.plan, position, default_altitude);
+                    let id = draft.mission.place_waypoint(position, default_altitude);
                     draft.select(Some(id));
                 }
             }
             MessageKind::Remove(item) => {
-                draft.plan.remove(item);
+                draft.plan_mut().remove(item);
                 if draft.selected == Some(item) {
                     draft.select(None);
                 }
             }
             MessageKind::MoveUp(item) => {
-                draft.plan.move_up(item);
+                draft.plan_mut().move_up(item);
             }
             MessageKind::MoveDown(item) => {
-                draft.plan.move_down(item);
+                draft.plan_mut().move_down(item);
             }
             MessageKind::Select(item) => {
-                let item = item.filter(|item| draft.plan.get(*item).is_some());
+                let item = item.filter(|item| draft.plan().get(*item).is_some());
                 draft.select(item);
             }
             MessageKind::ChangeCommand(item, command) => {
                 if draft
-                    .plan
+                    .plan_mut()
                     .update(item, |current| *current = current.with_command(command))
                     && draft.selected == Some(item)
                 {
@@ -428,7 +368,7 @@ impl MissionEditor {
                 }
             }
             MessageKind::EditField(item, field, text) => {
-                draft.plan.update(item, |current| {
+                draft.plan_mut().update(item, |current| {
                     current.set_field_from_str(field, &text);
                 });
                 if draft.selected == Some(item) {
@@ -436,12 +376,12 @@ impl MissionEditor {
                 }
             }
             MessageKind::Discard => {
-                draft.plan.clear();
+                draft.plan_mut().clear();
                 draft.select(None);
             }
             MessageKind::TogglePlacing => draft.placing = !draft.placing,
             MessageKind::Drag(item, position) | MessageKind::Drop(item, position) => {
-                draft.plan.update(item, |current| {
+                draft.plan_mut().update(item, |current| {
                     current.set_lat_lon(position.lat, position.lon)
                 });
                 if draft.selected == Some(item) {
@@ -464,7 +404,12 @@ impl MissionEditor {
             return Task::none();
         };
 
-        if !confirmed && self.drafts.get(&plan).is_some_and(Draft::is_modified) {
+        if !confirmed
+            && self
+                .drafts
+                .get(&plan)
+                .is_some_and(|draft| draft.mission.is_modified())
+        {
             cx.confirm(
                 Confirmation::new(
                     "Replace your changes?",
@@ -507,7 +452,7 @@ impl MissionEditor {
         if !confirmed && armed {
             cx.confirm(
                 Confirmation::new(
-                    format!("Upload to armed {}?", vehicle_name(cx.fleet, system)),
+                    format!("Upload to armed {}?", cx.fleet.vehicle_name(system)),
                     "The vehicle is armed. If it is flying the mission, the new plan takes effect immediately.",
                     Message {
                         plan,
@@ -520,7 +465,7 @@ impl MissionEditor {
             return Task::none();
         }
 
-        let items = draft.plan.mission_items();
+        let items = draft.plan().mission_items();
         let client = cx.services.vehicle(system);
         self.transfer(system, Operation::Upload, move |progress| async move {
             client.upload_mission(items, &*progress).await.map(Some)
@@ -540,7 +485,7 @@ impl MissionEditor {
         if !confirmed {
             cx.confirm(
                 Confirmation::new(
-                    format!("Clear the mission on {}?", vehicle_name(cx.fleet, system)),
+                    format!("Clear the mission on {}?", cx.fleet.vehicle_name(system)),
                     "The vehicle's stored mission is deleted. Your plan here is kept.",
                     Message {
                         plan,
@@ -572,7 +517,7 @@ impl MissionEditor {
         if !confirmed {
             cx.confirm(
                 Confirmation::new(
-                    format!("Start the mission on {}?", vehicle_name(cx.fleet, system)),
+                    format!("Start the mission on {}?", cx.fleet.vehicle_name(system)),
                     "The vehicle starts flying its stored mission from the beginning.",
                     Message {
                         plan,
@@ -612,7 +557,7 @@ impl MissionEditor {
         let Some(index) = self
             .drafts
             .get(&plan)
-            .and_then(|draft| draft.plan.index_of(item))
+            .and_then(|draft| draft.plan().index_of(item))
         else {
             return Task::none();
         };
@@ -729,28 +674,22 @@ impl MissionEditor {
             }
         };
 
-        let draft = self.drafts.entry(plan).or_default();
+        let draft = self.draft_mut(plan);
         match operation {
-            Operation::Download => {
+            Operation::Download | Operation::Upload => {
                 let mission = mission.unwrap_or_else(OnboardMission::empty);
+                let replaced = draft.mission.transferred(&mission);
+                draft.replaced(replaced);
+
                 let count = mission.items.len();
-                draft.plan.set_items(mission.items.iter().cloned());
-                draft.select(None);
-                draft.base = Some(mission.items);
-                cx.notices.push(
-                    Notice::success(format!("Downloaded {count} mission items")).vehicle(system),
-                );
-            }
-            Operation::Upload => {
-                let mission = mission.unwrap_or_else(OnboardMission::empty);
-                let count = mission.items.len();
-                draft.sync_to(mission.items);
-                cx.notices.push(
-                    Notice::success(format!("Uploaded {count} mission items")).vehicle(system),
-                );
+                let title = match operation {
+                    Operation::Download => format!("Downloaded {count} mission items"),
+                    _ => format!("Uploaded {count} mission items"),
+                };
+                cx.notices.push(Notice::success(title).vehicle(system));
             }
             Operation::Clear => {
-                draft.base = Some(Vec::new());
+                draft.mission.cleared();
                 cx.notices
                     .push(Notice::success("Mission cleared on the vehicle").vehicle(system));
             }
@@ -775,7 +714,7 @@ impl MissionEditor {
             return Task::none();
         };
 
-        let items = draft.plan.mission_items();
+        let items = draft.plan().mission_items();
         let home = plan
             .and_then(|system| cx.fleet.vehicle(system))
             .and_then(|vehicle| {
@@ -791,16 +730,6 @@ impl MissionEditor {
             let _ = sender.try_send(MessageKind::Saved(path, result));
         })
     }
-}
-
-/// Append a waypoint at `position` at the plan's next altitude.
-fn push_waypoint(plan: &mut MissionPlan, position: GeoPosition, default_altitude: f32) -> ItemId {
-    let altitude = plan.next_altitude(default_altitude);
-    plan.push(MissionItem::waypoint(Position {
-        lat: position.lat,
-        lon: position.lon,
-        alt_m: altitude,
-    }))
 }
 
 #[cfg(test)]

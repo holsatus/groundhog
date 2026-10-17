@@ -12,11 +12,11 @@ use std::{
 
 use groundhog_logic::SystemId;
 use iced::{
-    Alignment, Element, Length, Theme, Widget,
-    widget::{button, container, row, text},
+    Alignment, Element, Length, Widget,
+    widget::{column, container, row},
 };
 
-use crate::style;
+use crate::ui::{self, Icon, Tone, style};
 
 /// How many notices the history keeps.
 const HISTORY_LEN: usize = 500;
@@ -33,6 +33,16 @@ pub enum Level {
 }
 
 impl Level {
+    /// How a notice of this level is accented.
+    pub fn tone(self) -> Tone {
+        match self {
+            Level::Error => Tone::Danger,
+            Level::Warning => Tone::Warning,
+            Level::Success => Tone::Success,
+            Level::Info => Tone::Accent,
+        }
+    }
+
     /// How long a toast of this level stays up.
     fn lifetime(self) -> Duration {
         match self {
@@ -171,34 +181,29 @@ impl Notifications {
 
     /// The toast stack, newest at the bottom.
     pub fn view(&self) -> Element<'_, Message> {
-        let toasts = self.toasts.iter().map(|toast| -> Element<'_, Message> {
+        let toasts = self.toasts.iter().map(|toast| {
             let notice = &toast.notice;
-            let level = notice.level;
+            let body = column![ui::text(&notice.title)]
+                .push(notice.detail.as_ref().map(ui::caption).boxed())
+                .spacing(ui::space::XXS)
+                .width(Length::Fill);
 
-            let mut body = iced::widget::Column::<Element<'_, Message>>::new()
-                .push(text(&notice.title).size(14).boxed())
-                .spacing(2);
-            if let Some(detail) = &notice.detail {
-                body = body.push(text(detail).size(12).boxed());
-            }
-
-            let dismiss = button(text("×").size(14))
-                .padding([0, 6])
-                .style(style::button::transparent)
-                .on_press(Message::Dismiss(toast.id));
+            let dismiss = ui::icon_button(Icon::Close)
+                .on_press(Message::Dismiss(toast.id))
+                .boxed();
 
             container(
-                row![body.width(Length::Fill), dismiss]
-                    .spacing(8)
+                row![body, dismiss]
+                    .spacing(ui::space::M)
                     .align_y(Alignment::Start),
             )
-            .padding(10)
+            .padding([ui::space::S, ui::space::M])
             .width(Length::Fixed(340.0))
-            .style(move |theme: &Theme| style::toast(theme, level))
+            .style(style::toast(notice.level.tone()))
             .boxed()
         });
 
-        iced::widget::Column::from_iter(toasts).spacing(6).boxed()
+        column(toasts).spacing(ui::space::S).boxed()
     }
 }
 
