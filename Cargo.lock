@@ -1830,29 +1830,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "groundhog"
+name = "groundhog-gui-iced"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "directories",
  "env_logger",
  "futures",
+ "groundhog-logic",
  "iced",
  "iced_runtime",
  "iced_test",
  "log",
  "mav-param",
  "mavio",
- "nalgebra",
- "num_enum",
  "rfd",
  "ron",
+ "serde",
+ "slippery",
+ "tokio",
+]
+
+[[package]]
+name = "groundhog-logic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "log",
+ "mav-param",
+ "mavio",
+ "nalgebra",
  "rust-ini",
  "serde",
  "serial2-tokio",
  "serialport",
- "slippery",
  "socket2",
  "thiserror 2.0.21",
  "tokio",

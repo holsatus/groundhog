@@ -23,10 +23,10 @@ touch the area it describes.
 ## Quick start
 
 ```sh
-cargo run                                   # the application
-cargo test                                  # every test; fast (< 1 s after building)
-cargo fmt --check                           # CI gate
-cargo clippy --all-targets -- -D warnings   # CI gate: warnings are errors
+cargo run                                              # the application
+cargo test --workspace                                 # every test; fast (< 1 s after building)
+cargo fmt --all --check                                # CI gate
+cargo clippy --workspace --all-targets -- -D warnings  # CI gate: warnings are errors
 ```
 
 CI (`.github/workflows/ci.yml`) runs exactly the last three. **A change is done
@@ -37,25 +37,38 @@ To try the application without a vehicle, run ArduPilot or PX4 SITL and add a
 UDP link listening on the port it sends to (usually 14550). In listen mode a
 UDP link serves every vehicle that sends to it.
 
-Logs go to stderr through `env_logger`, at debug level for this crate and
-error level for dependencies (see `main.rs`).
+Logs go to stderr through `env_logger`, at debug level for Groundhog's crates
+and error level for dependencies (see `groundhog-gui-iced/src/main.rs`).
 
 ---
 
 ## The architecture in one page
 
+The workspace has two crates, under `crates/`:
+
+| Crate | What it is | Depends on |
+|---|---|---|
+| `groundhog-logic` | The backend: all vehicle state and every rule about it, the middleware, the transports, and the vocabulary frontends name it with (`SystemId`, `MavlinkId`, `GeoPosition`, link descriptions) | `mavio`, `tokio` |
+| `groundhog-gui-iced` | The desktop frontend, built as the `groundhog` binary | `groundhog-logic`, `iced` |
+
+A future frontend (a CLI, say) is another crate next to `groundhog-gui-iced`,
+depending on `groundhog-logic`. Paths in this file are relative to a crate's `src/`;
+the crate is named where it is not obvious.
+
 ```
- features/  UI features: panels and map plugins          ┐
- map/       map engine: layers, hit-testing, gestures     ├─ UI thread (iced)
- app.rs     composition root, message routing, policy     ┘
+ gui-iced  features/  UI features: panels and map plugins            ┐
+           map/       map engine: layers, hit-testing, gestures       ├─ UI thread (iced)
+           app.rs     composition root, message routing, policy       ┘
     │ reads snapshots ▲            │ intents (operations)
     │                 │            ▼
- services/  fleet runtime, vehicle client, link supervisors, recording  ┐
- domain/    vehicle state, missions, parameters, firmware, calibration  │
- mavlink/   router and transactions (commands, parameters, missions)    ├─ async runtime (tokio)
- link/      transports: TCP, UDP, serial                                │
- wire/      pure codecs shared by domain and middleware                 ┘
- storage/   file formats (missions, parameters)
+ logic     services/  Backend, fleet runtime, vehicle client, links   ┐
+           domain/    vehicle state, missions, parameters, firmware,  │
+                      calibration                                     │
+           mavlink/   router and transactions (private)               ├─ async runtime (tokio)
+           link/      transports: TCP, UDP, serial (private)          │
+           wire/      pure codecs (private)                           ┘
+           storage/   file formats (missions, parameters)
+           lib.rs     SystemId and MavlinkId, shared by every layer
 ```
 
 How data moves:
@@ -71,12 +84,13 @@ How data moves:
    vehicles for liveness, and bootstraps new vehicles. At most every 33 ms it
    publishes an immutable `FleetSnapshot`, plus the `FleetEvent`s since the
    last one.
-4. **The UI** (`app.rs`, `features/`) keeps the latest snapshot and only
-   *operator* state: mission drafts, parameter edits, the selected vehicle,
-   view state. It changes vehicles only through operations on
-   `services::VehicleClient`, never by mutating state. Results that change
-   what a vehicle holds (a transferred mission, a parameter list) flow back
-   through the runtime, so every reader sees them.
+4. **The frontend** (`app.rs`, `features/`) starts one `Backend` at boot,
+   keeps the latest snapshot, and holds only *operator* state: mission
+   drafts, parameter edits, the selected vehicle, view state. It changes
+   vehicles only through operations on `services::VehicleClient`, never by
+   mutating state. Results that change what a vehicle holds (a transferred
+   mission, a parameter list) flow back through the runtime, so every reader
+   sees them.
 
 Vehicle state therefore keeps advancing when the UI is busy or stalled, and the
 UI can never observe a half-applied update.
@@ -86,24 +100,31 @@ UI can never observe a half-applied update.
 ## The layers
 
 A layer may use the layers listed below it in the diagram; never one above.
-`foundation.rs` (`MavlinkId`, the wire *address* type) is shared by all.
+`SystemId` and `MavlinkId` (logic `address.rs`, exported at the crate root)
+are shared by all.
 
 | Module | Owns | Depends on | Must not |
 |---|---|---|---|
-| `link/` | Opening transports; `LinkConfig` | `foundation` | know about MAVLink messages |
-| `wire/` | Pure codecs (parameter encodings) | `mavio` | hold state |
-| `mavlink/` | Router, duplicate suppression, transactions, outbound queues | `link`, `wire`, `mavio`, `tokio` | know about vehicles as state, or the UI |
-| `domain/` | Vehicle state and its folding, missions, parameters, firmware adapters, calibration protocols | `wire`, `mavio` types as vocabulary | do I/O, spawn tasks, use iced, call the middleware |
-| `storage/` | File formats (WPL missions; INI/`.param`/`.params` parameters) | `domain` | touch the filesystem (callers do) |
-| `services/` | Fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | use iced; expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `TransferProgress`, is fine |
-| `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
-| `features/` | One module per UI feature, plus shared UI building blocks | `services`, `domain`, `map`, `storage` | use `mavlink` (tests excepted) or each other's state |
-| `app.rs` | Wiring at boot, message routing, effects, notice policy | everything | contain feature logic |
-| `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, attitude) | iced | depend on the domain |
+| logic `link/` | Link descriptions (`LinkId`, `LinkConfig`, `LinkBuild`, public); opening transports (private) | `mavio`, `tokio` | know about MAVLink messages |
+| logic `wire/` | Pure codecs (parameter encodings, coordinate scales) | `mavio` | hold state |
+| logic `mavlink/` | Router, duplicate suppression, transactions, outbound queues | `link`, `wire`, `mavio`, `tokio` | know about vehicles as state, or the UI |
+| logic `domain/` | Vehicle state and its folding, positions (`geo`), missions, parameters, firmware adapters, calibration protocols | `wire`, `mavio` types as vocabulary | do I/O, spawn tasks, call the middleware |
+| logic `storage/` | File formats (WPL missions; INI/`.param`/`.params` parameters) | `domain` | touch the filesystem (callers do) |
+| logic `services/` | `Backend`, fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `TransferProgress` and `LinkStats`, is fine |
+| gui `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
+| gui `features/` | One module per UI feature, plus shared UI building blocks | `services`, `domain`, `map`, `storage` | each other's state |
+| gui `app.rs` | Wiring at boot, message routing, effects, notice policy | everything | contain feature logic |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, attitude) | iced | depend on the domain |
+
+The crate boundary enforces most of the table: `mavlink`, `wire` and the
+transports are private to `groundhog-logic`, so no frontend can reach the router, and
+the methods that fold messages into vehicle state are `pub(crate)`, so a
+frontend cannot advance a vehicle behind the runtime's back.
 
 The domain deliberately uses `mavio` *types* (`MavCmd`, `MavFrame`, decoded
 messages) as its vocabulary: a MAVLink GCS gains nothing from re-declaring the
-MAVLink enums. What the domain must not use is the *middleware* (`mavlink/`).
+MAVLink enums. Frontends use them too, from the same workspace dependency.
+What a frontend must not use is the *middleware*, and it cannot.
 
 ---
 
@@ -111,6 +132,25 @@ MAVLink enums. What the domain must not use is the *middleware* (`mavlink/`).
 
 Each decision below records what was chosen and why, so you can tell when a
 change would undo it.
+
+### The backend and the frontends are separate crates
+
+`groundhog-logic` holds every piece of vehicle state and every rule about it;
+`groundhog-gui-iced` holds presentation and operator state, and names vehicle
+state with the logic crate's own types. A frontend starts the backend with
+`Backend::start(BackendOptions { links, .. })`, which wires the router, the
+fleet runtime and the link supervisors together and returns the
+`BackendEvents` streams to drive. From then on it reads snapshots through
+`backend.fleet()`, manages links through `backend.links_mut()`, and starts
+recordings with `backend.record(directory)`.
+
+*Why:* a second frontend (a CLI, a headless logger) must get the same
+behaviour without re-implementing any of it, and the compiler, not review,
+should keep the UI from reaching into the middleware or mutating vehicle
+state. Anything a frontend computes from vehicle state that another frontend
+would compute the same way belongs in the logic crate: the calibration panel,
+for example, asks `Vehicle::calibration_kinds` and
+`Vehicle::calibration_controls` instead of the firmware's command builders.
 
 ### Vehicle state is owned off the UI thread
 
@@ -185,8 +225,8 @@ do now, progress, sides done, per-compass results), and a
 gives the start, confirm and cancel commands and folds the vehicle's feedback
 into the session. The session lives on the `Vehicle`, so the runtime advances
 it as feedback arrives, and the UI (`features/calibration.rs`) only starts,
-confirms and cancels through `VehicleClient` and renders what the session
-says. Finished runs are announced as `FleetEvent::CalibrationFinished`.
+confirms and cancels through `VehicleClient` and renders what the session and
+`Vehicle::calibration_controls` say. Finished runs are announced as `FleetEvent::CalibrationFinished`.
 
 ### Missions are stored as they travel on the wire
 
@@ -260,8 +300,21 @@ the link is configured not to. The status the UI shows is the supervisor's own
 - **Format and lint:** `rustfmt` defaults; clippy with `-D warnings`. Do not
   add `#[allow(...)]` to silence a lint; fix the cause. The vendored
   `widget/pane_grid` is the only exception.
-- **No dead code.** This is a binary crate, so an unused `pub` item is a
-  warning. Delete it, or gate test-only helpers with `#[cfg(test)]`.
+- **No dead code.** Delete unused items, or gate test-only helpers with
+  `#[cfg(test)]`. The frontend is a binary crate, so the compiler finds them
+  there. In the library crates it only finds unused items that are not
+  exported, so keep their public API to what a frontend needs: give
+  backend-internal items `pub(crate)` (which the compiler checks again), and
+  remove a `pub` item when the last frontend use goes.
+- **Dependencies:** one crate's dependency goes in that crate's manifest.
+  Only a dependency more than one crate uses goes in the root's
+  `[workspace.dependencies]`, so they agree on its version. iced, in
+  particular, is a dependency of `groundhog-gui-iced` alone.
+- **Visibility is the seam.** The middleware, transports and wire codecs are
+  private modules of `groundhog-logic`, and everything that advances vehicle
+  state (`handle_message`, the `observe_*` folds, session updates) is
+  `pub(crate)`. A frontend that needs one of these needs a new backend
+  operation instead.
 - **Panics:** none in non-test code, except `expect("why this holds")` on a
   proven invariant.
 - **Units in names:** `alt_m`, `hold_s`, `yaw_deg`. Convert units exactly:
@@ -283,7 +336,7 @@ the link is configured not to. The status the UI shows is the supervisor's own
 
 ### The UI (iced)
 
-This crate tracks iced's git `master`, where some APIs differ from the released
+The frontend tracks iced's git `master`, where some APIs differ from the released
 versions:
 
 - Convert widgets to `Element` with `.boxed()` (from `iced::Widget`, which must
@@ -324,21 +377,23 @@ call `finish(&key, ticket)` first and drop the result if it returns `false`.
 
 ## Testing
 
-All tests run with `cargo test`; most finish in microseconds. Every bug fix
+All tests run with `cargo test --workspace`; most finish in microseconds. Every bug fix
 comes with a test that fails without the fix.
 
 | What | Where | How |
 |---|---|---|
-| Middleware transactions | `mavlink/tests.rs` | `MockVehicle` over `tokio::io::duplex`; script the vehicle's side |
-| Router internals | `mavlink/router.rs` tests | call `handle_frame` with built frames; inspect the route table |
-| End to end | `services/tests.rs` | real router, runtime and `VehicleClient` against a mock vehicle; `until(...)` waits for a snapshot condition |
-| Domain | next to the code | plain unit tests; fold messages with `Fleet::observe` / `Vehicle::handle_message` |
-| Map gestures | `map/overlay.rs` tests | drive the canvas `Program` with synthetic mouse and keyboard events |
-| Widget composition | `map/mod.rs` tests | `iced_test::Simulator` delivers real events through the composed widgets; assert on event status and messages |
-| Features | `features/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
+| Middleware transactions | logic `mavlink/tests.rs` | `MockVehicle` over `tokio::io::duplex`; script the vehicle's side |
+| Router internals | logic `mavlink/router.rs` tests | call `handle_frame` with built frames; inspect the route table |
+| End to end | logic `services/tests.rs` | real router, runtime and `VehicleClient` against a mock vehicle; `until(...)` waits for a snapshot condition |
+| Domain | logic, next to the code | plain unit tests; fold messages with `Fleet::observe` / `Vehicle::handle_message` |
+| Map gestures | gui `map/overlay.rs` tests | drive the canvas `Program` with synthetic mouse and keyboard events |
+| Widget composition | gui `map/mod.rs` tests | `iced_test::Simulator` delivers real events through the composed widgets; assert on event status and messages |
+| Features | gui `features/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
 
-Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and spawn the
-runtime with `RuntimeOptions { bootstrap: false }`. To simulate an operation's
+Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
+backend with `BackendOptions { bootstrap: false, .. }`; the snapshots they
+hand to the feature come from a `Fleet` they fold messages into with
+`Fleet::observe`. To simulate an operation's
 result, take its ticket with `Operations::ticket_of` (test-only).
 
 Tests must not touch the user's files. Write into a temporary directory, or
