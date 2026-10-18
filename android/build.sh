@@ -61,7 +61,9 @@ STAGING="$OUT/staging"
 
 cd "$ROOT"
 echo "==> building $LIB for $TARGET (release)"
-cargo build --release --lib -p groundhog-gui-iced --target "$TARGET"
+# The manifest builds the library as an `rlib` only; the shared object
+# Android loads is asked for here.
+cargo rustc --release --lib -p groundhog-gui-iced --target "$TARGET" --crate-type cdylib
 
 echo "==> staging"
 rm -rf "$STAGING" "$OUT/app-unsigned.apk" "$OUT/app-aligned.apk" "$OUT/groundhog-debug.apk"

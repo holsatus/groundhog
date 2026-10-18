@@ -48,5 +48,7 @@ pub fn run() -> iced::Result {
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     platform::android::init(app.clone());
-    let _ = application().run_android(app);
+    if let Err(error) = application().run_android(app) {
+        log::error!("The application stopped: {error}");
+    }
 }

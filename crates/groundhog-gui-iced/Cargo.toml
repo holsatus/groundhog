@@ -6,9 +6,11 @@ edition.workspace = true
 # A library next to the binary so Android can load the application as a
 # `cdylib`: Android has no `main`, it calls the exported `android_main` from
 # `libgroundhog_gui_iced.so`. The binary remains the desktop entry point.
+# The library is an `rlib` here, so desktop builds do not link a shared
+# object nobody loads; `android/build.sh` asks for the `cdylib` with
+# `cargo rustc --crate-type cdylib`.
 [lib]
 name = "groundhog_gui_iced"
-crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "groundhog"

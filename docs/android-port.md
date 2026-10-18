@@ -109,11 +109,16 @@ The Android entry point lives in the frontend library:
 ```rust
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "C" fn android_main(app: android_activity::AndroidApp) {
+pub fn android_main(app: android_activity::AndroidApp) {
     platform::android::init(app.clone());
-    let _ = application().run_android(app);
+    if let Err(error) = application().run_android(app) {
+        log::error!("The application stopped: {error}");
+    }
 }
 ```
+
+It keeps the Rust ABI: `android-activity`'s glue declares it as
+`extern "Rust" { fn android_main(app: AndroidApp); }`.
 
 `android-activity = { features = ["native-activity"] }` is added as a direct
 dependency on Android. This is what turns on winit's Android backend: winit's
@@ -124,7 +129,7 @@ features across the graph.
 
 | Area | Change |
 |---|---|
-| Crates | `groundhog-gui-iced` gains a `cdylib` library next to its binary; all modules move from `main.rs` into `lib.rs` |
+| Crates | `groundhog-gui-iced` gains a library next to its binary; all modules move from `main.rs` into `lib.rs`. It is an `rlib` in the manifest, and `build.sh` asks for the `cdylib` (`cargo rustc --crate-type cdylib`), so desktop builds link no shared object |
 | Entry | `src/main.rs` calls `groundhog_gui_iced::run()`; `android_main` starts the same `Application` through `run_android` |
 | Paths | new `platform` module: desktop uses `directories`, Android uses `AndroidApp::internal_data_path()` (`<files>/config/config.ron`, `<files>/data/tlogs`) |
 | Logging | desktop keeps `env_logger`; Android uses `android_logger` (`adb logcat -s groundhog`) plus a panic hook, so a panic is logged instead of vanishing into stderr |
@@ -132,7 +137,7 @@ features across the graph.
 | Fonts | the iced fork loads `/system/fonts`, which Android needs: cosmic-text finds fonts through fontconfig, which Android does not have |
 | Tiles | the `slippery` fork gives Android a `rustls` client with Mozilla's bundled roots, because `reqwest`'s default Android verifier panics without a JVM-side component |
 | Lifecycle | the iced fork creates the window on `Resumed` and recreates the wgpu surface there, because Android destroys the native window when the app is backgrounded |
-| Packaging | `android/` holds the manifest and a Gradle-free build script: `cargo build`, `aapt2 link`, `zip`, `zipalign`, `apksigner` |
+| Packaging | `android/` holds the manifest and a Gradle-free build script: `cargo rustc`, `aapt2 link`, `zip`, `zipalign`, `apksigner` |
 
 Explicitly **not** in this pass: touch behaviour for the app's own widgets,
 phone layout, insets/soft-keyboard polish, USB serial, SAF import/export,
@@ -157,7 +162,8 @@ adb logcat -s groundhog
 ```
 
 The script sets the target compiler/linker from the NDK, builds only the
-library (`cargo build --release --lib -p groundhog-gui-iced`), links the
+library as a shared object
+(`cargo rustc --release --lib -p groundhog-gui-iced --crate-type cdylib`), links the
 manifest with `aapt2`, adds `lib/arm64-v8a/libgroundhog_gui_iced.so`
 uncompressed, aligns it with `zipalign -P 16` (16 KiB pages, so it also works
 on Android 15+ devices) and signs with a generated debug keystore.
@@ -179,9 +185,12 @@ reads `WindowInsets.getInsets(Type)` for the bars, the cutout and the IME;
 older releases use the deprecated `getSystemWindowInset*` methods.
 
 A Java `View.OnApplyWindowInsetsListener` would push changes, but that needs a
-compiled activity subclass, so the insets are polled every 250 ms; the
+compiled activity subclass, so the insets are polled every 150 ms; the
 subscription only publishes a message when the values change, so an idle
-application is not redrawn (`dumpsys cpuinfo` reports 0% while idle).
+application is not redrawn (`dumpsys cpuinfo` reports 0% while idle). Each
+read is posted to the Java main thread, which owns the view hierarchy, and
+runs in its own JNI local frame, because that thread is never detached and
+would otherwise keep every local reference.
 
 The status- and navigation-bar icon colour follows the app theme through
 `WindowInsetsController.setSystemBarsAppearance`, posted to the Java main
@@ -245,7 +254,7 @@ the drag source.
 
 ## Verification
 
-1. `cargo build --release --lib -p groundhog-gui-iced --target aarch64-linux-android`
+1. `cargo rustc --release --lib -p groundhog-gui-iced --target aarch64-linux-android --crate-type cdylib`
    succeeds. ✅
 2. `android/out/groundhog-debug.apk` passes `apksigner verify` and contains
    `lib/arm64-v8a/libgroundhog_gui_iced.so` plus a binary manifest. ✅

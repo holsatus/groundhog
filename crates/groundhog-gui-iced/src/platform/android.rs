@@ -36,11 +36,14 @@ static APP: OnceLock<AndroidApp> = OnceLock::new();
 /// keyboard, a rotation or a system-bar change is to ask again. The
 /// subscription below only publishes a message when the values actually
 /// change, so an idle application does not redraw.
-const INSETS_POLL: Duration = Duration::from_millis(250);
+const INSETS_POLL: Duration = Duration::from_millis(150);
 
 /// Whether reading the insets has already failed, so a broken JNI call does
 /// not log on every poll.
 static INSETS_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// The insets last read on the Java main thread.
+static READ_INSETS: Mutex<Insets> = Mutex::new(Insets::ZERO);
 
 /// The insets last published, so only a change becomes a message.
 static LAST_INSETS: Mutex<Insets> = Mutex::new(Insets::ZERO);
@@ -86,35 +89,46 @@ pub fn data_dir() -> Option<PathBuf> {
     APP.get()?.internal_data_path().map(|dir| dir.join("data"))
 }
 
-/// The window insets in logical pixels.
+/// The window insets in logical pixels, as last read.
+///
+/// Reading them is posted to the Java main thread, which owns the view
+/// hierarchy (`getRootWindowInsets` computes and caches on first use, so it is
+/// not safe to call from another thread); this returns what the last read
+/// found, and asks for a new one.
 pub fn insets() -> Insets {
     let Some(app) = APP.get() else {
         return Insets::ZERO;
     };
 
-    match read_insets(app) {
-        Ok(physical) => physical.to_logical(scale(app)),
-        Err(error) => {
-            if !INSETS_FAILED.swap(true, Ordering::Relaxed) {
-                log::warn!("Could not read the window insets: {error}");
+    let posted = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        let insets = match read_insets(&posted) {
+            Ok(physical) => physical.to_logical(scale(&posted)),
+            Err(error) => {
+                if !INSETS_FAILED.swap(true, Ordering::Relaxed) {
+                    log::warn!("Could not read the window insets: {error}");
+                }
+                Insets::ZERO
             }
-            Insets::ZERO
-        }
-    }
+        };
+        *lock(&READ_INSETS) = insets;
+    }));
+
+    *lock(&READ_INSETS)
 }
 
 /// Every change of the window insets.
 ///
-/// The poll itself is cheap (one JNI query); only a change becomes a message,
-/// so an idle application is not redrawn. The last value is process state
-/// rather than a captured variable because iced's `map` and `filter_map`
-/// closures may not capture.
+/// The poll itself is cheap (one JNI query on the Java main thread); only a
+/// change becomes a message, so an idle application is not redrawn. A change
+/// shows at most two polls after it happens, because each poll publishes the
+/// previous poll's read. The last value is process state rather than a
+/// captured variable because iced's `map` and `filter_map` closures may not
+/// capture.
 pub fn insets_subscription() -> iced::Subscription<Insets> {
     iced::time::every(INSETS_POLL).filter_map(|_| {
         let now = insets();
-        let mut last = LAST_INSETS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut last = lock(&LAST_INSETS);
 
         if *last == now {
             None
@@ -123,6 +137,13 @@ pub fn insets_subscription() -> iced::Subscription<Insets> {
             Some(now)
         }
     })
+}
+
+/// `mutex`, whether or not a panic poisoned it: the insets are plain values.
+fn lock(mutex: &Mutex<Insets>) -> std::sync::MutexGuard<'_, Insets> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Chooses light or dark status- and navigation-bar icons to match the
@@ -163,26 +184,30 @@ fn apply_system_bars(app: &AndroidApp, dark: bool) -> jni::errors::Result<()> {
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
 
-    let window = env
-        .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
-        .l()?;
-    let controller = env
-        .call_method(
-            &window,
-            "getInsetsController",
-            "()Landroid/view/WindowInsetsController;",
-            &[],
-        )?
-        .l()?;
+    // The Java main thread is never detached, so its local references live
+    // until the frame they were made in is popped.
+    env.with_local_frame(8, |env| {
+        let window = env
+            .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .l()?;
+        let controller = env
+            .call_method(
+                &window,
+                "getInsetsController",
+                "()Landroid/view/WindowInsetsController;",
+                &[],
+            )?
+            .l()?;
 
-    env.call_method(
-        &controller,
-        "setSystemBarsAppearance",
-        "(II)V",
-        &[JValue::Int(appearance), JValue::Int(LIGHT_BARS)],
-    )?;
+        env.call_method(
+            &controller,
+            "setSystemBarsAppearance",
+            "(II)V",
+            &[JValue::Int(appearance), JValue::Int(LIGHT_BARS)],
+        )?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// The density the system uses, as a scale factor: 160 dpi is 1.0.
@@ -215,9 +240,7 @@ impl PhysicalInsets {
 
 /// Reads `Window.getDecorView().getRootWindowInsets()` through the JVM.
 ///
-/// This runs on the subscription's thread, not the UI thread, but every call
-/// it makes only reads state (`getWindow`, `getDecorView`,
-/// `getRootWindowInsets`, `getInsets`), which Android does not guard.
+/// Must run on the Java main thread, which owns the view hierarchy.
 fn read_insets(app: &AndroidApp) -> jni::errors::Result<PhysicalInsets> {
     // SAFETY: the VM and the activity belong to the app that `android_main`
     // received, and outlive the call.
@@ -225,8 +248,17 @@ fn read_insets(app: &AndroidApp) -> jni::errors::Result<PhysicalInsets> {
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
 
+    // The Java main thread is never detached, so its local references live
+    // until the frame they were made in is popped.
+    env.with_local_frame(16, |env| read_insets_in(env, &activity))
+}
+
+fn read_insets_in(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject<'_>,
+) -> jni::errors::Result<PhysicalInsets> {
     let window = env
-        .call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?
+        .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
         .l()?;
     let decor = env
         .call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?
