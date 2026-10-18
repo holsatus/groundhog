@@ -29,7 +29,7 @@ use crate::{
 };
 
 /// Space between panes, in logical pixels.
-pub const SPACING: f32 = ui::space::S + 1.0;
+pub const SPACING: f32 = ui::space::S;
 /// The smallest a pane gets when the operator resizes its neighbours.
 pub const MIN_PANE: f32 = 120.0;
 /// The smallest the map gets, along either axis, when the window shrinks.

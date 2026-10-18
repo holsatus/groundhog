@@ -1929,11 +1929,11 @@ pub fn default(theme: &Theme) -> Style {
         },
         hovered_split: Line {
             color: palette.primary.base.color,
-            width: 3.0,
+            width: 2.0,
         },
         picked_split: Line {
             color: palette.primary.strong.color,
-            width: 3.0,
+            width: 2.0,
         },
     }
 }

@@ -28,6 +28,16 @@ pub fn mono<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
 
 /// A MAVLink severity's name, in its tone.
 pub fn severity<'a>(severity: MavSeverity) -> Text<'a> {
+    /* do this instead?
+       [EMRG] - red
+       [ALRT] - red
+       [CRIT] - red
+       [ERRO] - red
+       [WARN] - yellow
+       [NOTC] - yellow
+       [INFO] - green
+       [DEBG] - grey
+    */
     text(format!("{severity:?}")).tone(Tone::of_severity(severity))
 }
 

@@ -3,7 +3,7 @@
 
 use iced::{
     Alignment, Element, Length, Padding, Widget,
-    widget::{Space, button, column, container, mouse_area, row, rule, sensor, stack, tooltip},
+    widget::{Space, button, column, container, mouse_area, row, sensor, stack, tooltip},
 };
 
 use super::{Application, Message};
@@ -129,13 +129,8 @@ impl Application {
                     .title_bar(pane_grid::TitleBar::new(empty).padding(0));
             }
 
-            // Every other pane is a rounded card, its header split off by a
-            // rule.
-            let body = column![
-                rule::horizontal(style::PANE_BORDER_WIDTH).style(style::pane_divider),
-                self.pane_body(*panel),
-            ]
-            .height(Length::Fill);
+            // Every other pane is a rounded card, its header split off by a rule.
+            let body = self.pane_body(*panel);
 
             let layout = |message| Message::Layout(message);
             let size = if is_maximized {
@@ -187,7 +182,7 @@ impl Application {
         .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
         .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
         .drop_target(|dragged, cursor, regions| self.layout.drop_hint(dragged, cursor, regions))
-        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
+        .on_resize(8, |event| Message::Layout(layout::Message::Resized(event)));
 
         if let Some(panel) = self.rail_drag {
             grid = grid.incoming(
