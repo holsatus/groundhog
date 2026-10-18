@@ -86,8 +86,9 @@ pub struct Application {
     /// The scale the settings' slider is being dragged to, applied on
     /// release.
     scale_preview: Option<f32>,
-    /// Whether the window was put in full-screen mode for the video.
-    full_screen: bool,
+    /// The window's full screen: the application's own (F11), apart from
+    /// the video's.
+    full_screen: FullScreen,
     /// The floating shell's sheet.
     floating: Floating,
     /// The window's size, once measured; it decides the shell.
@@ -137,6 +138,8 @@ pub enum Message {
     /// The platform's chrome moved, appeared or disappeared (the status and
     /// navigation bars, the soft keyboard, a rotation).
     Insets(Insets),
+    /// Put the whole application in full screen, or take it out (F11).
+    ToggleFullScreen,
 }
 
 /// Idle time after the last layout change before the layout is persisted.
@@ -188,7 +191,7 @@ impl Application {
             insets: platform::insets(),
             system_bars: None,
             scale_preview: None,
-            full_screen: false,
+            full_screen: FullScreen::default(),
             floating: Floating::default(),
             window: None,
         };
@@ -246,6 +249,10 @@ impl Application {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ToggleFullScreen => {
+                self.full_screen.toggle_app();
+                self.sync_full_screen()
+            }
             Message::Insets(insets) => {
                 self.insets = insets;
                 self.sync_system_bars();
@@ -593,21 +600,15 @@ impl Application {
         }
     }
 
-    /// Puts the window in full-screen mode while the video fills the screen,
-    /// and back when it no longer does (left, or its stream stopped).
+    /// Puts the window in the mode the application and the video ask for,
+    /// if it is not in it already.
     fn sync_full_screen(&mut self) -> Task<Message> {
-        let full_screen = self.video.is_full_screen();
-        if full_screen == self.full_screen {
-            return Task::none();
+        match self.full_screen.sync(self.video.is_full_screen()) {
+            Some(mode) => {
+                iced::window::latest().and_then(move |window| iced::window::set_mode(window, mode))
+            }
+            None => Task::none(),
         }
-        self.full_screen = full_screen;
-
-        let mode = if full_screen {
-            iced::window::Mode::Fullscreen
-        } else {
-            iced::window::Mode::Windowed
-        };
-        iced::window::latest().and_then(move |window| iced::window::set_mode(window, mode))
     }
 
     /// Matches the status- and navigation-bar icons to the theme: dark icons
@@ -805,6 +806,11 @@ impl Application {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 Some(Message::Modifiers(modifiers))
             }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::F11),
+                repeat: false,
+                ..
+            }) => Some(Message::ToggleFullScreen),
             _ => None,
         });
 
@@ -856,7 +862,83 @@ impl Application {
     }
 }
 
+/// The window's full screen. The operator asks for it twice over: for the
+/// whole application (F11), and for the video (its own button, left with
+/// Escape). The window is full screen while either asks, so leaving one
+/// leaves the other as it was: the video, left, does not take a full-screen
+/// application out of full screen.
+#[derive(Debug, Default)]
+struct FullScreen {
+    /// Whether the application is full screen (F11).
+    app: bool,
+    /// Whether the window is, as last set.
+    window: bool,
+}
+
+impl FullScreen {
+    fn toggle_app(&mut self) {
+        self.app = !self.app;
+    }
+
+    /// The mode the window must change to, now that the video is full
+    /// screen or not, if it must change.
+    fn sync(&mut self, video: bool) -> Option<iced::window::Mode> {
+        let full_screen = self.app || video;
+        if full_screen == self.window {
+            return None;
+        }
+        self.window = full_screen;
+        Some(if full_screen {
+            iced::window::Mode::Fullscreen
+        } else {
+            iced::window::Mode::Windowed
+        })
+    }
+}
+
 mod floating;
 #[cfg(test)]
 mod gallery;
 mod tiled;
+
+#[cfg(test)]
+mod tests {
+    use super::FullScreen;
+    use iced::window::Mode;
+
+    #[test]
+    fn leaving_the_video_keeps_the_application_full_screen() {
+        let mut full_screen = FullScreen::default();
+
+        // F11, then the video's full screen, then leaving the video: the
+        // window goes full screen once, and stays.
+        full_screen.toggle_app();
+        assert_eq!(full_screen.sync(false), Some(Mode::Fullscreen));
+        assert_eq!(full_screen.sync(true), None);
+        assert_eq!(full_screen.sync(false), None, "still the application's");
+
+        // F11 again, outside the video: windowed.
+        full_screen.toggle_app();
+        assert_eq!(full_screen.sync(false), Some(Mode::Windowed));
+    }
+
+    #[test]
+    fn the_video_alone_comes_and_goes() {
+        let mut full_screen = FullScreen::default();
+
+        assert_eq!(full_screen.sync(true), Some(Mode::Fullscreen));
+        assert_eq!(full_screen.sync(false), Some(Mode::Windowed));
+    }
+
+    #[test]
+    fn f11_inside_the_video_is_kept_for_after_it() {
+        let mut full_screen = FullScreen::default();
+        assert_eq!(full_screen.sync(true), Some(Mode::Fullscreen));
+
+        // F11 while the video fills the screen changes nothing yet...
+        full_screen.toggle_app();
+        assert_eq!(full_screen.sync(true), None);
+        // ...and leaving the video leaves the application full screen.
+        assert_eq!(full_screen.sync(false), None);
+    }
+}

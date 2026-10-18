@@ -212,7 +212,9 @@ until the desktop video works.
    stopping float over its corner, and the details (URI, size, decoder,
    latency) show on hovering the state or pressing it. The chip also puts
    the picture alone in a full-screen window (the notices still show
-   over it), left with Escape, back, or its own button. Fly
+   over it), left with Escape, back, or its own button. F11 puts the whole
+   application in full screen; the two are kept apart, so leaving the
+   video does not take the application out of its full screen. Fly
    shows it in the map's corner, a tap swapping the two. The source, the
    switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.
