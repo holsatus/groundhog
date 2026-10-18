@@ -22,7 +22,7 @@ use std::{
 
 use groundhog_logic::domain::geo::GeoPosition;
 use iced::{
-    Point, Rectangle, Renderer, Theme, keyboard, mouse, touch,
+    Padding, Point, Rectangle, Renderer, Theme, keyboard, mouse, touch,
     widget::canvas::{self, Action, Event, Frame, Geometry},
 };
 use slippery::Viewpoint;
@@ -71,15 +71,25 @@ impl Source {
 pub(super) struct Overlay<'a, Message> {
     layers: Vec<Box<dyn MapLayer<Message> + 'a>>,
     viewpoint: Viewpoint,
+    /// How much of each edge floats under something else.
+    covered: Padding,
 }
 
 impl<'a, Message> Overlay<'a, Message> {
-    pub fn new(layers: Vec<Box<dyn MapLayer<Message> + 'a>>, viewpoint: Viewpoint) -> Self {
-        Self { layers, viewpoint }
+    pub fn new(
+        layers: Vec<Box<dyn MapLayer<Message> + 'a>>,
+        viewpoint: Viewpoint,
+        covered: Padding,
+    ) -> Self {
+        Self {
+            layers,
+            viewpoint,
+            covered,
+        }
     }
 
     fn view(&self, bounds: Rectangle) -> MapView {
-        MapView::new(self.viewpoint, bounds.size())
+        MapView::new(self.viewpoint, bounds.size(), self.covered)
     }
 
     fn layer(&self, id: LayerId) -> Option<&(dyn MapLayer<Message> + 'a)> {
@@ -601,6 +611,7 @@ mod tests {
                 position: Geodetic::new(8.5, 47.4).as_mercator(),
                 zoom: Zoom::try_from(12.0).unwrap(),
             },
+            Padding::ZERO,
         )
     }
 

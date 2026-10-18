@@ -38,7 +38,11 @@ use mavio::{
 };
 
 use super::*;
-use crate::{features::mission::MessageKind, ui::theme::ThemeMode};
+use crate::{
+    features::mission::MessageKind,
+    shell::ShellMode,
+    ui::{style, theme::ThemeMode},
+};
 
 const SYSTEM: SystemId = SystemId(1);
 const AUTOPILOT: MavlinkId = MavlinkId {
@@ -477,6 +481,75 @@ async fn gallery() {
             .style(style::pane)
             .boxed(),
     );
+
+    // The floating shell on a phone, with the system bars over the map: in
+    // portrait with nothing open, with a sheet, and with the sheet expanded;
+    // in landscape with a sheet beside the map.
+    let _ = app.update(Message::Settings(settings_panel::Message::Shell(
+        ShellMode::Floating,
+    )));
+    let _ = app.update(Message::Insets(Insets {
+        top: 24.0,
+        right: 0.0,
+        bottom: 24.0,
+        left: 0.0,
+    }));
+    let portrait = Size::new(412.0, 915.0);
+    let landscape = Size::new(915.0, 412.0);
+    let floating = |message| Message::Floating(message);
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let _ = app.update(Message::Settings(settings_panel::Message::Theme(mode)));
+        let theme = app.theme();
+        let _ = app.update(Message::Window(portrait));
+
+        gallery.render(
+            &format!("floating-map-{suffix}"),
+            portrait,
+            &theme,
+            app.view().boxed(),
+        );
+        let _ = app.update(floating(shell::Message::Select(layout::Panel::Mission)));
+        gallery.render(
+            &format!("floating-sheet-{suffix}"),
+            portrait,
+            &theme,
+            app.view().boxed(),
+        );
+        let _ = app.update(floating(shell::Message::ToggleExpanded));
+        gallery.render(
+            &format!("floating-expanded-{suffix}"),
+            portrait,
+            &theme,
+            app.view().boxed(),
+        );
+        let _ = app.update(floating(shell::Message::ToggleExpanded));
+
+        let _ = app.update(Message::Window(landscape));
+        let _ = app.update(Message::Insets(Insets {
+            top: 24.0,
+            right: 0.0,
+            bottom: 16.0,
+            left: 32.0,
+        }));
+        gallery.render(
+            &format!("floating-landscape-{suffix}"),
+            landscape,
+            &theme,
+            app.view().boxed(),
+        );
+        let _ = app.update(floating(shell::Message::Close));
+        let _ = app.update(Message::Insets(Insets {
+            top: 24.0,
+            right: 0.0,
+            bottom: 24.0,
+            left: 0.0,
+        }));
+    }
+    let _ = app.update(Message::Settings(settings_panel::Message::Shell(
+        ShellMode::Automatic,
+    )));
+    let _ = app.update(Message::Insets(Insets::ZERO));
+    app.window = None;
 
     // A pending confirmation, over the whole window.
     let _ = app.update(Message::Settings(settings_panel::Message::Theme(

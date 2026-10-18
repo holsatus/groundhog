@@ -6,7 +6,7 @@ use groundhog_logic::{
     persist::{SaveQueue, read_or_set_aside, write_atomic},
 };
 
-use crate::{layout::Workspace, ui::theme::ThemeMode};
+use crate::{layout::Workspace, shell::ShellMode, ui::theme::ThemeMode};
 
 /// Current on-disk configuration schema version.
 const CONFIG_VERSION: u32 = 2;
@@ -21,6 +21,8 @@ fn default_config_version() -> u32 {
 pub struct Settings {
     /// Which palette to use.
     pub theme: ThemeMode,
+    /// How the window is laid out.
+    pub shell: ShellMode,
     /// How much larger than the platform's own scale the interface is drawn.
     pub scale_factor: f32,
     /// Record every received frame to a `.tlog` file per session.
@@ -34,6 +36,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
+            shell: ShellMode::default(),
             scale_factor: 1.0,
             record_telemetry: true,
             default_waypoint_altitude_m:

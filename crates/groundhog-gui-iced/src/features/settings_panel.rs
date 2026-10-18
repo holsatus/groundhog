@@ -15,6 +15,7 @@ use iced::{
 
 use crate::{
     config::Settings,
+    shell::ShellMode,
     ui::{self, TextExt, Tone, theme::ThemeMode},
 };
 
@@ -22,6 +23,8 @@ use crate::{
 pub enum Message {
     /// Switch the application palette.
     Theme(ThemeMode),
+    /// Choose how the window is laid out.
+    Shell(ShellMode),
     /// The scale slider moved; the scale is previewed on the slider only.
     PreviewScaleFactor(f32),
     /// The scale slider was released: apply the previewed scale.
@@ -50,6 +53,11 @@ pub fn view<'a>(
                 "Theme",
                 ui::pick_list(Some(settings.theme), ThemeMode::ALL, ThemeMode::to_string)
                     .on_select(Message::Theme),
+            ),
+            ui::field(
+                "Layout",
+                ui::pick_list(Some(settings.shell), ShellMode::ALL, ShellMode::to_string)
+                    .on_select(Message::Shell),
             ),
             ui::field(
                 "Scale",

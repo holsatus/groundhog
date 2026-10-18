@@ -396,7 +396,8 @@ impl MapLayer<Message> for Hud<'_> {
     fn draw(&self, frame: &mut MapFrame<'_>, _interaction: Interaction) {
         if let Some(current) = &self.vehicle.attitude.current {
             let (roll, pitch, yaw) = current.attitude.euler_angles();
-            attitude::overlay(frame.frame(), roll, pitch, yaw, &self.palette);
+            let area = frame.view().visible();
+            attitude::overlay(frame.frame(), area, roll, pitch, yaw, &self.palette);
         }
     }
 
@@ -407,7 +408,7 @@ impl MapLayer<Message> for Hud<'_> {
             return Vec::new();
         }
 
-        let (center, radius) = attitude::placement(view.size());
+        let (center, radius) = attitude::placement(view.visible());
         vec![Handle {
             id: HandleId(0),
             anchor: Anchor::Screen(center),

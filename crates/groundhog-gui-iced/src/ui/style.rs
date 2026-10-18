@@ -167,6 +167,36 @@ pub fn pane(theme: &Theme) -> container::Style {
     }
 }
 
+/// A pane floating over the map (a sheet, the navigation bar): a regular
+/// pane, lifted off the tiles by a shadow.
+pub fn floating(theme: &Theme) -> container::Style {
+    container::Style {
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.3),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 10.0,
+        },
+        ..pane(theme)
+    }
+}
+
+/// A wash of the window background under the platform's status bar, where
+/// the map shows through it, so the bar's icons stay legible over any tile.
+pub fn scrim(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(
+            theme
+                .palette()
+                .background
+                .base
+                .color
+                .scale_alpha(0.7)
+                .into(),
+        ),
+        ..container::Style::default()
+    }
+}
+
 /// The header of a pane, with rounded top corners so it sits flush inside
 /// the pane border. The focused pane's header is a shade brighter.
 pub fn title_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {

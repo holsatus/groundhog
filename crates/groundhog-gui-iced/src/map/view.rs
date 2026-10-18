@@ -1,7 +1,7 @@
 //! What a layer sees of the map: the projection, and a frame to draw into.
 
 use iced::{
-    Color, Font, Pixels, Point, Rectangle, Size,
+    Color, Font, Padding, Pixels, Point, Rectangle, Size,
     advanced::text::Alignment as TextAlignment,
     alignment::Vertical,
     widget::canvas::{Fill, Frame, Path, Stroke, Text},
@@ -15,15 +15,17 @@ use groundhog_logic::domain::geo::GeoPosition;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapView {
     projector: Projector,
+    visible: Rectangle,
 }
 
 impl MapView {
-    pub(super) fn new(viewpoint: Viewpoint, size: Size) -> Self {
+    /// The view of an overlay of `size`, `covered` along its edges by what
+    /// floats over the map.
+    pub(super) fn new(viewpoint: Viewpoint, size: Size, covered: Padding) -> Self {
+        let bounds = Rectangle::with_size(size);
         Self {
-            projector: Projector {
-                viewpoint,
-                bounds: Rectangle::with_size(size),
-            },
+            projector: Projector { viewpoint, bounds },
+            visible: visible(bounds, covered),
         }
     }
 
@@ -36,11 +38,18 @@ impl MapView {
                 zoom: slippery::Zoom::try_from(14.0).expect("a valid zoom"),
             },
             Size::new(800.0, 600.0),
+            Padding::ZERO,
         )
     }
 
     pub fn size(&self) -> Size {
         self.projector.bounds.size()
+    }
+
+    /// The part of the overlay nothing floats over. Layers anchored to the
+    /// screen (an instrument in a corner) keep to it.
+    pub fn visible(&self) -> Rectangle {
+        self.visible
     }
 
     /// The zoom level (slippy-map convention, larger is closer).
@@ -173,6 +182,40 @@ impl<'a> MapFrame<'a> {
     }
 }
 
+/// `bounds` less `covered`, never less than nothing.
+fn visible(bounds: Rectangle, covered: Padding) -> Rectangle {
+    Rectangle {
+        x: bounds.x + covered.left,
+        y: bounds.y + covered.top,
+        width: (bounds.width - covered.left - covered.right).max(0.0),
+        height: (bounds.height - covered.top - covered.bottom).max(0.0),
+    }
+}
+
+/// Where the map must look for `position` to appear in the middle of what
+/// is visible of it, when `covered` of its edges is hidden.
+pub(super) fn centred_in_visible(
+    viewpoint: Viewpoint,
+    position: Mercator,
+    covered: Padding,
+) -> Mercator {
+    // The projection is linear around the bounds' centre, so any bounds do:
+    // with `position` at the centre, the point as far from it as the visible
+    // centre is from the whole centre, the other way, is where to look.
+    let projector = Projector {
+        viewpoint: Viewpoint {
+            position,
+            zoom: viewpoint.zoom,
+        },
+        bounds: Rectangle::with_size(Size::ZERO),
+    };
+    let shift = iced::Vector::new(
+        (covered.left - covered.right) / 2.0,
+        (covered.top - covered.bottom) / 2.0,
+    );
+    projector.screen_space_into_mercator(Point::ORIGIN - shift)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +228,35 @@ mod tests {
                 zoom: Zoom::try_from(12.0).unwrap(),
             },
             Size::new(800.0, 600.0),
+            Padding::ZERO,
         )
+    }
+
+    #[test]
+    fn a_position_centred_in_the_visible_part_appears_there() {
+        let position = GeoPosition::new(47.4, 8.5);
+        let covered = Padding {
+            top: 40.0,
+            right: 0.0,
+            bottom: 300.0,
+            left: 100.0,
+        };
+        let viewpoint = Viewpoint {
+            position: centred_in_visible(view().projector.viewpoint, mercator(position), covered),
+            zoom: Zoom::try_from(12.0).unwrap(),
+        };
+
+        let view = MapView::new(viewpoint, Size::new(800.0, 600.0), covered);
+        let at = view.to_screen(position);
+        let visible = view.visible();
+        assert!(
+            (at.x - visible.center_x()).abs() < 0.01,
+            "{at:?} in {visible:?}"
+        );
+        assert!(
+            (at.y - visible.center_y()).abs() < 0.01,
+            "{at:?} in {visible:?}"
+        );
     }
 
     #[test]

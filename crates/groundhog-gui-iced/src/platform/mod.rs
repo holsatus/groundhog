@@ -19,6 +19,11 @@ pub mod android;
 #[cfg(target_os = "android")]
 pub use android::{config_dir, data_dir, insets, insets_subscription, set_system_bars};
 
+/// Whether the platform is a touch screen: no hover, and fingers rather
+/// than a pointer, so the interface floats over the map by default and
+/// shows no tooltips.
+pub const TOUCH: bool = cfg!(target_os = "android");
+
 /// The space the platform's own chrome takes around the application's
 /// content, in logical pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

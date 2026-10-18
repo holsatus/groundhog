@@ -12,11 +12,14 @@ use std::{
 
 use groundhog_logic::SystemId;
 use iced::{
-    Alignment, Element, Length, Widget, mouse,
-    widget::{column, container, mouse_area, row},
+    Alignment, Element, Length, Widget,
+    widget::{column, container, row},
 };
 
-use crate::ui::{self, Icon, Tone, style};
+use crate::{
+    ui::{self, Icon, Tone, style},
+    widget::surface::surface,
+};
 
 /// How many notices the history keeps.
 const HISTORY_LEN: usize = 500;
@@ -201,11 +204,9 @@ impl Notifications {
             .width(Length::Fixed(340.0))
             .style(style::toast(notice.level.tone()));
 
-            // A toast is opaque to the pointer: what lies beneath (the map)
-            // is not hovered, zoomed or dragged through it.
-            mouse_area(toast)
-                .interaction(mouse::Interaction::Idle)
-                .boxed()
+            // A toast is opaque to the pointer and to fingers: what lies
+            // beneath (the map) is not hovered, zoomed or dragged through it.
+            surface(toast).boxed()
         });
 
         column(toasts).spacing(ui::space::S).boxed()

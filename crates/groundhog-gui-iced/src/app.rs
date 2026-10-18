@@ -21,8 +21,8 @@ use groundhog_logic::{
     services::{FleetUpdate, LinkEvent, LinkStatus, TlogRecorder},
 };
 use iced::{
-    Alignment, Element, Length, Padding, Subscription, Task, Theme, Widget, keyboard,
-    widget::{Space, button, column, container, mouse_area, row, rule, sensor, stack, tooltip},
+    Element, Length, Size, Subscription, Task, Theme, Widget, keyboard,
+    widget::{container, sensor, stack},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
@@ -41,16 +41,10 @@ use crate::{
         vehicles::{self, VehiclePanel},
     },
     layout::{self, Layout},
-    map::{self, LayerSet, Map},
+    map::{self, LayerSet, Map, Placement},
     platform::{self, Insets},
-    ui::{
-        self, Icon,
-        style::{self, ButtonKind},
-    },
-    widget::{
-        drag_source::drag_source,
-        pane_grid::{self, PaneGrid},
-    },
+    shell::{self, Floating, Shell},
+    ui,
 };
 
 /// The features that take a [`Context`], grouped so their state can be
@@ -90,6 +84,10 @@ pub struct Application {
     /// The scale the settings' slider is being dragged to, applied on
     /// release.
     scale_preview: Option<f32>,
+    /// The floating shell's sheet.
+    floating: Floating,
+    /// The window's size, once measured; it decides the shell.
+    window: Option<Size>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +99,10 @@ pub enum Message {
     /// A configuration write finished.
     ConfigurationSaved(Result<(), String>),
 
+    /// The window was laid out at this size.
+    Window(Size),
     Layout(layout::Message),
+    Floating(shell::Message),
     /// A rail button was clicked with the primary button; the modifiers
     /// held decide where its panel opens.
     Rail(layout::Panel),
@@ -178,6 +179,8 @@ impl Application {
             insets: platform::insets(),
             system_bars: None,
             scale_preview: None,
+            floating: Floating::default(),
+            window: None,
         };
 
         if application.configuration.settings.record_telemetry {
@@ -250,6 +253,14 @@ impl Application {
                     self.notices
                         .push(Notice::error("Could not save the configuration").detail(error));
                 }
+                Task::none()
+            }
+            Message::Window(size) => {
+                self.window = Some(size);
+                Task::none()
+            }
+            Message::Floating(message) => {
+                self.floating.update(message);
                 Task::none()
             }
             Message::Layout(message) => {
@@ -376,7 +387,7 @@ impl Application {
             }
             Effect::CenterMap(position) => {
                 self.map.set_following(false);
-                self.map.center_on(position);
+                self.map.center_on(position, self.map_placement());
             }
             Effect::FollowVehicle(follow) => {
                 self.map.set_following(follow);
@@ -404,7 +415,7 @@ impl Application {
             .and_then(|system| self.fleet.vehicle(system))
             .and_then(|vehicle| vehicle.position.current.as_ref())
         {
-            self.map.follow_to(position.pos);
+            self.map.follow_to(position.pos, self.map_placement());
         }
     }
 
@@ -517,6 +528,7 @@ impl Application {
 
         match message {
             settings_panel::Message::Theme(mode) => settings.theme = mode,
+            settings_panel::Message::Shell(mode) => settings.shell = mode,
             settings_panel::Message::PreviewScaleFactor(scale) => self.scale_preview = Some(scale),
             settings_panel::Message::CommitScaleFactor => {
                 if let Some(scale) = self.scale_preview.take() {
@@ -569,43 +581,27 @@ impl Application {
         }
     }
 
-    pub fn view(&self) -> impl Widget<Message> + '_ {
-        // The rail and the panes float on the window's background, one gap
-        // apart from each other and from the window's edges.
-        // Where the platform's chrome covers the window, the gap is measured
-        // from the chrome instead of the window's edge.
-        let insets = self.insets.padding(self.scale_factor());
-        let base = container(row![self.view_rail(), self.view_panes()].spacing(ui::space::S))
-            .padding(Padding {
-                top: insets.top.max(ui::space::S),
-                right: insets.right.max(ui::space::S),
-                bottom: insets.bottom.max(ui::space::S),
-                left: insets.left.max(ui::space::S),
-            })
-            .style(style::workspace);
-
-        // Toasts pop up in the map's corner, unless a maximized pane hides
-        // the map.
-        let base = if self.map_is_shown() {
-            base.boxed()
-        } else {
-            stack![base, self.view_toasts(ui::space::XL)].boxed()
-        };
-
-        confirm::view(base, self.confirmation.as_ref(), Message::Confirm)
+    /// The shell the window is laid out in.
+    fn shell(&self) -> Shell {
+        self.configuration
+            .settings
+            .shell
+            .resolve(self.window, platform::TOUCH)
     }
 
-    /// Whether the map is on screen: a compact window shows it as its panel,
-    /// and a maximized pane otherwise hides it.
-    fn map_is_shown(&self) -> bool {
-        if self.layout.is_compact() {
-            return self.layout.compact_panel() == layout::Panel::Map;
-        }
+    pub fn view(&self) -> impl Widget<Message> + '_ {
+        let base = match self.shell() {
+            Shell::Tiled => self.view_tiled(),
+            Shell::Floating => self.view_floating(),
+        };
 
-        let panes = self.layout.panes();
-        panes
-            .maximized()
-            .is_none_or(|pane| panes.get(pane) == Some(&layout::Panel::Map))
+        sensor(confirm::view(
+            base,
+            self.confirmation.as_ref(),
+            Message::Confirm,
+        ))
+        .on_show(Message::Window)
+        .on_resize(Message::Window)
     }
 
     /// The toasts, in the bottom-right corner of the space they are given,
@@ -620,192 +616,45 @@ impl Application {
             .boxed()
     }
 
-    /// The rail: a button per panel, highlighted while it is open. Pressing
-    /// an open panel's button closes it. A closed panel opens in the left,
-    /// middle or right column by the mouse button pressed (or a plain,
-    /// Ctrl/Cmd or Shift click), or where its button is dragged onto the
-    /// grid.
-    fn view_rail(&self) -> Element<'_, Message> {
-        let compact = self.layout.is_compact();
+    /// How the map is placed in the shell on screen.
+    fn map_placement(&self) -> Placement {
+        match self.shell() {
+            Shell::Tiled => Placement::Pane,
+            Shell::Floating => Placement::Window {
+                covered: self.floating_covered(),
+            },
+        }
+    }
 
-        // A compact window has no room for several panes, so the map is a
-        // panel like the others and the rail chooses the one on screen.
-        let panels: Vec<layout::Panel> = if compact {
-            std::iter::once(layout::Panel::Map)
-                .chain(layout::Panel::DOCKABLE)
-                .collect()
-        } else {
-            layout::Panel::DOCKABLE.to_vec()
+    /// The map with the features' layers, placed as `placement`.
+    fn view_map(&self, placement: Placement) -> Element<'_, Message> {
+        let theme = self.theme();
+        let context = MapContext {
+            fleet: &self.fleet,
+            selected: self.selected,
+            palette: *theme.palette(),
         };
 
-        let buttons = panels.into_iter().map(|panel| {
-            let open = if compact {
-                self.layout.compact_panel() == panel
-            } else {
-                self.layout.is_open(panel)
-            };
-            let icon = ui::icon::icon(panel.icon(), ui::size::RAIL_ICON, ButtonKind::Subtle, true);
-            let press = if compact {
-                Message::Layout(layout::Message::Select(panel))
-            } else {
-                Message::Rail(panel)
-            };
-            let button = button(container(icon).center(Length::Fill))
-                .padding(0)
-                .width(ui::size::RAIL_BUTTON)
-                .height(ui::size::RAIL_BUTTON)
-                .style(style::rail_button(open))
-                .on_press(press);
+        let mut layers = LayerSet::new();
+        layers.plugin(&self.features.vehicles, context, Message::Vehicles);
+        layers.plugin(&self.features.mission, context, Message::Mission);
 
-            let button = if compact {
-                button.boxed()
-            } else {
-                let toggle = |slot| Message::Layout(layout::Message::Toggle(panel, slot));
-                let button = mouse_area(button)
-                    .on_middle_press(toggle(layout::Slot::Middle))
-                    .on_right_press(toggle(layout::Slot::Right));
-
-                // Dragged, the button becomes a label for the panel, styled as a tooltip.
-                let preview = container(
-                    row![
-                        ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
-                        ui::text(panel.title())
-                    ]
-                    .spacing(ui::space::S)
-                    .align_y(Alignment::Center),
-                )
-                .padding([ui::space::S, ui::space::M])
-                .style(style::tooltip);
-                drag_source(
-                    button,
-                    preview,
-                    Message::RailDragged(panel),
-                    Message::RailDropped,
-                )
-                .boxed()
-            };
-
-            ui::tooltip(button, panel.title(), tooltip::Position::Right)
-        });
-
-        column(buttons).spacing(ui::space::S).boxed()
+        self.map.view(layers, Message::Map, &theme, placement)
     }
 
-    /// The panes, as the layout arranges them. The layout is told the
-    /// grid's size, which it needs to keep the side columns' widths in
-    /// pixels.
-    fn view_panes(&self) -> impl Widget<Message> + '_ {
-        let sized = |size| Message::Layout(layout::Message::Sized(size));
-        let mut grid = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
-            // The map paints opaque tiles across its whole pane, which a rounded
-            // container cannot clip; it draws its own frame instead (see
-            // `map::Map::view`), and has no title bar to grab, so it cannot be
-            // moved or closed.
-            if panel.is_fixed() {
-                let empty = Space::new().height(Length::Fixed(0.0)).boxed();
-                return pane_grid::Content::new(self.pane_body(*panel))
-                    .title_bar(pane_grid::TitleBar::new(empty).padding(0));
-            }
-
-            // Every other pane is a rounded card, its header split off by a
-            // rule.
-            let body = column![
-                rule::horizontal(style::PANE_BORDER_WIDTH).style(style::pane_divider),
-                self.pane_body(*panel),
-            ]
-            .height(Length::Fill);
-
-            let compact = self.layout.is_compact();
-            let controls = (!compact).then(|| {
-                let layout = |message| Message::Layout(message);
-                let size = if is_maximized {
-                    ui::icon_button(Icon::Minimize)
-                        .hint("Restore")
-                        .on_press(layout(layout::Message::Restore))
-                } else {
-                    ui::icon_button(Icon::Maximize)
-                        .hint("Maximize")
-                        .on_press(layout(layout::Message::Maximize(pane)))
-                };
-                let close = ui::icon_button(Icon::Close)
-                    .hint("Close")
-                    .on_press(layout(layout::Message::Close(pane)));
-
-                pane_grid::Controls::new(row![size.boxed(), close.boxed()].spacing(ui::space::XS))
-            });
-
-            let title = row![
-                ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
-                ui::text(panel.title())
-            ]
-            .spacing(ui::space::S)
-            .align_y(Alignment::Center);
-
-            let mut title_bar = pane_grid::TitleBar::new(title.boxed());
-            if let Some(controls) = controls {
-                title_bar = title_bar.controls(controls);
-            }
-
-            let title_bar = title_bar
-                // The controls are as far from the bar's right edge as from
-                // its top and bottom; the title gets more room on the left.
-                // The pane's border is drawn over the bar's top and right
-                // edges, while the divider lies below it, so those sides add
-                // the border's width.
-                .padding(Padding {
-                    top: ui::space::XS + style::PANE_BORDER_WIDTH,
-                    right: ui::space::XS + style::PANE_BORDER_WIDTH,
-                    bottom: ui::space::XS,
-                    left: ui::space::M,
-                })
-                .style(style::title_bar(self.layout.is_focused(pane)));
-
-            pane_grid::Content::new(body.boxed())
-                .style(style::pane)
-                .title_bar(title_bar)
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .spacing(layout::SPACING)
-        .min_size(layout::MIN_PANE)
-        .style(style::pane_grid)
-        .on_click(|pane| Message::Layout(layout::Message::Clicked(pane)))
-        .on_drag(|event| Message::Layout(layout::Message::Dragged(event)))
-        .drop_target(|dragged, cursor, regions| self.layout.drop_hint(dragged, cursor, regions))
-        .on_resize(7, |event| Message::Layout(layout::Message::Resized(event)));
-
-        if let Some(panel) = self.rail_drag {
-            grid = grid.incoming(
-                move |cursor, regions| self.layout.incoming_hint(panel, cursor, regions),
-                move |target| Message::Layout(layout::Message::Placed(panel, target)),
-            );
-        }
-
-        sensor(grid).on_show(sized).on_resize(sized)
-    }
-
+    /// A panel's content, the same in every shell.
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
         let fleet: &FleetSnapshot = &self.fleet;
 
         match panel {
-            layout::Panel::Map => {
-                let theme = self.theme();
-                let context = MapContext {
-                    fleet,
-                    selected: self.selected,
-                    palette: *theme.palette(),
-                };
-
-                let mut layers = LayerSet::new();
-                layers.plugin(&self.features.vehicles, context, Message::Vehicles);
-                layers.plugin(&self.features.mission, context, Message::Mission);
-
-                let map = self.map.view(layers, Message::Map, &theme);
-                // A `Stack` hides the pointer from the map only where an
-                // upper layer shows one: here, over the toasts, which are
-                // meant to hide it.
-                stack![map, self.view_toasts(ui::space::M)].boxed()
-            }
+            // A `Stack` hides the pointer from the map only where an upper
+            // layer shows one: here, over the toasts, which are meant to
+            // hide it.
+            layout::Panel::Map => stack![
+                self.view_map(Placement::Pane),
+                self.view_toasts(ui::space::M)
+            ]
+            .boxed(),
             layout::Panel::Vehicles => self
                 .features
                 .vehicles
@@ -891,5 +740,7 @@ impl Application {
     }
 }
 
+mod floating;
 #[cfg(test)]
 mod gallery;
+mod tiled;

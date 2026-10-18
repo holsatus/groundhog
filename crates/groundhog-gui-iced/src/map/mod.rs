@@ -10,7 +10,7 @@
 //! let mut layers = LayerSet::new();
 //! layers.plugin(&self.vehicles, context, Message::Vehicles);
 //! layers.plugin(&self.mission, context, Message::Mission);
-//! self.map.view(layers, Message::Map, &theme)
+//! self.map.view(layers, Message::Map, &theme, Placement::Pane)
 //! ```
 
 mod layer;
@@ -24,7 +24,7 @@ pub use layer::{
 pub use view::{MapFrame, MapView};
 
 use iced::{
-    Color, Element, Length, Point, Size, Task, Theme, Widget,
+    Color, Element, Length, Padding, Point, Size, Task, Theme, Widget,
     widget::canvas::{Canvas, Fill, LineJoin, Path, Stroke, Style, fill},
 };
 use slippery::{CacheMessage, MapWidget, Projector, TileCache, Viewpoint, Zoom, location};
@@ -37,6 +37,26 @@ pub struct Map {
     tile_cache: TileCache,
     /// Whether the view follows a position fed through [`Map::follow_to`].
     follow: bool,
+}
+
+/// How the map sits in the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Placement {
+    /// In a pane: rounded corners and a border, and nothing over it.
+    Pane,
+    /// Running to the window's edges, with `covered` of each edge hidden
+    /// under what floats over the map.
+    Window { covered: Padding },
+}
+
+impl Placement {
+    /// How much of each edge is hidden.
+    pub fn covered(self) -> Padding {
+        match self {
+            Placement::Pane => Padding::ZERO,
+            Placement::Window { covered } => covered,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,25 +107,32 @@ impl Map {
         self.follow = follow;
     }
 
-    /// Centre the view on `position` if following.
-    pub fn follow_to(&mut self, position: GeoPosition) {
+    /// Centre the view on `position` if following, in the part of the map
+    /// placed as `placement` that nothing covers.
+    pub fn follow_to(&mut self, position: GeoPosition, placement: Placement) {
         if self.follow {
-            self.center_on(position);
+            self.center_on(position, placement);
         }
     }
 
-    /// Centre the view on `position`.
-    pub fn center_on(&mut self, position: GeoPosition) {
-        self.viewpoint.position = view::mercator(position);
+    /// Centre the view on `position`, in the part of the map placed as
+    /// `placement` that nothing covers.
+    pub fn center_on(&mut self, position: GeoPosition, placement: Placement) {
+        self.viewpoint.position = view::centred_in_visible(
+            self.viewpoint,
+            view::mercator(position),
+            placement.covered(),
+        );
     }
 
-    /// The map with `layers` on top. `wrap` lifts the map's own messages into
-    /// the layers' message type.
+    /// The map with `layers` on top, placed as `placement`. `wrap` lifts the
+    /// map's own messages into the layers' message type.
     pub fn view<'a, M: 'static>(
         &'a self,
         mut layers: LayerSet<'a, M>,
         wrap: impl Fn(Message) -> M + 'a,
         theme: &Theme,
+        placement: Placement,
     ) -> Element<'a, M> {
         let palette = theme.palette();
         layers.push(Chrome {
@@ -113,23 +140,29 @@ impl Map {
             z_index: i32::MIN,
             kind: ChromeKind::Tint(palette.background.base.color.scale_alpha(0.3)),
         });
-        layers.push(Chrome {
-            id: LayerId::new("map.frame"),
-            z_index: i32::MAX,
-            kind: ChromeKind::Frame {
-                background: palette.background.base.color,
-                border: palette.background.strongest.color,
-            },
-        });
+        if placement == Placement::Pane {
+            layers.push(Chrome {
+                id: LayerId::new("map.frame"),
+                z_index: i32::MAX,
+                kind: ChromeKind::Frame {
+                    background: palette.background.base.color,
+                    border: palette.background.strongest.color,
+                },
+            });
+        }
 
         let tiles: Element<'a, Message> =
             MapWidget::new(&self.tile_cache, Message::Cache, self.viewpoint)
                 .on_update(Message::Projector)
                 .boxed();
 
-        let overlay = Canvas::new(overlay::Overlay::new(layers.into_sorted(), self.viewpoint))
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let overlay = Canvas::new(overlay::Overlay::new(
+            layers.into_sorted(),
+            self.viewpoint,
+            placement.covered(),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         // Not a `Stack`: it would hide the pointer from the tiles while a
         // handle is hovered, disabling zoom and pan there (see `layered`).
@@ -270,8 +303,12 @@ mod tests {
         let map = Map::new();
         let mut layers = LayerSet::new();
         layers.push(CentreHandle { draggable });
-        let mut simulator =
-            iced_test::Simulator::new(map.view(layers, |message| message, &Theme::Dark));
+        let mut simulator = iced_test::Simulator::new(map.view(
+            layers,
+            |message| message,
+            &Theme::Dark,
+            Placement::Pane,
+        ));
 
         simulator.point_at(at);
         simulator.simulate([iced::Event::Mouse(mouse::Event::CursorMoved {

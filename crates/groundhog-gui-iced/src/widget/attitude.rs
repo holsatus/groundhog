@@ -17,7 +17,7 @@
 //! follows the application theme.
 
 use iced::{
-    Font, Pixels, Point, Radians,
+    Font, Pixels, Point, Radians, Rectangle,
     alignment::Vertical,
     theme::Palette,
     widget::canvas::{Fill, Frame, LineCap, Path, Stroke, Style, Text, path::Arc},
@@ -41,28 +41,39 @@ const MAX_DIAL_RADIUS: f32 = 64.0;
 /// Smallest compass dial radius; below this the cardinals stop being legible.
 const MIN_DIAL_RADIUS: f32 = 24.0;
 
-/// Draws the instrument anchored to the top-right corner of the map pane.
+/// Draws the instrument anchored to the top-right corner of `area`: the
+/// part of the map pane nothing covers.
 ///
-/// The dial is scaled to fit the pane, clamped to
+/// The dial is scaled to fit the area, clamped to
 /// [`MIN_DIAL_RADIUS`]..[`MAX_DIAL_RADIUS`], and inset by [`OVERLAY_MARGIN`].
-pub fn overlay(frame: &mut Frame, roll: f32, pitch: f32, yaw: f32, palette: &Palette) {
-    let (center, radius) = placement(frame.size());
+pub fn overlay(
+    frame: &mut Frame,
+    area: Rectangle,
+    roll: f32,
+    pitch: f32,
+    yaw: f32,
+    palette: &Palette,
+) {
+    let (center, radius) = placement(area);
 
     draw(frame, center, radius, roll, pitch, yaw, palette);
 }
 
-/// The dial centre and radius for an instrument anchored to the top-right of a
-/// pane of the given `size`.
+/// The dial centre and radius for an instrument anchored to the top-right of
+/// `area`.
 ///
 /// The dial shrinks so the instrument's full reach — the arc band included —
-/// stays inset from the pane edges, and is clamped so it remains legible on a
-/// small pane and does not dominate a large one.
-pub(crate) fn placement(size: iced::Size) -> (Point, f32) {
-    let fit = (size.width.min(size.height) / 2.0 - OVERLAY_MARGIN) / ARC_REACH;
+/// stays inset from the area's edges, and is clamped so it remains legible
+/// in a small area and does not dominate a large one.
+pub(crate) fn placement(area: Rectangle) -> (Point, f32) {
+    let fit = (area.width.min(area.height) / 2.0 - OVERLAY_MARGIN) / ARC_REACH;
     let radius = fit.clamp(MIN_DIAL_RADIUS, MAX_DIAL_RADIUS);
 
     let reach = radius * ARC_REACH;
-    let center = Point::new(size.width - OVERLAY_MARGIN - reach, OVERLAY_MARGIN + reach);
+    let center = Point::new(
+        area.x + area.width - OVERLAY_MARGIN - reach,
+        area.y + OVERLAY_MARGIN + reach,
+    );
 
     (center, radius)
 }
@@ -322,7 +333,7 @@ mod tests {
 
     #[test]
     fn placement_caps_the_radius_on_a_large_pane() {
-        let (center, radius) = placement(Size::new(1000.0, 1000.0));
+        let (center, radius) = placement(Rectangle::with_size(Size::new(1000.0, 1000.0)));
 
         assert_eq!(radius, MAX_DIAL_RADIUS);
 
@@ -337,7 +348,7 @@ mod tests {
     #[test]
     fn placement_shrinks_to_fit_a_small_pane() {
         // Height is the binding dimension: the reach must fit inside it.
-        let (center, radius) = placement(Size::new(500.0, 140.0));
+        let (center, radius) = placement(Rectangle::with_size(Size::new(500.0, 140.0)));
         let reach = radius * ARC_REACH;
 
         assert!(radius < MAX_DIAL_RADIUS);
@@ -347,8 +358,19 @@ mod tests {
 
     #[test]
     fn placement_does_not_go_below_the_minimum() {
-        let (_, radius) = placement(Size::new(10.0, 10.0));
+        let (_, radius) = placement(Rectangle::with_size(Size::new(10.0, 10.0)));
 
         assert_eq!(radius, MIN_DIAL_RADIUS);
+    }
+
+    #[test]
+    fn placement_keeps_to_the_area() {
+        let whole = placement(Rectangle::with_size(Size::new(1000.0, 1000.0)));
+        let area = Rectangle::new(Point::new(0.0, 40.0), Size::new(900.0, 1000.0));
+
+        let (center, radius) = placement(area);
+
+        assert_eq!(radius, whole.1);
+        assert_eq!(center, whole.0 + iced::Vector::new(-100.0, 40.0));
     }
 }

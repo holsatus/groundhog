@@ -190,12 +190,19 @@ pub fn list_row<'a, M: 'a>(index: usize, content: impl Widget<M> + 'a) -> Elemen
         .boxed()
 }
 
-/// `content`, explained by `hint` on `side` when hovered.
+/// `content`, explained by `hint` on `side` when hovered; on a touch
+/// screen, which cannot hover, only `content`.
 pub fn tooltip<'a, M: 'a>(
     content: impl Widget<M> + 'a,
     hint: impl IntoFragment<'a>,
     side: Position,
 ) -> Element<'a, M> {
+    // Without hover, a tooltip opens on a tap and lingers until something
+    // else is tapped.
+    if crate::platform::TOUCH {
+        return content.boxed();
+    }
+
     iced::widget::tooltip(
         content,
         container(text(hint))

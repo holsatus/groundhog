@@ -32,10 +32,6 @@ use crate::{
 pub const SPACING: f32 = ui::space::S;
 /// The smallest a pane gets when the operator resizes its neighbours.
 pub const MIN_PANE: f32 = 120.0;
-/// Below this grid width (logical pixels) the three-column workspace is
-/// replaced by one panel at a time: a phone has no room for a side column and
-/// the map at once.
-pub const COMPACT_BELOW: f32 = 640.0;
 /// The smallest the map gets, along either axis, when the window shrinks.
 const MIN_MAP: f32 = 200.0;
 /// How close to a divider a drop counts as on it, in logical pixels from
@@ -519,9 +515,6 @@ pub enum Message {
     Resized(pane_grid::ResizeEvent),
     /// Open the panel at the end of `slot`, or close it if it is open.
     Toggle(Panel, Slot),
-    /// Show `panel` in a compact window; selecting the panel already shown
-    /// returns to the map.
-    Select(Panel),
     Close(pane_grid::Pane),
     Maximize(pane_grid::Pane),
     Restore,
@@ -554,10 +547,6 @@ pub struct Layout {
     /// The grid's size, once measured.
     size: Option<Size>,
     focus: Option<pane_grid::Pane>,
-    /// Whether the window is too narrow for the three-column workspace.
-    compact: bool,
-    /// The panel filling a compact window.
-    compact_panel: Panel,
     dirty: bool,
     revision: u64,
 }
@@ -574,24 +563,11 @@ impl Layout {
             panes: pane_grid::State::new(Panel::Map).0,
             size: None,
             focus: None,
-            compact: false,
-            compact_panel: Panel::Map,
             dirty: false,
             revision: 0,
         };
         layout.arrange();
         layout
-    }
-
-    /// Whether the window is too narrow for the workspace, and shows one
-    /// panel at a time instead.
-    pub fn is_compact(&self) -> bool {
-        self.compact
-    }
-
-    /// The panel a compact window shows.
-    pub fn compact_panel(&self) -> Panel {
-        self.compact_panel
     }
 
     pub fn panes(&self) -> &pane_grid::State<Panel> {
@@ -671,9 +647,6 @@ impl Layout {
                 }
             }
             Message::Resized(event) => {
-                if self.compact {
-                    return;
-                }
                 // The grid moves first; the workspace measures the result.
                 // Rearranging here would replace the split being dragged.
                 self.panes.resize(event.split, event.ratio);
@@ -688,85 +661,25 @@ impl Layout {
                 self.workspace.measure(&regions);
             }
             Message::Toggle(panel, slot) => {
-                if self.compact {
-                    self.select(panel);
-                } else if self.is_open(panel) {
+                if self.is_open(panel) {
                     self.close(panel);
                 } else {
                     self.open(panel, slot);
                 }
             }
-            Message::Select(panel) => self.select(panel),
             Message::Close(pane) => {
                 if let Some(panel) = self.panes.get(pane).copied() {
-                    if self.compact {
-                        if panel != Panel::Map {
-                            self.select(Panel::Map);
-                        }
-                    } else {
-                        self.close(panel);
-                    }
+                    self.close(panel);
                 }
             }
-            Message::Maximize(pane) => {
-                if !self.compact {
-                    self.panes.maximize(pane);
-                }
-            }
-            Message::Restore => {
-                if !self.compact {
-                    self.panes.restore();
-                }
-            }
+            Message::Maximize(pane) => self.panes.maximize(pane),
+            Message::Restore => self.panes.restore(),
             Message::Sized(size) => {
                 if self.size != Some(size) {
                     self.size = Some(size);
-
-                    let compact = size.width < COMPACT_BELOW;
-                    if compact != self.compact {
-                        self.set_compact(compact);
-                    } else if !compact {
-                        self.arrange();
-                    }
+                    self.arrange();
                 }
             }
-        }
-    }
-
-    /// Switch between the workspace and a single panel, keeping the
-    /// workspace arrangement for the next wide window.
-    fn set_compact(&mut self, compact: bool) {
-        self.compact = compact;
-
-        if compact {
-            self.arrange_compact();
-        } else {
-            self.arrange();
-        }
-    }
-
-    /// Show one panel, filling the grid.
-    fn arrange_compact(&mut self) {
-        self.panes = pane_grid::State::new(self.compact_panel).0;
-        self.focus = None;
-    }
-
-    /// Show `panel` in a compact window; selecting the panel already shown
-    /// returns to the map.
-    fn select(&mut self, panel: Panel) {
-        if !self.compact {
-            return;
-        }
-
-        let next = if panel == self.compact_panel && panel != Panel::Map {
-            Panel::Map
-        } else {
-            panel
-        };
-
-        if next != self.compact_panel {
-            self.compact_panel = next;
-            self.arrange_compact();
         }
     }
 
@@ -1664,67 +1577,5 @@ mod tests {
         assert!(layout.workspace.middle.panes.is_empty(), "no duplicates");
         assert!(layout.workspace.left.size.is_finite());
         assert_eq!(layout.workspace.middle.size, MIN_PANE);
-    }
-
-    #[test]
-    fn a_narrow_window_shows_one_panel() {
-        let layout = layout_at(Workspace::default(), Size::new(400.0, 800.0));
-
-        assert!(layout.is_compact());
-        assert_eq!(layout.compact_panel(), Panel::Map);
-        assert_eq!(
-            layout
-                .panes
-                .iter()
-                .map(|(_, panel)| *panel)
-                .collect::<Vec<_>>(),
-            [Panel::Map],
-            "the workspace's vehicles panel is not shown"
-        );
-    }
-
-    #[test]
-    fn selecting_a_panel_replaces_the_one_shown() {
-        let mut layout = layout_at(Workspace::default(), Size::new(400.0, 800.0));
-
-        layout.update(Message::Select(Panel::Links));
-        assert_eq!(layout.compact_panel(), Panel::Links);
-        assert_eq!(
-            layout
-                .panes
-                .iter()
-                .map(|(_, panel)| *panel)
-                .collect::<Vec<_>>(),
-            [Panel::Links]
-        );
-
-        // Selecting the panel already shown returns to the map.
-        layout.update(Message::Select(Panel::Links));
-        assert_eq!(layout.compact_panel(), Panel::Map);
-        assert_eq!(
-            layout
-                .panes
-                .iter()
-                .map(|(_, panel)| *panel)
-                .collect::<Vec<_>>(),
-            [Panel::Map]
-        );
-    }
-
-    #[test]
-    fn a_wide_window_restores_the_workspace() {
-        let mut layout = layout_at(Workspace::default(), Size::new(400.0, 800.0));
-        layout.update(Message::Select(Panel::Logs));
-
-        layout.update(Message::Sized(SIZE));
-
-        assert!(!layout.is_compact());
-        let regions = regions(&layout);
-        assert!(regions.contains_key(&Panel::Vehicles));
-        assert!(regions.contains_key(&Panel::Map));
-        assert!(
-            !regions.contains_key(&Panel::Logs),
-            "the compact panel is view state, not part of the workspace"
-        );
     }
 }

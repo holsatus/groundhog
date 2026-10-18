@@ -14,6 +14,7 @@ mod features;
 mod layout;
 mod map;
 mod platform;
+mod shell;
 mod ui;
 mod widget;
 
