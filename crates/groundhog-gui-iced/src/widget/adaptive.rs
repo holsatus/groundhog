@@ -90,23 +90,6 @@ pub fn header<'a, M: 'a>(
     }
 }
 
-/// `wide` while it is offered at least `min_width`, `narrow` otherwise. Each
-/// keeps its own state, so a field focused in one is not focused in the
-/// other: give the two the same content, arranged differently.
-pub fn either<'a, M: 'a>(
-    wide: impl Widget<M, Theme, Renderer> + 'a,
-    narrow: impl Widget<M, Theme, Renderer> + 'a,
-    min_width: f32,
-) -> Adaptive<'a, M> {
-    use iced::Widget as _;
-
-    Adaptive {
-        children: vec![wide.boxed(), narrow.boxed()],
-        arrangement: Arrangement::Either { min_width },
-        spacing: 0.0,
-    }
-}
-
 pub struct Adaptive<'a, Message> {
     children: Vec<Element<'a, Message>>,
     arrangement: Arrangement,
@@ -118,7 +101,6 @@ enum Arrangement {
     FormRow { label_width: f32, min_control: f32 },
     Grid { min_cell: f32, max_columns: usize },
     Header { min_subject: f32, height: f32 },
-    Either { min_width: f32 },
 }
 
 /// The child the last layout left out, if any: it is not drawn and sees no
@@ -355,15 +337,6 @@ impl<Message> Widget<Message, Theme, Renderer> for Adaptive<'_, Message> {
                 };
                 tree.size = Size::new(width, height);
             }
-            Arrangement::Either { min_width } => {
-                let (shown, hidden) = if width >= min_width { (0, 1) } else { (1, 0) };
-                tree.state.downcast_mut::<Hidden>().0 = Some(hidden);
-                tree.children[hidden].size = Size::ZERO;
-
-                self.children[shown].layout(&mut tree.children[shown], renderer, &limits);
-                tree.children[shown].translation = Vector::ZERO;
-                tree.size = tree.children[shown].size;
-            }
         }
     }
 
@@ -494,32 +467,6 @@ mod tests {
         assert!(!tools_fit(300.0, 120.0, 100.0, 140.0, 6.0));
         // No status takes no gap.
         assert!(tools_fit(246.0, 0.0, 100.0, 140.0, 6.0));
-    }
-
-    /// Either of two buttons, in a window `width` wide; what a press at the
-    /// top-left publishes.
-    fn press_either(width: f32) -> Vec<&'static str> {
-        let wide = button(text("Wide")).on_press("wide");
-        let narrow = button(text("Narrow")).on_press("narrow");
-        let mut simulator = iced_test::Simulator::with_size(
-            Default::default(),
-            Size::new(width, 400.0),
-            either(wide, narrow, 500.0).boxed(),
-        );
-        simulator.point_at(Point::new(5.0, 5.0));
-        simulator.simulate([Event::Mouse(mouse::Event::ButtonPressed(
-            mouse::Button::Left,
-        ))]);
-        simulator.simulate([Event::Mouse(mouse::Event::ButtonReleased(
-            mouse::Button::Left,
-        ))]);
-        simulator.into_messages().collect()
-    }
-
-    #[test]
-    fn either_shows_one_and_only_that_one_hears_events() {
-        assert_eq!(press_either(600.0), ["wide"]);
-        assert_eq!(press_either(400.0), ["narrow"]);
     }
 
     #[test]

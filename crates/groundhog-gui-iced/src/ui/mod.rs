@@ -32,7 +32,6 @@ pub mod theme;
 mod tool;
 
 /// One of two arrangements of the same content, by the width it is given.
-pub use crate::widget::adaptive::either;
 pub use button::{button, button_with, entry, icon_button};
 pub use container::{
     actions, activity, badge, banner, card, card_list, divider, empty, field, floating, list_row,

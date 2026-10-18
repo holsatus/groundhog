@@ -660,12 +660,7 @@ fn view_param_row<'a>(
             .boxed()
     };
 
-    /// The name's column in a wide row, and its type's.
-    const NAME: f32 = 160.0;
-    const TYPE: f32 = 50.0;
-    /// The value field's width in a narrow row, and the least it gets in a
-    /// wide one.
-    const VALUE: f32 = 96.0;
+    const INPUT_WIDTH: f32 = 96.0;
 
     let name = ident.as_str();
     let kind = value_type_name(param.value());
@@ -676,7 +671,7 @@ fn view_param_row<'a>(
             .width(Length::Fill),
         ui::mono(kind).tone(Tone::Muted),
         space::horizontal().width(ui::space::M),
-        input().width(VALUE),
+        input().width(INPUT_WIDTH),
         restore(),
         upload(),
     ]
