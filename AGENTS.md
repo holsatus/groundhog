@@ -38,19 +38,22 @@ UDP link listening on the port it sends to (usually 14550). In listen mode a
 UDP link serves every vehicle that sends to it.
 
 Logs go to stderr through `env_logger`, at debug level for Groundhog's crates
-and error level for dependencies (see `groundhog-gui-iced/src/main.rs`).
+and error level for dependencies (see `groundhog-gui-iced/src/platform/`).
+
+The frontend also runs on Android: `android/build.sh` builds a debug APK
+(see `docs/android-port.md` for the toolchain and the iced fork it needs).
+Logs then go to `adb logcat -s groundhog`.
 
 ---
 
 ## The architecture in one page
 
-The workspace has three crates, under `crates/`:
+The workspace has two crates, under `crates/`:
 
 | Crate | What it is | Depends on |
 |---|---|---|
 | `groundhog-logic` | The backend: all vehicle state and every rule about it, the middleware, the transports, and the vocabulary frontends name it with (`SystemId`, `MavlinkId`, `GeoPosition`, link descriptions) | `mavio`, `tokio` |
-| `groundhog-gui-iced` | The desktop frontend, built as the `groundhog` binary | `groundhog-logic`, `iced` |
-| `groundhog-gui-egui` | A second desktop frontend over the same backend, built as `groundhog-egui` (egui_dock panes, walkers map) | `groundhog-logic`, `egui` |
+| `groundhog-gui-iced` | The frontend, built as the `groundhog` binary on the desktop and as a `cdylib` on Android | `groundhog-logic`, `iced` |
 
 Another frontend (a CLI, say) is another crate next to these, depending on
 `groundhog-logic`. Paths in this file are relative to a crate's `src/`;
@@ -59,11 +62,11 @@ the crate is named where it is not obvious.
 ```
  gui-iced  features/  UI features: panels and map plugins            ┐
            ui/        the toolkit: tokens, styles, icons, widgets      │
-           map/       map engine: layers, hit-testing, gestures       ├─ UI thread (iced)
-           app.rs     composition root, message routing, policy       ┘
- gui-egui  features/  the same features, drawn with egui widgets      ┐
-           map/       walkers plugins for the same overlays           ├─ UI thread (egui)
-           app.rs     composition root, event policy                  ┘
+           map/       map engine: layers, hit-testing, gestures       │
+           layout.rs  the tiled shell's workspace                     ├─ UI thread (iced)
+           shell.rs   which shell; the floating shell's sheet         │
+           app.rs     composition root, message routing, policy       │
+           platform/  paths, logging, insets: desktop or Android      ┘
     │ reads snapshots ▲            │ intents (operations)
     │                 │            ▼
  logic     services/  Backend, fleet runtime, vehicle client, links   ┐
@@ -122,8 +125,10 @@ are shared by all.
 | gui `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
 | gui `features/` | One module per UI feature | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
 | gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
-| gui `app.rs` | Wiring at boot, message routing, effects, notice policy | everything | contain feature logic |
-| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, attitude) | iced | depend on the domain |
+| gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
+| gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
+| gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, `surface`, attitude) | iced | depend on the domain |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and
@@ -177,11 +182,8 @@ map layers, and the wording and loudness of notices. The backend must not
 decide those, because a headless client or a differently structured UI
 would decide them differently.
 
-`groundhog-gui-egui` is the second frontend this decision was made for:
-egui widgets, immediate-mode intents collected per frame, and walkers' map
-plugins over the same backend. It keeps its own configuration file
-(`config-egui.ron`) so two frontends can run at once without racing each
-other's writes.
+A second frontend keeps its own configuration file, so two frontends can
+run at once without racing each other's writes.
 
 ### Vehicle state is owned off the UI thread
 
@@ -350,6 +352,44 @@ dragged divider moves the grid first; the workspace then measures it.
 *Why:* free splitting made every new pane take half of whatever it split,
 and a layout that tracks fractions makes the side panels grow and shrink
 with the window, where the map is what should.
+
+### Two shells over the same panels
+
+A panel's content is the same wherever it is shown
+(`Application::pane_body`); a *shell* decides only where panels go
+(`shell.rs`):
+
+- **Tiled** (`app/tiled.rs`): the rail and the workspace above, for a mouse
+  and a large screen.
+- **Floating** (`app/floating.rs`): the map fills the window, under the
+  platform's status and navigation bars, and everything else floats over
+  it: a navigation bar picking one panel, shown in a sheet along the bottom
+  in portrait or along the side in landscape (`shell::SheetPlacement`), or
+  over the whole map when expanded. A scrim under the status bar keeps its
+  icons legible over any tile. The sheet is view state; nothing about the
+  floating shell is persisted.
+
+`ShellMode` (a setting) picks one, or leaves it to `Automatic`: floating on
+a touch screen whose shortest side is under 600 logical pixels, and in any
+window under 640 wide. *Why the shortest side:* rotating a phone does not
+change it, so turning the phone keeps the shell and the panel open in it,
+where a width threshold swapped the whole layout on every rotation.
+
+The platform's insets (`platform::Insets`, polled over JNI on Android, zero
+on the desktop) are given to the shells rather than padding the window:
+the tiled shell keeps its panes clear of them, and the floating shell lets
+only the map run under them.
+
+Whatever floats over the map is a `widget::surface`, which captures the
+presses (and wheel) that land on it. The map follows a finger by the
+finger's own position, not the cursor, so without one a press on a sheet's
+background would pan the map beneath. Moves and releases pass through, so
+a gesture that started on the map ends on the map.
+
+The map is told how much of each edge is covered (`map::Placement`):
+screen-anchored layers keep to `MapView::visible` (the attitude HUD clears
+the status bar), and `Map::center_on` puts a position in the middle of
+what shows, not under the sheet.
 
 ### Failures reach the operator; consequential commands ask first
 
@@ -540,11 +580,6 @@ comes with a test that fails without the fix.
 | Widget composition | gui `map/mod.rs` tests | `iced_test::Simulator` delivers real events through the composed widgets; assert on event status and messages |
 | Features | gui `features/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
 
-The egui frontend's tests follow the same recipe, one `#[cfg(test)] mod
-tests` per feature module instead of separate files: for example
-`groundhog-gui-egui/src/features/mission.rs` drives the editor through its
-intents against a real backend and asserts on notices and effects.
-
 Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
 backend with `BackendOptions { bootstrap: false, .. }`; the snapshots they
 hand to the feature come from a `Fleet` they fold messages into with
@@ -561,8 +596,10 @@ whole `Application::view()` to PNG with `snapshot(..).matches_image(path)`.
 renderer suffix such as `-wgpu`); otherwise it compares against the existing
 one. Delete old snapshots before re-rendering.
 
-To *look at* the interface, render the gallery: every panel and the whole
-window, light and dark, with a synthetic vehicle (`app/gallery.rs`). It is
+To *look at* the interface, render the gallery: every panel, the whole
+window in the tiled shell, and a phone in the floating shell in both
+orientations, light and dark, with a synthetic vehicle (`app/gallery.rs`).
+It is
 an ignored test that needs its own configuration directory:
 
 ```sh
@@ -674,13 +711,16 @@ with a location), the file formats, and jump-target translation (for
 
 1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
    and `icon` (add the icon to `ui::Icon` if it is new), and list it in
-   `Panel::DOCKABLE`. Where it opens is the operator's choice (see
-   [The workspace](#the-workspace-is-three-columns-around-the-map)).
+   `Panel::DOCKABLE`, which puts it on the tiled shell's rail and the
+   floating shell's navigation bar. Where it opens is the operator's choice
+   (see [The workspace](#the-workspace-is-three-columns-around-the-map)).
 2. Create `features/<name>.rs` (or a directory) with its state, `Message`,
    `update(&mut self, message, cx: &mut Context<Message>) -> Task<Message>`,
    and `view`, which returns a `ui::panel`.
 3. In `app.rs`: add the state (to `Features` if it takes a `Context`), a
-   `Message` variant routed through `dispatch`, and an arm in `pane_body`.
+   `Message` variant routed through `dispatch`, and an arm in `pane_body`,
+   which both shells show. Check it in a narrow sheet too: a phone gives a
+   panel about 400 logical pixels of width.
 
 ### Add a setting
 
@@ -731,7 +771,17 @@ replaces the file atomically.
   from lower layers whenever an upper layer shows a cursor, so hovering a
   handle would disable zoom and pan. `map/layered.rs` is the map's own
   container: the overlay sees events first, and the tiles lose only the events
-  the overlay captures.
+  the overlay captures. Stacking *over* the whole map, as the floating shell
+  and the toasts do, is fine, as long as each piece over it is a
+  `widget::surface`: a finger reaches the map by its position whatever the
+  `Stack` does with the cursor.
+- **A finger is not the mouse.** iced reports fingers as `Event::Touch`, with
+  an id each; the mouse cursor follows the last finger only loosely. Widgets
+  that handle presses themselves (the map overlay, `drag_source`) must
+  handle touch too, follow one finger by its id, and end what it started on
+  `FingerLost`. Hover does not exist: tooltips are off on touch screens
+  (`platform::TOUCH`), so a hint must never be the only way to learn what a
+  control does.
 - **`LayerId`s must be stable and unique.** The engine keys caches and pointer
   state on them.
 - **The vendored `widget/pane_grid`** is a fork of iced's. Its header lists

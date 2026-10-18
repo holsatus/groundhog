@@ -202,19 +202,26 @@ content up while it is open.
 
 ### Pass 2 — phone layout (done)
 
-Below 640 logical pixels of grid width — a phone in portrait, at the default
-scale — the workspace is replaced by one panel at a time. The rail grows a Map
-button and selects the panel that fills the window; tapping the selected panel
-returns to the map. The persisted `Workspace` is left untouched (the compact
-panel is view state), so a wide window — a tablet, or the phone in landscape —
-restores the three-column arrangement exactly as it was.
+A phone gets the floating shell (see "Two shells over the same panels" in
+AGENTS.md): the map fills the screen, under the status and navigation bars,
+and a navigation bar picks one panel to show in a sheet over it — along the
+bottom in portrait, along the side in landscape. The tiled workspace stays
+for tablets and the desktop, and either can be chosen in the settings.
 
-`Layout` owns the switch (`COMPACT_BELOW`, `Message::Select`); the application
-draws the rail accordingly and hides the pane's maximize and close controls,
-which mean nothing with a single pane.
+The shell is chosen by the screen's shortest side, so rotating the phone
+keeps the shell and the open sheet. (A first attempt switched to a
+single-panel mode below 640 pixels of width, which gave a phone in
+landscape the whole three-column workspace.)
 
-Verified on the Pixel 7: portrait shows one panel, the rail switches panels and
-returns to the map, and rotating to landscape restores the workspace.
+The insets are not padding around the window any more: the floating shell
+lets the map run under the bars and keeps only what floats clear of them,
+and the map is told how much of each edge is covered, so the attitude
+instrument clears the status bar and a followed vehicle stays in the part
+of the map that shows.
+
+Floating panels capture the presses that land on them (`widget::surface`):
+the map follows a finger by its own position, so a press on a sheet would
+otherwise pan the map beneath it.
 
 ### Pass 3 — touch (done)
 
@@ -228,9 +235,14 @@ becomes a click — which is how the mission editor places a waypoint. A finger
 the system takes away cancels the drag in progress instead of leaving it
 stuck.
 
+Only the first finger down drives the overlay. A second one makes the
+gesture a pinch: a press waiting to become a click is handed to the map (so
+a two-finger tap places no waypoint), and a drag in progress keeps its
+handle, the second finger captured so the map does not pan under it.
+
 The rail's drag source handles touch as well, so panels can be dragged onto
-the grid on a large screen; on a phone the rail is tap-only, which is all a
-single-pane window needs.
+the grid of the tiled shell on a tablet; the floating shell's navigation bar
+is tap-only.
 
 Verified on the Pixel 7: a swipe pans the map (the overlay does not steal the
 gesture), and the widget tests cover the finger paths for both the overlay and
@@ -242,8 +254,9 @@ the drag source.
 - Serial links cannot open; UDP/TCP work (INTERNET permission is declared).
 - Soft keyboard text entry is basic (key events); IME composition, clipboard
   and long-press selection are not implemented in the minimal fork.
-- Tooltips open on hover, so on touch one lingers after a tap until something
-  else is tapped.
+- Tooltips are off on touch screens (a tap would open one that lingers), so
+  icon buttons explain themselves only by their icon there.
+- The back button does not close the sheet yet.
 - No foreground service: telemetry stops if Android freezes the process in the
   background.
 - The release library is not stripped, so the debug APK is ~34 MB; a
