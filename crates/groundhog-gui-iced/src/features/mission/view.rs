@@ -26,9 +26,6 @@ use crate::{
     widget::virtualized::virtual_list,
 };
 
-/// Height of a single mission-list row.
-const ROW_HEIGHT: f32 = 34.0;
-
 /// A command in the command picker.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CommandChoice(MavCmd);
@@ -88,35 +85,31 @@ impl MissionEditor {
             row![ui::badge(state, tone), ui::caption(count).tone(Tone::Muted)]
                 .spacing(ui::space::S)
                 .align_y(Alignment::Center),
+            [],
             [
-                ui::icon_button(Icon::Add)
-                    .hint("Add a waypoint after the last")
-                    .on_press_maybe(on_plan(MessageKind::AddWaypoint))
-                    .boxed(),
-                ui::icon_button(Icon::Place)
-                    .chosen(draft.placing)
-                    .hint(if draft.placing {
-                        "Placing: each click on the map adds a waypoint. Press to stop."
-                    } else {
-                        "Add waypoints by clicking the map"
-                    })
-                    .on_press_maybe(on_plan(MessageKind::TogglePlacing))
-                    .boxed(),
-                Space::new().width(ui::space::S).boxed(),
-                ui::icon_button(Icon::Open)
-                    .hint("Load a plan from a file")
-                    .on_press_maybe(on_plan(MessageKind::LoadDialog))
-                    .boxed(),
-                ui::icon_button(Icon::Save)
-                    .hint("Save the plan to a file")
-                    .on_press_maybe(on_plan(MessageKind::SaveDialog))
-                    .boxed(),
-                ui::icon_button(Icon::Delete)
-                    .hint("Discard the plan (the vehicle keeps its mission)")
-                    .on_press_maybe(
-                        on_plan(MessageKind::Discard).filter(|_| !draft.plan().is_empty()),
+                vec![
+                    ui::tool(Icon::Add, "Add a waypoint after the last")
+                        .on_press_maybe(on_plan(MessageKind::AddWaypoint)),
+                    ui::tool(
+                        Icon::Place,
+                        if draft.placing {
+                            "Stop placing waypoints on the map"
+                        } else {
+                            "Place waypoints on the map"
+                        },
                     )
-                    .boxed(),
+                    .chosen(draft.placing)
+                    .on_press_maybe(on_plan(MessageKind::TogglePlacing)),
+                ],
+                vec![
+                    ui::tool(Icon::Open, "Load a plan from a file")
+                        .on_press_maybe(on_plan(MessageKind::LoadDialog)),
+                    ui::tool(Icon::Save, "Save the plan to a file")
+                        .on_press_maybe(on_plan(MessageKind::SaveDialog)),
+                    ui::tool(Icon::Delete, "Discard the plan").on_press_maybe(
+                        on_plan(MessageKind::Discard).filter(|_| !draft.plan().is_empty()),
+                    ),
+                ],
             ],
         );
 
@@ -252,6 +245,8 @@ impl MissionEditor {
         }
 
         let selected = draft.selected;
+        // A row is a button around one line, with a little room around it.
+        let row_height = ui::size::control() + 2.0 * ui::space::XXS;
 
         let list = virtual_list(draft.plan().items().iter().enumerate(), move |entry| {
             let &(index, planned) = entry;
@@ -280,7 +275,7 @@ impl MissionEditor {
                 })
                 .boxed()
         })
-        .item_height(|_| ROW_HEIGHT)
+        .item_height(move |_| row_height)
         .key(|(_, planned)| planned.id());
 
         scrollable(list)
@@ -333,43 +328,40 @@ fn view_editor<'a>(
     let last = index + 1 == draft.plan().len();
 
     // The item's actions head the card, so they stay in view however far
-    // its fields scroll.
-    let header = row![
-        ui::title(format!("Item {}", index + 1)),
-        command,
-        ui::icon_button(Icon::MoveUp)
-            .hint("Move up")
-            .on_press_maybe(on_edit(MessageKind::MoveUp(id)).filter(|_| !first))
-            .boxed(),
-        ui::icon_button(Icon::MoveDown)
-            .hint("Move down")
-            .on_press_maybe(on_edit(MessageKind::MoveDown(id)).filter(|_| !last))
-            .boxed(),
-        ui::icon_button(Icon::Skip)
-            .hint(if plan.is_some() && status == SyncStatus::Synced {
-                "Continue the mission from here"
-            } else {
-                "Continue the mission from here (once the plan is synced)"
-            })
-            .on_press_maybe(
-                on_edit(MessageKind::SetCurrent {
-                    item: id,
-                    confirmed: false,
-                })
-                .filter(|_| plan.is_some() && status == SyncStatus::Synced),
-            )
-            .boxed(),
-        ui::icon_button(Icon::Delete)
-            .hint("Remove the item")
-            .on_press_maybe(on_edit(MessageKind::Remove(id)))
-            .boxed(),
-        ui::icon_button(Icon::Close)
-            .hint("Deselect")
-            .on_press(message(MessageKind::Select(None)))
-            .boxed(),
-    ]
-    .spacing(ui::space::XS)
-    .align_y(Alignment::Center);
+    // its fields scroll; where they would squeeze the command, they fold
+    // into a menu.
+    let header = ui::header(
+        row![ui::title(format!("Item {}", index + 1)), command]
+            .spacing(ui::space::S)
+            .align_y(Alignment::Center),
+        [],
+        [
+            vec![
+                ui::tool(Icon::MoveUp, "Move up")
+                    .on_press_maybe(on_edit(MessageKind::MoveUp(id)).filter(|_| !first)),
+                ui::tool(Icon::MoveDown, "Move down")
+                    .on_press_maybe(on_edit(MessageKind::MoveDown(id)).filter(|_| !last)),
+                ui::tool(
+                    Icon::Skip,
+                    if plan.is_some() && status == SyncStatus::Synced {
+                        "Continue the mission from here"
+                    } else {
+                        "Continue from here (once synced)"
+                    },
+                )
+                .on_press_maybe(
+                    on_edit(MessageKind::SetCurrent {
+                        item: id,
+                        confirmed: false,
+                    })
+                    .filter(|_| plan.is_some() && status == SyncStatus::Synced),
+                ),
+                ui::tool(Icon::Delete, "Remove the item")
+                    .on_press_maybe(on_edit(MessageKind::Remove(id))),
+            ],
+            vec![ui::tool(Icon::Close, "Deselect").on_press(message(MessageKind::Select(None)))],
+        ],
+    );
 
     ui::card(
         column![header, Column::with_children(fields).spacing(ui::space::S)].spacing(ui::space::M),

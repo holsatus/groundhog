@@ -166,6 +166,7 @@ impl CalibrationPanel {
             .spacing(ui::space::S)
             .align_y(Alignment::Center),
             [],
+            [],
         );
 
         // A run under way comes first: it is what the operator is doing.

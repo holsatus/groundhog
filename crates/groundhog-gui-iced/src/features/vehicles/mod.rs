@@ -203,6 +203,7 @@ impl VehiclePanel {
             ]
             .into_iter()
             .flatten(),
+            [],
         );
 
         let Some(vehicle) = vehicle else {
@@ -278,19 +279,9 @@ impl VehiclePanel {
     }
 }
 
-/// Values shown three to a row, so they line up in columns.
+/// Values in columns that line up: three to a row where they fit.
 fn stats<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    let mut rows = column![].spacing(ui::space::S);
-    let mut cells = cells.into_iter().peekable();
-    while cells.peek().is_some() {
-        let mut line: Vec<Element<'a, Message>> = cells.by_ref().take(3).collect();
-        // Short rows keep the columns' widths.
-        while line.len() < 3 {
-            line.push(ui::stat("", ui::text("")));
-        }
-        rows = rows.push(row(line).spacing(ui::space::M));
-    }
-    rows.boxed()
+    ui::stats(cells, 3)
 }
 
 /// What the vehicle is doing, at a glance: its mode, large, whether it

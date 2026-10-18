@@ -478,7 +478,21 @@ Views build widgets through `crate::ui`, never by styling raw iced widgets,
 so the look is decided in one place:
 
 - **Tokens:** gaps from `ui::space` (`XXS`…`XL`), sizes from `ui::size`.
-  No numeric spacing, padding or text size appears in a view.
+  No numeric spacing, padding or text size appears in a view. Sizes a
+  finger needs larger are functions of the `ui::Density`
+  (`size::control()`, `size::list_row()`): 32 and 26 pixels for a pointer,
+  44 for touch. The application sets the density before each view
+  (`ui::set_density`): touch in the floating shell, or everywhere when the
+  operator asks for it. Read a density-dependent size while building the
+  view, never inside a closure that runs later (`let row =
+  ui::size::list_row(); .item_height(move |_| row)`).
+- **Space, not devices.** The toolkit arranges by the width it is given,
+  so a narrow desktop pane and a phone look the same: `ui::field` puts its
+  label above the control when they do not fit side by side, `ui::stats`
+  shows as many columns as fit, a header folds its tools into a menu, and
+  `ui::either(wide, narrow, min_width)` picks between two arrangements of
+  the same content (a parameter's row). Do not fix widths in a feature
+  where the content could give way instead.
 - **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::mono`, and
   `ui::overline` for section headings; colour by meaning with
   `.tone(Tone::Warning)` (`TextExt`), never a palette slot, so a view needs
@@ -499,7 +513,9 @@ so the look is decided in one place:
   `ui::actions`, `ui::activity`, `ui::badge` and `ui::banner` are the parts
   of the panel anatomy below; `ui::card`, `ui::card_list` (rows split by
   edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`
-  and `ui::list_row` (striped) cover the shared arrangements.
+  and `ui::stats` (read-outs in columns), and `ui::list_row` (striped)
+  cover the shared arrangements. Inputs come from `ui` too (`text_input`,
+  `pick_list`, `checkbox`, `slider`), so they take the density's size.
 
 ### The design language
 
@@ -517,8 +533,11 @@ card just to group them.
 
 1. **Header** (`ui::header`, via `ui::panel_with`): what the panel is about
    (a vehicle or component picker, a name, a filter) and how it stands
-   (badges), then quiet icon actions on things the panel holds as a whole
-   (files, adding items). One line, one height, divided from the body.
+   (badges), then its *tools* (`ui::tool`): actions on things the panel
+   holds as a whole (files, adding items), each an icon and a label. Where
+   there is room they are quiet icon buttons, the label their hint; where
+   there is not, they fold into a menu that lists them labelled. One line,
+   divided from the body.
 2. **Actions** (`ui::actions`): groups of buttons in workflow order, a
    group per kind of work (talking to the vehicle; flying; editing).
    Groups wrap whole. Hide a group that cannot apply (no vehicle) rather

@@ -14,6 +14,7 @@ use iced::{
 };
 
 use super::{
+    super::widget::adaptive::{form_row, grid},
     button::button,
     style::{self, Tone, size, space},
     text::{TextExt, caption, text},
@@ -32,23 +33,6 @@ pub fn panel<'a, M: 'a>(content: impl Widget<M> + 'a) -> Element<'a, M> {
 /// takes the rest of the height, and scrolls itself if it must.
 pub fn panel_with<'a, M: 'a>(header: Element<'a, M>, body: impl Widget<M> + 'a) -> Element<'a, M> {
     panel(column![header, divider(), body].spacing(space::M))
-}
-
-/// What a panel is about, on one line of a fixed height: `subject` (a
-/// picker, a name) fills it, and `status` (badges, quiet icon actions)
-/// sits at its end.
-pub fn header<'a, M: 'a>(
-    subject: impl Widget<M> + 'a,
-    status: impl IntoIterator<Item = Element<'a, M>>,
-) -> Element<'a, M> {
-    row![
-        container(subject).width(Length::Fill),
-        row(status).spacing(space::S).align_y(Alignment::Center),
-    ]
-    .spacing(space::M)
-    .height(size::ICON_BUTTON)
-    .align_y(Alignment::Center)
-    .boxed()
 }
 
 /// A panel's actions, in groups of related buttons: a wider gap sets the
@@ -164,12 +148,13 @@ pub fn field<'a, M: 'a>(
     label: impl IntoFragment<'a>,
     control: impl Widget<M> + 'a,
 ) -> Element<'a, M> {
-    row![
-        text(label).tone(Tone::Muted).width(size::FIELD_LABEL),
-        control
-    ]
-    .spacing(space::S)
-    .align_y(Alignment::Center)
+    form_row(
+        text(label).tone(Tone::Muted),
+        control,
+        size::FIELD_LABEL,
+        size::field_control(),
+        space::S,
+    )
     .boxed()
 }
 
@@ -179,6 +164,19 @@ pub fn stat<'a, M: 'a>(label: impl IntoFragment<'a>, value: Text<'a>) -> Element
     container(column![caption(label).tone(Tone::Muted), value.single_line()].spacing(space::XXS))
         .width(Length::FillPortion(1))
         .boxed()
+}
+
+/// Read-outs (each usually a [`stat`]) in columns that line up: as many as
+/// fit, up to `max_columns`, so a narrow panel shows fewer to a row instead
+/// of squeezing them.
+pub fn stats<'a, M: 'a>(
+    cells: impl IntoIterator<Item = Element<'a, M>>,
+    max_columns: usize,
+) -> Element<'a, M> {
+    /// The narrowest a read-out gets: a caption, and a value with its unit.
+    const MIN_CELL: f32 = 96.0;
+
+    grid(cells, MIN_CELL, max_columns, space::M).boxed()
 }
 
 /// Row `index` of a list, striped so long rows stay legible.

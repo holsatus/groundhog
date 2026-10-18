@@ -529,6 +529,7 @@ impl Application {
         match message {
             settings_panel::Message::Theme(mode) => settings.theme = mode,
             settings_panel::Message::Shell(mode) => settings.shell = mode,
+            settings_panel::Message::TouchControls(touch) => settings.touch_controls = touch,
             settings_panel::Message::PreviewScaleFactor(scale) => self.scale_preview = Some(scale),
             settings_panel::Message::CommitScaleFactor => {
                 if let Some(scale) = self.scale_preview.take() {
@@ -589,7 +590,19 @@ impl Application {
             .resolve(self.window, platform::TOUCH)
     }
 
+    /// How large controls are drawn: for a finger in the floating shell,
+    /// and everywhere when the operator asks for it.
+    fn density(&self) -> ui::Density {
+        if self.configuration.settings.touch_controls || self.shell() == Shell::Floating {
+            ui::Density::Touch
+        } else {
+            ui::Density::Pointer
+        }
+    }
+
     pub fn view(&self) -> impl Widget<Message> + '_ {
+        ui::set_density(self.density());
+
         let base = match self.shell() {
             Shell::Tiled => self.view_tiled(),
             Shell::Floating => self.view_floating(),

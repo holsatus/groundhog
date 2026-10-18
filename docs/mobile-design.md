@@ -97,14 +97,17 @@ conventions, minus Liquid Glass:
 
 | Window | Typical device | Shell | Navigation | Secondary content |
 |---|---|---|---|---|
-| Compact width (< 600) | Phone, portrait | Mobile | Bottom bar, four labelled destinations | Bottom sheet with detents, or a page |
+| Compact width (< 600) | Phone, portrait | Mobile | Bottom bar, five labelled destinations | Bottom sheet with detents, or a page |
 | Compact height (< 480) | Phone, landscape | Mobile | Rail at the left (behind the cutout's inset) | Side sheet beside the rail, or a page |
 | Medium (600–840) | Tablet in portrait, foldable | Mobile, wide | Rail | Supporting pane beside the map instead of over it |
 | Expanded and wider, not compact height | Tablet landscape, desktop | Tiled | Rail, grouped by destination | The workspace's panes |
 
 `ShellMode::Automatic` resolves from these classes instead of from a
-touch flag and the shortest side. A setting still overrides it. Density
-comes from the platform (touch or pointer) and can be overridden too.
+touch flag and the shortest side. A setting still overrides it.
+
+Density follows the shell: the mobile shell is touch-sized, the tiled one
+pointer-sized, and a setting (*Touch-sized controls*) makes every shell
+touch-sized, for a touch-screen laptop or a tablet in the tiled layout.
 
 The floating shell becomes the *mobile* shell. The tiled shell keeps its
 workspace and gains the same status strip and destination grouping, so
@@ -112,20 +115,24 @@ the two read as one application.
 
 ## Navigation
 
-Four destinations, the same in every shell:
+Five destinations, the same in every shell:
 
 | Destination | Holds | On a phone |
 |---|---|---|
 | **Fly** | The selected vehicle: status, flight actions, telemetry (today's Vehicles panel) | Map, status strip, standard sheet |
 | **Plan** | The mission editor | Map, standard sheet (list, then the selected item) |
 | **Setup** | Parameters, calibration; later radio, motors, failsafes, frame | A page listing them, each a page of its own |
-| **More** | Links, log, settings | A page listing them |
+| **Links** | The links, their status and the link editor | A page |
+| **More** | Log, settings | A page listing them |
 
-New vehicle configuration goes under Setup, and new ground station
-features under More. The bar stays at four.
+Links has a destination of its own because operators switch radios and
+SITL often, and a link's state is what to check first when a vehicle goes
+quiet. New vehicle configuration goes under Setup, and new ground station
+features under More. The bar stays at five, the most a navigation bar
+holds.
 
-Two shortcuts keep frequent paths short: the link indicator in the status
-strip opens Links, and an alert in the strip opens the log.
+The link indicator in the status strip also opens Links, and an alert in
+the strip opens the log.
 
 On the desktop, the rail keeps a button per panel (there is room, and
 opening several panels at once is the point of the workspace) but groups
@@ -153,7 +160,7 @@ the map where it was.
 │ ├ ─ ─ ─ ─ ─ half ─ ─ ─ ─ ─ ─ ┤ │
 │ │ FLIGHT · HEALTH · NAV …    │ │  the rest of today's panel
 │ ╰────────────────────────────╯ │
-│  ✈ Fly   ⌖ Plan  ⚙ Setup  ⋯   │  navigation bar
+│ ✈ Fly ⌖ Plan ⚙ Setup 🔗 ⋯     │  navigation bar
 └───────────────────────────────┘
 ```
 
@@ -165,7 +172,8 @@ the map where it was.
   sheet: the map stays live above it, and the map centres the vehicle in
   the part the sheet leaves visible (`map::Placement` already does this).
 - **Flight actions** in the peek, within thumb reach. Arm, takeoff, land,
-  return and starting a mission are confirmed by sliding (below).
+  return and starting a mission are confirmed by sliding (below); the
+  desktop keeps its dialog.
 - **Alerts** become a banner under the strip while they are current, as on
   the desktop's vehicle panel; transient notices become snackbars above
   the sheet.
@@ -227,17 +235,17 @@ stop fixing sizes themselves:
   button, the log's columns and the settings' slider value become toolkit
   tokens or minimums, so the toolkit can give way.
 - **Density:** `ui::size` tokens become a function of a density
-  (`Pointer`, `Touch`): icon buttons 32 → 48, list rows 26 → 48, rail
-  buttons 48 → 56, a field's label above or beside. Density is not the
-  scale factor. Scaling enlarges text and everything with it, while
-  density makes targets reachable at the same text size.
+  (`Pointer`, `Touch`): controls and icon buttons 32 → 44, list rows
+  26 → 44, larger checkboxes and slider handles. Density is not the scale
+  factor. Scaling enlarges text and everything with it, while density
+  makes targets reachable at the same text size.
 
 iced has no context to pass the density through, so the toolkit reads it
-from one place the application sets at boot and on a settings change. The
-width-adaptive parts are layout widgets that choose between two
-arrangements by the width they are offered. They are not `responsive`,
-which rebuilds its content on every layout and would do so about 30 times
-a second while snapshots arrive.
+from one place the application sets before each view. The width-adaptive
+parts are layout widgets (`widget::adaptive`) that choose an arrangement
+by the width they are offered. They are not `responsive`, which rebuilds
+its content on every layout and would do so about 30 times a second while
+snapshots arrive.
 
 ## Interaction idioms
 
@@ -245,12 +253,14 @@ a second while snapshots arrive.
   sheet a detent, then closes it, then pops a page, and only then leaves
   the application. On the desktop, Escape does the same where it means
   something.
-- **Confirmations.** A command that changes what the vehicle does is
-  confirmed by sliding a thumb across a control. That is harder to trigger
-  by accident than a tap in a dialog, and it is how QGroundControl confirms
-  guided actions. A destructive change to stored data (clearing a mission,
-  restoring defaults) asks in a modal sheet with a scrim and large buttons
-  on touch, or in today's dialog with a pointer.
+- **Confirmations.** In the mobile shell, a command that changes what the
+  vehicle does is confirmed by sliding a thumb across a control. That is
+  harder to trigger by accident than a tap in a dialog, and it is how
+  QGroundControl confirms guided actions. The tiled shell keeps its dialog,
+  which is quicker with a mouse. A destructive change to stored data
+  (clearing a mission, restoring defaults) asks in a modal sheet with a
+  scrim and large buttons in the mobile shell, and in the dialog in the
+  tiled one.
 - **Long press** stands in for right-click and hover: a marker's actions,
   a parameter's description.
 - **No hover-only information.** Without tooltips on touch, an icon button
@@ -292,11 +302,12 @@ Each step leaves both shells working, and each changes the gallery, which
 should render every panel at 360 logical pixels with touch density
 alongside today's renders.
 
-1. **Adaptive components and density.** `ui::field`, read-out grids,
-   header overflow, density-sized tokens, and no fixed widths in features.
-   This alone fixes the cramped panels on a phone at a raised scale, and
-   narrow desktop panes too.
-2. **Destinations and pages.** The four-item navigation bar with labels,
+1. **Adaptive components and density** (done). `ui::field` stacks its
+   label, `ui::stats` drops columns, headers fold their tools into a menu
+   (`ui::tool`, `widget::menu`), parameter rows narrow (`ui::either`), and
+   controls, rows, checkboxes and sliders are touch-sized at touch
+   density. The gallery renders every panel at a phone's width, touch-sized.
+2. **Destinations and pages.** The five-item navigation bar with labels,
    the rail grouped the same way, the page stack with a top app bar, and
    the back key.
 3. **Fly.** The status strip on both shells, the sheet with detents, alert
@@ -308,15 +319,13 @@ alongside today's renders.
 6. **Medium windows.** The supporting pane beside the map for tablets in
    portrait.
 
-## Decisions to make
+## Decisions
 
-- **The destinations.** Fly, Plan, Setup and More, or Links as a fifth
-  destination for operators who switch radios often (it is also reachable
-  from the status strip).
-- **Slide-to-confirm on the desktop too.** One way to arm everywhere is
-  simpler to learn and to test; a dialog is quicker with a mouse.
-- **Density override.** Whether a touch-screen laptop should default to
-  touch density, or only the setting decides.
+- **Five destinations:** Fly, Plan, Setup, Links and More.
+- **Slide-to-confirm only in the mobile shell;** the tiled shell keeps its
+  dialog.
+- **Density follows the shell,** and a setting makes it touch-sized
+  everywhere.
 
 ## Sources
 

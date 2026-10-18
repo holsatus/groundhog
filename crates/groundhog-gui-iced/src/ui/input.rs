@@ -1,13 +1,29 @@
-//! Inputs, styled alike and filling their width unless told otherwise.
+//! Inputs, styled alike, as tall as a button at the density views are
+//! built at, and filling their width unless told otherwise.
 
-use std::borrow::Borrow;
+use std::{borrow::Borrow, ops::RangeInclusive};
 
 use iced::{
-    Length,
-    widget::{Checkbox, PickList, TextInput, text::IntoFragment},
+    Length, Padding,
+    widget::{Checkbox, PickList, Slider, TextInput, slider::HandleShape, text::IntoFragment},
 };
 
-use super::style;
+use super::style::{self, Density, size};
+
+/// The height of a line of body text: iced's default size, 16, at its
+/// default line height of 1.3.
+const LINE: f32 = 16.0 * 1.3;
+
+/// Padding that makes a one-line input as tall as a control, `sides` wide.
+fn input_padding(sides: f32) -> Padding {
+    let vertical = ((size::control() - LINE) / 2.0).max(0.0);
+    Padding {
+        top: vertical,
+        bottom: vertical,
+        left: sides,
+        right: sides,
+    }
+}
 
 /// A text field.
 pub fn text_input<'a, M: Clone + 'a>(
@@ -16,6 +32,7 @@ pub fn text_input<'a, M: Clone + 'a>(
 ) -> TextInput<'a, M> {
     iced::widget::text_input(placeholder, value)
         .style(style::text_input)
+        .padding(input_padding(5.0))
         .width(Length::Fill)
 }
 
@@ -33,10 +50,37 @@ where
 {
     iced::widget::pick_list(selected, options, to_string)
         .style(style::pick_list)
+        .padding(input_padding(10.0))
         .width(Length::Fill)
 }
 
 /// A labelled checkbox.
 pub fn checkbox<'a, M: 'a>(label: impl IntoFragment<'a>, checked: bool) -> Checkbox<'a, M> {
-    iced::widget::checkbox(checked).label(label)
+    iced::widget::checkbox(checked)
+        .label(label)
+        .size(size::checkbox())
+}
+
+/// A slider over `range`, its handle large enough for a finger at touch
+/// density.
+pub fn slider<'a, T, M>(
+    range: RangeInclusive<T>,
+    value: T,
+    on_change: impl Fn(T) -> M + 'a,
+) -> Slider<'a, T, M>
+where
+    T: Copy + From<u8> + PartialOrd,
+    M: Clone,
+{
+    let touch = style::density() == Density::Touch;
+    iced::widget::slider(range, value, on_change)
+        .height(size::slider())
+        .style(move |theme, status| {
+            let mut style = iced::widget::slider::default(theme, status);
+            if touch {
+                style.handle.shape = HandleShape::Circle { radius: 11.0 };
+                style.rail.width = 6.0;
+            }
+            style
+        })
 }

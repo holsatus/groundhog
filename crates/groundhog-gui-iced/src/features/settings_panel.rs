@@ -10,7 +10,7 @@
 
 use iced::{
     Alignment, Element, Length, Widget,
-    widget::{column, row, scrollable, slider},
+    widget::{column, row, scrollable},
 };
 
 use crate::{
@@ -25,6 +25,8 @@ pub enum Message {
     Theme(ThemeMode),
     /// Choose how the window is laid out.
     Shell(ShellMode),
+    /// Use touch-sized controls in every layout.
+    TouchControls(bool),
     /// The scale slider moved; the scale is previewed on the slider only.
     PreviewScaleFactor(f32),
     /// The scale slider was released: apply the previewed scale.
@@ -59,10 +61,16 @@ pub fn view<'a>(
                 ui::pick_list(Some(settings.shell), ShellMode::ALL, ShellMode::to_string)
                     .on_select(Message::Shell),
             ),
+            ui::checkbox("Touch-sized controls", settings.touch_controls)
+                .on_toggle(Message::TouchControls)
+                .boxed(),
+            ui::caption("The floating layout always has them.")
+                .tone(Tone::Muted)
+                .boxed(),
             ui::field(
                 "Scale",
                 slider_with_value(
-                    slider(0.5..=2.0, scale, Message::PreviewScaleFactor)
+                    ui::slider(0.5..=2.0, scale, Message::PreviewScaleFactor)
                         .on_release(Message::CommitScaleFactor)
                         .step(0.1),
                     format!("{scale:.1}×"),
@@ -76,7 +84,7 @@ pub fn view<'a>(
         [ui::field(
             "First waypoint",
             slider_with_value(
-                slider(
+                ui::slider(
                     5.0..=500.0,
                     settings.default_waypoint_altitude_m,
                     Message::DefaultAltitude,

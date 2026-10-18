@@ -18,6 +18,7 @@ use iced::{
     widget::{self, container, rule, svg, text},
 };
 use mavio::default_dialect::enums::MavSeverity;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Gaps between and around elements, in logical pixels. Spacing inside a
 /// group is smaller than between groups.
@@ -36,8 +37,46 @@ pub mod space {
     pub const XL: f32 = 16.0;
 }
 
+/// How large the interactive parts are drawn: for a pointer, or for a
+/// finger. Text keeps its size either way; that is the scale factor's job.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Density {
+    #[default]
+    Pointer,
+    Touch,
+}
+
+/// The density views are built at. iced gives a view no context to read it
+/// from, so the application sets it before each view, which it builds on
+/// one thread.
+static DENSITY: AtomicU8 = AtomicU8::new(Density::Pointer as u8);
+
+/// Build the views that follow at `density`.
+pub fn set_density(density: Density) {
+    DENSITY.store(density as u8, Ordering::Relaxed);
+}
+
+/// The density views are being built at.
+pub fn density() -> Density {
+    if DENSITY.load(Ordering::Relaxed) == Density::Touch as u8 {
+        Density::Touch
+    } else {
+        Density::Pointer
+    }
+}
+
+/// `pointer` or `touch`, by the density views are being built at.
+fn by_density(pointer: f32, touch: f32) -> f32 {
+    match density() {
+        Density::Pointer => pointer,
+        Density::Touch => touch,
+    }
+}
+
 /// Text and icon sizes, in logical pixels.
 pub mod size {
+    use super::by_density;
+
     /// Secondary text: hints, units, details, labels of values. Running
     /// text keeps iced's default size, 16.
     pub const CAPTION: f32 = 12.0;
@@ -45,16 +84,36 @@ pub mod size {
     pub const TITLE: f32 = 18.0;
     /// An icon in a button.
     pub const ICON: f32 = 18.0;
-    /// The side of a square icon button.
-    pub const ICON_BUTTON: f32 = 32.0;
+    /// The height of a control (a button, a field, a picker) and the side
+    /// of an icon button: 32 for a pointer, 44 for a finger. 44 is Apple's
+    /// smallest target; Material's 48 counts the gap to the next target,
+    /// which `space::S` adds.
+    pub fn control() -> f32 {
+        by_density(32.0, 44.0)
+    }
     /// An icon on the rail.
     pub const RAIL_ICON: f32 = 27.0;
     /// The side of a button on the rail.
     pub const RAIL_BUTTON: f32 = 48.0;
     /// The width of the labels in a form, so its controls line up.
     pub const FIELD_LABEL: f32 = 140.0;
+    /// The narrowest a form's control gets beside its label; any narrower,
+    /// and the label goes above it.
+    pub fn field_control() -> f32 {
+        by_density(160.0, 200.0)
+    }
     /// The height of a list row of one line of body text.
-    pub const LIST_ROW: f32 = 26.0;
+    pub fn list_row() -> f32 {
+        by_density(26.0, 44.0)
+    }
+    /// The height of a slider: its handle's reach.
+    pub fn slider() -> f32 {
+        by_density(22.0, 44.0)
+    }
+    /// The side of a checkbox's box.
+    pub fn checkbox() -> f32 {
+        by_density(16.0, 22.0)
+    }
     /// The height of a progress bar.
     pub const PROGRESS: f32 = 6.0;
 }
@@ -358,6 +417,20 @@ fn mix(base: Color, tint: Color, amount: f32) -> Color {
         channel(base.g, tint.g),
         channel(base.b, tint.b),
     )
+}
+
+/// A container drawn as a button of `kind` at rest, for what looks like a
+/// button but handles its own press (a menu's trigger).
+pub fn button_at_rest(kind: ButtonKind) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let style = button(kind)(theme, widget::button::Status::Active);
+        container::Style {
+            background: style.background,
+            border: style.border,
+            text_color: Some(style.text_color),
+            ..container::Style::default()
+        }
+    }
 }
 
 /// A modal dialog.

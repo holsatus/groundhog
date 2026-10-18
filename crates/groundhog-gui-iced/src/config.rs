@@ -23,6 +23,8 @@ pub struct Settings {
     pub theme: ThemeMode,
     /// How the window is laid out.
     pub shell: ShellMode,
+    /// Touch-sized controls in every layout, not only the floating one.
+    pub touch_controls: bool,
     /// How much larger than the platform's own scale the interface is drawn.
     pub scale_factor: f32,
     /// Record every received frame to a `.tlog` file per session.
@@ -37,6 +39,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::Dark,
             shell: ShellMode::default(),
+            touch_controls: false,
             scale_factor: 1.0,
             record_telemetry: true,
             default_waypoint_altitude_m:

@@ -29,13 +29,17 @@ mod input;
 pub mod style;
 mod text;
 pub mod theme;
+mod tool;
 
+/// One of two arrangements of the same content, by the width it is given.
+pub use crate::widget::adaptive::either;
 pub use button::{button, button_with, icon_button};
 pub use container::{
-    actions, activity, badge, banner, card, card_list, divider, empty, field, header, list_row,
-    meter, overline, panel, panel_with, progress, section, stat, tooltip,
+    actions, activity, badge, banner, card, card_list, divider, empty, field, list_row, meter,
+    overline, panel, panel_with, progress, section, stat, stats, tooltip,
 };
 pub use icon::Icon;
-pub use input::{checkbox, pick_list, text_input};
-pub use style::{Tone, size, space};
+pub use input::{checkbox, pick_list, slider, text_input};
+pub use style::{Density, Tone, set_density, size, space};
 pub use text::{TextExt, caption, mono, severity, text, title};
+pub use tool::{header, tool};

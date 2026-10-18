@@ -413,17 +413,12 @@ impl ParameterPanel {
         };
         let header = ui::header(
             picker,
-            [
-                state,
-                ui::icon_button(Icon::Open)
-                    .hint("Load values from a file, as edits")
-                    .on_press(Message::LoadDialog(address))
-                    .boxed(),
-                ui::icon_button(Icon::Save)
-                    .hint("Save the parameters to a file")
-                    .on_press(Message::SaveDialog(address))
-                    .boxed(),
-            ],
+            [state],
+            [vec![
+                ui::tool(Icon::Open, "Load values from a file")
+                    .on_press(Message::LoadDialog(address)),
+                ui::tool(Icon::Save, "Save to a file").on_press(Message::SaveDialog(address)),
+            ]],
         );
 
         let actions = ui::actions([vec![
@@ -512,8 +507,9 @@ impl ParameterPanel {
         parameters: Option<&'a Parameters>,
         encoding_known: bool,
     ) -> Element<'a, Message> {
-        /// Heights must fit the tallest content of each item kind
-        const ROW_HEIGHT: f32 = 32.0;
+        // Heights must fit the tallest content of each item kind: a
+        // parameter's row holds a field and buttons.
+        let row_height = ui::size::control();
         const HEADER_HEIGHT: f32 = 28.0;
         const SEPARATOR_HEIGHT: f32 = 1.0;
 
@@ -575,10 +571,10 @@ impl ParameterPanel {
                 view_param_row(address, ident, param, *edit, encoding_known)
             }
         })
-        .item_height(|item| match item {
+        .item_height(move |item| match item {
             Item::Section { name: None, .. } => SEPARATOR_HEIGHT,
             Item::Section { .. } => HEADER_HEIGHT,
-            Item::Param(..) => ROW_HEIGHT,
+            Item::Param(..) => row_height,
         })
         .key(move |item| match item {
             Item::Section { first, .. } => ((address, (*first).clone()), true),
@@ -619,19 +615,25 @@ fn view_param_row<'a>(
 ) -> Element<'a, Message> {
     let value_text = edit.map_or_else(|| value_to_string(param.value()), |edit| edit.text.clone());
 
-    let input = ui::text_input("Value", value_text)
-        .on_input(move |text| Message::Edit(address, ident.clone(), text));
-    let input = match edit {
-        Some(edit) => input.style(style::marked_text_input(edit_tone(edit))),
-        None => input,
+    let input = || {
+        let input = ui::text_input("Value", value_text.clone())
+            .on_input(move |text| Message::Edit(address, ident.clone(), text));
+        match edit {
+            Some(edit) => input.style(style::marked_text_input(edit_tone(edit))),
+            None => input,
+        }
     };
 
-    let restore = ui::icon_button(Icon::Revert)
-        .hint(match edit {
-            Some(_) => format!("Restore to {}", value_to_string(param.value())),
-            None => "Nothing to restore".to_string(),
-        })
-        .on_press_maybe(edit.map(|_| Message::Reset(address, ident.clone())));
+    let restore_hint = match edit {
+        Some(_) => format!("Restore to {}", value_to_string(param.value())),
+        None => "Nothing to restore".to_string(),
+    };
+    let restore = || {
+        ui::icon_button(Icon::Revert)
+            .hint(restore_hint.clone())
+            .on_press_maybe(edit.map(|_| Message::Reset(address, ident.clone())))
+            .boxed()
+    };
 
     let uploadable = edit
         .and_then(ParamEdit::uploadable)
@@ -646,24 +648,51 @@ fn view_param_row<'a>(
         (Some(_), None) if !encoding_known => "Encoding unknown; uploads disabled".to_string(),
         _ => "Nothing to upload".to_string(),
     };
-    let upload = ui::icon_button(Icon::Upload)
-        .hint(upload_hint)
-        .on_press_maybe(uploadable.map(|_| Message::Upload(address, ident.clone())));
+    let upload = || {
+        ui::icon_button(Icon::Upload)
+            .hint(upload_hint.clone())
+            .on_press_maybe(uploadable.map(|_| Message::Upload(address, ident.clone())))
+            .boxed()
+    };
 
-    row![
-        ui::mono(ident.as_str()).width(160.0),
-        ui::mono(value_type_name(param.value()))
-            .width(50.0)
+    /// The name's column in a wide row, and its type's.
+    const NAME: f32 = 160.0;
+    const TYPE: f32 = 50.0;
+    /// The value field's width in a narrow row, and the least it gets in a
+    /// wide one.
+    const VALUE: f32 = 96.0;
+
+    let name = ident.as_str();
+    let kind = value_type_name(param.value());
+    let buttons = 2.0 * ui::size::control() + 4.0 * ui::space::XS;
+
+    // Wide, the names and types line up in columns and the value takes
+    // the rest; narrow, the name gives way to the value instead.
+    let wide = row![
+        ui::mono(name).width(NAME),
+        ui::mono(kind)
+            .width(TYPE)
             .align_x(Alignment::End)
             .tone(Tone::Muted),
         space::horizontal().width(ui::space::M),
-        input,
-        restore.boxed(),
-        upload.boxed(),
+        input(),
+        restore(),
+        upload(),
     ]
     .spacing(ui::space::XS)
-    .align_y(Alignment::Center)
-    .boxed()
+    .align_y(Alignment::Center);
+
+    let narrow = row![
+        ui::mono(name).single_line().width(Length::Fill),
+        ui::mono(kind).tone(Tone::Muted),
+        input().width(VALUE),
+        restore(),
+        upload(),
+    ]
+    .spacing(ui::space::XS)
+    .align_y(Alignment::Center);
+
+    ui::either(wide, narrow, NAME + TYPE + ui::space::M + VALUE + buttons).boxed()
 }
 
 #[cfg(test)]

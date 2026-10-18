@@ -172,7 +172,7 @@ impl<'a, M> Action<'a, M> {
                 };
                 iced::widget::button(content.boxed())
                     .width(width)
-                    .height(size::ICON_BUTTON)
+                    .height(size::control())
                     .padding([0.0, space::M])
             }
             Content::Icon(glyph) => iced::widget::button(
@@ -181,8 +181,8 @@ impl<'a, M> Action<'a, M> {
                     .boxed(),
             )
             .padding(0)
-            .width(size::ICON_BUTTON)
-            .height(size::ICON_BUTTON),
+            .width(size::control())
+            .height(size::control()),
             Content::Element(content) => iced::widget::button(content).width(width),
         };
 

@@ -155,6 +155,7 @@ impl LogPanel {
 
         let count = entries.len();
         let entries = entries.into_iter().enumerate().collect::<Vec<_>>();
+        let row_height = ui::size::list_row();
         let list = virtual_list(entries, |&(index, entry)| match entry {
             Entry::Vehicle(system, status) => timeline_row(
                 index,
@@ -172,7 +173,7 @@ impl LogPanel {
                 },
             ),
         })
-        .item_height(|_| ui::size::LIST_ROW)
+        .item_height(move |_| row_height)
         .key(|(index, entry)| (*index, entry.at()));
 
         // The filter is what the panel is about: whose messages, and how
@@ -203,6 +204,7 @@ impl LogPanel {
             })
             .tone(Tone::Muted)
             .boxed()],
+            [],
         );
 
         let body = if count == 0 {

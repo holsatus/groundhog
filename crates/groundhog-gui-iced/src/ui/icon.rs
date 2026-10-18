@@ -101,6 +101,8 @@ icons! {
     Log => "list.svg",
     /// The settings panel.
     Settings => "wrench.svg",
+    /// Open a menu of what does not fit.
+    More => "ellipsis-vertical.svg",
 }
 
 /// `icon` at `size` (usually [`style::size::ICON`]), coloured for a button

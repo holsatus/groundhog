@@ -357,6 +357,19 @@ async fn gallery() {
                     .style(style::pane)
                     .boxed(),
             );
+
+            // As a phone's sheet shows it: narrow, with touch-sized controls.
+            ui::set_density(ui::Density::Touch);
+            let name = format!("panel-{}-phone-{suffix}", panel.title().to_lowercase());
+            gallery.render(
+                &name,
+                Size::new(380.0, 820.0),
+                &theme,
+                iced::widget::container(app.pane_body(panel))
+                    .style(style::pane)
+                    .boxed(),
+            );
+            ui::set_density(ui::Density::Pointer);
         }
     }
 
