@@ -86,6 +86,8 @@ pub struct Application {
     /// The scale the settings' slider is being dragged to, applied on
     /// release.
     scale_preview: Option<f32>,
+    /// Whether the window was put in full-screen mode for the video.
+    full_screen: bool,
     /// The floating shell's sheet.
     floating: Floating,
     /// The window's size, once measured; it decides the shell.
@@ -186,6 +188,7 @@ impl Application {
             insets: platform::insets(),
             system_bars: None,
             scale_preview: None,
+            full_screen: false,
             floating: Floating::default(),
             window: None,
         };
@@ -334,7 +337,7 @@ impl Application {
                     self.configuration.video = settings;
                     self.save_configuration();
                 }
-                task.map(Message::Video)
+                Task::batch([task.map(Message::Video), self.sync_full_screen()])
             }
             Message::Logs(message) => {
                 self.log_panel.update(message);
@@ -590,6 +593,23 @@ impl Application {
         }
     }
 
+    /// Puts the window in full-screen mode while the video fills the screen,
+    /// and back when it no longer does (left, or its stream stopped).
+    fn sync_full_screen(&mut self) -> Task<Message> {
+        let full_screen = self.video.is_full_screen();
+        if full_screen == self.full_screen {
+            return Task::none();
+        }
+        self.full_screen = full_screen;
+
+        let mode = if full_screen {
+            iced::window::Mode::Fullscreen
+        } else {
+            iced::window::Mode::Windowed
+        };
+        iced::window::latest().and_then(move |window| iced::window::set_mode(window, mode))
+    }
+
     /// Matches the status- and navigation-bar icons to the theme: dark icons
     /// on a light palette, light ones on a dark palette.
     fn sync_system_bars(&mut self) {
@@ -622,9 +642,20 @@ impl Application {
     pub fn view(&self) -> impl Widget<Message> + '_ {
         ui::set_density(self.density());
 
-        let base = match self.shell() {
-            Shell::Tiled => self.view_tiled(),
-            Shell::Floating => self.view_floating(),
+        // The full-screen video still shows the notices: an alert must not
+        // go unseen for watching the video.
+        let base = if self.video.is_full_screen() {
+            let insets = self.insets.padding(self.scale_factor());
+            stack![
+                self.video.view_full_screen(insets).map(Message::Video),
+                self.view_toasts(ui::space::XL),
+            ]
+            .boxed()
+        } else {
+            match self.shell() {
+                Shell::Tiled => self.view_tiled(),
+                Shell::Floating => self.view_floating(),
+            }
         };
 
         // The window is measured by what fills it, whatever the shell puts
@@ -777,10 +808,26 @@ impl Application {
             _ => None,
         });
 
-        // The system's back (a phone's gesture, a mouse's back button), and
-        // Escape where nothing else took it, step back in the floating
-        // shell.
-        let back = if self.shell() == Shell::Floating {
+        // Escape, or the system's back (a phone's gesture, a mouse's back
+        // button), leaves the full-screen video; elsewhere in the floating
+        // shell, back and Escape where nothing else took it step back.
+        let back = if self.video.is_full_screen() {
+            iced::event::listen_with(|event, _, _| {
+                let leave = match event {
+                    iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => matches!(
+                        key,
+                        keyboard::Key::Named(
+                            keyboard::key::Named::Escape | keyboard::key::Named::BrowserBack
+                        )
+                    ),
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Back,
+                    )) => true,
+                    _ => false,
+                };
+                leave.then_some(Message::Video(video::Message::FullScreen(false)))
+            })
+        } else if self.shell() == Shell::Floating {
             iced::event::listen_with(|event, status, _| {
                 let back = match event {
                     iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {

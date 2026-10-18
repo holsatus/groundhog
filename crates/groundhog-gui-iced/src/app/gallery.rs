@@ -444,6 +444,16 @@ async fn gallery() {
         let _ = app.update(Message::Video(video::Message::ToggleForm));
     }
 
+    // The video alone, filling the screen.
+    let _ = app.update(Message::Video(video::Message::FullScreen(true)));
+    gallery.render(
+        "video-full-screen",
+        Size::new(1600.0, 1000.0),
+        &app.theme(),
+        app.view().boxed(),
+    );
+    let _ = app.update(Message::Video(video::Message::FullScreen(false)));
+
     // Dragging the parameters (right column) by their title bar, to show
     // where they would land: the bottom half of the vehicles pane (splitting
     // it), the divider beneath it (an even share), its middle (a swap), and

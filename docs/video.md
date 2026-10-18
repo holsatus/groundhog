@@ -210,7 +210,9 @@ until the desktop video works.
    floating shell lists it under More). While the stream is on, the
    picture is the whole panel: the stream's state, changing the source and
    stopping float over its corner, and the details (URI, size, decoder,
-   latency) show on hovering the state or pressing it. Fly
+   latency) show on hovering the state or pressing it. The chip also puts
+   the picture alone in a full-screen window (the notices still show
+   over it), left with Escape, back, or its own button. Fly
    shows it in the map's corner, a tap swapping the two. The source, the
    switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.

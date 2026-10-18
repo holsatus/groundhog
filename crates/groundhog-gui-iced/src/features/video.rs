@@ -34,6 +34,8 @@ pub enum Message {
     ToggleForm,
     /// Show or hide the stream's details over the picture.
     ToggleDetails,
+    /// Show the picture alone, filling the screen, or leave it.
+    FullScreen(bool),
     /// Receiver `id`'s state changed: a frame arrived, or its status.
     Updated(u64, State),
 }
@@ -42,6 +44,16 @@ pub enum Message {
 pub enum Event {
     /// The settings to persist.
     Changed(VideoSettings),
+}
+
+/// How a receiver's status reads, in a badge.
+fn status_badge(status: &Status) -> (&'static str, Tone) {
+    match status {
+        Status::Connecting => ("Connecting", Tone::Muted),
+        Status::Streaming { .. } => ("Live", Tone::Success),
+        Status::Retrying { .. } => ("No video", Tone::Warning),
+        Status::Failed(_) => ("Failed", Tone::Danger),
+    }
 }
 
 /// The widest the floating cards over the picture get.
@@ -56,6 +68,8 @@ pub struct VideoPanel {
     form: bool,
     /// Whether the stream's details show over the picture.
     details: bool,
+    /// Whether the picture fills the screen, alone.
+    full_screen: bool,
     /// The identity the next receiver gets.
     next: u64,
 }
@@ -75,6 +89,7 @@ impl VideoPanel {
             receiving: None,
             form: false,
             details: false,
+            full_screen: false,
             next: 0,
         };
         let task = if panel.settings.enabled {
@@ -83,6 +98,12 @@ impl VideoPanel {
             Task::none()
         };
         (panel, task)
+    }
+
+    /// Whether the picture fills the screen, alone. Never without a
+    /// stream.
+    pub fn is_full_screen(&self) -> bool {
+        self.full_screen && self.receiving.is_some()
     }
 
     /// Where the frames arrive, while the stream is on.
@@ -119,6 +140,7 @@ impl VideoPanel {
             }
             Message::Stop => {
                 self.receiving = None;
+                self.full_screen = false;
                 self.settings.enabled = false;
                 (Task::none(), Some(Event::Changed(self.settings.clone())))
             }
@@ -128,6 +150,10 @@ impl VideoPanel {
             }
             Message::ToggleDetails => {
                 self.details = !self.details;
+                (Task::none(), None)
+            }
+            Message::FullScreen(full_screen) => {
+                self.full_screen = full_screen && self.receiving.is_some();
                 (Task::none(), None)
             }
             Message::Updated(id, state) => {
@@ -183,12 +209,7 @@ impl VideoPanel {
             container(self.view_status(&receiving.state.status)).center(Length::Fill),
         ];
 
-        let (label, tone) = match &receiving.state.status {
-            Status::Connecting => ("Connecting", Tone::Muted),
-            Status::Streaming { .. } => ("Live", Tone::Success),
-            Status::Retrying { .. } => ("No video", Tone::Warning),
-            Status::Failed(_) => ("Failed", Tone::Danger),
-        };
+        let (label, tone) = status_badge(&receiving.state.status);
         // Hovered, the indicator explains itself; pressed (as a finger
         // must, having no hover), it keeps the details open.
         let indicator = ui::tooltip(
@@ -209,6 +230,10 @@ impl VideoPanel {
                 ui::icon_button(Icon::Stop)
                     .hint("Stop the video")
                     .on_press(Message::Stop)
+                    .boxed(),
+                ui::icon_button(Icon::Maximize)
+                    .hint("Full screen (Esc to leave)")
+                    .on_press(Message::FullScreen(true))
                     .boxed(),
             ]
             .spacing(ui::space::XS)
@@ -235,6 +260,44 @@ impl VideoPanel {
         .padding(ui::space::S);
 
         ui::picture(stack![picture, overlay])
+    }
+
+    /// The picture alone, filling the screen, with the stream's state and a
+    /// way out (also Escape, or back) in its corner, clear of the platform's
+    /// chrome by `insets`.
+    pub fn view_full_screen(&self, insets: Padding) -> Element<'_, Message> {
+        let Some(receiving) = &self.receiving else {
+            return iced::widget::Space::new().boxed();
+        };
+
+        let (label, tone) = status_badge(&receiving.state.status);
+        let chip = ui::floating(
+            row![
+                ui::badge(label, tone),
+                ui::icon_button(Icon::Minimize)
+                    .hint("Leave full screen (Esc)")
+                    .on_press(Message::FullScreen(false))
+                    .boxed(),
+            ]
+            .spacing(ui::space::S)
+            .align_y(Alignment::Center),
+        )
+        .padding(Padding {
+            left: ui::space::M,
+            ..Padding::new(ui::space::XS)
+        });
+        let corner = container(chip).padding(Padding {
+            top: insets.top + ui::space::S,
+            right: insets.right + ui::space::S,
+            bottom: insets.bottom + ui::space::S,
+            left: insets.left + ui::space::S,
+        });
+
+        ui::screen(stack![
+            video(receiving.receiver.slot()),
+            container(self.view_status(&receiving.state.status)).center(Length::Fill),
+            corner,
+        ])
     }
 
     /// The stream's details: where it comes from, what it is, and how it is
@@ -405,6 +468,23 @@ mod tests {
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming)
         );
+    }
+
+    #[test]
+    fn full_screen_needs_a_stream_and_ends_with_it() {
+        let mut panel = panel(VideoSettings::default());
+        let _ = panel.update(Message::FullScreen(true));
+        assert!(!panel.is_full_screen(), "nothing to show");
+
+        let _ = panel.update(Message::EditSource("test://".to_string()));
+        let _ = panel.update(Message::Start);
+        let _ = panel.update(Message::FullScreen(true));
+        assert!(panel.is_full_screen());
+
+        let _ = panel.update(Message::Stop);
+        assert!(!panel.is_full_screen());
+        let _ = panel.update(Message::Start);
+        assert!(!panel.is_full_screen(), "a new stream starts in its panel");
     }
 
     /// The panel's receiver puts frames in the slot the video widget reads.
