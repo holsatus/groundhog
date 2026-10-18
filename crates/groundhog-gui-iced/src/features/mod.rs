@@ -112,10 +112,54 @@ pub struct MapContext<'a> {
 }
 
 /// A file dialog opening in `directory`, if known.
+#[cfg(not(target_os = "android"))]
 pub fn file_dialog(directory: Option<&Path>) -> rfd::AsyncFileDialog {
     let dialog = rfd::AsyncFileDialog::new();
     match directory {
         Some(directory) => dialog.set_directory(directory),
         None => dialog,
+    }
+}
+
+/// A stand-in for `rfd::AsyncFileDialog` on Android.
+///
+/// Android has no native file dialog through `rfd`; picking and saving files
+/// needs the Storage Access Framework, which is a later pass. Until then the
+/// dialog reports "cancelled", so the file actions do nothing instead of
+/// failing to compile.
+#[cfg(target_os = "android")]
+pub fn file_dialog(_directory: Option<&Path>) -> AndroidFileDialog {
+    AndroidFileDialog
+}
+
+#[cfg(target_os = "android")]
+pub struct AndroidFileDialog;
+
+#[cfg(target_os = "android")]
+impl AndroidFileDialog {
+    pub fn set_file_name(self, _name: &str) -> Self {
+        self
+    }
+
+    pub fn add_filter(self, _name: &str, _extensions: &[&str]) -> Self {
+        self
+    }
+
+    pub async fn pick_file(self) -> Option<AndroidFileHandle> {
+        None
+    }
+
+    pub async fn save_file(self) -> Option<AndroidFileHandle> {
+        None
+    }
+}
+
+#[cfg(target_os = "android")]
+pub struct AndroidFileHandle(PathBuf);
+
+#[cfg(target_os = "android")]
+impl AndroidFileHandle {
+    pub fn path(&self) -> &Path {
+        &self.0
     }
 }

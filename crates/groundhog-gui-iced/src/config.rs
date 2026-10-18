@@ -1,19 +1,12 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use directories::ProjectDirs;
 use groundhog_logic::{
     link::LinkConfig,
     persist::{SaveQueue, read_or_set_aside, write_atomic},
 };
 
 use crate::{layout::Workspace, ui::theme::ThemeMode};
-
-static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
-    LazyLock::new(|| directories::ProjectDirs::from("org", "Holsatus", "Groundhog"));
 
 /// Current on-disk configuration schema version.
 const CONFIG_VERSION: u32 = 2;
@@ -50,9 +43,7 @@ impl Default for Settings {
 
 /// Where application data (telemetry logs) is kept.
 pub fn data_dir() -> Option<PathBuf> {
-    PROJECT_DIRS
-        .as_ref()
-        .map(|dirs| dirs.data_dir().to_path_buf())
+    crate::platform::data_dir()
 }
 
 /// Persists configurations one at a time, in order, off the UI thread (see
@@ -114,9 +105,8 @@ impl Default for Configuration {
 
 impl Configuration {
     fn config_path() -> anyhow::Result<PathBuf> {
-        PROJECT_DIRS
-            .as_ref()
-            .map(|dirs| dirs.config_dir().join("config.ron"))
+        crate::platform::config_dir()
+            .map(|dir| dir.join("config.ron"))
             .context("Unable to construct path to config.ron")
     }
 

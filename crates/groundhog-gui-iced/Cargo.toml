@@ -3,6 +3,13 @@ name = "groundhog-gui-iced"
 version.workspace = true
 edition.workspace = true
 
+# A library next to the binary so Android can load the application as a
+# `cdylib`: Android has no `main`, it calls the exported `android_main` from
+# `libgroundhog_gui_iced.so`. The binary remains the desktop entry point.
+[lib]
+name = "groundhog_gui_iced"
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "groundhog"
 path = "src/main.rs"
@@ -26,11 +33,24 @@ iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "a
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
 slippery = { git = "https://github.com/peterkrull/slippery" }
-env_logger = "0.11.10"
-rfd = "0.17.2"
-directories = "6.0.0"
 ron = "0.12.1"
 anyhow = "1.0.104"
+
+# Desktop-only platform services: rfd has no Android backend and does not
+# compile for it; `env_logger` writes to stderr (which Android discards) and
+# `directories` has no usable directories there (Android has no `$HOME`).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.17.2"
+env_logger = "0.11.10"
+directories = "6.0.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# `native-activity` is what turns on winit's Android backend: winit's own
+# feature is only `android-activity/native-activity`, and Cargo unifies it.
+# It also provides `AndroidApp`, the entry point argument and the data paths.
+android-activity = { version = "0.6", features = ["native-activity"] }
+# `env_logger` writes to stderr, which is /dev/null for an Android app.
+android_logger = "0.15.1"
 
 [dev-dependencies]
 # Headless widget tests (event propagation through composed widgets). Same bare

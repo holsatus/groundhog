@@ -53,7 +53,10 @@
 //! * [`State`] API to perform actions programmatically (`split`, `swap`, `resize`, etc.)
 //!
 //! # Example
-//! ```no_run
+//! ```ignore
+//! // Iced's upstream example, kept for reference: it calls the upstream
+//! // `pane_grid` constructor, while this fork builds `PaneGrid::new`
+//! // directly (see `layout.rs` for the workspace's use).
 //! # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
 //! # use iced::widget::Widget;
 //! #
@@ -174,7 +177,8 @@ const THICKNESS_RATIO: f32 = 25.0;
 /// * [`State`] API to perform actions programmatically (`split`, `swap`, `resize`, etc.)
 ///
 /// # Example
-/// ```no_run
+/// ```ignore
+/// // Iced's upstream example; this fork builds `PaneGrid::new` directly.
 /// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
 /// # use iced::widget::Widget;
 /// #

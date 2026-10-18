@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/groundhog-logic", "crates/groundhog-gui-iced", "crates/groundhog-gui-egui"]
+members = ["crates/groundhog-logic", "crates/groundhog-gui-iced"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,3 +17,36 @@ mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a
 mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-ardupilotmega", "tokio"] }
 tokio = "1.51.1"
 serde = "1.0.228"
+
+# The local iced fork carries the Android shell support (an `android_main`
+# entry point, surface recreation on resume, system fonts and an `arboard`
+# that compiles). The workspace root is the only place Cargo reads `[patch]`,
+# so every iced crate a dependency asks for directly is redirected here:
+# `iced` alone is not enough, because `slippery` also depends on `iced_core`
+# and `iced_graphics`, and the frontend on `iced_runtime`. Without these
+# entries Cargo would build two copies of iced with incompatible types.
+#
+# The fork lives next to this repository (branch `android`, iced master at
+# 08eb93a plus the six `iced-mobile/iced` commits and one documentation fix).
+# See docs/android-port.md.
+[patch."https://github.com/iced-rs/iced"]
+iced = { path = "../iced-android" }
+iced_core = { path = "../iced-android/core" }
+iced_debug = { path = "../iced-android/debug" }
+iced_futures = { path = "../iced-android/futures" }
+iced_graphics = { path = "../iced-android/graphics" }
+iced_program = { path = "../iced-android/program" }
+iced_renderer = { path = "../iced-android/renderer" }
+iced_runtime = { path = "../iced-android/runtime" }
+iced_test = { path = "../iced-android/test" }
+iced_tiny_skia = { path = "../iced-android/tiny_skia" }
+iced_widget = { path = "../iced-android/widget" }
+iced_winit = { path = "../iced-android/winit" }
+iced_wgpu = { path = "../iced-android/wgpu" }
+
+# slippery also fetches map tiles through `reqwest`, whose Android
+# certificate verifier needs a JVM-side component this Gradle-free build
+# cannot ship (it panics without one). The local fork trusts Mozilla's
+# bundled roots on Android instead, so the map can load its tiles.
+[patch."https://github.com/peterkrull/slippery"]
+slippery = { path = "../slippery-android" }

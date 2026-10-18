@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The first-pass Android manifest: a plain NativeActivity that loads the iced
+  frontend's cdylib and starts its exported `android_main`.
+
+  - `configChanges` keeps rotation, dark mode, keyboard and locale changes from
+    restarting the activity, which would restart `android_main` (winit allows
+    one event loop per process).
+  - `windowSoftInputMode=adjustResize` lets the soft keyboard resize the window
+    instead of covering the focused field.
+  - `hasCode=false`: there are no Java/Kotlin classes; NativeActivity is a
+    framework class and the library is loaded from `jniLibs`.
+  - `extractNativeLibs=false`: the .so is stored uncompressed and page-aligned
+    by build.sh, so Android maps it directly.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.holsatus.groundhog">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- USB serial links need host mode; the app still runs without it. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <application
+        android:label="Groundhog"
+        android:hasCode="false"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="groundhog_gui_iced" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
