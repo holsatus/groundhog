@@ -377,9 +377,9 @@ A panel's content is the same wherever it is shown
   over any tile. Where the operator is, is view state; nothing about the
   floating shell is persisted.
 
-The tiled shell's rail groups its panels by the same destinations, a short
-rule between groups, so a panel keeps its company in both shells.
-`Destination::panels` is the one list of panels and their order.
+`Destination::panels` is the one list of panels and their order: the
+tiled shell's rail lists them in that order too, evenly, without marking
+the groups.
 
 `ShellMode` (a setting) picks one, or leaves it to `Automatic`: floating on
 a touch screen whose shortest side is under 600 logical pixels, and in any
@@ -743,8 +743,8 @@ with a location), the file formats, and jump-target translation (for
 1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
    `icon` (add the icon to `ui::Icon` if it is new) and `summary` (the line
    shown where it is listed among others), and list it in a
-   `shell::Destination`'s `panels`. That puts it in its group on the tiled
-   shell's rail, and in its destination in the floating shell. Add a
+   `shell::Destination`'s `panels`. That puts it on the tiled shell's rail,
+   and in its destination in the floating shell. Add a
    destination only for a new task: the navigation bar holds five. Where a
    panel opens in the tiled shell is the operator's choice (see
    [The workspace](#the-workspace-is-three-columns-around-the-map)).

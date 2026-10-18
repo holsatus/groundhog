@@ -50,7 +50,8 @@ struct Geometry {
     /// Whether the window is wider than tall: the rail goes along the left,
     /// and the sheet beside it.
     landscape: bool,
-    /// The size of the screen beside the navigation.
+    /// The size of the screen beside the navigation, for placing a sheet
+    /// in it. The screen itself fills what the navigation leaves.
     screen: Size,
     /// The insets on the screen's own edges (the navigation takes the rest).
     screen_insets: Padding,
@@ -210,9 +211,12 @@ impl Application {
 
         let map = self.view_map(Placement::Window { covered });
 
-        container(stack![map, scrim, chrome, toasts])
-            .width(geometry.screen.width)
-            .height(geometry.screen.height)
+        // Filling what the navigation leaves, not sized to the window as last
+        // measured: the window is measured from this, so a fixed size would
+        // keep it from ever growing.
+        stack![map, scrim, chrome, toasts]
+            .width(Length::Fill)
+            .height(Length::Fill)
             .boxed()
     }
 
@@ -248,8 +252,8 @@ impl Application {
             .height(Length::Fill),
         )
         .padding(geometry.screen_insets)
-        .width(geometry.screen.width)
-        .height(geometry.screen.height)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(style::page);
 
         stack![page, self.view_toasts_within(geometry.screen_insets)].boxed()

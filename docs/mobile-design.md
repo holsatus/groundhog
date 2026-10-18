@@ -100,7 +100,7 @@ conventions, minus Liquid Glass:
 | Compact width (< 600) | Phone, portrait | Mobile | Bottom bar, five labelled destinations | Bottom sheet with detents, or a page |
 | Compact height (< 480) | Phone, landscape | Mobile | Rail at the left (behind the cutout's inset) | Side sheet beside the rail, or a page |
 | Medium (600–840) | Tablet in portrait, foldable | Mobile, wide | Rail | Supporting pane beside the map instead of over it |
-| Expanded and wider, not compact height | Tablet landscape, desktop | Tiled | Rail, grouped by destination | The workspace's panes |
+| Expanded and wider, not compact height | Tablet landscape, desktop | Tiled | Rail, in the destinations' order | The workspace's panes |
 
 `ShellMode::Automatic` resolves from these classes instead of from a
 touch flag and the shortest side. A setting still overrides it.
@@ -135,8 +135,8 @@ The link indicator in the status strip also opens Links, and an alert in
 the strip opens the log.
 
 On the desktop, the rail keeps a button per panel (there is room, and
-opening several panels at once is the point of the workspace) but groups
-them by destination with a gap between groups, in the same order. Fly and
+opening several panels at once is the point of the workspace), in the
+destinations' order, without marking the groups. Fly and
 Plan share one map instance, so switching between them on a phone keeps
 the map where it was.
 
@@ -278,7 +278,7 @@ snapshots arrive.
    window's width and height, `Density` from the platform, both resolved
    in `Application` and handed to the shell and the toolkit.
 2. **Destinations** (`layout::Panel` gains a destination; a `Destination`
-   enum): the navigation bar and the rail's grouping read from it.
+   enum): the navigation bar and the rail's order read from it.
 3. **Panels return their anatomy instead of composing it.** A feature's
    `view` returns its parts (header subject and status, action groups,
    banners, activity, body, and a short *summary* for a sheet's peek or a
@@ -293,7 +293,7 @@ snapshots arrive.
 5. **A page stack** for the mobile shell (Setup → Parameters → an edit),
    popped by back.
 
-The tiled shell needs only the status strip, the rail's grouping and the
+The tiled shell needs only the status strip, the rail's order and the
 adaptive components; its workspace is unchanged.
 
 ## Order of work
@@ -309,7 +309,7 @@ alongside today's renders.
    density. The gallery renders every panel at a phone's width, touch-sized.
 2. **Destinations and pages** (done). The five-item navigation bar with
    labels (a rail in landscape), docked on the system's inset; the tiled
-   rail grouped the same way; pages with a top bar, Setup and More listing
+   rail in the same order; pages with a top bar, Setup and More listing
    their panels; and back, from the back key (taken as a key by opting out
    of `OnBackInvokedCallback`, which this Java-less activity cannot
    register), Escape or a mouse's back button, leaving the application

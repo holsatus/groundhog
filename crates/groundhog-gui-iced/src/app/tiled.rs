@@ -20,9 +20,6 @@ use crate::{
     },
 };
 
-/// The thickness of the rule between the rail's groups.
-const RAIL_DIVIDER: f32 = 1.0;
-
 impl Application {
     pub(super) fn view_tiled(&self) -> Element<'_, Message> {
         // The rail and the panes float on the window's background, one gap
@@ -97,42 +94,23 @@ impl Application {
             ui::tooltip(button, panel.title(), tooltip::Position::Right)
         };
 
-        // Grouped as the floating shell's destinations, a short rule
-        // between groups, so a panel is found in the same company on both.
-        let mut rail: Vec<Element<'_, Message>> = Vec::new();
-        for (index, destination) in Destination::ALL.into_iter().enumerate() {
-            if index > 0 {
-                rail.push(
-                    container(rule::horizontal(RAIL_DIVIDER).style(style::pane_divider))
-                        .padding([0.0, ui::space::M])
-                        .width(ui::size::RAIL_BUTTON)
-                        .boxed(),
-                );
-            }
-            rail.push(
-                column(destination.panels().iter().map(|panel| button_of(*panel)))
-                    .spacing(ui::space::S)
-                    .boxed(),
-            );
-        }
-        column(rail).spacing(ui::space::S).boxed()
+        // In the order the floating shell's destinations list them.
+        let buttons = Destination::ALL
+            .into_iter()
+            .flat_map(|destination| destination.panels().iter().copied())
+            .map(button_of);
+        column(buttons).spacing(ui::space::S).boxed()
     }
 
     /// The centre of `panel`'s button on the rail, from the rail's top.
     #[cfg(test)]
     pub(super) fn rail_button_centre(panel: layout::Panel) -> f32 {
-        let pitch = ui::size::RAIL_BUTTON + ui::space::S;
-        let mut y = 0.0;
-        for destination in Destination::ALL {
-            for candidate in destination.panels() {
-                if *candidate == panel {
-                    return y + ui::size::RAIL_BUTTON / 2.0;
-                }
-                y += pitch;
-            }
-            y += RAIL_DIVIDER + ui::space::S;
-        }
-        y
+        let index = Destination::ALL
+            .into_iter()
+            .flat_map(|destination| destination.panels().iter().copied())
+            .position(|candidate| candidate == panel)
+            .unwrap_or_default();
+        index as f32 * (ui::size::RAIL_BUTTON + ui::space::S) + ui::size::RAIL_BUTTON / 2.0
     }
 
     /// The panes, as the layout arranges them. The layout is told the

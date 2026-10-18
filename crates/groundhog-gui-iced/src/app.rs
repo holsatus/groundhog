@@ -611,11 +611,17 @@ impl Application {
             Shell::Floating => self.view_floating(),
         };
 
-        sensor(confirm::view(
-            base,
-            self.confirmation.as_ref(),
-            Message::Confirm,
-        ))
+        // The window is measured by what fills it, whatever the shell puts
+        // inside, so the measure follows every resize.
+        sensor(
+            container(confirm::view(
+                base,
+                self.confirmation.as_ref(),
+                Message::Confirm,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
         .on_show(Message::Window)
         .on_resize(Message::Window)
     }
