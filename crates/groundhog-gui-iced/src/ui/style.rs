@@ -415,20 +415,24 @@ pub fn button(
     }
 }
 
+/// A quiet button: a surface a shade off the pane's, outlined on hover.
+///
+/// The border is always there, in the fill's colour when it is not shown:
+/// iced paints a border in place of the fill beneath it, so a transparent
+/// one would cut a ring out of the button, leaving it smaller than its
+/// neighbours and its corners less round. A disabled button keeps its
+/// shape too, so a row of buttons stays even.
 fn subtle_button(theme: &Theme, status: widget::button::Status) -> widget::button::Style {
     use widget::button::Status;
 
     let palette = theme.palette();
-    let (background, border) = match status {
-        Status::Active | Status::Pressed => (
-            Some(palette.background.weaker.color.into()),
-            Color::TRANSPARENT,
-        ),
-        Status::Hovered => (
-            Some(palette.background.weak.color.into()),
-            palette.background.neutral.color,
-        ),
-        Status::Disabled => (None, Color::TRANSPARENT),
+    let fill = match status {
+        Status::Hovered => palette.background.weak.color,
+        Status::Active | Status::Pressed | Status::Disabled => palette.background.weaker.color,
+    };
+    let border = match status {
+        Status::Hovered => palette.background.neutral.color,
+        _ => fill,
     };
     let text_color = match status {
         Status::Disabled => palette.background.weaker.text.scale_alpha(0.5),
@@ -436,7 +440,7 @@ fn subtle_button(theme: &Theme, status: widget::button::Status) -> widget::butto
     };
 
     widget::button::Style {
-        background,
+        background: Some(fill.into()),
         text_color,
         border: Border {
             color: border,
