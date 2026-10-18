@@ -103,6 +103,8 @@ icons! {
     Settings => "wrench.svg",
     /// The video panel.
     Video => "video.svg",
+    /// Stop a stream.
+    Stop => "square.svg",
     /// Open a menu of what does not fit.
     More => "ellipsis-vertical.svg",
     /// The destination for setting a vehicle up.

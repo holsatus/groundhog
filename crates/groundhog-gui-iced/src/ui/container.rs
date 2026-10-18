@@ -6,10 +6,10 @@
 //! actions, any [`activity`] in progress, and its body.
 
 use iced::{
-    Alignment, Element, Length, Widget,
+    Alignment, Element, Length, Padding, Widget,
     widget::{
-        ProgressBar, Rule, Text, column, container, progress_bar, row, rule, text::IntoFragment,
-        tooltip::Position,
+        Container, ProgressBar, Rule, Text, column, container, progress_bar, row, rule,
+        text::IntoFragment, tooltip::Position,
     },
 };
 
@@ -174,6 +174,30 @@ pub fn screen<'a, M: 'a>(content: impl Widget<M> + 'a) -> Element<'a, M> {
         .height(Length::Fill)
         .style(style::screen)
         .boxed()
+}
+
+/// A card floating over a picture or the map: a small pane lifted by a
+/// shadow. Pad and size it as its content needs.
+pub fn floating<'a, M: 'a, W: Widget<M> + 'a>(content: W) -> Container<'a, W> {
+    container(content).style(style::floating)
+}
+
+/// A pane's body that is a picture (a video), with whatever floats over it:
+/// edge to edge inside the pane's border, black around the picture.
+pub fn picture<'a, M: 'a>(content: impl Widget<M> + 'a) -> Element<'a, M> {
+    container(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(style::picture),
+    )
+    .padding(Padding {
+        top: 0.0,
+        right: style::PANE_BORDER_WIDTH,
+        bottom: style::PANE_BORDER_WIDTH,
+        left: style::PANE_BORDER_WIDTH,
+    })
+    .boxed()
 }
 
 /// Read-outs (each usually a [`stat`]) in columns that line up: as many as

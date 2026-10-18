@@ -186,6 +186,13 @@ fn fleet() -> Fleet {
     fleet
 }
 
+/// The video panel as a pane.
+fn video_pane(app: &Application) -> Element<'_, Message> {
+    iced::widget::container(app.pane_body(layout::Panel::Video))
+        .style(style::pane)
+        .boxed()
+}
+
 /// Every panel but the map, in the order the destinations list them.
 fn panels() -> impl Iterator<Item = layout::Panel> {
     Destination::ALL
@@ -405,14 +412,36 @@ async fn gallery() {
         },
     )));
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        let theme = mode.theme();
         gallery.render(
             &format!("panel-video-live-{suffix}"),
             Size::new(560.0, 820.0),
-            &mode.theme(),
-            iced::widget::container(app.pane_body(layout::Panel::Video))
-                .style(style::pane)
-                .boxed(),
+            &theme,
+            video_pane(&app),
         );
+        // As a maximized pane: the picture takes all of it.
+        gallery.render(
+            &format!("panel-video-wide-{suffix}"),
+            Size::new(1200.0, 700.0),
+            &theme,
+            video_pane(&app),
+        );
+        let _ = app.update(Message::Video(video::Message::ToggleDetails));
+        gallery.render(
+            &format!("panel-video-details-{suffix}"),
+            Size::new(1200.0, 700.0),
+            &theme,
+            video_pane(&app),
+        );
+        let _ = app.update(Message::Video(video::Message::ToggleDetails));
+        let _ = app.update(Message::Video(video::Message::ToggleForm));
+        gallery.render(
+            &format!("panel-video-source-{suffix}"),
+            Size::new(1200.0, 700.0),
+            &theme,
+            video_pane(&app),
+        );
+        let _ = app.update(Message::Video(video::Message::ToggleForm));
     }
 
     // Dragging the parameters (right column) by their title bar, to show

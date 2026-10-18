@@ -207,7 +207,10 @@ until the desktop video works.
    sender on loopback, as QGC's tests do.
 3. **The panel** (done), in both shells, and the settings: the Video
    panel holds the source, the low-latency switch and the picture (the
-   floating shell lists it under More), and while the stream is on, Fly
+   floating shell lists it under More). While the stream is on, the
+   picture is the whole panel: the stream's state, changing the source and
+   stopping float over its corner, and the details (URI, size, decoder,
+   latency) show on hovering the state or pressing it. Fly
    shows it in the map's corner, a tap swapping the two. The source, the
    switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.

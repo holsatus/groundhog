@@ -539,7 +539,10 @@ so the look is decided in one place:
   of the panel anatomy below; `ui::card`, `ui::card_list` (rows split by
   edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`
   and `ui::stats` (read-outs in columns), and `ui::list_row` (striped)
-  cover the shared arrangements. Inputs come from `ui` too (`text_input`,
+  cover the shared arrangements. A panel whose body is a picture (the
+  video) uses `ui::picture`, edge to edge inside the pane's border, with
+  what it needs floating over it in `ui::floating` cards rather than
+  around it. Inputs come from `ui` too (`text_input`,
   `pick_list`, `checkbox`, `slider`), so they take the density's size.
 
 ### The design language

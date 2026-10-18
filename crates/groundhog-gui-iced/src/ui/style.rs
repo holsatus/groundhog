@@ -568,6 +568,18 @@ pub fn screen(_theme: &Theme) -> container::Style {
     }
 }
 
+/// A pane's body that is a picture: [`screen`], its lower corners rounded
+/// as the pane's are inside its border.
+pub fn picture(theme: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            radius: Radius::default().bottom(PANE_RADIUS - PANE_BORDER_WIDTH),
+            ..Border::default()
+        },
+        ..screen(theme)
+    }
+}
+
 /// A page of the floating shell: a pane's surface, filling the window.
 pub fn page(theme: &Theme) -> container::Style {
     surface(theme.palette().background.weakest)
