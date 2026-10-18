@@ -513,7 +513,10 @@ impl Application {
 
         match message {
             settings_panel::Message::Theme(mode) => settings.theme = mode,
-            settings_panel::Message::SetScaleFactor(scale) => settings.scale_factor = scale,
+            settings_panel::Message::CommitScaleFactor => {
+                settings.scale_factor = settings.temp_scale_factor
+            }
+            settings_panel::Message::SetScaleFactor(scale) => settings.temp_scale_factor = scale,
             settings_panel::Message::DefaultAltitude(altitude) => {
                 settings.default_waypoint_altitude_m = altitude;
             }
@@ -525,6 +528,7 @@ impl Application {
                     recorder.stop();
                 }
             }
+            settings_panel::Message::RestoreDefaults => *settings = Default::default(),
         }
 
         if self.configuration.settings != before {

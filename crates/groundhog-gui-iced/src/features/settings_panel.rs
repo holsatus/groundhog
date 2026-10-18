@@ -19,8 +19,10 @@ pub enum Message {
     /// Switch the application palette.
     Theme(ThemeMode),
     SetScaleFactor(f32),
+    CommitScaleFactor,
     RecordTelemetry(bool),
     DefaultAltitude(f32),
+    RestoreDefaults,
 }
 
 /// `recording` is the file telemetry is being recorded to, if any.
@@ -39,10 +41,14 @@ pub fn view<'a>(
             ui::field(
                 "Scale",
                 slider_with_value(
-                    slider(0.5..=2.0, settings.scale_factor, Message::SetScaleFactor)
-                        .on_release(Message::CommitScaleFactor)
-                        .step(0.1),
-                    format!("{:.1}×", settings.scale_factor),
+                    slider(
+                        0.5..=2.0,
+                        settings.temp_scale_factor,
+                        Message::SetScaleFactor,
+                    )
+                    .on_release(Message::CommitScaleFactor)
+                    .step(0.1),
+                    format!("{:.1}×", settings.temp_scale_factor),
                 ),
             ),
         ],
@@ -79,8 +85,14 @@ pub fn view<'a>(
         ],
     );
 
+    let restore = ui::button("Restore to defaults")
+        .kind(ui::style::ButtonKind::Warning)
+        .on_press(Message::RestoreDefaults)
+        .width(Length::Fill)
+        .boxed();
+
     ui::panel(scrollable(
-        column![appearance, planning, recording].spacing(ui::space::L),
+        column![appearance, planning, recording, restore].spacing(ui::space::L),
     ))
 }
 
