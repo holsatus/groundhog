@@ -55,6 +55,37 @@ pub fn icon_button<'a, M>(icon: Icon) -> Action<'a, M> {
     Action::new(Content::Icon(icon))
 }
 
+/// A row that opens what it names: `icon`, `title` and a line about it,
+/// and a chevron. Two lines high, so a finger finds it at any density.
+pub fn entry<'a, M: Clone + 'a>(
+    glyph: Icon,
+    title: impl IntoFragment<'a>,
+    detail: impl IntoFragment<'a>,
+    on_press: M,
+) -> Element<'a, M> {
+    use super::text::caption;
+
+    let content = row![
+        icon::icon(glyph, size::ICON, ButtonKind::Subtle, true),
+        iced::widget::column![
+            text(title).single_line(),
+            caption(detail).tone(super::Tone::Muted),
+        ]
+        .spacing(space::XXS)
+        .width(Length::Fill),
+        icon::icon(Icon::Forward, size::ICON, ButtonKind::Subtle, true),
+    ]
+    .spacing(space::L)
+    .align_y(Alignment::Center);
+
+    iced::widget::button(content)
+        .padding([space::M, space::M])
+        .width(Length::Fill)
+        .style(style::button(ButtonKind::Subtle))
+        .on_press(on_press)
+        .boxed()
+}
+
 /// A button around arbitrary `content`, such as a list row.
 pub fn button_with<'a, M>(content: impl Widget<M> + 'a) -> Action<'a, M> {
     Action::new(Content::Element(content.boxed()))

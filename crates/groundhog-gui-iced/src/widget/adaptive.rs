@@ -148,9 +148,17 @@ fn columns(width: f32, min_cell: f32, max_columns: usize, spacing: f32) -> usize
     fit.clamp(1, max_columns)
 }
 
-/// Limits no wider than `width`, as tall as `limits` allow.
+/// Limits no wider than `width`, as tall as `limits` allow. Inside a
+/// scrollable the height is unbounded, its maximum only a hint (the
+/// viewport); that is kept, or content near the end of a scrolled area would
+/// be squeezed into what is left of the viewport.
 fn column_limits(limits: &layout::Limits, width: f32) -> layout::Limits {
-    layout::Limits::new(Size::ZERO, Size::new(width, limits.max.height))
+    layout::Limits::with_flags(
+        Size::ZERO,
+        Size::new(width, limits.max.height),
+        Size::new(false, limits.compression.height),
+        Size::new(false, limits.infinite.height),
+    )
 }
 
 impl<Message> Meta for Adaptive<'_, Message> {}
@@ -194,7 +202,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Adaptive<'_, Message> {
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         let limits = limits.width(Length::Fill);
-        let width = limits.max.width;
+        let width = limits.bounds().width;
         let spacing = self.spacing;
         tree.state.downcast_mut::<Hidden>().0 = None;
 
@@ -512,6 +520,20 @@ mod tests {
     fn either_shows_one_and_only_that_one_hears_events() {
         assert_eq!(press_either(600.0), ["wide"]);
         assert_eq!(press_either(400.0), ["narrow"]);
+    }
+
+    #[test]
+    fn cells_keep_the_unbounded_height_of_a_scrollable() {
+        let scrolled = layout::Limits::with_flags(
+            Size::ZERO,
+            Size::new(300.0, 10.0),
+            Size::new(false, true),
+            Size::new(false, true),
+        );
+
+        let cell = column_limits(&scrolled, 100.0);
+
+        assert_eq!(cell.bounds(), Size::new(100.0, f32::INFINITY));
     }
 
     #[test]

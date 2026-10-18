@@ -260,7 +260,10 @@ impl Application {
                 Task::none()
             }
             Message::Floating(message) => {
-                self.floating.update(message);
+                // Back with nowhere left to go leaves, as a phone app does.
+                if !self.floating.update(message) {
+                    platform::leave();
+                }
                 Task::none()
             }
             Message::Layout(message) => {
@@ -744,10 +747,33 @@ impl Application {
             _ => None,
         });
 
+        // The system's back (a phone's gesture, a mouse's back button), and
+        // Escape where nothing else took it, step back in the floating
+        // shell.
+        let back = if self.shell() == Shell::Floating {
+            iced::event::listen_with(|event, status, _| {
+                let back = match event {
+                    iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
+                        matches!(key, keyboard::Key::Named(keyboard::key::Named::BrowserBack))
+                            || (status == iced::event::Status::Ignored
+                                && key == keyboard::Key::Named(keyboard::key::Named::Escape))
+                    }
+                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                        iced::mouse::Button::Back,
+                    )) => true,
+                    _ => false,
+                };
+                back.then_some(Message::Floating(shell::Message::Back))
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             layout_tick,
             refresh,
             modifiers,
+            back,
             platform::insets_subscription().map(Message::Insets),
         ])
     }

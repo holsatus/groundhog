@@ -11,13 +11,13 @@
 mod desktop;
 #[cfg(not(target_os = "android"))]
 pub use desktop::{
-    config_dir, data_dir, init_logging, insets, insets_subscription, set_system_bars,
+    config_dir, data_dir, init_logging, insets, insets_subscription, leave, set_system_bars,
 };
 
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
-pub use android::{config_dir, data_dir, insets, insets_subscription, set_system_bars};
+pub use android::{config_dir, data_dir, insets, insets_subscription, leave, set_system_bars};
 
 /// Whether the platform is a touch screen: no hover, and fingers rather
 /// than a pointer, so the interface floats over the map by default and

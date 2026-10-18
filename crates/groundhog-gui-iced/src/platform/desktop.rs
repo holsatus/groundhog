@@ -42,5 +42,9 @@ pub fn insets_subscription() -> iced::Subscription<Insets> {
     iced::Subscription::none()
 }
 
+/// Back with nowhere left to go does nothing on the desktop: a window is
+/// closed by the window manager.
+pub fn leave() {}
+
 /// The desktop draws no system bars over the application.
 pub fn set_system_bars(_dark: bool) {}

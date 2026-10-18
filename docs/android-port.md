@@ -259,7 +259,8 @@ the drag source.
   and long-press selection are not implemented in the minimal fork.
 - Tooltips are off on touch screens (a tap would open one that lingers), so
   icon buttons explain themselves only by their icon there.
-- The back button does not close the sheet yet.
+- Back is taken as the back key (`enableOnBackInvokedCallback="false"` in
+  the manifest), so the system's predictive-back animation does not play.
 - No foreground service: telemetry stops if Android freezes the process in the
   background.
 - The release library is not stripped, so the debug APK is ~34 MB; a

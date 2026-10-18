@@ -171,6 +171,34 @@ pub fn set_system_bars(dark: bool) {
     }));
 }
 
+/// Sends the application to the background, as back from an app's first
+/// screen does. (winit takes every back key as handled, so the system never
+/// does this itself.) The process keeps running, and with it the links.
+pub fn leave() {
+    let Some(app) = APP.get() else {
+        return;
+    };
+
+    let posted = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        if let Err(error) = move_task_to_back(&posted) {
+            log::warn!("Could not leave the application: {error}");
+        }
+    }));
+}
+
+/// Calls `Activity.moveTaskToBack(true)`.
+fn move_task_to_back(app: &AndroidApp) -> jni::errors::Result<()> {
+    // SAFETY: the VM and activity belong to the app that `android_main`
+    // received, and outlive the call.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+
+    env.call_method(&activity, "moveTaskToBack", "(Z)Z", &[JValue::Bool(1)])?;
+    Ok(())
+}
+
 /// Sets `WindowInsetsController.setSystemBarsAppearance` on the window.
 fn apply_system_bars(app: &AndroidApp, dark: bool) -> jni::errors::Result<()> {
     // `APPEARANCE_LIGHT_STATUS_BARS` and `APPEARANCE_LIGHT_NAVIGATION_BARS`:

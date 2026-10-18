@@ -361,13 +361,25 @@ A panel's content is the same wherever it is shown
 
 - **Tiled** (`app/tiled.rs`): the rail and the workspace above, for a mouse
   and a large screen.
-- **Floating** (`app/floating.rs`): the map fills the window, under the
-  platform's status and navigation bars, and everything else floats over
-  it: a navigation bar picking one panel, shown in a sheet along the bottom
-  in portrait or along the side in landscape (`shell::SheetPlacement`), or
-  over the whole map when expanded. A scrim under the status bar keeps its
-  icons legible over any tile. The sheet is view state; nothing about the
+- **Floating** (`app/floating.rs`): a phone's navigation by task. A
+  navigation bar docked along the bottom (a rail along the left in
+  landscape) picks one of five `shell::Destination`s: Fly, Plan, Setup,
+  Links and More, each holding panels. Fly and Plan are the map, running
+  under the status bar, with their panel in a sheet over it, along the
+  bottom in portrait or along the side in landscape
+  (`shell::SheetPlacement`), or over the whole map when expanded. The
+  others are pages: a top bar, then the panel, or a list of the
+  destination's panels (`ui::entry` rows) that opens each as a page with a
+  way back. The system's back gesture (the back key; also Escape and a
+  mouse's back button) steps out one level at a time (`Floating::back`),
+  and from the bare map sends the application to the background, as a
+  phone app does. A scrim under the status bar keeps its icons legible
+  over any tile. Where the operator is, is view state; nothing about the
   floating shell is persisted.
+
+The tiled shell's rail groups its panels by the same destinations, a short
+rule between groups, so a panel keeps its company in both shells.
+`Destination::panels` is the one list of panels and their order.
 
 `ShellMode` (a setting) picks one, or leaves it to `Automatic`: floating on
 a touch screen whose shortest side is under 600 logical pixels, and in any
@@ -729,10 +741,13 @@ with a location), the file formats, and jump-target translation (for
 ### Add a UI panel
 
 1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
-   and `icon` (add the icon to `ui::Icon` if it is new), and list it in
-   `Panel::DOCKABLE`, which puts it on the tiled shell's rail and the
-   floating shell's navigation bar. Where it opens is the operator's choice
-   (see [The workspace](#the-workspace-is-three-columns-around-the-map)).
+   `icon` (add the icon to `ui::Icon` if it is new) and `summary` (the line
+   shown where it is listed among others), and list it in a
+   `shell::Destination`'s `panels`. That puts it in its group on the tiled
+   shell's rail, and in its destination in the floating shell. Add a
+   destination only for a new task: the navigation bar holds five. Where a
+   panel opens in the tiled shell is the operator's choice (see
+   [The workspace](#the-workspace-is-three-columns-around-the-map)).
 2. Create `features/<name>.rs` (or a directory) with its state, `Message`,
    `update(&mut self, message, cx: &mut Context<Message>) -> Task<Message>`,
    and `view`, which returns a `ui::panel`.

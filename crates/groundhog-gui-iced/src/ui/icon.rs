@@ -103,6 +103,14 @@ icons! {
     Settings => "wrench.svg",
     /// Open a menu of what does not fit.
     More => "ellipsis-vertical.svg",
+    /// The destination for setting a vehicle up.
+    Setup => "sliders-horizontal.svg",
+    /// The destination holding the rest.
+    Others => "ellipsis.svg",
+    /// Go back a step.
+    Back => "arrow-left.svg",
+    /// Open what a row names.
+    Forward => "chevron-right.svg",
 }
 
 /// `icon` at `size` (usually [`style::size::ICON`]), coloured for a button

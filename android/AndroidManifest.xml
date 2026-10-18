@@ -8,6 +8,11 @@
     one event loop per process).
   - `windowSoftInputMode=adjustResize` lets the soft keyboard resize the window
     instead of covering the focused field.
+  - `enableOnBackInvokedCallback=false` keeps the back gesture arriving as the
+    back key, which the application turns into stepping back (closing a sheet,
+    leaving a page). Targeting Android 16, the key is otherwise no longer sent;
+    taking the gesture through `OnBackInvokedCallback` needs Java code this
+    activity does not have.
   - `hasCode=false`: there are no Java/Kotlin classes; NativeActivity is a
     framework class and the library is loaded from `jniLibs`.
   - `extractNativeLibs=false`: the .so is stored uncompressed and page-aligned
@@ -34,7 +39,8 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|locale|layoutDirection|fontScale"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:enableOnBackInvokedCallback="false">
 
             <meta-data
                 android:name="android.app.lib_name"

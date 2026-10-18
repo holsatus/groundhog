@@ -554,6 +554,48 @@ fn subtle_button(theme: &Theme, status: widget::button::Status) -> widget::butto
     }
 }
 
+/// A page of the floating shell: a pane's surface, filling the window.
+pub fn page(theme: &Theme) -> container::Style {
+    surface(theme.palette().background.weakest)
+}
+
+/// The floating shell's navigation bar or rail, docked at the window's
+/// edge: a shade apart from the page and the map beside it.
+pub fn navigation(theme: &Theme) -> container::Style {
+    surface(theme.palette().background.weaker)
+}
+
+/// An item of the navigation bar: no background of its own; its icon's
+/// indicator shows which is chosen.
+pub fn navigation_item(theme: &Theme, status: widget::button::Status) -> widget::button::Style {
+    let palette = theme.palette();
+    widget::button::Style {
+        background: matches!(status, widget::button::Status::Pressed)
+            .then(|| palette.background.weak.color.into()),
+        text_color: palette.background.base.text,
+        border: Border {
+            radius: PANE_RADIUS.into(),
+            ..Border::default()
+        },
+        ..widget::button::Style::default()
+    }
+}
+
+/// The pill behind a navigation item's icon, filled while it is chosen.
+pub fn navigation_indicator(chosen: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let palette = theme.palette();
+        container::Style {
+            background: chosen.then(|| palette.background.neutral.color.into()),
+            border: Border {
+                radius: 16.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        }
+    }
+}
+
 /// A button on the rail: no background while its panel is closed, a
 /// stronger one while it is open, and the panes' rounder corners, since it
 /// floats on the window's background like they do.

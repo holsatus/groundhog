@@ -74,17 +74,6 @@ pub enum Panel {
 }
 
 impl Panel {
-    /// Panels offered on the rail, in order. The map is not one of them.
-    pub const DOCKABLE: [Panel; 7] = [
-        Panel::Vehicles,
-        Panel::Mission,
-        Panel::Parameters,
-        Panel::Calibration,
-        Panel::Links,
-        Panel::Logs,
-        Panel::Settings,
-    ];
-
     pub fn title(self) -> &'static str {
         match self {
             Panel::Map => "Map",
@@ -109,6 +98,21 @@ impl Panel {
             Panel::Links => Icon::Links,
             Panel::Logs => Icon::Log,
             Panel::Settings => Icon::Settings,
+        }
+    }
+
+    /// What the panel is for, in a line: shown where it is listed among
+    /// others (the floating shell's Setup and More pages).
+    pub fn summary(self) -> &'static str {
+        match self {
+            Panel::Map => "The vehicles and the mission, on a map",
+            Panel::Vehicles => "The selected vehicle: its state, commands and read-outs",
+            Panel::Mission => "The mission: its items, and transfers to the vehicle",
+            Panel::Parameters => "Read and change what the autopilot stores",
+            Panel::Calibration => "Calibrate the accelerometer, compass and other sensors",
+            Panel::Links => "Connections to vehicles",
+            Panel::Logs => "Status messages from the vehicles, and notices",
+            Panel::Settings => "Appearance, planning and recording",
         }
     }
 

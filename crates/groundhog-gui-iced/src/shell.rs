@@ -5,10 +5,12 @@
 //!
 //! - [`Shell::Tiled`]: the desktop workspace, three columns of panes around
 //!   the map with a rail beside them (its state is [`crate::layout`]);
-//! - [`Shell::Floating`]: the map fills the whole window, under the
-//!   platform's status and navigation bars, and everything else floats over
-//!   it: a navigation bar choosing one panel, and that panel in a sheet
-//!   (along the bottom in portrait, along the side in landscape).
+//! - [`Shell::Floating`]: a phone's navigation by task. A navigation bar
+//!   (a rail in landscape) picks one of five [`Destination`]s. Flying and
+//!   planning happen on the map, which runs under the platform's status
+//!   bar, with the destination's panel in a sheet over it; the others are
+//!   pages, and a page listing several panels opens each as a page of its
+//!   own. Back steps out one level at a time.
 //!
 //! The operator picks one in the settings, or leaves it to
 //! [`ShellMode::Automatic`], which floats on phones and in narrow windows.
@@ -20,7 +22,7 @@ use std::fmt;
 
 use iced::Size;
 
-use crate::layout::Panel;
+use crate::{layout::Panel, ui::Icon};
 
 /// Below this window width the workspace has no room for a side column next
 /// to the map, whatever the platform.
@@ -90,46 +92,193 @@ impl fmt::Display for ShellMode {
     }
 }
 
-/// The floating shell's state: which panel the sheet shows, and how much
-/// of the window it takes. It is view state, not persisted.
+/// Where the operator is in the floating shell: one of five tasks, chosen
+/// in its navigation bar. The tiled shell's rail groups its panels the same
+/// way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Destination {
+    /// The selected vehicle, over the map.
+    #[default]
+    Fly,
+    /// The mission, over the map.
+    Plan,
+    /// Configuring the vehicle: parameters, calibration.
+    Setup,
+    /// The links to vehicles.
+    Links,
+    /// The rest: the log, the settings.
+    More,
+}
+
+impl Destination {
+    pub const ALL: [Destination; 5] = [
+        Destination::Fly,
+        Destination::Plan,
+        Destination::Setup,
+        Destination::Links,
+        Destination::More,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Destination::Fly => "Fly",
+            Destination::Plan => "Plan",
+            Destination::Setup => "Setup",
+            Destination::Links => "Links",
+            Destination::More => "More",
+        }
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Destination::Fly => Icon::Vehicle,
+            Destination::Plan => Icon::Mission,
+            Destination::Setup => Icon::Setup,
+            Destination::Links => Icon::Links,
+            Destination::More => Icon::Others,
+        }
+    }
+
+    /// The panels it holds, in the order they are listed.
+    pub fn panels(self) -> &'static [Panel] {
+        match self {
+            Destination::Fly => &[Panel::Vehicles],
+            Destination::Plan => &[Panel::Mission],
+            Destination::Setup => &[Panel::Parameters, Panel::Calibration],
+            Destination::Links => &[Panel::Links],
+            Destination::More => &[Panel::Logs, Panel::Settings],
+        }
+    }
+
+    /// Whether its work happens on the map, its panel in a sheet over it;
+    /// the others are pages.
+    pub fn on_map(self) -> bool {
+        matches!(self, Destination::Fly | Destination::Plan)
+    }
+}
+
+/// The floating shell's state: the destination, and where in it the
+/// operator is. It is view state, not persisted.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Floating {
-    sheet: Option<Panel>,
+    destination: Destination,
+    /// Whether a map destination shows its panel in a sheet.
+    sheet: bool,
+    /// Whether the sheet takes the whole window.
     expanded: bool,
+    /// The panel opened from a page listing several (Setup's parameters).
+    page: Option<Panel>,
+}
+
+/// What the floating shell shows besides the navigation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Screen {
+    /// The map, with `panel` in a sheet over it if one is open.
+    Map { sheet: Option<Panel> },
+    /// A page listing the destination's panels.
+    List(Destination),
+    /// A page showing `panel`; `nested` when it was opened from a list, so
+    /// it has a way back.
+    Page { panel: Panel, nested: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Message {
-    /// Show `panel` in the sheet, or close the sheet if it shows it already.
-    Select(Panel),
-    Close,
+    /// Go to a destination; going to the one shown returns to its start
+    /// (or, on the map, shows or hides its sheet).
+    Go(Destination),
+    /// Open one of a list's panels.
+    Open(Panel),
+    /// Go back a step: the system's back gesture, or a page's back arrow.
+    Back,
     /// Let the sheet take the whole window, or give the map its share back.
     ToggleExpanded,
+    /// Close the sheet.
+    Close,
 }
 
 impl Floating {
-    /// The panel in the sheet, if it is open.
-    pub fn sheet(&self) -> Option<Panel> {
-        self.sheet
+    pub fn destination(&self) -> Destination {
+        self.destination
     }
 
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
 
-    pub fn update(&mut self, message: Message) {
+    /// What to show for the destination.
+    pub fn screen(&self) -> Screen {
+        let destination = self.destination;
+        let panels = destination.panels();
+
+        if destination.on_map() {
+            Screen::Map {
+                sheet: panels.first().copied().filter(|_| self.sheet),
+            }
+        } else if let Some(panel) = self.page {
+            Screen::Page {
+                panel,
+                nested: true,
+            }
+        } else if let [panel] = panels {
+            Screen::Page {
+                panel: *panel,
+                nested: false,
+            }
+        } else {
+            Screen::List(destination)
+        }
+    }
+
+    /// Apply `message`; for [`Message::Back`], whether there was anywhere to
+    /// go back to (if not, the application leaves, as a phone app does).
+    pub fn update(&mut self, message: Message) -> bool {
         match message {
-            Message::Select(panel) if panel.is_fixed() => {}
-            Message::Select(panel) if self.sheet == Some(panel) => self.sheet = None,
-            Message::Select(panel) => self.sheet = Some(panel),
-            Message::Close => self.sheet = None,
+            Message::Go(destination) if destination == self.destination => {
+                if destination.on_map() {
+                    self.sheet = !self.sheet;
+                } else {
+                    self.page = None;
+                }
+            }
+            Message::Go(destination) => {
+                self.destination = destination;
+                self.sheet = destination.on_map();
+                self.page = None;
+            }
+            Message::Open(panel) => {
+                if self.destination.panels().contains(&panel) {
+                    self.page = Some(panel);
+                }
+            }
+            Message::Back => return self.back(),
             Message::ToggleExpanded => self.expanded = !self.expanded,
+            Message::Close => self.sheet = false,
         }
 
         // A sheet opens at its share of the window, never already expanded.
-        if self.sheet.is_none() {
+        if !self.sheet {
             self.expanded = false;
         }
+        true
+    }
+
+    /// One step back: out of an expanded sheet, then the sheet, out of a
+    /// nested page, then to the map. Nowhere to go from the bare map.
+    fn back(&mut self) -> bool {
+        if self.expanded {
+            self.expanded = false;
+        } else if self.destination.on_map() && self.sheet {
+            self.sheet = false;
+        } else if self.page.is_some() {
+            self.page = None;
+        } else if self.destination != Destination::Fly {
+            self.destination = Destination::Fly;
+            self.sheet = false;
+        } else {
+            return false;
+        }
+        true
     }
 }
 
@@ -222,32 +371,104 @@ mod tests {
     }
 
     #[test]
-    fn selecting_the_open_panel_closes_the_sheet() {
-        let mut floating = Floating::default();
-
-        floating.update(Message::Select(Panel::Mission));
-        assert_eq!(floating.sheet(), Some(Panel::Mission));
-
-        floating.update(Message::Select(Panel::Links));
-        assert_eq!(floating.sheet(), Some(Panel::Links));
-
-        floating.update(Message::Select(Panel::Links));
-        assert_eq!(floating.sheet(), None);
-
-        floating.update(Message::Select(Panel::Map));
-        assert_eq!(floating.sheet(), None, "the map is always there");
+    fn every_panel_but_the_map_has_one_destination() {
+        let panels = [
+            Panel::Map,
+            Panel::Vehicles,
+            Panel::Mission,
+            Panel::Parameters,
+            Panel::Calibration,
+            Panel::Links,
+            Panel::Logs,
+            Panel::Settings,
+        ];
+        for panel in panels {
+            let holding = Destination::ALL
+                .iter()
+                .filter(|destination| destination.panels().contains(&panel))
+                .count();
+            let expected = if panel == Panel::Map { 0 } else { 1 };
+            assert_eq!(holding, expected, "{panel:?}");
+        }
     }
 
     #[test]
-    fn a_sheet_reopens_at_its_share() {
+    fn map_destinations_show_their_panel_in_a_sheet() {
         let mut floating = Floating::default();
-        floating.update(Message::Select(Panel::Mission));
-        floating.update(Message::ToggleExpanded);
-        assert!(floating.is_expanded());
+        assert_eq!(floating.screen(), Screen::Map { sheet: None });
 
-        floating.update(Message::Close);
-        floating.update(Message::Select(Panel::Mission));
+        floating.update(Message::Go(Destination::Plan));
+        assert_eq!(
+            floating.screen(),
+            Screen::Map {
+                sheet: Some(Panel::Mission)
+            }
+        );
+
+        // Going to the destination shown hides and shows its sheet.
+        floating.update(Message::Go(Destination::Plan));
+        assert_eq!(floating.screen(), Screen::Map { sheet: None });
+    }
+
+    #[test]
+    fn pages_list_several_panels_and_open_one() {
+        let mut floating = Floating::default();
+
+        floating.update(Message::Go(Destination::Links));
+        assert_eq!(
+            floating.screen(),
+            Screen::Page {
+                panel: Panel::Links,
+                nested: false
+            }
+        );
+
+        floating.update(Message::Go(Destination::Setup));
+        assert_eq!(floating.screen(), Screen::List(Destination::Setup));
+        floating.update(Message::Open(Panel::Calibration));
+        assert_eq!(
+            floating.screen(),
+            Screen::Page {
+                panel: Panel::Calibration,
+                nested: true
+            }
+        );
+
+        // Another destination's panel does not open here.
+        floating.update(Message::Open(Panel::Logs));
+        assert_eq!(
+            floating.screen(),
+            Screen::Page {
+                panel: Panel::Calibration,
+                nested: true
+            }
+        );
+
+        // Going to the destination shown returns to its list.
+        floating.update(Message::Go(Destination::Setup));
+        assert_eq!(floating.screen(), Screen::List(Destination::Setup));
+    }
+
+    #[test]
+    fn back_steps_out_one_level_at_a_time_and_then_leaves() {
+        let mut floating = Floating::default();
+        floating.update(Message::Go(Destination::More));
+        floating.update(Message::Open(Panel::Settings));
+
+        assert!(floating.update(Message::Back));
+        assert_eq!(floating.screen(), Screen::List(Destination::More));
+        assert!(floating.update(Message::Back));
+        assert_eq!(floating.destination(), Destination::Fly);
+        assert_eq!(floating.screen(), Screen::Map { sheet: None });
+        assert!(!floating.update(Message::Back), "nowhere left to go");
+
+        floating.update(Message::Go(Destination::Plan));
+        floating.update(Message::Go(Destination::Fly));
+        floating.update(Message::ToggleExpanded);
+        assert!(floating.update(Message::Back));
         assert!(!floating.is_expanded());
+        assert!(floating.update(Message::Back));
+        assert_eq!(floating.screen(), Screen::Map { sheet: None });
     }
 
     #[test]

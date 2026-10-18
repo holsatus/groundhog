@@ -307,9 +307,13 @@ alongside today's renders.
    (`ui::tool`, `widget::menu`), parameter rows narrow (`ui::either`), and
    controls, rows, checkboxes and sliders are touch-sized at touch
    density. The gallery renders every panel at a phone's width, touch-sized.
-2. **Destinations and pages.** The five-item navigation bar with labels,
-   the rail grouped the same way, the page stack with a top app bar, and
-   the back key.
+2. **Destinations and pages** (done). The five-item navigation bar with
+   labels (a rail in landscape), docked on the system's inset; the tiled
+   rail grouped the same way; pages with a top bar, Setup and More listing
+   their panels; and back, from the back key (taken as a key by opting out
+   of `OnBackInvokedCallback`, which this Java-less activity cannot
+   register), Escape or a mouse's back button, leaving the application
+   from the bare map.
 3. **Fly.** The status strip on both shells, the sheet with detents, alert
    banners and snackbars, map controls.
 4. **Plan.** List-detail in the sheet, the add-waypoint button, long press

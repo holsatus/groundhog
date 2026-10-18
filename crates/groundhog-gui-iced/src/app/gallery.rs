@@ -40,7 +40,7 @@ use mavio::{
 use super::*;
 use crate::{
     features::mission::MessageKind,
-    shell::ShellMode,
+    shell::{Destination, ShellMode},
     ui::{style, theme::ThemeMode},
 };
 
@@ -184,6 +184,13 @@ fn fleet() -> Fleet {
     );
 
     fleet
+}
+
+/// Every panel but the map, in the order the destinations list them.
+fn panels() -> impl Iterator<Item = layout::Panel> {
+    Destination::ALL
+        .into_iter()
+        .flat_map(|destination| destination.panels().iter().copied())
 }
 
 /// One step of the pointer, before a render.
@@ -347,7 +354,7 @@ async fn gallery() {
             Some(iced::Point::new(300.0, 18.0)),
         );
 
-        for panel in layout::Panel::DOCKABLE {
+        for panel in panels() {
             let name = format!("panel-{}-{suffix}", panel.title().to_lowercase());
             gallery.render(
                 &name,
@@ -433,16 +440,12 @@ async fn gallery() {
     // Dragging a closed panel's rail button onto the middle of the
     // vehicles pane: it has nothing to swap with, so it splits the half
     // the cursor is on.
-    let (index, closed) = layout::Panel::DOCKABLE
-        .into_iter()
-        .enumerate()
-        .find(|(_, panel)| !app.layout.is_open(*panel))
+    let closed = panels()
+        .find(|panel| !app.layout.is_open(*panel))
         .expect("a closed panel");
     let button = iced::Point::new(
         ui::space::S + ui::size::RAIL_BUTTON / 2.0,
-        ui::space::S
-            + index as f32 * (ui::size::RAIL_BUTTON + ui::space::S)
-            + ui::size::RAIL_BUTTON / 2.0,
+        ui::space::S + Application::rail_button_centre(closed),
     );
     let _ = app.update(Message::RailDragged(closed));
     gallery.render_after(
@@ -496,67 +499,69 @@ async fn gallery() {
     );
 
     // The floating shell on a phone, with the system bars over the map: in
-    // portrait with nothing open, with a sheet, and with the sheet expanded;
-    // in landscape with a sheet beside the map.
+    // portrait, the bare map, Fly's and Plan's sheets (Plan's expanded),
+    // Setup's list and one of its pages, and Links; in landscape, Plan's
+    // sheet beside the map, and a page.
     let _ = app.update(Message::Settings(settings_panel::Message::Shell(
         ShellMode::Floating,
     )));
-    let _ = app.update(Message::Insets(Insets {
+    let portrait = Size::new(412.0, 915.0);
+    let landscape = Size::new(915.0, 412.0);
+    let portrait_insets = Insets {
         top: 24.0,
         right: 0.0,
         bottom: 24.0,
         left: 0.0,
-    }));
-    let portrait = Size::new(412.0, 915.0);
-    let landscape = Size::new(915.0, 412.0);
-    let floating = |message| Message::Floating(message);
+    };
+    let landscape_insets = Insets {
+        top: 24.0,
+        right: 0.0,
+        bottom: 16.0,
+        left: 32.0,
+    };
+    let go = |destination| Message::Floating(shell::Message::Go(destination));
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         let _ = app.update(Message::Settings(settings_panel::Message::Theme(mode)));
         let theme = app.theme();
         let _ = app.update(Message::Window(portrait));
+        let _ = app.update(Message::Insets(portrait_insets));
+        let render = |app: &Application, name: &str, size| {
+            gallery.render(
+                &format!("floating-{name}-{suffix}"),
+                size,
+                &theme,
+                app.view().boxed(),
+            );
+        };
 
-        gallery.render(
-            &format!("floating-map-{suffix}"),
-            portrait,
-            &theme,
-            app.view().boxed(),
-        );
-        let _ = app.update(floating(shell::Message::Select(layout::Panel::Mission)));
-        gallery.render(
-            &format!("floating-sheet-{suffix}"),
-            portrait,
-            &theme,
-            app.view().boxed(),
-        );
-        let _ = app.update(floating(shell::Message::ToggleExpanded));
-        gallery.render(
-            &format!("floating-expanded-{suffix}"),
-            portrait,
-            &theme,
-            app.view().boxed(),
-        );
-        let _ = app.update(floating(shell::Message::ToggleExpanded));
+        render(&app, "map", portrait);
+        let _ = app.update(go(Destination::Fly));
+        render(&app, "fly", portrait);
+        let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));
+        render(&app, "fly-expanded", portrait);
+        let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));
+        let _ = app.update(go(Destination::Plan));
+        let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));
+        render(&app, "plan-expanded", portrait);
+        let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));
+        let _ = app.update(go(Destination::Setup));
+        render(&app, "setup", portrait);
+        let _ = app.update(Message::Floating(shell::Message::Open(
+            layout::Panel::Parameters,
+        )));
+        render(&app, "parameters", portrait);
+        let _ = app.update(go(Destination::Links));
+        render(&app, "links", portrait);
 
         let _ = app.update(Message::Window(landscape));
-        let _ = app.update(Message::Insets(Insets {
-            top: 24.0,
-            right: 0.0,
-            bottom: 16.0,
-            left: 32.0,
-        }));
-        gallery.render(
-            &format!("floating-landscape-{suffix}"),
-            landscape,
-            &theme,
-            app.view().boxed(),
-        );
-        let _ = app.update(floating(shell::Message::Close));
-        let _ = app.update(Message::Insets(Insets {
-            top: 24.0,
-            right: 0.0,
-            bottom: 24.0,
-            left: 0.0,
-        }));
+        let _ = app.update(Message::Insets(landscape_insets));
+        let _ = app.update(go(Destination::Plan));
+        render(&app, "landscape-plan", landscape);
+        let _ = app.update(go(Destination::More));
+        render(&app, "landscape-more", landscape);
+
+        // Back to the bare map, for the next theme.
+        while app.floating.update(shell::Message::Back) {}
     }
     let _ = app.update(Message::Settings(settings_panel::Message::Shell(
         ShellMode::Automatic,
