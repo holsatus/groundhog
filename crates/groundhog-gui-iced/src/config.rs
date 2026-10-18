@@ -21,7 +21,7 @@ fn default_config_version() -> u32 {
 pub struct Settings {
     /// Which palette to use.
     pub theme: ThemeMode,
-    pub temp_scale_factor: f32,
+    /// How much larger than the platform's own scale the interface is drawn.
     pub scale_factor: f32,
     /// Record every received frame to a `.tlog` file per session.
     pub record_telemetry: bool,
@@ -34,7 +34,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
-            temp_scale_factor: 1.0,
             scale_factor: 1.0,
             record_telemetry: true,
             default_waypoint_altitude_m:

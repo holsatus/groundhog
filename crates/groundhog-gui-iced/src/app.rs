@@ -27,7 +27,7 @@ use iced::{
 use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
-    config::{self, ConfigWriter, Configuration},
+    config::{self, ConfigWriter, Configuration, Settings},
     features::{
         Context, Effect, MapContext,
         calibration::{self, CalibrationPanel},
@@ -87,6 +87,9 @@ pub struct Application {
     insets: Insets,
     /// The theme whose system-bar icons were requested, if any.
     system_bars: Option<bool>,
+    /// The scale the settings' slider is being dragged to, applied on
+    /// release.
+    scale_preview: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +177,7 @@ impl Application {
             log_panel: LogPanel::new(),
             insets: platform::insets(),
             system_bars: None,
+            scale_preview: None,
         };
 
         if application.configuration.settings.record_telemetry {
@@ -513,29 +517,45 @@ impl Application {
 
         match message {
             settings_panel::Message::Theme(mode) => settings.theme = mode,
+            settings_panel::Message::PreviewScaleFactor(scale) => self.scale_preview = Some(scale),
             settings_panel::Message::CommitScaleFactor => {
-                settings.scale_factor = settings.temp_scale_factor
+                if let Some(scale) = self.scale_preview.take() {
+                    settings.scale_factor = scale;
+                }
             }
-            settings_panel::Message::SetScaleFactor(scale) => settings.temp_scale_factor = scale,
             settings_panel::Message::DefaultAltitude(altitude) => {
                 settings.default_waypoint_altitude_m = altitude;
             }
-            settings_panel::Message::RecordTelemetry(record) => {
-                settings.record_telemetry = record;
-                if record && self.recorder.is_none() {
-                    self.start_recording();
-                } else if !record && let Some(recorder) = self.recorder.take() {
-                    recorder.stop();
-                }
+            settings_panel::Message::RecordTelemetry(record) => settings.record_telemetry = record,
+            settings_panel::Message::RestoreDefaults => {
+                self.confirmation = Some(
+                    Confirmation::new(
+                        "Restore the default settings?",
+                        "Every setting goes back to its default. Links and the panel layout are kept.",
+                        Message::Settings(settings_panel::Message::DefaultsConfirmed),
+                    )
+                    .accept_label("Restore"),
+                );
             }
-            settings_panel::Message::RestoreDefaults => *settings = Default::default(),
+            settings_panel::Message::DefaultsConfirmed => *settings = Settings::default(),
         }
 
         if self.configuration.settings != before {
             self.save_configuration();
         }
 
+        self.sync_recording();
         self.sync_system_bars();
+    }
+
+    /// Starts or stops recording to match the setting.
+    fn sync_recording(&mut self) {
+        let record = self.configuration.settings.record_telemetry;
+        if record && self.recorder.is_none() {
+            self.start_recording();
+        } else if !record && let Some(recorder) = self.recorder.take() {
+            recorder.stop();
+        }
     }
 
     /// Matches the status- and navigation-bar icons to the theme: dark icons
@@ -552,8 +572,16 @@ impl Application {
     pub fn view(&self) -> impl Widget<Message> + '_ {
         // The rail and the panes float on the window's background, one gap
         // apart from each other and from the window's edges.
+        // Where the platform's chrome covers the window, the gap is measured
+        // from the chrome instead of the window's edge.
+        let insets = self.insets.padding(self.scale_factor());
         let base = container(row![self.view_rail(), self.view_panes()].spacing(ui::space::S))
-            .padding(ui::space::S)
+            .padding(Padding {
+                top: insets.top.max(ui::space::S),
+                right: insets.right.max(ui::space::S),
+                bottom: insets.bottom.max(ui::space::S),
+                left: insets.left.max(ui::space::S),
+            })
             .style(style::workspace);
 
         // Toasts pop up in the map's corner, unless a maximized pane hides
@@ -564,12 +592,7 @@ impl Application {
             stack![base, self.view_toasts(ui::space::XL)].boxed()
         };
 
-        container(confirm::view(
-            base,
-            self.confirmation.as_ref(),
-            Message::Confirm,
-        ))
-        .padding(self.insets.padding(self.scale_factor()))
+        confirm::view(base, self.confirmation.as_ref(), Message::Confirm)
     }
 
     /// Whether the map is on screen: a compact window shows it as its panel,
@@ -819,6 +842,7 @@ impl Application {
                 .boxed(),
             layout::Panel::Settings => settings_panel::view(
                 &self.configuration.settings,
+                self.scale_preview,
                 self.recorder.as_ref().map(TlogRecorder::path),
             )
             .map(Message::Settings)
