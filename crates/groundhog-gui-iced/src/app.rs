@@ -569,11 +569,16 @@ impl Application {
             self.confirmation.as_ref(),
             Message::Confirm,
         ))
-        .padding(self.insets.padding())
+        .padding(self.insets.padding(self.scale_factor()))
     }
 
-    /// Whether the map is on screen: no other pane is maximized.
+    /// Whether the map is on screen: a compact window shows it as its panel,
+    /// and a maximized pane otherwise hides it.
     fn map_is_shown(&self) -> bool {
+        if self.layout.is_compact() {
+            return self.layout.compact_panel() == layout::Panel::Map;
+        }
+
         let panes = self.layout.panes();
         panes
             .maximized()
@@ -598,37 +603,64 @@ impl Application {
     /// Ctrl/Cmd or Shift click), or where its button is dragged onto the
     /// grid.
     fn view_rail(&self) -> Element<'_, Message> {
-        let buttons = layout::Panel::DOCKABLE.into_iter().map(|panel| {
-            let open = self.layout.is_open(panel);
+        let compact = self.layout.is_compact();
+
+        // A compact window has no room for several panes, so the map is a
+        // panel like the others and the rail chooses the one on screen.
+        let panels: Vec<layout::Panel> = if compact {
+            std::iter::once(layout::Panel::Map)
+                .chain(layout::Panel::DOCKABLE)
+                .collect()
+        } else {
+            layout::Panel::DOCKABLE.to_vec()
+        };
+
+        let buttons = panels.into_iter().map(|panel| {
+            let open = if compact {
+                self.layout.compact_panel() == panel
+            } else {
+                self.layout.is_open(panel)
+            };
             let icon = ui::icon::icon(panel.icon(), ui::size::RAIL_ICON, ButtonKind::Subtle, true);
+            let press = if compact {
+                Message::Layout(layout::Message::Select(panel))
+            } else {
+                Message::Rail(panel)
+            };
             let button = button(container(icon).center(Length::Fill))
                 .padding(0)
                 .width(ui::size::RAIL_BUTTON)
                 .height(ui::size::RAIL_BUTTON)
                 .style(style::rail_button(open))
-                .on_press(Message::Rail(panel));
-            let toggle = |slot| Message::Layout(layout::Message::Toggle(panel, slot));
-            let button = mouse_area(button)
-                .on_middle_press(toggle(layout::Slot::Middle))
-                .on_right_press(toggle(layout::Slot::Right));
+                .on_press(press);
 
-            // Dragged, the button becomes a label for the panel, styled as a tooltip.
-            let preview = container(
-                row![
-                    ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
-                    ui::text(panel.title())
-                ]
-                .spacing(ui::space::S)
-                .align_y(Alignment::Center),
-            )
-            .padding([ui::space::S, ui::space::M])
-            .style(style::tooltip);
-            let button = drag_source(
-                button,
-                preview,
-                Message::RailDragged(panel),
-                Message::RailDropped,
-            );
+            let button = if compact {
+                button.boxed()
+            } else {
+                let toggle = |slot| Message::Layout(layout::Message::Toggle(panel, slot));
+                let button = mouse_area(button)
+                    .on_middle_press(toggle(layout::Slot::Middle))
+                    .on_right_press(toggle(layout::Slot::Right));
+
+                // Dragged, the button becomes a label for the panel, styled as a tooltip.
+                let preview = container(
+                    row![
+                        ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
+                        ui::text(panel.title())
+                    ]
+                    .spacing(ui::space::S)
+                    .align_y(Alignment::Center),
+                )
+                .padding([ui::space::S, ui::space::M])
+                .style(style::tooltip);
+                drag_source(
+                    button,
+                    preview,
+                    Message::RailDragged(panel),
+                    Message::RailDropped,
+                )
+                .boxed()
+            };
 
             ui::tooltip(button, panel.title(), tooltip::Position::Right)
         });
@@ -660,19 +692,24 @@ impl Application {
             ]
             .height(Length::Fill);
 
-            let layout = |message| Message::Layout(message);
-            let size = if is_maximized {
-                ui::icon_button(Icon::Minimize)
-                    .hint("Restore")
-                    .on_press(layout(layout::Message::Restore))
-            } else {
-                ui::icon_button(Icon::Maximize)
-                    .hint("Maximize")
-                    .on_press(layout(layout::Message::Maximize(pane)))
-            };
-            let close = ui::icon_button(Icon::Close)
-                .hint("Close")
-                .on_press(layout(layout::Message::Close(pane)));
+            let compact = self.layout.is_compact();
+            let controls = (!compact).then(|| {
+                let layout = |message| Message::Layout(message);
+                let size = if is_maximized {
+                    ui::icon_button(Icon::Minimize)
+                        .hint("Restore")
+                        .on_press(layout(layout::Message::Restore))
+                } else {
+                    ui::icon_button(Icon::Maximize)
+                        .hint("Maximize")
+                        .on_press(layout(layout::Message::Maximize(pane)))
+                };
+                let close = ui::icon_button(Icon::Close)
+                    .hint("Close")
+                    .on_press(layout(layout::Message::Close(pane)));
+
+                pane_grid::Controls::new(row![size.boxed(), close.boxed()].spacing(ui::space::XS))
+            });
 
             let title = row![
                 ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
@@ -681,10 +718,12 @@ impl Application {
             .spacing(ui::space::S)
             .align_y(Alignment::Center);
 
-            let title_bar = pane_grid::TitleBar::new(title.boxed())
-                .controls(pane_grid::Controls::new(
-                    row![size.boxed(), close.boxed()].spacing(ui::space::XS),
-                ))
+            let mut title_bar = pane_grid::TitleBar::new(title.boxed());
+            if let Some(controls) = controls {
+                title_bar = title_bar.controls(controls);
+            }
+
+            let title_bar = title_bar
                 // The controls are as far from the bar's right edge as from
                 // its top and bottom; the title gets more room on the left.
                 // The pane's border is drawn over the bar's top and right

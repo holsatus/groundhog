@@ -191,10 +191,24 @@ Verified on the Pixel 7: in portrait and landscape the content starts below the
 status bar and above the navigation bar, and the soft keyboard pushes the
 content up while it is open.
 
+### Pass 2 — phone layout (done)
+
+Below 640 logical pixels of grid width — a phone in portrait, at the default
+scale — the workspace is replaced by one panel at a time. The rail grows a Map
+button and selects the panel that fills the window; tapping the selected panel
+returns to the map. The persisted `Workspace` is left untouched (the compact
+panel is view state), so a wide window — a tablet, or the phone in landscape —
+restores the three-column arrangement exactly as it was.
+
+`Layout` owns the switch (`COMPACT_BELOW`, `Message::Select`); the application
+draws the rail accordingly and hides the pane's maximize and close controls,
+which mean nothing with a single pane.
+
+Verified on the Pixel 7: portrait shows one panel, the rail switches panels and
+returns to the map, and rotating to landscape restores the workspace.
+
 ## Known limitations
 
-- The desktop workspace layout is still used on phones: a side column plus the
-  rail can take the whole width, squeezing the map. This is the next pass.
 - Pick/save file actions do nothing on Android.
 - Serial links cannot open; UDP/TCP work (INTERNET permission is declared).
 - Soft keyboard text entry is basic (key events); IME composition, clipboard
@@ -223,10 +237,9 @@ content up while it is open.
 
 ## Later passes
 
-1. Phone layout (single-pane workspace below a width breakpoint).
-2. Touch behaviour for the map overlay, the rail and the drag sources.
-3. SAF import/export for missions and parameters, USB serial through the
+1. Touch behaviour for the map overlay, the rail and the drag sources.
+2. SAF import/export for missions and parameters, USB serial through the
    Android USB Host API, and a foreground service for background
    telemetry/recording.
-4. Full IME/clipboard by porting the `iced_android` Java activity and the
+3. Full IME/clipboard by porting the `iced_android` Java activity and the
    remaining iced widget patches.

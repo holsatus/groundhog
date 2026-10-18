@@ -39,12 +39,43 @@ impl Insets {
     };
 
     /// The insets as padding, so no content is drawn under them.
-    pub fn padding(self) -> iced::Padding {
+    ///
+    /// `scale` is the application scale factor from [`Settings`]. The insets
+    /// are logical pixels (dp), while iced lays the user interface out in
+    /// pixels that the application scale factor has already enlarged, so the
+    /// padding must shrink by the same factor to keep covering the same part
+    /// of the screen.
+    ///
+    /// [`Settings`]: crate::config::Settings
+    pub fn padding(self, scale: f32) -> iced::Padding {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+
         iced::Padding {
-            top: self.top,
-            right: self.right,
-            bottom: self.bottom,
-            left: self.left,
+            top: self.top / scale,
+            right: self.right / scale,
+            bottom: self.bottom / scale,
+            left: self.left / scale,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn padding_shrinks_by_the_application_scale() {
+        let insets = Insets {
+            top: 24.0,
+            right: 0.0,
+            bottom: 48.0,
+            left: 0.0,
+        };
+
+        let padding = insets.padding(2.0);
+
+        assert_eq!(padding.top, 12.0);
+        assert_eq!(padding.bottom, 24.0);
+        assert_eq!(Insets::ZERO.padding(2.0), iced::Padding::ZERO);
     }
 }

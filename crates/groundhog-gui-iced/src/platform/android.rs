@@ -54,6 +54,9 @@ pub fn init(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("groundhog")
+            // `log`'s runtime maximum starts at `Off`; `with_max_level` raises
+            // it. The filter then drops the noise from dependencies.
+            .with_max_level(LevelFilter::Debug)
             .with_filter(
                 android_logger::FilterBuilder::new()
                     .filter_level(LevelFilter::Error)
