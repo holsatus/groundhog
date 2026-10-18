@@ -169,6 +169,8 @@ struct LayerCache {
 #[derive(Default)]
 pub(super) struct State {
     pointer: Pointer,
+    /// The finger driving `pointer`, while one is down.
+    finger: Option<touch::Finger>,
     hovered: Option<(LayerId, HandleId)>,
     caches: RefCell<HashMap<LayerId, LayerCache>>,
 }
@@ -220,24 +222,7 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
         // bigger hit area; whatever the overlay does not capture, the map
         // below pans and zooms with.
         if let Event::Touch(finger) = event {
-            let (event, cursor) = match *finger {
-                touch::Event::FingerPressed { position, .. } => (
-                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    mouse::Cursor::Available(position),
-                ),
-                touch::Event::FingerMoved { position, .. } => (
-                    Event::Mouse(mouse::Event::CursorMoved { position }),
-                    mouse::Cursor::Available(position),
-                ),
-                touch::Event::FingerLifted { position, .. } => (
-                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-                    mouse::Cursor::Available(position),
-                ),
-                // The system took the gesture: a drag must not stay stuck.
-                touch::Event::FingerLost { .. } => return self.cancel(state),
-            };
-
-            return self.pointer(state, &event, bounds, cursor, Source::Touch);
+            return self.touch(state, *finger, bounds);
         }
 
         self.pointer(state, event, bounds, cursor, Source::Mouse)
@@ -331,6 +316,75 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
 }
 
 impl<Message> Overlay<'_, Message> {
+    /// A finger, put through the pointer state machine as if it were the
+    /// mouse.
+    ///
+    /// Only the first finger down on the overlay drives the gesture. A second
+    /// one makes it a pinch: a press still waiting to become a click or a
+    /// drag is handed to the map instead (so a two-finger tap places nothing),
+    /// and a drag in progress keeps its handle, the second finger captured so
+    /// the map does not pan under it.
+    fn touch(
+        &self,
+        state: &mut State,
+        event: touch::Event,
+        bounds: Rectangle,
+    ) -> Option<Action<Message>> {
+        let (id, position) = match event {
+            touch::Event::FingerPressed { id, position }
+            | touch::Event::FingerMoved { id, position }
+            | touch::Event::FingerLifted { id, position }
+            | touch::Event::FingerLost { id, position } => (id, position),
+        };
+        let cursor = mouse::Cursor::Available(position);
+
+        if state.finger.is_some_and(|finger| finger != id) {
+            if !matches!(event, touch::Event::FingerPressed { .. }) {
+                return None;
+            }
+
+            return match state.pointer {
+                Pointer::Pressed { .. } => {
+                    state.pointer = Pointer::Panning;
+                    None
+                }
+                Pointer::Dragging { .. } => Some(Action::capture()),
+                Pointer::Idle | Pointer::Panning => None,
+            };
+        }
+
+        let event = match event {
+            touch::Event::FingerPressed { .. } => {
+                if !bounds.contains(position) {
+                    return None;
+                }
+                state.finger = Some(id);
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+            }
+            touch::Event::FingerMoved { .. } if state.finger.is_some() => {
+                Event::Mouse(mouse::Event::CursorMoved { position })
+            }
+            touch::Event::FingerLifted { .. } if state.finger.is_some() => {
+                state.finger = None;
+                // A finger leaves nothing hovered behind it.
+                state.hovered = None;
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+            }
+            // The system took the gesture: a drag must not stay stuck, and a
+            // press must not become a click.
+            touch::Event::FingerLost { .. } if state.finger.is_some() => {
+                state.finger = None;
+                state.hovered = None;
+                let cancelled = self.cancel(state);
+                state.pointer = Pointer::Idle;
+                return cancelled.or(Some(Action::request_redraw()));
+            }
+            _ => return None,
+        };
+
+        self.pointer(state, &event, bounds, cursor, Source::Touch)
+    }
+
     /// The pointer state machine, shared by the mouse and a finger.
     fn pointer(
         &self,
@@ -827,5 +881,82 @@ mod tests {
         assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
         assert!(captured);
         assert_eq!(state.pointer, Pointer::Idle);
+    }
+
+    /// A second finger's event at an overlay-relative point.
+    fn second_finger(event: fn(touch::Finger, Point) -> touch::Event, x: f32, y: f32) -> Event {
+        Event::Touch(event(touch::Finger(1), finger_position(x, y)))
+    }
+
+    fn pressed(id: touch::Finger, position: Point) -> touch::Event {
+        touch::Event::FingerPressed { id, position }
+    }
+
+    fn lifted(id: touch::Finger, position: Point) -> touch::Event {
+        touch::Event::FingerLifted { id, position }
+    }
+
+    #[test]
+    fn a_two_finger_tap_places_nothing() {
+        let overlay = overlay();
+        let mut state = State::default();
+
+        overlay.update(&mut state, &finger_down(10.0, 10.0), BOUNDS, NO_CURSOR);
+        let (_, captured) = message(overlay.update(
+            &mut state,
+            &second_finger(pressed, 60.0, 10.0),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert!(!captured, "the map pinches with both fingers");
+
+        let (clicked, _) =
+            message(overlay.update(&mut state, &finger_up(10.0, 10.0), BOUNDS, NO_CURSOR));
+        assert_eq!(clicked, None);
+        let (clicked, _) = message(overlay.update(
+            &mut state,
+            &second_finger(lifted, 60.0, 10.0),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert_eq!(clicked, None);
+        assert_eq!(state.pointer, Pointer::Idle);
+    }
+
+    #[test]
+    fn a_second_finger_does_not_interrupt_a_drag() {
+        let overlay = overlay();
+        let mut state = State::default();
+
+        overlay.update(
+            &mut state,
+            &finger_down(CENTRE.0, CENTRE.1),
+            BOUNDS,
+            NO_CURSOR,
+        );
+        let far = (CENTRE.0 + 40.0, CENTRE.1);
+        overlay.update(&mut state, &finger_moved(far.0, far.1), BOUNDS, NO_CURSOR);
+
+        let (_, captured) = message(overlay.update(
+            &mut state,
+            &second_finger(pressed, 10.0, 10.0),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert!(captured, "the map must not pan under the drag");
+        assert!(matches!(state.pointer, Pointer::Dragging { .. }));
+
+        // The second finger lifting first ends nothing.
+        let (ended, _) = message(overlay.update(
+            &mut state,
+            &second_finger(lifted, 10.0, 10.0),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert_eq!(ended, None);
+
+        let (dropped, _) =
+            message(overlay.update(&mut state, &finger_up(far.0, far.1), BOUNDS, NO_CURSOR));
+        assert_eq!(dropped, Some(Msg::Dropped(MARKER)));
     }
 }
