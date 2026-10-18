@@ -30,23 +30,16 @@ serde = "1.0.228"
 # 08eb93a plus the six `iced-mobile/iced` commits and one documentation fix).
 # See docs/android-port.md.
 [patch."https://github.com/iced-rs/iced"]
-iced = { path = "../iced-android" }
-iced_core = { path = "../iced-android/core" }
-iced_debug = { path = "../iced-android/debug" }
-iced_futures = { path = "../iced-android/futures" }
-iced_graphics = { path = "../iced-android/graphics" }
-iced_program = { path = "../iced-android/program" }
-iced_renderer = { path = "../iced-android/renderer" }
-iced_runtime = { path = "../iced-android/runtime" }
-iced_test = { path = "../iced-android/test" }
-iced_tiny_skia = { path = "../iced-android/tiny_skia" }
-iced_widget = { path = "../iced-android/widget" }
-iced_winit = { path = "../iced-android/winit" }
-iced_wgpu = { path = "../iced-android/wgpu" }
-
-# slippery also fetches map tiles through `reqwest`, whose Android
-# certificate verifier needs a JVM-side component this Gradle-free build
-# cannot ship (it panics without one). The local fork trusts Mozilla's
-# bundled roots on Android instead, so the map can load its tiles.
-[patch."https://github.com/peterkrull/slippery"]
-slippery = { path = "../slippery-android" }
+iced = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_core = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_debug = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_futures = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_graphics = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_program = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_renderer = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_runtime = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_test = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_tiny_skia = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_widget = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_winit = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_wgpu = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }

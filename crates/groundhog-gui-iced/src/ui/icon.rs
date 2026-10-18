@@ -58,7 +58,7 @@ icons! {
     /// Send to the vehicle.
     Upload => "upload.svg",
     /// Undo an edit.
-    Revert => "undo-2.svg",
+    Restore => "undo-2.svg",
     /// Fetch from the vehicle.
     Download => "download.svg",
     /// Add an item.

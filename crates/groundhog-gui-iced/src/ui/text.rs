@@ -44,6 +44,8 @@ pub trait TextExt {
     /// Keep the text on one line, cut with an ellipsis. Text in a list row
     /// of fixed height must be single-line.
     fn single_line(self) -> Self;
+
+    fn single_line_ellipsis_start(self) -> Self;
 }
 
 impl TextExt for Text<'_> {
@@ -53,5 +55,9 @@ impl TextExt for Text<'_> {
 
     fn single_line(self) -> Self {
         self.wrapping(Wrapping::None).ellipsis(Ellipsis::End)
+    }
+
+    fn single_line_ellipsis_start(self) -> Self {
+        self.wrapping(Wrapping::None).ellipsis(Ellipsis::Start)
     }
 }

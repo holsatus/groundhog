@@ -2437,6 +2437,7 @@ dependencies = [
 [[package]]
 name = "iced"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_core",
  "iced_debug",
@@ -2452,6 +2453,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -2470,6 +2472,7 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -2479,6 +2482,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "futures",
  "iced_core",
@@ -2492,6 +2496,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2511,6 +2516,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -2519,6 +2525,7 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_graphics",
  "iced_tiny_skia",
@@ -2530,6 +2537,7 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "bytes",
  "iced_core",
@@ -2540,6 +2548,7 @@ dependencies = [
 [[package]]
 name = "iced_selector"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_core",
 ]
@@ -2547,6 +2556,7 @@ dependencies = [
 [[package]]
 name = "iced_test"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_futures",
  "iced_program",
@@ -2562,6 +2572,7 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2578,6 +2589,7 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2597,6 +2609,7 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "iced_renderer",
  "iced_runtime",
@@ -2610,6 +2623,7 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#64c5ccf3a81929ea3f59135d0be9691fe48b6060"
 dependencies = [
  "arboard",
  "iced_debug",
@@ -5521,6 +5535,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slippery"
 version = "0.1.0"
+source = "git+https://github.com/peterkrull/slippery#1054ba505ba4a6752e1cbb3344752a11f8f69aa3"
 dependencies = [
  "env_logger",
  "http-cache-reqwest",

@@ -424,10 +424,19 @@ impl ParameterPanel {
         let actions = ui::actions([vec![
             ui::button("Download")
                 .icon(Icon::Download)
-                .busy(downloading, "Downloading…")
+                .busy(downloading, "Download")
                 .hint("Read every parameter from the vehicle")
                 .on_press(Message::Reload(address))
                 .boxed(),
+            ui::button(if pending > 0 {
+                format!("Restore {pending}")
+            } else {
+                "Restore".to_string()
+            })
+            .icon(Icon::Restore)
+            .hint("Restore all locally changed parameters")
+            .on_press_maybe((pending > 0).then_some(Message::ResetAll(address)))
+            .boxed(),
             ui::button(if pending > 0 {
                 format!("Upload {pending}")
             } else {
@@ -442,10 +451,6 @@ impl ParameterPanel {
             .hint("Write every changed value to the vehicle")
             .on_press_maybe((pending > 0 && encoding_known).then_some(Message::UploadAll(address)))
             .boxed(),
-            ui::icon_button(Icon::Revert)
-                .hint("Discard every change")
-                .on_press_maybe((pending > 0).then_some(Message::ResetAll(address)))
-                .boxed(),
         ]]);
 
         let encoding_warning = (!encoding_known
@@ -629,7 +634,7 @@ fn view_param_row<'a>(
         None => "Nothing to restore".to_string(),
     };
     let restore = || {
-        ui::icon_button(Icon::Revert)
+        ui::icon_button(Icon::Restore)
             .hint(restore_hint.clone())
             .on_press_maybe(edit.map(|_| Message::Reset(address, ident.clone())))
             .boxed()
@@ -664,27 +669,13 @@ fn view_param_row<'a>(
 
     let name = ident.as_str();
     let kind = value_type_name(param.value());
-    let buttons = 2.0 * ui::size::control() + 4.0 * ui::space::XS;
-
-    // Wide, the names and types line up in columns and the value takes
-    // the rest; narrow, the name gives way to the value instead.
-    let wide = row![
-        ui::mono(name).width(NAME),
-        ui::mono(kind)
-            .width(TYPE)
-            .align_x(Alignment::End)
-            .tone(Tone::Muted),
-        space::horizontal().width(ui::space::M),
-        input(),
-        restore(),
-        upload(),
-    ]
-    .spacing(ui::space::XS)
-    .align_y(Alignment::Center);
 
     let narrow = row![
-        ui::mono(name).single_line().width(Length::Fill),
+        ui::mono(name)
+            .single_line_ellipsis_start()
+            .width(Length::Fill),
         ui::mono(kind).tone(Tone::Muted),
+        space::horizontal().width(ui::space::M),
         input().width(VALUE),
         restore(),
         upload(),
@@ -692,7 +683,7 @@ fn view_param_row<'a>(
     .spacing(ui::space::XS)
     .align_y(Alignment::Center);
 
-    ui::either(wide, narrow, NAME + TYPE + ui::space::M + VALUE + buttons).boxed()
+    narrow.boxed()
 }
 
 #[cfg(test)]
