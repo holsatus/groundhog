@@ -84,9 +84,7 @@ impl Source {
                 Ok(Source::MpegTsTcp { host, port })
             }
             "test" => Ok(Source::TestPattern),
-            other => Err(format!(
-                "Unknown video source \"{other}://\"; use rtsp, udp, udp265, mpegts, tcp or test"
-            )),
+            other => Err(format!("Unknown video source scheme \"{other}://\"")),
         }
     }
 }

@@ -371,10 +371,8 @@ impl VideoPanel {
         column![
             ui::field("Source", field),
             problem.map(|problem| ui::caption(problem).tone(Tone::Danger).boxed()),
-            ui::caption(
-                "rtsp://, udp:// (H.264 over RTP), udp265://, mpegts://, tcp://, or test://"
-            )
-            .tone(Tone::Muted),
+            ui::caption("rtsp://, udp://, udp265://, mpegts://, tcp://, or test://")
+                .tone(Tone::Muted),
             ui::checkbox("Low latency", self.settings.low_latency).on_toggle(Message::LowLatency),
             ui::caption(
                 "Frames show as soon as they are decoded. On a lossy link, turn it off to put \
