@@ -380,6 +380,41 @@ async fn gallery() {
         }
     }
 
+    // The video panel receiving the test pattern. Its state comes as
+    // messages the gallery does not run; it is handed the first
+    // receiver's once the first frame is in.
+    let _ = app.update(Message::Video(video::Message::EditSource(
+        "test://".to_string(),
+    )));
+    let _ = app.update(Message::Video(video::Message::Start));
+    for _ in 0..250 {
+        if app.video.slot().is_some_and(|slot| slot.latest().is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let _ = app.update(Message::Video(video::Message::Updated(
+        0,
+        groundhog_video::State {
+            status: groundhog_video::Status::Streaming {
+                width: 1280,
+                height: 720,
+                decoder: None,
+            },
+            frames: 1,
+        },
+    )));
+    for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        gallery.render(
+            &format!("panel-video-live-{suffix}"),
+            Size::new(560.0, 820.0),
+            &mode.theme(),
+            iced::widget::container(app.pane_body(layout::Panel::Video))
+                .style(style::pane)
+                .boxed(),
+        );
+    }
+
     // Dragging the parameters (right column) by their title bar, to show
     // where they would land: the bottom half of the vehicles pane (splitting
     // it), the divider beneath it (an even share), its middle (a swap), and
@@ -535,6 +570,9 @@ async fn gallery() {
         };
 
         render(&app, "map", portrait);
+        let _ = app.update(Message::Floating(shell::Message::SwapVideo));
+        render(&app, "video", portrait);
+        let _ = app.update(Message::Floating(shell::Message::SwapVideo));
         let _ = app.update(go(Destination::Fly));
         render(&app, "fly", portrait);
         let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));

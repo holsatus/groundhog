@@ -166,6 +166,16 @@ pub fn stat<'a, M: 'a>(label: impl IntoFragment<'a>, value: Text<'a>) -> Element
         .boxed()
 }
 
+/// A dark surface for a picture (a video), so the bands around it read as
+/// the edges of a screen rather than of the panel.
+pub fn screen<'a, M: 'a>(content: impl Widget<M> + 'a) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::screen)
+        .boxed()
+}
+
 /// Read-outs (each usually a [`stat`]) in columns that line up: as many as
 /// fit, up to `max_columns`, so a narrow panel shows fewer to a row instead
 /// of squeezing them.

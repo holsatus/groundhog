@@ -71,6 +71,8 @@ pub enum Panel {
     Logs,
     #[serde(rename = "Settings")]
     Settings,
+    #[serde(rename = "Video")]
+    Video,
 }
 
 impl Panel {
@@ -84,6 +86,7 @@ impl Panel {
             Panel::Links => "Links",
             Panel::Logs => "Log",
             Panel::Settings => "Settings",
+            Panel::Video => "Video",
         }
     }
 
@@ -98,6 +101,7 @@ impl Panel {
             Panel::Links => Icon::Links,
             Panel::Logs => Icon::Log,
             Panel::Settings => Icon::Settings,
+            Panel::Video => Icon::Video,
         }
     }
 
@@ -113,6 +117,7 @@ impl Panel {
             Panel::Links => "Connections to vehicles",
             Panel::Logs => "Status messages from the vehicles, and notices",
             Panel::Settings => "Appearance, planning and recording",
+            Panel::Video => "The camera's stream, and where it comes from",
         }
     }
 

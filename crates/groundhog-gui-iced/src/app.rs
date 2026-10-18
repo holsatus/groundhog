@@ -39,6 +39,7 @@ use crate::{
         parameter_panel::{self, ParameterPanel},
         settings_panel,
         vehicles::{self, VehiclePanel},
+        video::{self, VideoPanel},
     },
     layout::{self, Layout},
     map::{self, LayerSet, Map, Placement},
@@ -76,6 +77,7 @@ pub struct Application {
     confirmation: Option<Confirmation<Message>>,
     features: Features,
     link_panel: LinkPanel,
+    video: VideoPanel,
     log_panel: LogPanel,
     /// How much of the window the platform's own chrome covers.
     insets: Insets,
@@ -121,6 +123,7 @@ pub enum Message {
     Calibration(calibration::Message),
     Links(link_panel::Message),
     Logs(log_panel::Message),
+    Video(video::Message),
     Settings(settings_panel::Message),
     Notifications(notifications::Message),
     Confirm(Answer),
@@ -160,6 +163,9 @@ impl Application {
             .clone()
             .map_or_else(Layout::new, Layout::from_workspace);
 
+        // The video comes back on if it was on when the application closed.
+        let (video, video_task) = VideoPanel::new(configuration.video.clone());
+
         let mut application = Application {
             layout,
             map: Map::new(),
@@ -175,6 +181,7 @@ impl Application {
             confirmation: None,
             features: Features::default(),
             link_panel: LinkPanel::new(),
+            video,
             log_panel: LogPanel::new(),
             insets: platform::insets(),
             system_bars: None,
@@ -197,6 +204,7 @@ impl Application {
             Task::stream(events.fleet.into_stream()).map(Message::Fleet),
             Task::stream(events.links.into_stream()).map(Message::Link),
             Task::stream(saved).map(Message::ConfigurationSaved),
+            video_task.map(Message::Video),
         ]);
 
         (application, tasks)
@@ -319,6 +327,14 @@ impl Application {
                     self.save_configuration();
                 }
                 task.map(Message::Links)
+            }
+            Message::Video(message) => {
+                let (task, event) = self.video.update(message);
+                if let Some(video::Event::Changed(settings)) = event {
+                    self.configuration.video = settings;
+                    self.save_configuration();
+                }
+                task.map(Message::Video)
             }
             Message::Logs(message) => {
                 self.log_panel.update(message);
@@ -642,10 +658,17 @@ impl Application {
     fn map_placement(&self) -> Placement {
         match self.shell() {
             Shell::Tiled => Placement::Pane,
+            // In the corner, while the video fills the screen.
+            Shell::Floating if self.video_is_main() => Placement::Pane,
             Shell::Floating => Placement::Window {
                 covered: self.floating_covered(),
             },
         }
+    }
+
+    /// Whether the floating shell's video fills the map's screen.
+    fn video_is_main(&self) -> bool {
+        self.video.slot().is_some() && self.floating.is_video_main()
     }
 
     /// The map with the features' layers, placed as `placement`.
@@ -706,6 +729,7 @@ impl Application {
                 .view(self.backend.links())
                 .map(Message::Links)
                 .boxed(),
+            layout::Panel::Video => self.video.view().map(Message::Video).boxed(),
             layout::Panel::Logs => self
                 .log_panel
                 .view(fleet, self.selected, &self.notices)

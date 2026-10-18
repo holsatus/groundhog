@@ -106,7 +106,7 @@ pub enum Destination {
     Setup,
     /// The links to vehicles.
     Links,
-    /// The rest: the log, the settings.
+    /// The rest: the video source, the log, the settings.
     More,
 }
 
@@ -146,7 +146,7 @@ impl Destination {
             Destination::Plan => &[Panel::Mission],
             Destination::Setup => &[Panel::Parameters, Panel::Calibration],
             Destination::Links => &[Panel::Links],
-            Destination::More => &[Panel::Logs, Panel::Settings],
+            Destination::More => &[Panel::Video, Panel::Logs, Panel::Settings],
         }
     }
 
@@ -168,6 +168,9 @@ pub struct Floating {
     expanded: bool,
     /// The panel opened from a page listing several (Setup's parameters).
     page: Option<Panel>,
+    /// Whether the video fills the map's screen, the map in its corner,
+    /// rather than the other way round (while there is video).
+    video_main: bool,
 }
 
 /// What the floating shell shows besides the navigation.
@@ -195,6 +198,8 @@ pub enum Message {
     ToggleExpanded,
     /// Close the sheet.
     Close,
+    /// Swap the video and the map: the one in the corner fills the screen.
+    SwapVideo,
 }
 
 impl Floating {
@@ -204,6 +209,11 @@ impl Floating {
 
     pub fn is_expanded(&self) -> bool {
         self.expanded
+    }
+
+    /// Whether the video fills the map's screen, if there is video.
+    pub fn is_video_main(&self) -> bool {
+        self.video_main
     }
 
     /// What to show for the destination.
@@ -254,6 +264,7 @@ impl Floating {
             Message::Back => return self.back(),
             Message::ToggleExpanded => self.expanded = !self.expanded,
             Message::Close => self.sheet = false,
+            Message::SwapVideo => self.video_main = !self.video_main,
         }
 
         // A sheet opens at its share of the window, never already expanded.
@@ -381,6 +392,7 @@ mod tests {
             Panel::Links,
             Panel::Logs,
             Panel::Settings,
+            Panel::Video,
         ];
         for panel in panels {
             let holding = Destination::ALL
@@ -469,6 +481,19 @@ mod tests {
         assert!(!floating.is_expanded());
         assert!(floating.update(Message::Back));
         assert_eq!(floating.screen(), Screen::Map { sheet: None });
+    }
+
+    #[test]
+    fn the_video_and_the_map_swap() {
+        let mut floating = Floating::default();
+        assert!(!floating.is_video_main());
+
+        floating.update(Message::SwapVideo);
+        assert!(floating.is_video_main());
+        floating.update(Message::Go(Destination::Setup));
+        assert!(floating.is_video_main(), "kept while elsewhere");
+        floating.update(Message::SwapVideo);
+        assert!(!floating.is_video_main());
     }
 
     #[test]

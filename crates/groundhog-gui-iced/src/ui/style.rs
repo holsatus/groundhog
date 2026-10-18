@@ -554,6 +554,20 @@ fn subtle_button(theme: &Theme, status: widget::button::Status) -> widget::butto
     }
 }
 
+/// Behind a picture (a video), whose letterbox bands show it: black, as a
+/// screen is, in either theme.
+pub fn screen(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::BLACK.into()),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            radius: WIDGET_RADIUS.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A page of the floating shell: a pane's surface, filling the window.
 pub fn page(theme: &Theme) -> container::Style {
     surface(theme.palette().background.weakest)
@@ -577,6 +591,15 @@ pub fn navigation_item(theme: &Theme, status: widget::button::Status) -> widget:
             radius: PANE_RADIUS.into(),
             ..Border::default()
         },
+        ..widget::button::Style::default()
+    }
+}
+
+/// A button with no look of its own, laid over what it acts on (a
+/// picture-in-picture, tapped to swap it).
+pub fn invisible_button(_theme: &Theme, _status: widget::button::Status) -> widget::button::Style {
+    widget::button::Style {
+        background: None,
         ..widget::button::Style::default()
     }
 }

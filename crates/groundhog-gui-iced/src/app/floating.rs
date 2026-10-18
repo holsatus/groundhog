@@ -26,7 +26,7 @@ use crate::{
         self, Icon,
         style::{self, ButtonKind},
     },
-    widget::surface::surface,
+    widget::{surface::surface, video::video},
 };
 
 /// The window's size before it is first measured: a phone in portrait.
@@ -42,6 +42,10 @@ const RAIL_ITEM: f32 = 64.0;
 const INDICATOR: Size = Size::new(56.0, 32.0);
 /// The height of a page's top bar.
 const TOP_BAR: f32 = 56.0;
+/// The picture in the map screen's corner: this share of the screen's
+/// width, and no wider than this, at 16:9.
+const CORNER_SHARE: f32 = 0.4;
+const CORNER_WIDTH: f32 = 320.0;
 
 /// Where the pieces of the floating shell go in the window.
 struct Geometry {
@@ -209,12 +213,46 @@ impl Application {
             .height(geometry.insets.top)
             .style(style::scrim);
 
-        let map = self.view_map(Placement::Window { covered });
+        // While there is video, it and the map share the screen: one fills
+        // it, the other sits in the corner of what shows, and a tap on the
+        // corner swaps them.
+        let (main, corner) = match self.video.slot() {
+            Some(slot) if self.floating.is_video_main() => (
+                ui::screen(video(slot)),
+                Some(self.view_map(Placement::Pane)),
+            ),
+            Some(slot) => (
+                self.view_map(Placement::Window { covered }),
+                Some(ui::screen(video(slot))),
+            ),
+            None => (self.view_map(Placement::Window { covered }), None),
+        };
+        let corner = corner.map(|content| {
+            let width = (geometry.screen.width * CORNER_SHARE).min(CORNER_WIDTH);
+            let swap = button(Space::new().width(Length::Fill).height(Length::Fill))
+                .style(style::invisible_button)
+                .on_press(Message::Floating(shell::Message::SwapVideo));
+            let corner = surface(
+                container(stack![content, swap])
+                    .width(width)
+                    .height(width * 9.0 / 16.0),
+            );
+            container(corner)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(Padding {
+                    top: covered.top + ui::space::S,
+                    right: covered.right + ui::space::S,
+                    bottom: covered.bottom + ui::space::S,
+                    left: covered.left + ui::space::S,
+                })
+                .boxed()
+        });
 
         // Filling what the navigation leaves, not sized to the window as last
         // measured: the window is measured from this, so a fixed size would
         // keep it from ever growing.
-        stack![map, scrim, chrome, toasts]
+        stack![main, scrim, corner, chrome, toasts]
             .width(Length::Fill)
             .height(Length::Fill)
             .boxed()

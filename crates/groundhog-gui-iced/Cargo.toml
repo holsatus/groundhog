@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 groundhog-logic = { path = "../groundhog-logic" }
+groundhog-video = { path = "../groundhog-video" }
 
 log.workspace = true
 futures.workspace = true

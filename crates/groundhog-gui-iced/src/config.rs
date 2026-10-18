@@ -48,6 +48,33 @@ impl Default for Settings {
     }
 }
 
+/// Where the video comes from, and how it is received.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct VideoSettings {
+    /// The stream's URI (see `groundhog_video::Source`).
+    pub uri: String,
+    /// Show frames as soon as they are decoded, without a jitter buffer.
+    pub low_latency: bool,
+    /// Outside low-latency mode, how long packets are held to reorder them.
+    pub jitter_buffer_ms: u32,
+    /// Whether the stream was being received when the application last
+    /// ran, so it is received again at start.
+    pub enabled: bool,
+}
+
+impl Default for VideoSettings {
+    fn default() -> Self {
+        Self {
+            // QGroundControl's default: H.264 over RTP on UDP port 5600.
+            uri: "udp://:5600".to_string(),
+            low_latency: true,
+            jitter_buffer_ms: groundhog_video::DEFAULT_JITTER_BUFFER_MS,
+            enabled: false,
+        }
+    }
+}
+
 /// Where application data (telemetry logs) is kept.
 pub fn data_dir() -> Option<PathBuf> {
     crate::platform::data_dir()
@@ -96,6 +123,9 @@ pub struct Configuration {
 
     #[serde(default)]
     pub settings: Settings,
+
+    #[serde(default)]
+    pub video: VideoSettings,
 }
 
 impl Default for Configuration {
@@ -106,6 +136,7 @@ impl Default for Configuration {
             file_picker_path: None,
             workspace: None,
             settings: Settings::default(),
+            video: VideoSettings::default(),
         }
     }
 }

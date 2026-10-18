@@ -101,6 +101,8 @@ icons! {
     Log => "list.svg",
     /// The settings panel.
     Settings => "wrench.svg",
+    /// The video panel.
+    Video => "video.svg",
     /// Open a menu of what does not fit.
     More => "ellipsis-vertical.svg",
     /// The destination for setting a vehicle up.

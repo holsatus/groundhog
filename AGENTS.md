@@ -40,6 +40,15 @@ UDP link serves every vehicle that sends to it.
 Logs go to stderr through `env_logger`, at debug level for Groundhog's crates
 and error level for dependencies (see `groundhog-gui-iced/src/platform/`).
 
+Video needs GStreamer's development files and plugins (on Fedora,
+`gstreamer1-devel gstreamer1-plugins-base-devel` and the plugins packages;
+on Debian and Ubuntu, `libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev` and `gstreamer1.0-plugins-good`,
+`-bad` and `-libav`). An H.264 decoder is the part distributions ship
+apart: `gstreamer1.0-libav` (`avdec_h264`), a VA-API driver, or OpenH264.
+The source `test://` shows colour bars without a camera; the video tests
+skip what the installed plugins cannot do.
+
 The frontend also runs on Android: `android/build.sh` builds a debug APK
 (see `docs/android-port.md` for the toolchain and the iced fork it needs).
 Logs then go to `adb logcat -s groundhog`.
@@ -48,12 +57,13 @@ Logs then go to `adb logcat -s groundhog`.
 
 ## The architecture in one page
 
-The workspace has two crates, under `crates/`:
+The workspace has three crates, under `crates/`:
 
 | Crate | What it is | Depends on |
 |---|---|---|
 | `groundhog-logic` | The backend: all vehicle state and every rule about it, the middleware, the transports, and the vocabulary frontends name it with (`SystemId`, `MavlinkId`, `GeoPosition`, link descriptions) | `mavio`, `tokio` |
-| `groundhog-gui-iced` | The frontend, built as the `groundhog` binary on the desktop and as a `cdylib` on Android | `groundhog-logic`, `iced` |
+| `groundhog-video` | Video from the vehicle: a stream's URI in, decoded frames out, at low latency (see `docs/video.md`) | GStreamer on the desktop, `tokio` |
+| `groundhog-gui-iced` | The frontend, built as the `groundhog` binary on the desktop and as a `cdylib` on Android | `groundhog-logic`, `groundhog-video`, `iced` |
 
 Another frontend (a CLI, say) is another crate next to these, depending on
 `groundhog-logic`. Paths in this file are relative to a crate's `src/`;
@@ -78,6 +88,8 @@ the crate is named where it is not obvious.
            storage/   file formats (missions, parameters)
            persist.rs safe writes of a frontend's own files
            lib.rs     SystemId and MavlinkId, shared by every layer
+ video     receiver   a GStreamer pipeline per attempt, supervised    ┐
+           frame      the newest frame, for the frontend to draw     ┘ own threads
 ```
 
 How data moves:
@@ -128,7 +140,8 @@ are shared by all.
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
-| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, `surface`, attitude) | iced | depend on the domain |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, `surface`, `video`, attitude) | iced | depend on the domain |
+| video | `Receiver` (URI to frames, its `State`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and

@@ -4,4 +4,5 @@ pub mod drag_source;
 pub mod menu;
 pub mod pane_grid;
 pub mod surface;
+pub mod video;
 pub mod virtualized;

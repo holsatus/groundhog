@@ -18,6 +18,7 @@ pub mod operations;
 pub mod parameter_panel;
 pub mod settings_panel;
 pub mod vehicles;
+pub mod video;
 
 use std::path::{Path, PathBuf};
 

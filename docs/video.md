@@ -1,9 +1,10 @@
 # Video from the vehicle
 
-How Groundhog can show a drone's video stream, with latency low enough to
-fly by: what QGroundControl does, where latency comes from, and how a
-stream reaches an iced view on the desktop and on Android. This is a plan;
-nothing here is built yet.
+How Groundhog shows a drone's video stream, with latency low enough to fly
+by: what QGroundControl does, where latency comes from, and how a stream
+reaches an iced view on the desktop and on Android. Steps 1 to 3 of the
+[order of work](#order-of-work) are built: video on the desktop, in the
+Video panel and, in the floating shell, in Fly's corner.
 
 ## What QGroundControl does
 
@@ -194,16 +195,21 @@ until the desktop video works.
 
 ## Order of work
 
-1. **The widget, with a test source.** `widget/video.rs` drawing NV12 and
+1. **The widget, with a test source** (done: `widget/video.rs`, and
+   `test://`, scrolling colour bars). `widget/video.rs` drawing NV12 and
    I420 frames from a slot, fed by a GStreamer `videotestsrc` pipeline into
    an `appsink`. This settles the iced side: textures, letterboxing, colour,
    wake-ups, and the cost per frame in the gallery and on the device.
-2. **The receiver.** `groundhog-video` with the sources above, the
+2. **The receiver** (done). `groundhog-video` with the sources above, the
    low-latency and default jitter settings, QoS off, reconnecting with
    backoff after a stall, and state for the panel. Tested against a
    `videotestsrc ! x264enc tune=zerolatency ! rtph264pay ! udpsink`
    sender on loopback, as QGC's tests do.
-3. **The panel**, in both shells, and the settings.
+3. **The panel** (done), in both shells, and the settings: the Video
+   panel holds the source, the low-latency switch and the picture (the
+   floating shell lists it under More), and while the stream is on, Fly
+   shows it in the map's corner, a tap swapping the two. The source, the
+   switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.
 5. **Recording and camera discovery** (`VIDEO_STREAM_INFORMATION`).
 

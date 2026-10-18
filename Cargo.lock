@@ -1955,6 +1955,7 @@ dependencies = [
  "env_logger",
  "futures",
  "groundhog-logic",
+ "groundhog-video",
  "iced",
  "iced_runtime",
  "iced_test",

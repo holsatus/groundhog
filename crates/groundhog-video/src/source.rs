@@ -9,7 +9,7 @@
 //! | `udp265://[address]:port` | H.265 over RTP/UDP |
 //! | `mpegts://[address]:port` | MPEG-TS over UDP |
 //! | `tcp://host:port` | MPEG-TS over TCP |
-//! | `test://` | A moving test pattern, to check the video path without a camera |
+//! | `test://` | Scrolling colour bars, to check the video path (and its colours) without a camera |
 //!
 //! An empty address listens on every interface.
 
@@ -191,7 +191,7 @@ pub(crate) fn pipeline_description(source: &Source, config: &crate::Config) -> S
             format!("tcpclientsrc host={host} port={port} ! {decode}")
         }
         Source::TestPattern => format!(
-            "videotestsrc is-live=true pattern=ball \
+            "videotestsrc is-live=true pattern=smpte horizontal-speed=4 \
              ! video/x-raw,width=1280,height=720,framerate=30/1 ! {sink}"
         ),
     }
