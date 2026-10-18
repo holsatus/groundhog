@@ -42,6 +42,7 @@ use crate::{
     },
     layout::{self, Layout},
     map::{self, LayerSet, Map},
+    platform::{self, Insets},
     ui::{
         self, Icon,
         style::{self, ButtonKind},
@@ -82,6 +83,10 @@ pub struct Application {
     features: Features,
     link_panel: LinkPanel,
     log_panel: LogPanel,
+    /// How much of the window the platform's own chrome covers.
+    insets: Insets,
+    /// The theme whose system-bar icons were requested, if any.
+    system_bars: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +125,9 @@ pub enum Message {
     LayoutSaveTick,
     /// Refreshes time-dependent views (toast expiry, link countdowns).
     Tick(Instant),
+    /// The platform's chrome moved, appeared or disappeared (the status and
+    /// navigation bars, the soft keyboard, a rotation).
+    Insets(Insets),
 }
 
 /// Idle time after the last layout change before the layout is persisted.
@@ -164,11 +172,15 @@ impl Application {
             features: Features::default(),
             link_panel: LinkPanel::new(),
             log_panel: LogPanel::new(),
+            insets: platform::insets(),
+            system_bars: None,
         };
 
         if application.configuration.settings.record_telemetry {
             application.start_recording();
         }
+
+        application.sync_system_bars();
 
         let saved = futures::stream::unfold(saved, |mut saved| async move {
             saved.recv().await.map(|outcome| (outcome, saved))
@@ -216,6 +228,11 @@ impl Application {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Insets(insets) => {
+                self.insets = insets;
+                self.sync_system_bars();
+                Task::none()
+            }
             Message::Fleet(update) => {
                 self.on_fleet(update);
                 Task::none()
@@ -496,7 +513,7 @@ impl Application {
 
         match message {
             settings_panel::Message::Theme(mode) => settings.theme = mode,
-            settings_panel::Message::ScaleFactor(scale) => settings.scale_factor = scale,
+            settings_panel::Message::SetScaleFactor(scale) => settings.scale_factor = scale,
             settings_panel::Message::DefaultAltitude(altitude) => {
                 settings.default_waypoint_altitude_m = altitude;
             }
@@ -512,6 +529,19 @@ impl Application {
 
         if self.configuration.settings != before {
             self.save_configuration();
+        }
+
+        self.sync_system_bars();
+    }
+
+    /// Matches the status- and navigation-bar icons to the theme: dark icons
+    /// on a light palette, light ones on a dark palette.
+    fn sync_system_bars(&mut self) {
+        let dark = self.theme().palette().is_dark;
+
+        if self.system_bars != Some(dark) {
+            self.system_bars = Some(dark);
+            platform::set_system_bars(dark);
         }
     }
 
@@ -535,6 +565,7 @@ impl Application {
             self.confirmation.as_ref(),
             Message::Confirm,
         ))
+        .padding(self.insets.padding())
     }
 
     /// Whether the map is on screen: no other pane is maximized.
@@ -784,7 +815,12 @@ impl Application {
             _ => None,
         });
 
-        Subscription::batch([layout_tick, refresh, modifiers])
+        Subscription::batch([
+            layout_tick,
+            refresh,
+            modifiers,
+            platform::insets_subscription().map(Message::Insets),
+        ])
     }
 }
 

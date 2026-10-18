@@ -51,6 +51,10 @@ directories = "6.0.0"
 android-activity = { version = "0.6", features = ["native-activity"] }
 # `env_logger` writes to stderr, which is /dev/null for an Android app.
 android_logger = "0.15.1"
+# Reading the window insets (`WindowInsets`) needs JNI. This is a different
+# major version from the one `android-activity` uses internally; only raw JNI
+# pointers cross between them.
+jni = "0.21"
 
 [dev-dependencies]
 # Headless widget tests (event propagation through composed widgets). Same bare

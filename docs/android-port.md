@@ -162,26 +162,50 @@ manifest with `aapt2`, adds `lib/arm64-v8a/libgroundhog_gui_iced.so`
 uncompressed, aligns it with `zipalign -P 16` (16 KiB pages, so it also works
 on Android 15+ devices) and signs with a generated debug keystore.
 
-## Known limitations of this pass
+## Passes
 
-- The desktop workspace layout is used unchanged: on a portrait phone the map
-  is squeezed, and the rail plus a side column can take the whole width. That
-  is expected; it is the next pass.
-- No insets: the app draws edge-to-edge, so the status bar (clock, battery)
-  and the navigation bar overlap the map and panes.
+### Pass 1 — window insets (done)
+
+Android 15+ draws the application edge to edge, so the status bar, the display
+cutout, the navigation bar and the soft keyboard cover it. `platform::Insets`
+carries the four sides in logical pixels and `Application::view` pads the root
+by them, so the rail, the panes, the toasts and the confirmation dialog all
+move out of the system's way together.
+
+The values come from `Window.getDecorView().getRootWindowInsets()` over JNI —
+the same call `iced_android` makes from Java — with the physical pixels
+divided by the display density (`Configuration::density() / 160`). API 30+
+reads `WindowInsets.getInsets(Type)` for the bars, the cutout and the IME;
+older releases use the deprecated `getSystemWindowInset*` methods.
+
+A Java `View.OnApplyWindowInsetsListener` would push changes, but that needs a
+compiled activity subclass, so the insets are polled every 250 ms; the
+subscription only publishes a message when the values change, so an idle
+application is not redrawn (`dumpsys cpuinfo` reports 0% while idle).
+
+The status- and navigation-bar icon colour follows the app theme through
+`WindowInsetsController.setSystemBarsAppearance`, posted to the Java main
+thread because the controller belongs to that thread.
+
+Verified on the Pixel 7: in portrait and landscape the content starts below the
+status bar and above the navigation bar, and the soft keyboard pushes the
+content up while it is open.
+
+## Known limitations
+
+- The desktop workspace layout is still used on phones: a side column plus the
+  rail can take the whole width, squeezing the map. This is the next pass.
 - Pick/save file actions do nothing on Android.
-- Serial links cannot open; UDP/TCP should work (INTERNET permission is
-  declared).
+- Serial links cannot open; UDP/TCP work (INTERNET permission is declared).
 - Soft keyboard text entry is basic (key events); IME composition, clipboard
   and long-press selection are not implemented in the minimal fork.
-- No insets padding: the app draws under the status and navigation bars.
 - No foreground service: telemetry stops if Android freezes the process in the
   background.
 - The release library is not stripped, so the debug APK is ~34 MB; a
   distribution build should strip the `.so` (and split per ABI).
-- The fork is a local path (`../iced-android`); CI or another checkout needs
-  the same directory, a submodule, or a published fork with matching `[patch]`
-  URLs.
+- The forks are local paths (`../iced-android`, `../slippery-android`); CI or
+  another checkout needs the same directories, submodules, or published forks
+  with matching `[patch]` URLs.
 
 ## Verification
 
@@ -190,7 +214,8 @@ on Android 15+ devices) and signs with a generated debug keystore.
 2. `android/out/groundhog-debug.apk` passes `apksigner verify` and contains
    `lib/arm64-v8a/libgroundhog_gui_iced.so` plus a binary manifest. ✅
 3. `adb install` succeeds and the activity starts. ✅ (Pixel 7, Android 16;
-   the map loads OpenStreetMap tiles and the UI draws.)
+   the map loads OpenStreetMap tiles, the UI draws, and the insets keep the
+   content clear of the system bars and the keyboard.)
 4. Host gates still pass: `cargo test --workspace` (188 tests),
    `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
    The Android target also passes `cargo clippy --target aarch64-linux-android
@@ -198,11 +223,10 @@ on Android 15+ devices) and signs with a generated debug keystore.
 
 ## Later passes
 
-1. Phone layout (single-pane workspace below a width breakpoint) and touch
-   behaviour for the map overlay, rail and drag sources.
-2. Insets, soft-keyboard avoidance, back gesture.
-3. USB serial through the Android USB Host API.
-4. SAF import/export for missions and parameters.
-5. Foreground service for background telemetry/recording.
-6. Full IME/clipboard by porting the `iced_android` Java activity and the
+1. Phone layout (single-pane workspace below a width breakpoint).
+2. Touch behaviour for the map overlay, the rail and the drag sources.
+3. SAF import/export for missions and parameters, USB serial through the
+   Android USB Host API, and a foreground service for background
+   telemetry/recording.
+4. Full IME/clipboard by porting the `iced_android` Java activity and the
    remaining iced widget patches.

@@ -18,7 +18,7 @@ use crate::{
 pub enum Message {
     /// Switch the application palette.
     Theme(ThemeMode),
-    ScaleFactor(f32),
+    SetScaleFactor(f32),
     RecordTelemetry(bool),
     DefaultAltitude(f32),
 }
@@ -39,7 +39,9 @@ pub fn view<'a>(
             ui::field(
                 "Scale",
                 slider_with_value(
-                    slider(0.5..=2.0, settings.scale_factor, Message::ScaleFactor).step(0.1),
+                    slider(0.5..=2.0, settings.scale_factor, Message::SetScaleFactor)
+                        .on_release(Message::CommitScaleFactor)
+                        .step(0.1),
                     format!("{:.1}×", settings.scale_factor),
                 ),
             ),

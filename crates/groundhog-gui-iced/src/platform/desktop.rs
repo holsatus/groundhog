@@ -4,6 +4,8 @@ use std::{path::PathBuf, sync::LazyLock};
 
 use directories::ProjectDirs;
 
+use super::Insets;
+
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| ProjectDirs::from("org", "Holsatus", "Groundhog"));
 
@@ -29,3 +31,16 @@ pub fn init_logging() {
         .filter_module("groundhog_gui_iced", log::LevelFilter::Debug)
         .init();
 }
+
+/// Nothing of the platform's chrome covers the application.
+pub fn insets() -> Insets {
+    Insets::ZERO
+}
+
+/// No insets change.
+pub fn insets_subscription() -> iced::Subscription<Insets> {
+    iced::Subscription::none()
+}
+
+/// The desktop draws no system bars over the application.
+pub fn set_system_bars(_dark: bool) {}
