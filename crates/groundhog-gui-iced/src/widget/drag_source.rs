@@ -14,18 +14,31 @@ use iced::{
         Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree, tree},
     },
-    keyboard,
+    keyboard, touch,
 };
 
 /// How far the cursor moves, pressed, before a press becomes a drag: as far
 /// as a pane's title bar must move in the pane grid.
 const DEADBAND: f32 = 10.0;
 
+/// The same for a finger, which rolls and wobbles as it presses.
+const TOUCH_DEADBAND: f32 = 16.0;
+
 /// The gap between the cursor and the preview above it.
 const LIFT: f32 = 0.0;
 
 const CONTENT: usize = 0;
 const PREVIEW: usize = 1;
+
+/// A finger's phase, as the state machine needs it: the mouse's events,
+/// except that a finger can be taken away by the system.
+#[derive(Debug, Clone, Copy)]
+enum TouchGesture {
+    Press(Point),
+    Move(Point),
+    Release,
+    Cancel,
+}
 
 /// `content` that publishes `on_drag` when it is dragged, and `on_end` when
 /// the drag ends: on release anywhere, or on Escape. While dragged,
@@ -124,11 +137,36 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
     ) {
         let state = tree.state.downcast_mut::<State>();
 
+        // A finger drags like the mouse, and the content sees the finger's
+        // own position: a phone reports a stale mouse cursor while a finger
+        // is down.
+        let (gesture, content_cursor) = match event {
+            Event::Touch(touch) => match *touch {
+                touch::Event::FingerPressed { position, .. } => (
+                    Some(TouchGesture::Press(position)),
+                    mouse::Cursor::Available(position),
+                ),
+                touch::Event::FingerMoved { position, .. } => (
+                    Some(TouchGesture::Move(position)),
+                    mouse::Cursor::Available(position),
+                ),
+                touch::Event::FingerLifted { position, .. } => (
+                    Some(TouchGesture::Release),
+                    mouse::Cursor::Available(position),
+                ),
+                touch::Event::FingerLost { position, .. } => (
+                    Some(TouchGesture::Cancel),
+                    mouse::Cursor::Available(position),
+                ),
+            },
+            _ => (None, cursor),
+        };
+
         // While dragging, the content does not see the cursor, so a release
         // back over it is not a click, and it does not show as hovered.
         let content_cursor = match state {
             State::Dragging | State::Cancelled => mouse::Cursor::Unavailable,
-            State::Idle | State::Pressed(_) => cursor,
+            State::Idle | State::Pressed(_) => content_cursor,
         };
 
         match event {
@@ -169,6 +207,40 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
                 shell.request_redraw();
             }
             _ => {}
+        }
+
+        if let Some(gesture) = gesture {
+            match gesture {
+                TouchGesture::Press(position) => {
+                    *state = if layout.bounds().contains(position) {
+                        State::Pressed(position)
+                    } else {
+                        State::Idle
+                    };
+                }
+                TouchGesture::Move(position) => match *state {
+                    State::Pressed(origin) if position.distance(origin) > TOUCH_DEADBAND => {
+                        *state = State::Dragging;
+                        shell.publish(self.on_drag.clone());
+                        shell.request_redraw();
+                    }
+                    State::Dragging => shell.request_redraw(),
+                    _ => {}
+                },
+                TouchGesture::Release => {
+                    if let State::Dragging = state {
+                        shell.publish(self.on_end.clone());
+                    }
+                    *state = State::Idle;
+                }
+                TouchGesture::Cancel => {
+                    // The system took the gesture; a drag must not stay stuck.
+                    if let State::Dragging = state {
+                        shell.publish(self.on_end.clone());
+                    }
+                    *state = State::Cancelled;
+                }
+            }
         }
 
         self.children[CONTENT].update(
@@ -310,6 +382,9 @@ mod tests {
         Press,
         Release,
         Escape,
+        TouchPress(Point),
+        TouchMove(Point),
+        TouchRelease(Point),
     }
 
     /// A button in a drag source at the window's top-left, put through
@@ -333,6 +408,18 @@ mod tests {
                 Step::Press => Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
                 Step::Release => Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
                 Step::Escape => iced_test::simulator::press_key(Named::Escape, None),
+                Step::TouchPress(position) => Event::Touch(touch::Event::FingerPressed {
+                    id: touch::Finger(0),
+                    position,
+                }),
+                Step::TouchMove(position) => Event::Touch(touch::Event::FingerMoved {
+                    id: touch::Finger(0),
+                    position,
+                }),
+                Step::TouchRelease(position) => Event::Touch(touch::Event::FingerLifted {
+                    id: touch::Finger(0),
+                    position,
+                }),
             };
             simulator.simulate([event]);
         }
@@ -378,5 +465,22 @@ mod tests {
     fn a_press_elsewhere_starts_nothing() {
         use Step::*;
         assert!(run([Move(AWAY), Press, Move(ON), Release]).is_empty());
+    }
+
+    #[test]
+    fn a_finger_drags_and_a_tap_stays_a_click() {
+        use Step::*;
+
+        // A finger wobbles more than a mouse before it is a drag.
+        let jitter = Point::new(ON.x + 8.0, ON.y + 4.0);
+        assert_eq!(
+            run([TouchPress(ON), TouchMove(jitter), TouchRelease(jitter)]),
+            [Message::Clicked]
+        );
+
+        assert_eq!(
+            run([TouchPress(ON), TouchMove(AWAY), TouchRelease(AWAY)]),
+            [Message::Dragged, Message::Ended]
+        );
     }
 }

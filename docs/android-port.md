@@ -207,12 +207,34 @@ which mean nothing with a single pane.
 Verified on the Pixel 7: portrait shows one panel, the rail switches panels and
 returns to the map, and rotating to landscape restores the workspace.
 
+### Pass 3 — touch (done)
+
+The map overlay's pointer state machine treats a finger like the mouse, with
+two differences that matter on a phone: a larger slop before a press turns
+into a drag (`TOUCH_DRAG_THRESHOLD`), and a larger hit area around every
+handle (`TOUCH_TARGET_RADIUS`, a 44 logical pixel target), so a mission
+marker or a vehicle can be tapped without precision. A press on empty map is
+still not captured, so the tiles below keep panning and pinching, and its tap
+becomes a click — which is how the mission editor places a waypoint. A finger
+the system takes away cancels the drag in progress instead of leaving it
+stuck.
+
+The rail's drag source handles touch as well, so panels can be dragged onto
+the grid on a large screen; on a phone the rail is tap-only, which is all a
+single-pane window needs.
+
+Verified on the Pixel 7: a swipe pans the map (the overlay does not steal the
+gesture), and the widget tests cover the finger paths for both the overlay and
+the drag source.
+
 ## Known limitations
 
 - Pick/save file actions do nothing on Android.
 - Serial links cannot open; UDP/TCP work (INTERNET permission is declared).
 - Soft keyboard text entry is basic (key events); IME composition, clipboard
   and long-press selection are not implemented in the minimal fork.
+- Tooltips open on hover, so on touch one lingers after a tap until something
+  else is tapped.
 - No foreground service: telemetry stops if Android freezes the process in the
   background.
 - The release library is not stripped, so the debug APK is ~34 MB; a
@@ -237,9 +259,8 @@ returns to the map, and rotating to landscape restores the workspace.
 
 ## Later passes
 
-1. Touch behaviour for the map overlay, the rail and the drag sources.
-2. SAF import/export for missions and parameters, USB serial through the
+1. SAF import/export for missions and parameters, USB serial through the
    Android USB Host API, and a foreground service for background
    telemetry/recording.
-3. Full IME/clipboard by porting the `iced_android` Java activity and the
+2. Full IME/clipboard by porting the `iced_android` Java activity and the
    remaining iced widget patches.

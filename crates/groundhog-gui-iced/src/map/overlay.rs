@@ -22,7 +22,7 @@ use std::{
 
 use groundhog_logic::domain::geo::GeoPosition;
 use iced::{
-    Point, Rectangle, Renderer, Theme, keyboard, mouse,
+    Point, Rectangle, Renderer, Theme, keyboard, mouse, touch,
     widget::canvas::{self, Action, Event, Frame, Geometry},
 };
 use slippery::Viewpoint;
@@ -32,8 +32,40 @@ use super::{
     view::{MapFrame, MapView},
 };
 
-/// Pointer travel, in pixels, that turns a press into a drag (or a pan).
+/// Pointer travel, in pixels, that turns a mouse press into a drag (or a pan).
 pub const DRAG_THRESHOLD: f32 = 4.0;
+
+/// The same for a finger: it rolls as it presses, so the slop is larger.
+pub const TOUCH_DRAG_THRESHOLD: f32 = 10.0;
+
+/// How much of a handle's surroundings a finger hits: a touch target should
+/// be about 44 logical pixels across.
+pub const TOUCH_TARGET_RADIUS: f32 = 22.0;
+
+/// Where a gesture came from, which decides its slop and hit area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Source {
+    Mouse,
+    Touch,
+}
+
+impl Source {
+    /// How far the pointer may travel before the press becomes a drag.
+    fn threshold(self) -> f32 {
+        match self {
+            Source::Mouse => DRAG_THRESHOLD,
+            Source::Touch => TOUCH_DRAG_THRESHOLD,
+        }
+    }
+
+    /// How much bigger a handle's hit area is under this pointer.
+    fn hit_radius(self) -> f32 {
+        match self {
+            Source::Mouse => 0.0,
+            Source::Touch => TOUCH_TARGET_RADIUS,
+        }
+    }
+}
 
 /// The canvas program hosting a frame's layers.
 pub(super) struct Overlay<'a, Message> {
@@ -57,8 +89,9 @@ impl<'a, Message> Overlay<'a, Message> {
             .map(|layer| layer.as_ref())
     }
 
-    /// The topmost handle under `point`.
-    fn hit(&self, view: &MapView, point: Point) -> Option<Target> {
+    /// The topmost handle under `point`, with every handle's hit area at
+    /// least `min_radius`.
+    fn hit(&self, view: &MapView, point: Point, min_radius: f32) -> Option<Target> {
         for layer in self.layers.iter().rev() {
             let closest = layer
                 .handles(view)
@@ -66,7 +99,7 @@ impl<'a, Message> Overlay<'a, Message> {
                 .filter_map(|handle| {
                     let center = anchor_point(view, &handle);
                     let distance = center.distance(point);
-                    (distance <= handle.radius).then_some((handle, distance))
+                    (distance <= handle.radius.max(min_radius)).then_some((handle, distance))
                 })
                 .min_by(|(_, a), (_, b)| a.total_cmp(b));
 
@@ -183,128 +216,31 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        let view = self.view(bounds);
-        // Relative to the overlay; kept even outside it, so a drag can leave
-        // the map and come back.
-        let point = cursor
-            .position()
-            .map(|point| Point::new(point.x - bounds.x, point.y - bounds.y));
-        let inside = cursor.is_over(bounds);
+        // A finger is the same gesture as the mouse, with more slop and a
+        // bigger hit area; whatever the overlay does not capture, the map
+        // below pans and zooms with.
+        if let Event::Touch(finger) = event {
+            let (event, cursor) = match *finger {
+                touch::Event::FingerPressed { position, .. } => (
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    mouse::Cursor::Available(position),
+                ),
+                touch::Event::FingerMoved { position, .. } => (
+                    Event::Mouse(mouse::Event::CursorMoved { position }),
+                    mouse::Cursor::Available(position),
+                ),
+                touch::Event::FingerLifted { position, .. } => (
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    mouse::Cursor::Available(position),
+                ),
+                // The system took the gesture: a drag must not stay stuck.
+                touch::Event::FingerLost { .. } => return self.cancel(state),
+            };
 
-        match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let point = point.filter(|_| inside)?;
-                let target = self.hit(&view, point);
-                state.pointer = Pointer::Pressed { at: point, target };
-
-                // Only a draggable handle keeps the map from panning.
-                target
-                    .filter(|target| target.draggable)
-                    .map(|_| Action::capture())
-            }
-
-            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let point = point?;
-
-                match state.pointer {
-                    Pointer::Pressed { at, target } if at.distance(point) > DRAG_THRESHOLD => {
-                        match target.filter(|target| target.draggable) {
-                            Some(target) => {
-                                state.pointer = Pointer::Dragging { target };
-                                Some(self.drag_action(target, view.to_geo(point)))
-                            }
-                            None => {
-                                state.pointer = Pointer::Panning;
-                                None
-                            }
-                        }
-                    }
-                    Pointer::Dragging { target } => {
-                        Some(self.drag_action(target, view.to_geo(point)))
-                    }
-                    Pointer::Idle => {
-                        let hovered = inside
-                            .then(|| self.hit(&view, point))
-                            .flatten()
-                            .map(|target| (target.layer, target.handle));
-
-                        (hovered != state.hovered).then(|| {
-                            state.hovered = hovered;
-                            Action::request_redraw()
-                        })
-                    }
-                    Pointer::Pressed { .. } | Pointer::Panning => None,
-                }
-            }
-
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let pointer = std::mem::take(&mut state.pointer);
-
-                // A release is never captured, so the map always ends its own
-                // pan, whatever the overlay made of the gesture.
-                let message = match pointer {
-                    Pointer::Pressed { target, at } => {
-                        let at = view.to_geo(point.unwrap_or(at));
-                        match target {
-                            Some(target) => self.send(
-                                target.layer,
-                                LayerEvent::Click {
-                                    handle: Some(target.handle),
-                                    at,
-                                },
-                            ),
-                            None => self.click_empty(at),
-                        }
-                    }
-                    Pointer::Dragging { target } => {
-                        let at = point
-                            .map(|point| view.to_geo(point))
-                            .unwrap_or(target.origin);
-                        self.send(
-                            target.layer,
-                            LayerEvent::DragEnd {
-                                handle: target.handle,
-                                at,
-                            },
-                        )
-                    }
-                    Pointer::Idle | Pointer::Panning => None,
-                };
-
-                Some(match message {
-                    Some(message) => Action::publish(message),
-                    None => Action::request_redraw(),
-                })
-            }
-
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            }) => {
-                let Pointer::Dragging { target } = state.pointer else {
-                    return None;
-                };
-                state.pointer = Pointer::Idle;
-
-                let message = self.send(
-                    target.layer,
-                    LayerEvent::DragCancel {
-                        handle: target.handle,
-                        origin: target.origin,
-                    },
-                );
-                Some(match message {
-                    Some(message) => Action::publish(message).and_capture(),
-                    None => Action::capture(),
-                })
-            }
-
-            Event::Mouse(mouse::Event::CursorLeft) => {
-                state.hovered.take().map(|_| Action::request_redraw())
-            }
-
-            _ => None,
+            return self.pointer(state, &event, bounds, cursor, Source::Touch);
         }
+
+        self.pointer(state, event, bounds, cursor, Source::Mouse)
     }
 
     fn draw(
@@ -395,6 +331,144 @@ impl<Message> canvas::Program<Message> for Overlay<'_, Message> {
 }
 
 impl<Message> Overlay<'_, Message> {
+    /// The pointer state machine, shared by the mouse and a finger.
+    fn pointer(
+        &self,
+        state: &mut State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        source: Source,
+    ) -> Option<Action<Message>> {
+        let view = self.view(bounds);
+        // Relative to the overlay; kept even outside it, so a drag can leave
+        // the map and come back.
+        let point = cursor
+            .position()
+            .map(|point| Point::new(point.x - bounds.x, point.y - bounds.y));
+        let inside = cursor.is_over(bounds);
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let point = point.filter(|_| inside)?;
+                let target = self.hit(&view, point, source.hit_radius());
+                state.pointer = Pointer::Pressed { at: point, target };
+
+                // Only a draggable handle keeps the map from panning.
+                target
+                    .filter(|target| target.draggable)
+                    .map(|_| Action::capture())
+            }
+
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let point = point?;
+
+                match state.pointer {
+                    Pointer::Pressed { at, target } if at.distance(point) > source.threshold() => {
+                        match target.filter(|target| target.draggable) {
+                            Some(target) => {
+                                state.pointer = Pointer::Dragging { target };
+                                Some(self.drag_action(target, view.to_geo(point)))
+                            }
+                            None => {
+                                state.pointer = Pointer::Panning;
+                                None
+                            }
+                        }
+                    }
+                    Pointer::Dragging { target } => {
+                        Some(self.drag_action(target, view.to_geo(point)))
+                    }
+                    Pointer::Idle => {
+                        let hovered = inside
+                            .then(|| self.hit(&view, point, source.hit_radius()))
+                            .flatten()
+                            .map(|target| (target.layer, target.handle));
+
+                        (hovered != state.hovered).then(|| {
+                            state.hovered = hovered;
+                            Action::request_redraw()
+                        })
+                    }
+                    Pointer::Pressed { .. } | Pointer::Panning => None,
+                }
+            }
+
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let pointer = std::mem::take(&mut state.pointer);
+
+                // A release is never captured, so the map always ends its own
+                // pan, whatever the overlay made of the gesture.
+                let message = match pointer {
+                    Pointer::Pressed { target, at } => {
+                        let at = view.to_geo(point.unwrap_or(at));
+                        match target {
+                            Some(target) => self.send(
+                                target.layer,
+                                LayerEvent::Click {
+                                    handle: Some(target.handle),
+                                    at,
+                                },
+                            ),
+                            None => self.click_empty(at),
+                        }
+                    }
+                    Pointer::Dragging { target } => {
+                        let at = point
+                            .map(|point| view.to_geo(point))
+                            .unwrap_or(target.origin);
+                        self.send(
+                            target.layer,
+                            LayerEvent::DragEnd {
+                                handle: target.handle,
+                                at,
+                            },
+                        )
+                    }
+                    Pointer::Idle | Pointer::Panning => None,
+                };
+
+                Some(match message {
+                    Some(message) => Action::publish(message),
+                    None => Action::request_redraw(),
+                })
+            }
+
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) => self.cancel(state),
+
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                state.hovered.take().map(|_| Action::request_redraw())
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Ends the drag in progress, if any: the gesture will not end on its own
+    /// (escape, or a finger the system took away).
+    fn cancel(&self, state: &mut State) -> Option<Action<Message>> {
+        let Pointer::Dragging { target } = state.pointer else {
+            return None;
+        };
+        state.pointer = Pointer::Idle;
+
+        let message = self.send(
+            target.layer,
+            LayerEvent::DragCancel {
+                handle: target.handle,
+                origin: target.origin,
+            },
+        );
+
+        Some(match message {
+            Some(message) => Action::publish(message).and_capture(),
+            None => Action::capture(),
+        })
+    }
+
     fn drag_action(&self, target: Target, at: GeoPosition) -> Action<Message> {
         match self.send(
             target.layer,
@@ -612,5 +686,146 @@ mod tests {
         let away = at(10.0, 10.0);
         overlay.update(&mut state, &moved(away), BOUNDS, away);
         assert_eq!(state.hovered, None);
+    }
+
+    /// A finger at an overlay-relative point.
+    fn finger_position(x: f32, y: f32) -> Point {
+        Point::new(BOUNDS.x + x, BOUNDS.y + y)
+    }
+
+    fn finger_down(x: f32, y: f32) -> Event {
+        Event::Touch(touch::Event::FingerPressed {
+            id: touch::Finger(0),
+            position: finger_position(x, y),
+        })
+    }
+
+    fn finger_moved(x: f32, y: f32) -> Event {
+        Event::Touch(touch::Event::FingerMoved {
+            id: touch::Finger(0),
+            position: finger_position(x, y),
+        })
+    }
+
+    fn finger_up(x: f32, y: f32) -> Event {
+        Event::Touch(touch::Event::FingerLifted {
+            id: touch::Finger(0),
+            position: finger_position(x, y),
+        })
+    }
+
+    fn finger_lost(x: f32, y: f32) -> Event {
+        Event::Touch(touch::Event::FingerLost {
+            id: touch::Finger(0),
+            position: finger_position(x, y),
+        })
+    }
+
+    /// The touch path ignores the mouse cursor, which the platform may not
+    /// move at all.
+    const NO_CURSOR: mouse::Cursor = mouse::Cursor::Unavailable;
+
+    #[test]
+    fn a_finger_drags_a_handle_with_a_larger_slop() {
+        let overlay = overlay();
+        let mut state = State::default();
+
+        let (_, captured) = message(overlay.update(
+            &mut state,
+            &finger_down(CENTRE.0, CENTRE.1),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert!(captured, "a draggable handle keeps the map from panning");
+
+        // Past the mouse's threshold, still within a finger's slop.
+        let nudge = (CENTRE.0 + 8.0, CENTRE.1);
+        assert_eq!(
+            message(overlay.update(
+                &mut state,
+                &finger_moved(nudge.0, nudge.1),
+                BOUNDS,
+                NO_CURSOR
+            ))
+            .0,
+            None
+        );
+
+        let far = (CENTRE.0 + 40.0, CENTRE.1);
+        let (moved, captured) =
+            message(overlay.update(&mut state, &finger_moved(far.0, far.1), BOUNDS, NO_CURSOR));
+        assert_eq!(moved, Some(Msg::Moved(MARKER)));
+        assert!(captured);
+
+        let (dropped, captured) =
+            message(overlay.update(&mut state, &finger_up(far.0, far.1), BOUNDS, NO_CURSOR));
+        assert_eq!(dropped, Some(Msg::Dropped(MARKER)));
+        assert!(!captured, "releases always reach the map");
+    }
+
+    #[test]
+    fn a_finger_hits_a_larger_area_than_a_cursor() {
+        let overlay = overlay();
+        let offset = TOUCH_TARGET_RADIUS - 2.0;
+
+        // The marker's own radius is 10: a cursor misses at 20 pixels...
+        let mut state = State::default();
+        let near = at(CENTRE.0 + offset, CENTRE.1);
+        let (_, captured) = message(overlay.update(&mut state, &press(), BOUNDS, near));
+        assert!(!captured, "the map pans instead");
+
+        // ...a finger does not.
+        let mut state = State::default();
+        let (_, captured) = message(overlay.update(
+            &mut state,
+            &finger_down(CENTRE.0 + offset, CENTRE.1),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert!(captured);
+
+        let (clicked, _) = message(overlay.update(
+            &mut state,
+            &finger_up(CENTRE.0 + offset, CENTRE.1),
+            BOUNDS,
+            NO_CURSOR,
+        ));
+        assert_eq!(clicked, Some(Msg::Clicked(Some(MARKER))));
+    }
+
+    #[test]
+    fn a_finger_on_empty_map_is_left_to_the_map() {
+        let overlay = overlay();
+        let mut state = State::default();
+
+        let (_, captured) =
+            message(overlay.update(&mut state, &finger_down(10.0, 10.0), BOUNDS, NO_CURSOR));
+        assert!(!captured, "the map pans and pinches with the finger");
+
+        let (clicked, _) =
+            message(overlay.update(&mut state, &finger_up(10.0, 10.0), BOUNDS, NO_CURSOR));
+        assert_eq!(clicked, Some(Msg::Clicked(None)), "a tap places a waypoint");
+    }
+
+    #[test]
+    fn a_lost_finger_cancels_a_drag() {
+        let overlay = overlay();
+        let mut state = State::default();
+
+        overlay.update(
+            &mut state,
+            &finger_down(CENTRE.0, CENTRE.1),
+            BOUNDS,
+            NO_CURSOR,
+        );
+
+        let far = (CENTRE.0 + 40.0, CENTRE.1);
+        overlay.update(&mut state, &finger_moved(far.0, far.1), BOUNDS, NO_CURSOR);
+
+        let (cancelled, captured) =
+            message(overlay.update(&mut state, &finger_lost(far.0, far.1), BOUNDS, NO_CURSOR));
+        assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
+        assert!(captured);
+        assert_eq!(state.pointer, Pointer::Idle);
     }
 }
