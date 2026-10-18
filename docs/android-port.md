@@ -241,8 +241,11 @@ a two-finger tap places no waypoint), and a drag in progress keeps its
 handle, the second finger captured so the map does not pan under it.
 
 The rail's drag source handles touch as well, so panels can be dragged onto
-the grid of the tiled shell on a tablet; the floating shell's navigation bar
-is tap-only.
+the grid of the tiled shell on a tablet: the grid drops them where the finger
+is lifted, and the label of what is dragged is drawn a touch target's height
+above the finger, where the finger does not cover it. A finger the system
+takes away drops nothing, from the rail or from a pane's title bar. The
+floating shell's navigation bar is tap-only.
 
 Verified on the Pixel 7: a swipe pans the map (the overlay does not steal the
 gesture), and the widget tests cover the finger paths for both the overlay and

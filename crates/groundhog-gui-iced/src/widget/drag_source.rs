@@ -27,6 +27,10 @@ const TOUCH_DEADBAND: f32 = 16.0;
 /// The gap between the cursor and the preview above it.
 const LIFT: f32 = 0.0;
 
+/// The same under a finger, which covers what is right above the point it
+/// touches: about a touch target's height.
+const TOUCH_LIFT: f32 = 44.0;
+
 const CONTENT: usize = 0;
 const PREVIEW: usize = 1;
 
@@ -42,8 +46,9 @@ enum TouchGesture {
 
 /// `content` that publishes `on_drag` when it is dragged, and `on_end` when
 /// the drag ends: on release anywhere, or on Escape. While dragged,
-/// `preview` follows the cursor, centred [`LIFT`] above it, so it hides
-/// neither the pointer nor what is under it.
+/// `preview` follows the cursor, centred [`LIFT`] above it (or
+/// [`TOUCH_LIFT`] above a finger), so it hides neither the pointer nor what
+/// is under it, and no finger hides it.
 pub fn drag_source<'a, M: Clone + 'a>(
     content: impl Widget<M, Theme, Renderer> + 'a,
     preview: impl Widget<M, Theme, Renderer> + 'a,
@@ -73,7 +78,10 @@ enum State {
     #[default]
     Idle,
     Pressed(Point),
-    Dragging,
+    /// The preview is drawn `lift` above the pointer.
+    Dragging {
+        lift: f32,
+    },
     /// Escape ended the drag; the button is still down.
     Cancelled,
 }
@@ -165,7 +173,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         // While dragging, the content does not see the cursor, so a release
         // back over it is not a click, and it does not show as hovered.
         let content_cursor = match state {
-            State::Dragging | State::Cancelled => mouse::Cursor::Unavailable,
+            State::Dragging { .. } | State::Cancelled => mouse::Cursor::Unavailable,
             State::Idle | State::Pressed(_) => content_cursor,
         };
 
@@ -183,15 +191,15 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
                         .position()
                         .is_some_and(|position| position.distance(origin) > DEADBAND) =>
                 {
-                    *state = State::Dragging;
+                    *state = State::Dragging { lift: LIFT };
                     shell.publish(self.on_drag.clone());
                     shell.request_redraw();
                 }
-                State::Dragging => shell.request_redraw(),
+                State::Dragging { .. } => shell.request_redraw(),
                 _ => {}
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if let State::Dragging = state {
+                if let State::Dragging { .. } = state {
                     shell.publish(self.on_end.clone());
                 }
                 *state = State::Idle;
@@ -199,7 +207,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
-            }) if matches!(state, State::Dragging) => {
+            }) if matches!(state, State::Dragging { .. }) => {
                 // The release to come will be neither a drop nor a click.
                 *state = State::Cancelled;
                 shell.publish(self.on_end.clone());
@@ -220,22 +228,22 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
                 }
                 TouchGesture::Move(position) => match *state {
                     State::Pressed(origin) if position.distance(origin) > TOUCH_DEADBAND => {
-                        *state = State::Dragging;
+                        *state = State::Dragging { lift: TOUCH_LIFT };
                         shell.publish(self.on_drag.clone());
                         shell.request_redraw();
                     }
-                    State::Dragging => shell.request_redraw(),
+                    State::Dragging { .. } => shell.request_redraw(),
                     _ => {}
                 },
                 TouchGesture::Release => {
-                    if let State::Dragging = state {
+                    if let State::Dragging { .. } = state {
                         shell.publish(self.on_end.clone());
                     }
                     *state = State::Idle;
                 }
                 TouchGesture::Cancel => {
                     // The system took the gesture; a drag must not stay stuck.
-                    if let State::Dragging = state {
+                    if let State::Dragging { .. } = state {
                         shell.publish(self.on_end.clone());
                     }
                     *state = State::Cancelled;
@@ -262,7 +270,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        if let State::Dragging = tree.state.downcast_ref::<State>() {
+        if let State::Dragging { .. } = tree.state.downcast_ref::<State>() {
             return mouse::Interaction::Grabbing;
         }
         self.children[CONTENT].mouse_interaction(
@@ -305,9 +313,11 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         window: Size,
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         match *tree.state.downcast_ref::<State>() {
-            State::Dragging => vec![overlay::Element::new(Box::new(Preview {
+            State::Dragging { lift } => vec![overlay::Element::new(Box::new(Preview {
                 preview: &self.children[PREVIEW],
                 tree: &tree.children[PREVIEW],
+                lift,
+                window,
             }))],
             // Not while dragging: a tooltip would follow the press.
             _ => self.children[CONTENT].overlay(
@@ -322,13 +332,15 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
     }
 }
 
-/// The preview, drawn under the cursor. It reports no mouse interaction:
-/// an overlay that does hides the cursor from the widgets beneath, and the
-/// one under the cursor decides the drop. (The drag source itself shows the
-/// grabbing pointer.)
+/// The preview, drawn `lift` above the cursor and kept inside the
+/// `window`. It reports no mouse interaction: an overlay that does hides the
+/// cursor from the widgets beneath, and the one under the cursor decides the
+/// drop. (The drag source itself shows the grabbing pointer.)
 struct Preview<'a, 'b, Message> {
     preview: &'a Element<'b, Message>,
     tree: &'a Tree,
+    lift: f32,
+    window: Size,
 }
 
 impl<Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, '_, Message> {
@@ -345,8 +357,7 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, '_, Mes
             return;
         };
         let size = self.tree.size;
-        let layout =
-            Layout::new(size).move_to(position - Vector::new(size.width / 2.0, size.height + LIFT));
+        let layout = Layout::new(size).move_to(placement(position, size, self.lift, self.window));
 
         renderer.with_layer(layout.bounds(), |renderer| {
             self.preview.draw(
@@ -360,6 +371,18 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, '_, Mes
             );
         });
     }
+}
+
+/// Where a preview of `size` goes: centred `lift` above `pointer`, moved
+/// back inside `window` where that would leave it.
+fn placement(pointer: Point, size: Size, lift: f32, window: Size) -> Point {
+    let x = pointer.x - size.width / 2.0;
+    let y = pointer.y - size.height - lift;
+
+    Point::new(
+        x.min(window.width - size.width).max(0.0),
+        y.min(window.height - size.height).max(0.0),
+    )
 }
 
 #[cfg(test)]
@@ -465,6 +488,23 @@ mod tests {
     fn a_press_elsewhere_starts_nothing() {
         use Step::*;
         assert!(run([Move(AWAY), Press, Move(ON), Release]).is_empty());
+    }
+
+    #[test]
+    fn a_preview_clears_the_finger_and_stays_in_the_window() {
+        let window = Size::new(400.0, 800.0);
+        let size = Size::new(100.0, 30.0);
+        let finger = Point::new(200.0, 400.0);
+
+        let at = placement(finger, size, TOUCH_LIFT, window);
+        assert_eq!(at.x + size.width / 2.0, finger.x, "centred on the finger");
+        assert_eq!(finger.y - (at.y + size.height), TOUCH_LIFT);
+
+        // Dragged from the rail at the window's top-left corner.
+        let corner = placement(Point::new(10.0, 10.0), size, TOUCH_LIFT, window);
+        assert_eq!(corner, Point::ORIGIN);
+        let edge = placement(Point::new(395.0, 400.0), size, TOUCH_LIFT, window);
+        assert_eq!(edge.x, window.width - size.width);
     }
 
     #[test]

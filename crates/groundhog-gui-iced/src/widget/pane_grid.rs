@@ -19,7 +19,9 @@
 //     hint is drawn over the dragged pane, whose preview shrinks to its title
 //     bar (`Content::draw_title_bar`)
 //   - `PaneGrid::incoming` takes a drag that started outside the grid: the
-//     grid draws its drop hint and reports where it was dropped
+//     grid draws its drop hint and reports where it was dropped, by the mouse
+//     or by a lifted finger
+//   - a lost finger (`FingerLost`) cancels a pane drag instead of dropping it
 //   - `State::rearrange` replaces the arrangement, keeping the `Pane` of every
 //     kept state (so pane widget state survives a rearrangement)
 //
@@ -661,16 +663,24 @@ where
         };
 
         // A drag from outside: its hint follows the cursor, and a release
-        // over one drops it.
+        // over one drops it. A finger is dropped where it is lifted; one the
+        // system takes away drops nothing.
         if let Some(incoming) = &self.incoming {
-            match event {
-                Event::Mouse(mouse::Event::CursorMoved { .. }) => shell.request_redraw(),
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    if let Some(hint) = self.incoming_hint(cursor, layout.bounds()) {
-                        shell.publish((incoming.on_drop)(hint.target));
-                    }
+            let dropped = match event {
+                Event::Mouse(mouse::Event::CursorMoved { .. })
+                | Event::Touch(touch::Event::FingerMoved { .. }) => {
+                    shell.request_redraw();
+                    None
                 }
-                _ => {}
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(cursor),
+                Event::Touch(touch::Event::FingerLifted { position, .. }) => {
+                    Some(mouse::Cursor::Available(*position))
+                }
+                _ => None,
+            };
+
+            if let Some(hint) = dropped.and_then(|at| self.incoming_hint(at, layout.bounds())) {
+                shell.publish((incoming.on_drop)(hint.target));
             }
         }
 
@@ -800,11 +810,16 @@ where
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerLifted { .. })
             | Event::Touch(touch::Event::FingerLost { .. }) => {
+                // A finger the system takes away drops nothing.
+                let lost = matches!(event, Event::Touch(touch::Event::FingerLost { .. }));
+
                 if let Some((pane, origin)) = action.picked_pane()
                     && let Some(on_drag) = on_drag
                     && let Some(cursor_position) = cursor.position()
                 {
-                    if cursor_position.distance(origin) > DRAG_DEADBAND_DISTANCE {
+                    if lost {
+                        shell.publish(on_drag(DragEvent::Canceled { pane }));
+                    } else if cursor_position.distance(origin) > DRAG_DEADBAND_DISTANCE {
                         let event = if let Some(hint) =
                             self.custom_drop(pane, cursor_position, layout.bounds())
                         {
@@ -1473,6 +1488,111 @@ mod tests {
         assert!(corner.is_corner());
         assert_eq!(corner.vertical, Some(Split(0)));
         assert_eq!(corner.horizontal, Some(Split(1)));
+    }
+
+    /// A grid of two panes side by side, each with a title bar, after a
+    /// finger presses the left one's title bar, moves onto the right pane and
+    /// ends with `end`; the drag events it published.
+    fn pane_drag(end: fn(touch::Finger, Point) -> touch::Event) -> Vec<String> {
+        use iced::widget::text;
+
+        let (mut state, left) = State::new(());
+        state.split(Axis::Vertical, left, ());
+
+        let grid: PaneGrid<'_, String, _, _> = PaneGrid::new(&state, |_, _, _| {
+            Content::new(text("Body")).title_bar(TitleBar::new(text("Title")).padding(10))
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_drag(|event| match event {
+            DragEvent::Picked { .. } => "picked".to_string(),
+            DragEvent::Dropped { .. } => "dropped".to_string(),
+            DragEvent::Canceled { .. } => "canceled".to_string(),
+        });
+
+        let finger = |event: fn(touch::Finger, Point) -> touch::Event, at| {
+            Event::Touch(event(touch::Finger(0), at))
+        };
+        let title = Point::new(100.0, 10.0);
+        let right = Point::new(800.0, 400.0);
+
+        let mut simulator = iced_test::Simulator::new(iced::Widget::boxed(grid));
+        simulator.point_at(title);
+        simulator.simulate([finger(
+            |id, position| touch::Event::FingerPressed { id, position },
+            title,
+        )]);
+        simulator.point_at(right);
+        simulator.simulate([
+            finger(
+                |id, position| touch::Event::FingerMoved { id, position },
+                right,
+            ),
+            finger(end, right),
+        ]);
+        simulator.into_messages().collect()
+    }
+
+    #[test]
+    fn a_lost_finger_cancels_a_pane_drag() {
+        assert_eq!(
+            pane_drag(|id, position| touch::Event::FingerLifted { id, position }),
+            ["picked", "dropped"]
+        );
+        assert_eq!(
+            pane_drag(|id, position| touch::Event::FingerLost { id, position }),
+            ["picked", "canceled"]
+        );
+    }
+
+    /// A grid of one pane taking a drag from outside, which lands on the
+    /// pane wherever it is dropped; the targets it published after `event`.
+    fn incoming_drop(event: Event) -> Vec<String> {
+        use iced::widget::text;
+
+        let (state, _) = State::new(());
+        let grid: PaneGrid<'_, String, _, _> =
+            PaneGrid::new(&state, |_, _, _| Content::new(text("Pane")))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .incoming(
+                    |at, regions| {
+                        regions.iter().find(|(_, region)| region.contains(at)).map(
+                            |(pane, region)| DropHint {
+                                target: Target::Pane(*pane, Region::Center),
+                                area: *region,
+                            },
+                        )
+                    },
+                    |target: Target| format!("{target:?}"),
+                );
+
+        let mut simulator = iced_test::Simulator::new(iced::Widget::boxed(grid));
+        simulator.point_at(Point::new(100.0, 100.0));
+        simulator.simulate([event]);
+        simulator.into_messages().collect()
+    }
+
+    #[test]
+    fn a_drag_from_outside_drops_on_release_or_lift() {
+        let at = Point::new(100.0, 100.0);
+
+        let released = incoming_drop(Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        )));
+        assert_eq!(released.len(), 1);
+
+        let lifted = incoming_drop(Event::Touch(touch::Event::FingerLifted {
+            id: touch::Finger(0),
+            position: at,
+        }));
+        assert_eq!(lifted, released, "a finger drops like the mouse");
+
+        let lost = incoming_drop(Event::Touch(touch::Event::FingerLost {
+            id: touch::Finger(0),
+            position: at,
+        }));
+        assert!(lost.is_empty(), "a finger taken away drops nothing");
     }
 }
 
