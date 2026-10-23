@@ -2,9 +2,10 @@ use std::{collections::BTreeSet, time::Duration};
 
 use mav_param::{Ident, Value};
 use mavio::default_dialect::messages::{
-    AutopilotVersion, ParamRequestList, ParamRequestRead, ParamSet, ParamValue,
+    AutopilotVersion, ComponentInformationBasic, ParamRequestList, ParamRequestRead, ParamSet,
+    ParamValue,
 };
-use tokio::time::timeout;
+use tokio::{select, time::timeout};
 
 use super::{
     error::{MavError, Result},
@@ -91,10 +92,13 @@ impl MavlinkRouter {
         let _lock = self.lock_key(LockKey::ParamList(target)).await;
 
         if request_capabilities {
-            // Not all systems respect this part of the standard. If all else
-            // fails, parameters are assumed to use bytewise encoding.
-            if let Err(error) = self.request_message::<AutopilotVersion>(target).await {
-                log::warn!("No AUTOPILOT_VERSION from {target:?}: {error}");
+            let res = select!(
+                res = self.request_message::<AutopilotVersion>(target) => res.map(|_|()),
+                res = self.request_message::<ComponentInformationBasic>(target) => res.map(|_|()),
+            );
+
+            if let Err(error) = res {
+                log::warn!("Failed to fetch capabilities for {target:?}: {error}");
             }
         }
 
