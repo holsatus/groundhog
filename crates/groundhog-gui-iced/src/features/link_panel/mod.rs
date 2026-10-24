@@ -26,7 +26,7 @@ use super::notifications::{Notice, Notifications};
 use crate::ui::{self, Icon, TextExt, Tone};
 
 pub struct LinkPanel {
-    pub(crate) configurator: LinkConfigurator,
+    configurator: LinkConfigurator,
 }
 
 #[derive(Debug, Clone)]

@@ -13,9 +13,9 @@
 //! Supporting another autopilot means implementing [`Firmware`] and adding it
 //! to `for_autopilot`; nothing else changes.
 
-pub mod ardupilot;
+pub(crate) mod ardupilot;
 mod generic;
-pub mod px4;
+pub(crate) mod px4;
 
 use mavio::default_dialect::enums::{MavAutopilot, MavModeFlag};
 

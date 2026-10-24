@@ -409,7 +409,7 @@ impl ParamEdits {
     }
 }
 
-pub fn value_type_matches(lhs: Value, rhs: Value) -> bool {
+fn value_type_matches(lhs: Value, rhs: Value) -> bool {
     std::mem::discriminant(&lhs) == std::mem::discriminant(&rhs)
 }
 

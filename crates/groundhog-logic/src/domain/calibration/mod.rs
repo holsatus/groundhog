@@ -18,8 +18,8 @@
 //! session (it lives on the [`Vehicle`](super::vehicle::Vehicle)), so
 //! feedback is folded in as it arrives, independent of the UI.
 
-pub mod ardupilot;
-pub mod px4;
+pub(crate) mod ardupilot;
+pub(crate) mod px4;
 
 use std::collections::VecDeque;
 

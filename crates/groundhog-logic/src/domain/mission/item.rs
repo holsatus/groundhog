@@ -172,7 +172,7 @@ impl MissionItem {
     }
 
     /// Whether x/y are latitude/longitude in this item's frame.
-    pub fn has_global_frame(&self) -> bool {
+    fn has_global_frame(&self) -> bool {
         is_global_frame(self.frame)
     }
 
@@ -198,7 +198,7 @@ impl MissionItem {
     }
 
     /// Move the item to `position` (latitude, longitude and altitude).
-    pub fn set_position(&mut self, position: Position) {
+    fn set_position(&mut self, position: Position) {
         self.set_lat_lon(position.lat, position.lon);
         self.z = position.alt_m;
     }

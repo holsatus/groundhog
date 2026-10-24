@@ -10,7 +10,7 @@
 //!
 //! [`MissionLayout`]: crate::domain::firmware::MissionLayout
 
-pub mod codec;
+pub(crate) mod codec;
 pub mod command;
 mod draft;
 mod item;
