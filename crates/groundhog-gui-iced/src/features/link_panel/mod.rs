@@ -22,7 +22,10 @@ use groundhog_logic::{
     services::{self, LinkManager, LinkStats, LinkStatus},
 };
 
-use super::notifications::{Notice, Notifications};
+use super::{
+    confirm::Confirmation,
+    notifications::{Notice, Notifications},
+};
 use crate::ui::{self, Icon, TextExt, Tone};
 
 pub struct LinkPanel {
@@ -48,15 +51,20 @@ pub enum Message {
     Save(LinkConfig),
     Connect(LinkId),
     Disconnect(LinkId),
+    /// Ask the operator, then delete a configured link.
+    RequestDelete(LinkId),
     /// Remove a configured link, dropping any live connection with it.
     Delete(LinkId),
 }
 
-/// A request the root must satisfy, since it owns the configuration file.
+/// A request the root must satisfy, since it owns the configuration file
+/// and the confirmation dialog.
 #[derive(Debug)]
 pub enum Event {
     /// The configured links changed and should be persisted.
     LinksChanged(Vec<LinkConfig>),
+    /// Ask the operator before sending the message.
+    Confirm(Confirmation<Message>),
 }
 
 impl LinkPanel {
@@ -143,6 +151,24 @@ impl LinkPanel {
                 manager.connect(&id);
             }
             Message::Disconnect(id) => manager.disconnect(&id),
+            Message::RequestDelete(id) => {
+                let Some((_, config, status)) = manager.entries().find(|(link, ..)| **link == id)
+                else {
+                    return (Task::none(), None);
+                };
+                let body = if status.is_active() {
+                    "It is removed from the saved links, and its connection is closed."
+                } else {
+                    "It is removed from the saved links."
+                };
+                let confirmation = Confirmation::new(
+                    format!("Delete {}?", config.name),
+                    body,
+                    Message::Delete(id),
+                )
+                .accept_label("Delete");
+                return (Task::none(), Some(Event::Confirm(confirmation)));
+            }
             Message::Delete(id) => {
                 if manager.remove(&id) {
                     return (Task::none(), Some(Event::LinksChanged(manager.configs())));
@@ -315,7 +341,7 @@ fn view_link<'a>(
 
     let delete = ui::icon_button(Icon::Delete)
         .hint("Delete the link")
-        .on_press(Message::Delete(id.clone()));
+        .on_press(Message::RequestDelete(id.clone()));
 
     let summary = summarize(
         &status,
@@ -546,6 +572,29 @@ mod tests {
             panic!("Delete should emit LinksChanged");
         };
         assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_link_asks_first() {
+        let (mut panel, mut backend, mut notices) = panel();
+        let _ = panel.update(
+            Message::Save(config("A")),
+            backend.links_mut(),
+            &mut notices,
+        );
+        let id = backend.links().entries().next().unwrap().0.clone();
+
+        let (_, event) = panel.update(
+            Message::RequestDelete(id.clone()),
+            backend.links_mut(),
+            &mut notices,
+        );
+
+        let Some(Event::Confirm(confirmation)) = event else {
+            panic!("expected a confirmation")
+        };
+        assert!(matches!(&confirmation.accept, Message::Delete(link) if *link == id));
+        assert_eq!(backend.links().configs().len(), 1, "kept until accepted");
     }
 
     #[tokio::test]

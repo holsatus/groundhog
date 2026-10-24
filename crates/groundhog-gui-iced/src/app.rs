@@ -332,9 +332,15 @@ impl Application {
                     self.link_panel
                         .update(message, self.backend.links_mut(), &mut self.notices);
 
-                if let Some(link_panel::Event::LinksChanged(links)) = event {
-                    self.configuration.links = links;
-                    self.save_configuration();
+                match event {
+                    Some(link_panel::Event::LinksChanged(links)) => {
+                        self.configuration.links = links;
+                        self.save_configuration();
+                    }
+                    Some(link_panel::Event::Confirm(confirmation)) => {
+                        self.confirmation = Some(confirmation.map(Message::Links));
+                    }
+                    None => {}
                 }
                 task.map(Message::Links)
             }
