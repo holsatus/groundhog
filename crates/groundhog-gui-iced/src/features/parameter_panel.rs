@@ -85,6 +85,8 @@ pub enum Message {
     SelectComponent(MavlinkId),
     /// Download the component's parameter list again.
     Reload(MavlinkId),
+    /// Stop a download this panel started.
+    CancelReload(MavlinkId),
     Reloaded(MavlinkId, Ticket, Result<ParamListSummary>),
     /// The operator typed into a value field.
     Edit(MavlinkId, Ident, String),
@@ -152,6 +154,12 @@ impl ParameterPanel {
                     async move { client.fetch_parameters().await },
                     move |ticket, result| Message::Reloaded(address, ticket, result),
                 );
+            }
+            Message::CancelReload(address) => {
+                if self.reloads.cancel(&address) {
+                    cx.notices
+                        .push(Notice::info("Parameter download cancelled"));
+                }
             }
             Message::Reloaded(address, ticket, result) => {
                 if self.reloads.finish(&address, ticket) {
@@ -479,7 +487,9 @@ impl ParameterPanel {
                     "Downloading…".to_string()
                 },
                 (expected > 0).then(|| (got as f32, f32::from(expected))),
-                None,
+                self.reloads
+                    .is_running(&address)
+                    .then_some(Message::CancelReload(address)),
             )
         });
 

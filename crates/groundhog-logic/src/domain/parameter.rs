@@ -41,6 +41,8 @@ pub enum DownloadState {
     InProgress,
     Complete,
     Failed(String),
+    /// Stopped before it finished; the values received so far are kept.
+    Cancelled,
 }
 
 /// The parameters of one component.

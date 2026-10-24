@@ -48,6 +48,48 @@ pub struct ParamListSummary {
     pub expected: u16,
 }
 
+/// Reports a parameter download to the runtime: in progress from the start,
+/// then its outcome, or cancelled if the download is dropped first. A dropped
+/// download must not stay in progress in every reader's snapshot.
+struct DownloadReport<'a> {
+    fleet: &'a FleetHandle,
+    address: MavlinkId,
+    finished: bool,
+}
+
+impl<'a> DownloadReport<'a> {
+    fn start(fleet: &'a FleetHandle, address: MavlinkId) -> Self {
+        fleet.report(Input::ParamDownload {
+            address,
+            state: DownloadState::InProgress,
+        });
+        Self {
+            fleet,
+            address,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self, state: DownloadState) {
+        self.finished = true;
+        self.fleet.report(Input::ParamDownload {
+            address: self.address,
+            state,
+        });
+    }
+}
+
+impl Drop for DownloadReport<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.fleet.report(Input::ParamDownload {
+                address: self.address,
+                state: DownloadState::Cancelled,
+            });
+        }
+    }
+}
+
 /// An intent-level handle for operating one vehicle (or one component of it).
 /// Cheap to clone.
 #[derive(Clone)]
@@ -137,10 +179,7 @@ impl VehicleClient {
             )
         })?;
 
-        self.fleet.report(Input::ParamDownload {
-            address: target,
-            state: DownloadState::InProgress,
-        });
+        let report = DownloadReport::start(&self.fleet, target);
 
         let result = self
             .fleet
@@ -158,10 +197,7 @@ impl VehicleClient {
             }
             Err(error) => DownloadState::Failed(error.to_string()),
         };
-        self.fleet.report(Input::ParamDownload {
-            address: target,
-            state,
-        });
+        report.finish(state);
 
         result.map(|(received, expected)| ParamListSummary { received, expected })
     }

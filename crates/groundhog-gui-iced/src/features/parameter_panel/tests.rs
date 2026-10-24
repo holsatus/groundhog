@@ -238,3 +238,26 @@ fn the_filter_matches_case_insensitively() {
     assert!(!changed.matches(&ident("RATE"), false, ""));
     assert!(changed.matches(&ident("RATE"), true, ""));
 }
+
+#[tokio::test]
+async fn a_cancelled_download_ignores_its_late_result() {
+    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+    env.step(&mut panel, Message::Reload(ADDRESS));
+    let ticket = panel.reloads.ticket_of(&ADDRESS).unwrap();
+
+    env.step(&mut panel, Message::CancelReload(ADDRESS));
+    assert!(!panel.reloads.is_running(&ADDRESS));
+    assert_eq!(env.notices.history().last().unwrap().level, Level::Info);
+
+    let summary = ParamListSummary {
+        received: 1,
+        expected: 1,
+    };
+    env.step(&mut panel, Message::Reloaded(ADDRESS, ticket, Ok(summary)));
+    assert_eq!(
+        env.notices.history().last().unwrap().level,
+        Level::Info,
+        "no success notice for a download the operator stopped"
+    );
+}

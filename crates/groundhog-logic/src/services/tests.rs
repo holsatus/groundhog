@@ -27,6 +27,7 @@ use crate::{
     domain::{
         fleet::{FleetEvent, FleetSnapshot},
         mission::{MissionItem, Position},
+        parameter::DownloadState,
     },
     link::LinkId,
     mavlink::{
@@ -333,6 +334,35 @@ async fn parameter_writes_need_a_known_encoding() {
         .await;
 
     assert_eq!(result, Err(Error::ParamEncodingUnknown));
+}
+
+/// Dropping a download (the operator cancelled it) must not leave it in
+/// progress in the snapshot.
+#[tokio::test]
+async fn a_dropped_parameter_download_reports_itself_cancelled() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let client = harness.fleet.vehicle(SYSTEM);
+    let download = tokio::spawn(async move { client.fetch_parameters().await });
+    let DefaultDialect::ParamRequestList(_) = harness.vehicle.recv().await else {
+        panic!("expected PARAM_REQUEST_LIST")
+    };
+    let state = |fleet: &FleetSnapshot| {
+        let parameters = fleet.vehicle(SYSTEM)?.parameters(VEHICLE.component)?;
+        Some(parameters.download().clone())
+    };
+    until(&mut harness.updates, |fleet| {
+        state(fleet) == Some(DownloadState::InProgress)
+    })
+    .await;
+
+    download.abort();
+
+    until(&mut harness.updates, |fleet| {
+        state(fleet) == Some(DownloadState::Cancelled)
+    })
+    .await;
 }
 
 #[tokio::test]
