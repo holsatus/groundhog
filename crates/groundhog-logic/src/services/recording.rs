@@ -33,8 +33,7 @@ impl TlogRecorder {
     /// Must be called within an async runtime.
     pub(crate) fn start(router: &MavlinkRouter, directory: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(directory)?;
-        let path = directory.join(format!("{}.tlog", file_stamp(SystemTime::now())));
-        let file = std::fs::File::create(&path)?;
+        let (path, file) = create_new(directory, &file_stamp(SystemTime::now()))?;
 
         let mut frames = router.receive_filtered(|_| true);
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -105,6 +104,26 @@ impl TlogRecorder {
     }
 }
 
+/// A new file named `{stamp}.tlog` in `directory`, or `{stamp}_2.tlog` and
+/// on if that exists (a recording started within the same second): an
+/// existing recording is never truncated.
+fn create_new(directory: &Path, stamp: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut number = 1;
+    loop {
+        let path = match number {
+            1 => directory.join(format!("{stamp}.tlog")),
+            _ => directory.join(format!("{stamp}_{number}.tlog")),
+        };
+        match std::fs::File::create_new(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && number < 100 => {
+                number += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// `YYYY-MM-DD_HH-MM-SS` in UTC, for file names that sort chronologically.
 fn file_stamp(time: SystemTime) -> String {
     let seconds = time
@@ -150,6 +169,23 @@ mod tests {
         // 2024-02-29T12:34:56Z, a leap day.
         let leap = UNIX_EPOCH + Duration::from_secs(1_709_210_096);
         assert_eq!(file_stamp(leap), "2024-02-29_12-34-56");
+    }
+
+    #[test]
+    fn recordings_in_the_same_second_get_their_own_files() {
+        let directory =
+            std::env::temp_dir().join(format!("groundhog-tlog-names-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stamp = "2024-02-29_12-34-56";
+
+        let (first, mut file) = create_new(&directory, stamp).unwrap();
+        std::io::Write::write_all(&mut file, b"frames").unwrap();
+        let (second, _) = create_new(&directory, stamp).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(second.file_name().unwrap(), "2024-02-29_12-34-56_2.tlog");
+        assert_eq!(std::fs::read(&first).unwrap(), b"frames", "not truncated");
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]
