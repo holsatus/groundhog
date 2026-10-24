@@ -229,8 +229,6 @@ impl VehiclePanel {
     fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> Element<'a, Message> {
         let system = vehicle.system;
         let busy = |command| self.commands.is_running(&(system, command));
-        let firmware = vehicle.firmware();
-        let class = vehicle.class();
 
         let arm = match vehicle.armed() {
             Some(true) => ui::button("Disarm")
@@ -243,12 +241,7 @@ impl VehiclePanel {
                 .on_press(Message::RequestArm(system, true)),
         };
 
-        let modes: Vec<FlightMode> = firmware
-            .modes(class)
-            .iter()
-            .filter(|mode| mode.selectable)
-            .copied()
-            .collect();
+        let modes: Vec<FlightMode> = vehicle.modes().collect();
 
         let mode_picker = ui::pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
             .placeholder("Mode")
@@ -259,7 +252,7 @@ impl VehiclePanel {
             ui::button(label)
                 .hint(hint)
                 .on_press_maybe(
-                    (firmware.mode_of_kind(class, kind).is_some() && !busy(Command::SetMode))
+                    (vehicle.mode_of_kind(kind).is_some() && !busy(Command::SetMode))
                         .then_some(Message::RequestModeKind(system, kind)),
                 )
                 .boxed()

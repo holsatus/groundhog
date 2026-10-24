@@ -250,7 +250,8 @@ same vehicle.
 
 `domain::firmware::Firmware` (ArduPilot, PX4, generic) answers:
 
-- which flight modes exist and how to command one;
+- which flight modes exist, which of them a given vehicle offers (its
+  parameters can rule some out), and how to command one;
 - how parameters are encoded;
 - how the mission is laid out (ArduPilot keeps home in mission slot 0);
 - how sensors are calibrated (`Firmware::calibration`).

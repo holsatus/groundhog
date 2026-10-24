@@ -5,7 +5,7 @@
 //! `autopilot` field:
 //!
 //! - how `custom_mode` maps to a named [`FlightMode`], which modes an operator
-//!   may select, and how to command one ([`SetMode`]);
+//!   may select on a given vehicle, and how to command one ([`SetMode`]);
 //! - how parameter values are encoded when the vehicle does not advertise it;
 //! - how the mission is laid out on the wire ([`MissionLayout`]);
 //! - how sensors are calibrated ([`CalibrationProtocol`]).
@@ -20,7 +20,9 @@ pub mod px4;
 use mavio::default_dialect::enums::{MavAutopilot, MavModeFlag};
 
 use crate::{
-    domain::{calibration::CalibrationProtocol, vehicle::class::VehicleClass},
+    domain::{
+        calibration::CalibrationProtocol, parameter::Parameters, vehicle::class::VehicleClass,
+    },
     wire::param::ParamEncoding,
 };
 
@@ -151,12 +153,17 @@ pub trait Firmware: Send + Sync + 'static {
         }
     }
 
-    /// The selectable mode of `kind` for `class`, if this firmware has one.
-    fn mode_of_kind(&self, class: VehicleClass, kind: ModeKind) -> Option<FlightMode> {
-        self.modes(class)
-            .iter()
-            .find(|mode| mode.kind == kind && mode.selectable)
-            .copied()
+    /// Whether an operator may select `mode` on a vehicle of `class` whose
+    /// autopilot holds `parameters`. Some modes exist only while a feature
+    /// is enabled; while the parameters cannot tell, the mode is offered,
+    /// since the vehicle refuses a mode it lacks but a hidden one is lost.
+    fn offers(
+        &self,
+        mode: &FlightMode,
+        _class: VehicleClass,
+        _parameters: Option<&Parameters>,
+    ) -> bool {
+        mode.selectable
     }
 
     /// The parameter encoding to assume when the vehicle does not advertise

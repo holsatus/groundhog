@@ -148,7 +148,11 @@ mod tests {
 
     #[test]
     fn set_mode_splits_main_and_sub() {
-        let mission = Px4.mode_of_kind(VehicleClass::Copter, K::Mission).unwrap();
+        let mission = *Px4
+            .modes(VehicleClass::Copter)
+            .iter()
+            .find(|mode| mode.kind == K::Mission)
+            .unwrap();
         let command = Px4.set_mode(&mission);
         assert_eq!(command.custom_mode, MAIN_AUTO as f32);
         assert_eq!(command.custom_sub_mode, AUTO_MISSION as f32);

@@ -425,7 +425,7 @@ impl VehicleClient {
     /// firmware calls it. Returns the mode commanded.
     pub async fn set_mode_kind(&self, kind: ModeKind) -> Result<FlightMode> {
         let mode = self
-            .with_vehicle(|vehicle| vehicle.firmware().mode_of_kind(vehicle.class(), kind))?
+            .with_vehicle(|vehicle| vehicle.mode_of_kind(kind))?
             .ok_or(Error::NoSuchMode)?;
 
         self.set_mode(mode).await.map(|()| mode)

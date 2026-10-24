@@ -51,7 +51,7 @@ use crate::{
     MavlinkId, SystemId,
     domain::{
         calibration::{self, CalibrationControls, CalibrationKind, CalibrationUpdate, Feedback},
-        firmware::{self, Firmware, FlightMode, MissionLayout},
+        firmware::{self, Firmware, FlightMode, MissionLayout, ModeKind},
         geo::GeoPosition,
         mission::OnboardMission,
         parameter::{DownloadState, Parameters},
@@ -247,6 +247,25 @@ impl Vehicle {
     /// The latest reported flight mode, if the firmware knows it.
     pub fn flight_mode(&self) -> Option<FlightMode> {
         self.identity.flight_mode()
+    }
+
+    /// The modes an operator may select on this vehicle: its firmware's
+    /// modes for its class, less those its autopilot's parameters rule out.
+    pub fn modes(&self) -> impl Iterator<Item = FlightMode> + '_ {
+        let firmware = self.firmware();
+        let class = self.class();
+        let parameters = self.parameters(self.default_parameter_component());
+        firmware
+            .modes(class)
+            .iter()
+            .filter(move |mode| firmware.offers(mode, class, parameters))
+            .copied()
+    }
+
+    /// The selectable mode of `kind` (return, land, ...), if this vehicle
+    /// has one.
+    pub fn mode_of_kind(&self, kind: ModeKind) -> Option<FlightMode> {
+        self.modes().find(|mode| mode.kind == kind)
     }
 
     /// Whether the vehicle reports itself as armed, if it has sent a heartbeat.
@@ -828,6 +847,63 @@ mod tests {
         assert_eq!(vehicle.firmware().name(), "ArduPilot");
         assert!(vehicle.mission_layout().home_slot);
         assert_eq!(vehicle.flight_mode(), mode);
+    }
+
+    /// An ArduPlane, which reports itself as a fixed wing even when it is a
+    /// QuadPlane, with `Q_ENABLE` as given (or not yet downloaded).
+    fn ardupilot_plane(q_enable: Option<f32>) -> Vehicle {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::Heartbeat(messages::Heartbeat {
+                type_: MavType::FixedWing,
+                autopilot: MavAutopilot::Ardupilotmega,
+                base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+                ..Default::default()
+            }),
+        );
+        if let Some(value) = q_enable {
+            vehicle.handle_message(t, 1, &param_value("Q_ENABLE", value, MavParamType::Int8));
+        }
+        vehicle
+    }
+
+    #[test]
+    fn a_plane_without_a_quadplane_offers_no_q_modes() {
+        let vehicle = ardupilot_plane(Some(0.0));
+
+        assert!(vehicle.modes().all(|mode| !mode.name.starts_with('Q')));
+        assert!(vehicle.modes().any(|mode| mode.name == "Autoland"));
+        assert_eq!(vehicle.mode_of_kind(ModeKind::Land), None);
+        assert!(vehicle.mode_of_kind(ModeKind::ReturnToLaunch).is_some());
+    }
+
+    #[test]
+    fn a_quadplane_lands_in_qland_and_an_unknown_one_is_offered_it() {
+        for q_enable in [Some(1.0), None] {
+            let vehicle = ardupilot_plane(q_enable);
+            let land = vehicle.mode_of_kind(ModeKind::Land);
+            assert_eq!(land.map(|mode| mode.name), Some("QLand"), "{q_enable:?}");
+        }
+    }
+
+    #[test]
+    fn a_copter_keeps_its_modes_whatever_q_enable_says() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        vehicle.handle_message(t, 1, &param_value("Q_ENABLE", 0.0, MavParamType::Int8));
+
+        assert_eq!(
+            vehicle.mode_of_kind(ModeKind::Land).map(|mode| mode.name),
+            Some("Land")
+        );
+        let selectable = firmware::ardupilot::COPTER
+            .iter()
+            .filter(|mode| mode.selectable);
+        assert_eq!(vehicle.modes().count(), selectable.count());
     }
 
     #[test]

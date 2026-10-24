@@ -8,10 +8,13 @@
 //! - <https://github.com/ArduPilot/ardupilot/blob/master/ArduSub/defines.h>
 //! - <https://github.com/ArduPilot/ardupilot/blob/master/AntennaTracker/mode.h>
 
+use mav_param::{Ident, Value};
+
 use super::{Firmware, FlightMode, MissionLayout, ModeKind as K};
 use crate::{
     domain::{
         calibration::{CalibrationProtocol, ardupilot::ArduPilotCalibration},
+        parameter::Parameters,
         vehicle::class::VehicleClass,
     },
     wire::param::ParamEncoding,
@@ -86,6 +89,28 @@ pub const PLANE: &[FlightMode] = &[
     m("Autoland", K::Other, 26),
 ];
 
+/// The custom modes of [`PLANE`] that fly the QuadPlane's lift motors. They
+/// exist only while `Q_ENABLE` is set, and a QuadPlane that is neither a
+/// tiltrotor nor a tailsitter reports itself as a fixed wing, so only the
+/// parameter tells.
+const QUADPLANE_MODES: [u32; 8] = [17, 18, 19, 20, 21, 22, 23, 25];
+
+/// Whether the plane's parameters say it has no QuadPlane.
+fn quadplane_disabled(parameters: Option<&Parameters>) -> bool {
+    let q_enable =
+        parameters.and_then(|parameters| parameters.value(&Ident::from_str_truncated("Q_ENABLE")));
+    match q_enable {
+        Some(Value::U8(v)) => v == 0,
+        Some(Value::I8(v)) => v == 0,
+        Some(Value::U16(v)) => v == 0,
+        Some(Value::I16(v)) => v == 0,
+        Some(Value::U32(v)) => v == 0,
+        Some(Value::I32(v)) => v == 0,
+        Some(Value::F32(v)) => v == 0.0,
+        None => false,
+    }
+}
+
 pub const ROVER: &[FlightMode] = &[
     m("Manual", K::Manual, 0),
     m("Acro", K::Other, 1),
@@ -143,6 +168,19 @@ impl Firmware for ArduPilot {
         }
     }
 
+    fn offers(
+        &self,
+        mode: &FlightMode,
+        class: VehicleClass,
+        parameters: Option<&Parameters>,
+    ) -> bool {
+        let plane = matches!(class, VehicleClass::FixedWing | VehicleClass::Vtol);
+        mode.selectable
+            && !(plane
+                && QUADPLANE_MODES.contains(&mode.custom_mode)
+                && quadplane_disabled(parameters))
+    }
+
     /// ArduPilot encodes parameters by casting to float; current releases
     /// advertise this, older ones only set `PARAM_FLOAT` (meaning the same).
     fn param_encoding(&self) -> Option<ParamEncoding> {
@@ -197,15 +235,32 @@ mod tests {
         assert_eq!(mode.name, "QLoiter");
     }
 
+    fn of_kind(class: VehicleClass, kind: K) -> Option<FlightMode> {
+        ArduPilot
+            .modes(class)
+            .iter()
+            .find(|mode| mode.kind == kind && ArduPilot.offers(mode, class, None))
+            .copied()
+    }
+
     #[test]
     fn standard_kinds_resolve_per_class() {
-        let land = ArduPilot
-            .mode_of_kind(VehicleClass::Copter, K::Land)
-            .unwrap();
-        assert_eq!(land.custom_mode, 9);
-        let rtl = ArduPilot
-            .mode_of_kind(VehicleClass::Rover, K::ReturnToLaunch)
-            .unwrap();
+        assert_eq!(
+            of_kind(VehicleClass::Copter, K::Land).unwrap().custom_mode,
+            9
+        );
+        let rtl = of_kind(VehicleClass::Rover, K::ReturnToLaunch).unwrap();
         assert_eq!(rtl.custom_mode, 11);
+    }
+
+    #[test]
+    fn quadplane_modes_are_the_q_modes() {
+        for number in QUADPLANE_MODES {
+            let mode = PLANE
+                .iter()
+                .find(|mode| mode.custom_mode == number)
+                .unwrap();
+            assert!(mode.name.contains('Q'), "{}", mode.name);
+        }
     }
 }
