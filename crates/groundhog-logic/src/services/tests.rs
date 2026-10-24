@@ -399,7 +399,7 @@ mod calibration {
     };
 
     use super::*;
-    use crate::domain::calibration::{CalibrationKind, Instruction, Phase, Session, Side};
+    use crate::domain::calibration::{CalibrationKind, Instruction, Outcome, Phase, Session, Side};
 
     fn session(fleet: &FleetSnapshot) -> Option<&Session> {
         fleet.vehicle(SYSTEM)?.calibration.as_ref()
@@ -492,7 +492,7 @@ mod calibration {
             if update.events.contains(&FleetEvent::CalibrationFinished(
                 SYSTEM,
                 CalibrationKind::Accelerometer,
-                Phase::Succeeded,
+                Outcome::Succeeded,
             )) {
                 break;
             }

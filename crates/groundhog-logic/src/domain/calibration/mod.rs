@@ -220,8 +220,26 @@ pub enum Phase {
 
 impl Phase {
     pub fn is_finished(&self) -> bool {
-        matches!(self, Phase::Succeeded | Phase::Failed(_) | Phase::Cancelled)
+        self.outcome().is_some()
     }
+
+    /// How the session ended, once it has.
+    pub fn outcome(&self) -> Option<Outcome> {
+        match self {
+            Phase::Starting | Phase::Running => None,
+            Phase::Succeeded => Some(Outcome::Succeeded),
+            Phase::Failed(reason) => Some(Outcome::Failed(reason.clone())),
+            Phase::Cancelled => Some(Outcome::Cancelled),
+        }
+    }
+}
+
+/// How a finished session ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Succeeded,
+    Failed(String),
+    Cancelled,
 }
 
 /// One compass's state in a compass calibration (ArduPilot reports each).

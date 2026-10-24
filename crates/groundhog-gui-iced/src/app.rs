@@ -14,7 +14,7 @@ use std::{
 use groundhog_logic::{
     Backend, BackendOptions, SystemId,
     domain::{
-        calibration::Phase,
+        calibration::Outcome,
         fleet::{FleetEvent, FleetSnapshot},
         vehicle::{Liveness, status},
     },
@@ -520,15 +520,14 @@ impl Application {
             ))
             .detail("Download it to see the vehicle's current mission.")
             .vehicle(system),
-            FleetEvent::CalibrationFinished(system, kind, phase) => {
+            FleetEvent::CalibrationFinished(system, kind, outcome) => {
                 let subject = format!("{kind} calibration of {}", name(system));
-                match phase {
-                    Phase::Succeeded => Notice::success(format!("{subject} succeeded")),
-                    Phase::Failed(reason) => {
+                match outcome {
+                    Outcome::Succeeded => Notice::success(format!("{subject} succeeded")),
+                    Outcome::Failed(reason) => {
                         Notice::error(format!("{subject} failed")).detail(reason)
                     }
-                    Phase::Cancelled => Notice::info(format!("{subject} cancelled")),
-                    Phase::Starting | Phase::Running => return,
+                    Outcome::Cancelled => Notice::info(format!("{subject} cancelled")),
                 }
                 .vehicle(system)
             }

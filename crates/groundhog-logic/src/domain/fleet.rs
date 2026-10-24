@@ -27,7 +27,7 @@ use mavio::{DefaultDialect, default_dialect::enums::MavAutopilot};
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{CalibrationKind, CalibrationUpdate, Phase, Session},
+        calibration::{CalibrationKind, CalibrationUpdate, Outcome, Session},
         firmware::FlightMode,
         mission::OnboardMission,
         parameter::{DownloadState, Parameters},
@@ -67,7 +67,7 @@ pub enum FleetEvent {
     /// transferred.
     OnboardMissionStale(SystemId),
     /// A calibration ended: succeeded, failed or cancelled.
-    CalibrationFinished(SystemId, CalibrationKind, Phase),
+    CalibrationFinished(SystemId, CalibrationKind, Outcome),
 }
 
 /// An immutable view of the fleet at one moment. Cheap to clone and to keep:
@@ -342,11 +342,10 @@ fn is_calibrating(vehicle: &Vehicle) -> bool {
 
 /// The event for a vehicle's calibration having finished, if it has.
 fn calibration_finished(id: SystemId, vehicle: &Vehicle) -> Option<FleetEvent> {
-    vehicle
-        .calibration
-        .as_ref()
-        .filter(|session| session.phase.is_finished())
-        .map(|session| FleetEvent::CalibrationFinished(id, session.kind, session.phase.clone()))
+    vehicle.calibration.as_ref().and_then(|session| {
+        let outcome = session.phase.outcome()?;
+        Some(FleetEvent::CalibrationFinished(id, session.kind, outcome))
+    })
 }
 
 #[cfg(test)]
