@@ -9,8 +9,7 @@
 //!   otherwise;
 //! - [`grid`]: cells in as many columns as fit, up to a maximum;
 //! - [`header`]: a subject, its status and its tools on one line, the tools
-//!   folded into a menu when they would squeeze the subject;
-//! - [`either`]: one of two arrangements of the same content.
+//!   folded into a menu when they would squeeze the subject.
 //!
 //! They decide during layout, from the limits they are given, so the view
 //! that builds them does not need to know the width (unlike iced's

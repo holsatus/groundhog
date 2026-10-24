@@ -1,3 +1,6 @@
+//! Tests of the parameter panel: edits, uploads, downloads and files,
+//! driven through a [`Context`] over a synthetic fleet.
+
 use std::time::Instant;
 
 use groundhog_logic::{Backend, BackendOptions, domain::fleet::Fleet, services::FleetHandle};

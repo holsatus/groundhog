@@ -304,7 +304,7 @@ alongside today's renders.
 
 1. **Adaptive components and density** (done). `ui::field` stacks its
    label, `ui::stats` drops columns, headers fold their tools into a menu
-   (`ui::tool`, `widget::menu`), parameter rows narrow (`ui::either`), and
+   (`ui::tool`, `widget::menu`), parameter names give way in their rows, and
    controls, rows, checkboxes and sliders are touch-sized at touch
    density. The gallery renders every panel at a phone's width, touch-sized.
 2. **Destinations and pages** (done). The five-item navigation bar with

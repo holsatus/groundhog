@@ -1,3 +1,6 @@
+//! Tests of the mission editor: drafts, transfers and their confirmations,
+//! driven through a [`Context`] over a synthetic fleet.
+
 use std::time::Instant;
 
 use groundhog_logic::{

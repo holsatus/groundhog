@@ -1,3 +1,11 @@
+//! Parameter transactions: setting one parameter, and downloading the list.
+//!
+//! A set waits for the target to echo the parameter's new value, which may
+//! differ from the value sent. A list download requests every parameter,
+//! then re-requests the missing ones by index, in small batches, while the
+//! target keeps answering. The values themselves reach vehicle state through
+//! the inbound message stream, like any other message.
+
 use std::{collections::BTreeSet, time::Duration};
 
 use mav_param::{Ident, Value};

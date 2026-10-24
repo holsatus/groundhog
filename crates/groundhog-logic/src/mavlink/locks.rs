@@ -1,3 +1,11 @@
+//! Per-resource locks that serialise transactions.
+//!
+//! MAVLink replies carry no transaction id, so two transactions on the same
+//! resource (a command kind, a parameter, a mission type, on one target)
+//! would take each other's replies. Each takes the [`LockKey`] for its
+//! resource first; waiters are served in order, and a lock no one holds or
+//! waits for is removed.
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},

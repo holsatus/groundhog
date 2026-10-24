@@ -1,3 +1,11 @@
+//! Command transactions, and requesting a single message.
+//!
+//! A command is sent as `COMMAND_LONG` or `COMMAND_INT`, resent a few times
+//! while no `COMMAND_ACK` arrives, given longer while the target reports
+//! `IN_PROGRESS`, and cancelled with `COMMAND_CANCEL` if its future is dropped
+//! while in progress. Commands of one kind to one target run one at a time,
+//! because their ACKs cannot be told apart.
+
 use std::{future::IntoFuture, time::Duration};
 
 use futures::future::BoxFuture;

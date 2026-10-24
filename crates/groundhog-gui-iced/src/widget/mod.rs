@@ -1,3 +1,6 @@
+//! Widgets iced does not provide, built on its widget API and free of any
+//! knowledge of the domain. Views reach most of them through `crate::ui`.
+
 pub mod adaptive;
 pub mod attitude;
 pub mod drag_source;

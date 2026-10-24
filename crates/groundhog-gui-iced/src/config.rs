@@ -1,3 +1,11 @@
+//! The frontend's own configuration file: settings, links, video and the
+//! workspace layout, and how they are read and saved.
+//!
+//! The file belongs to this frontend alone, so another frontend can run
+//! beside it without racing its writes. Saves go through one
+//! [`SaveQueue`], which writes them in order and replaces the file
+//! atomically; a file that cannot be parsed is set aside, not overwritten.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -116,8 +124,8 @@ pub struct Configuration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_picker_path: Option<PathBuf>,
 
-    /// The panes' arrangement. (Configurations from before the three-column
-    /// workspace stored a `layout` instead, which is ignored.)
+    /// The panes' arrangement. Unknown fields (such as an old `layout`) are
+    /// ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Workspace>,
 

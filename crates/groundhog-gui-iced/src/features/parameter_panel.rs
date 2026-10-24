@@ -665,7 +665,7 @@ fn view_param_row<'a>(
     let name = ident.as_str();
     let kind = value_type_name(param.value());
 
-    let narrow = row![
+    row![
         ui::mono(name)
             .single_line_ellipsis_start()
             .width(Length::Fill),
@@ -676,9 +676,8 @@ fn view_param_row<'a>(
         upload(),
     ]
     .spacing(ui::space::XS)
-    .align_y(Alignment::Center);
-
-    narrow.boxed()
+    .align_y(Alignment::Center)
+    .boxed()
 }
 
 #[cfg(test)]

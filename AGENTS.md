@@ -519,10 +519,9 @@ so the look is decided in one place:
 - **Space, not devices.** The toolkit arranges by the width it is given,
   so a narrow desktop pane and a phone look the same: `ui::field` puts its
   label above the control when they do not fit side by side, `ui::stats`
-  shows as many columns as fit, a header folds its tools into a menu, and
-  `ui::either(wide, narrow, min_width)` picks between two arrangements of
-  the same content (a parameter's row). Do not fix widths in a feature
-  where the content could give way instead.
+  shows as many columns as fit, and a header folds its tools into a menu.
+  Do not fix widths in a feature where the content could give way
+  instead.
 - **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::mono`, and
   `ui::overline` for section headings; colour by meaning with
   `.tone(Tone::Warning)` (`TextExt`), never a palette slot, so a view needs

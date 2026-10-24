@@ -1,3 +1,9 @@
+//! Waiting for inbound messages: the filters transactions listen through.
+//!
+//! A receiver registers its filter when it is created, not when it is first
+//! polled, so a transaction can install it before sending its request and
+//! never miss a fast reply. Dropping the receiver removes the filter.
+
 use std::{future::IntoFuture, sync::Arc, time::Duration};
 
 use futures::future::BoxFuture;

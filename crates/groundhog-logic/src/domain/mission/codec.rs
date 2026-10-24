@@ -12,8 +12,10 @@ use super::{MissionItem, OnboardMission};
 use crate::domain::firmware::MissionLayout;
 
 /// Encode `items` for upload under `layout`. `home` fills the home slot when
-/// the layout has one; without a known home, a zero position is sent, which
-/// such firmwares overwrite with their actual home.
+/// the layout has one; without a known home, a zero position is sent. That
+/// is safe because ArduPilot, the firmware with a home slot, ignores what is
+/// written to it and reads it back as its own home (`AP_Mission::replace_cmd`
+/// and `read_cmd_from_storage`).
 pub(crate) fn encode(
     items: &[MissionItem],
     home: Option<&MissionItem>,

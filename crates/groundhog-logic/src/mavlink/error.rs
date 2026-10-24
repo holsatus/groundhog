@@ -1,3 +1,5 @@
+//! Why a middleware operation failed.
+
 use mavio::default_dialect::enums::{MavMissionResult, MavResult};
 
 use crate::MavlinkId;

@@ -1,3 +1,6 @@
+//! Tests of the calibration protocols: the commands each firmware is sent,
+//! and how its feedback advances a session.
+
 use std::time::Instant;
 
 use mavio::default_dialect::{

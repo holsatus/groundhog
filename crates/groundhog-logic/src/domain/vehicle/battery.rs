@@ -27,7 +27,8 @@ pub struct BatteryState {
 
 impl Battery {
     /// The main battery: battery 0 if reported individually, else the
-    /// `SYS_STATUS` summary.
+    /// lowest-numbered battery reported individually, else the `SYS_STATUS`
+    /// summary.
     pub fn primary(&self) -> Option<&BatteryState> {
         self.batteries
             .get(&0)

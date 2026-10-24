@@ -1,3 +1,16 @@
+//! The router: the links it owns, and every frame in and out of them.
+//!
+//! Each attached link gets a reader, a writer and a heartbeat task. The
+//! reader parses frames, drops copies of a packet already heard on another
+//! link (see `dedup`), refreshes the route to the sender from the first copy,
+//! hands command ACKs and transaction replies to whoever waits for them, and
+//! passes every message on through one lossless event channel, which pushes
+//! back on the transports rather than drop. The writer drains two queues per
+//! link, control before bulk, so a burst of parameter re-requests never
+//! delays a command. A frame to a target takes the link that most recently
+//! brought the first copy of a frame from it, and every link while the
+//! target has not been heard from.
+
 use std::{
     collections::BTreeMap,
     sync::{
