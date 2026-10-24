@@ -37,7 +37,7 @@ pub use container::{
     meter, overline, panel, panel_with, picture, progress, screen, section, stat, stats, tooltip,
 };
 pub use icon::Icon;
-pub use input::{checkbox, pick_list, slider, text_input};
+pub use input::{checkbox, pick_list, slider, text_input, unlabelled_checkbox};
 pub use style::{Density, Tone, set_density, size, space};
 pub use text::{TextExt, caption, mono, severity, text, title};
 pub use tool::{header, tool};

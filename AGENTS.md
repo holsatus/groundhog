@@ -547,7 +547,8 @@ so the look is decided in one place:
   video) uses `ui::picture`, edge to edge inside the pane's border, with
   what it needs floating over it in `ui::floating` cards rather than
   around it. Inputs come from `ui` too (`text_input`,
-  `pick_list`, `checkbox`, `slider`), so they take the density's size.
+  `pick_list`, `checkbox` and `unlabelled_checkbox`, `slider`), so they
+  take the density's size.
 
 ### The design language
 

@@ -382,7 +382,7 @@ fn field_widget<'a>(
     };
 
     match view.kind {
-        FieldKind::Bool => iced::widget::checkbox(view.value != 0.0)
+        FieldKind::Bool => ui::unlabelled_checkbox(view.value != 0.0)
             .on_toggle(move |on| edit(if on { "1" } else { "0" }.to_string()))
             .boxed(),
         FieldKind::Choice(options) => {

@@ -56,9 +56,13 @@ where
 
 /// A labelled checkbox.
 pub fn checkbox<'a, M: 'a>(label: impl IntoFragment<'a>, checked: bool) -> Checkbox<'a, M> {
-    iced::widget::checkbox(checked)
-        .label(label)
-        .size(size::checkbox())
+    unlabelled_checkbox(checked).label(label)
+}
+
+/// A checkbox whose label is elsewhere, such as a form row's
+/// ([`field`](super::field)).
+pub fn unlabelled_checkbox<'a, M: 'a>(checked: bool) -> Checkbox<'a, M> {
+    iced::widget::checkbox(checked).size(size::checkbox())
 }
 
 /// A slider over `range`, its handle large enough for a finger at touch
