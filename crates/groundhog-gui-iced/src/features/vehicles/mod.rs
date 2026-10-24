@@ -64,8 +64,12 @@ pub enum Message {
     /// Ask for confirmation, then arm (`true`) or disarm.
     RequestArm(SystemId, bool),
     Arm(SystemId, bool),
+    /// Switch the vehicle to a mode, asking first while it may be flying
+    /// (see [`mode_change_asks`]).
+    RequestMode(SystemId, FlightMode),
     SetMode(SystemId, FlightMode),
-    /// Command the vehicle's mode of a kind (return, land, ...).
+    /// Command the vehicle's mode of a kind (return, land, ...), asking
+    /// first while it may be flying.
     RequestModeKind(SystemId, ModeKind),
     ModeKind(SystemId, ModeKind),
     Finished(Key, super::operations::Ticket, Result<()>),
@@ -115,6 +119,24 @@ impl VehiclePanel {
                     move |ticket, result| Message::Finished((system, command), ticket, result),
                 );
             }
+            Message::RequestMode(system, mode) => {
+                let vehicle = cx.fleet.vehicle(system);
+                if vehicle.and_then(Vehicle::flight_mode) == Some(mode) {
+                    return Task::none();
+                }
+                if !mode_change_asks(vehicle) {
+                    return self.update(Message::SetMode(system, mode), cx);
+                }
+                let name = cx.fleet.vehicle_name(system);
+                cx.confirm(
+                    Confirmation::new(
+                        format!("Switch {name} to {mode}?"),
+                        "The vehicle leaves its current mode immediately.",
+                        Message::SetMode(system, mode),
+                    )
+                    .accept_label("Switch"),
+                );
+            }
             Message::SetMode(system, mode) => {
                 let client = cx.services.vehicle(system);
                 return self.commands.start(
@@ -126,6 +148,9 @@ impl VehiclePanel {
                 );
             }
             Message::RequestModeKind(system, kind) => {
+                if !mode_change_asks(cx.fleet.vehicle(system)) {
+                    return self.update(Message::ModeKind(system, kind), cx);
+                }
                 let name = cx.fleet.vehicle_name(system);
                 let (title, accept) = match kind {
                     ModeKind::ReturnToLaunch => (format!("Return {name} to launch?"), "Return"),
@@ -243,10 +268,13 @@ impl VehiclePanel {
 
         let modes: Vec<FlightMode> = vehicle.modes().collect();
 
-        let mode_picker = ui::pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
-            .placeholder("Mode")
-            .width(Length::Fixed(160.0))
-            .on_select(move |mode| Message::SetMode(system, mode));
+        let mut mode_picker =
+            ui::pick_list(vehicle.flight_mode(), modes, |mode| mode.name.to_string())
+                .placeholder("Mode")
+                .width(Length::Fixed(160.0));
+        if !busy(Command::SetMode) {
+            mode_picker = mode_picker.on_select(move |mode| Message::RequestMode(system, mode));
+        }
 
         let quick = |kind: ModeKind, label: &'static str, hint: &'static str| {
             ui::button(label)
@@ -270,6 +298,13 @@ impl VehiclePanel {
             ],
         ])
     }
+}
+
+/// Whether a mode change asks the operator first: while the vehicle is
+/// armed, or its armed state is unknown. A disarmed vehicle does not act on
+/// its mode until it is armed, and arming asks.
+fn mode_change_asks(vehicle: Option<&Vehicle>) -> bool {
+    vehicle.and_then(Vehicle::armed) != Some(false)
 }
 
 /// Values in columns that line up: three to a row where they fit.
@@ -548,3 +583,6 @@ fn liveness(liveness: Liveness) -> (&'static str, Tone) {
         Liveness::Lost => ("Lost", Tone::Danger),
     }
 }
+
+#[cfg(test)]
+mod tests;

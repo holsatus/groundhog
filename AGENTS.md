@@ -425,7 +425,11 @@ history. `services::Error` keeps the *reason* (`Rejection::TemporarilyRejected`,
 
 Commands that change what a vehicle does ask the operator first through a
 `Confirmation`: arming, starting a mission, jumping to an item, clearing the
-vehicle's mission, returning or landing.
+vehicle's mission, and changing its mode (returning and landing included).
+A mode change asks while the vehicle is armed or its armed state is
+unknown, wherever it comes from (the mode picker or a quick button); a
+disarmed vehicle does not act on its mode until it is armed, and arming
+asks.
 
 ### Links are supervised
 
@@ -609,7 +613,8 @@ call `finish(&key, ticket)` first and drop the result if it returns `false`.
   configured default, never the vehicle's current altitude (zero on the ground).
 - When something cannot be known (an encoding, a home position), refuse or
   ask. Do not guess.
-- Ask for confirmation before any command that changes what the vehicle does.
+- Ask for confirmation before any command that changes what the vehicle does
+  (for a mode change: while the vehicle is armed or may be).
 
 ---
 
