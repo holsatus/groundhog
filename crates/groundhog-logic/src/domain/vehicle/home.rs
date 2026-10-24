@@ -7,7 +7,7 @@ use crate::{
         geo::GeoPosition,
         mission::{MissionItem, Position},
     },
-    wire::LATLON_SCALE,
+    wire,
 };
 
 /// Where the vehicle returns to, from `HOME_POSITION`.
@@ -19,14 +19,13 @@ pub struct Home {
 }
 
 impl Home {
-    pub(crate) fn from_message(message: &messages::HomePosition) -> Self {
-        Home {
-            position: GeoPosition::new(
-                message.latitude as f64 * LATLON_SCALE,
-                message.longitude as f64 * LATLON_SCALE,
-            ),
+    /// The home a `HOME_POSITION` reports, unless it reports no location.
+    pub(crate) fn from_message(message: &messages::HomePosition) -> Option<Self> {
+        let (lat, lon) = wire::latlon(message.latitude, message.longitude)?;
+        Some(Home {
+            position: GeoPosition::new(lat, lon),
             altitude_msl: message.altitude as f32 / 1000.0,
-        }
+        })
     }
 
     /// The home as a firmware's home-slot mission item.

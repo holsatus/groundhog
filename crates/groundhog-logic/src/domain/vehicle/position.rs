@@ -8,7 +8,7 @@ use std::{
 use mavio::default_dialect::messages;
 use nalgebra::Vector3;
 
-use crate::{domain::geo::GeoPosition, wire::LATLON_SCALE};
+use crate::domain::geo::GeoPosition;
 
 /// The most points kept in a trail.
 pub const TRAIL_MAX_LEN: usize = 1000;
@@ -52,17 +52,17 @@ impl PositionTrack {
             .map(|velocity| (velocity.x * velocity.x + velocity.y * velocity.y).sqrt())
     }
 
+    /// Fold a position report whose coordinates the caller has decoded, so
+    /// that a report without a location is never folded.
     pub(crate) fn observe_global_position_int(
         &mut self,
         message: &messages::GlobalPositionInt,
+        pos: GeoPosition,
         time: Instant,
     ) {
         self.register(GlobalPosition {
             at: time,
-            pos: GeoPosition::new(
-                message.lat as f64 * LATLON_SCALE,
-                message.lon as f64 * LATLON_SCALE,
-            ),
+            pos,
             alt_agl: message.relative_alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(
@@ -73,17 +73,17 @@ impl PositionTrack {
         self.altitude_msl = Some(message.alt as f32 / 1000.);
     }
 
+    /// Fold a position report whose coordinates the caller has decoded, so
+    /// that a report without a location is never folded.
     pub(crate) fn observe_global_position_int_cov(
         &mut self,
         message: &messages::GlobalPositionIntCov,
+        pos: GeoPosition,
         time: Instant,
     ) {
         self.register(GlobalPosition {
             at: time,
-            pos: GeoPosition::new(
-                message.lat as f64 * LATLON_SCALE,
-                message.lon as f64 * LATLON_SCALE,
-            ),
+            pos,
             alt_agl: message.relative_alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(message.vx, message.vy, message.vz));
@@ -172,38 +172,6 @@ mod tests {
             alt_agl: 0.0,
             pos: GeoPosition::new(lat, lon),
         }
-    }
-
-    #[test]
-    fn global_position_int_stores_degrees_without_swapping_lat_lon() {
-        let mut track = PositionTrack::default();
-
-        let message = messages::GlobalPositionInt {
-            time_boot_ms: 0,
-            // Raw scaled ints: 474_000_000 -> 47.4 deg lat, 85_000_000 -> 8.5 deg lon.
-            lat: 474_000_000,
-            lon: 85_000_000,
-            alt: 150_000,
-            relative_alt: 100_000,
-            vx: 0,
-            vy: 0,
-            vz: 0,
-            hdg: 0,
-        };
-
-        track.observe_global_position_int(&message, Instant::now());
-
-        let pos = track.current.expect("position recorded").pos;
-        assert!(
-            (pos.lat - 47.4).abs() < 1e-7,
-            "lat was {} (expected 47.4)",
-            pos.lat
-        );
-        assert!(
-            (pos.lon - 8.5).abs() < 1e-7,
-            "lon was {} (expected 8.5)",
-            pos.lon
-        );
     }
 
     #[test]

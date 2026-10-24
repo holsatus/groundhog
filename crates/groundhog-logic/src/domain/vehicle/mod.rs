@@ -56,7 +56,7 @@ use crate::{
         mission::OnboardMission,
         parameter::{DownloadState, Parameters},
     },
-    wire::param::ParamEncoding,
+    wire::{self, param::ParamEncoding},
 };
 
 /// How recently a vehicle has been heard from.
@@ -263,7 +263,8 @@ impl Vehicle {
     /// home slot of the last downloaded mission.
     ///
     /// A home slot at latitude and longitude zero means no home: ArduPilot
-    /// fills the slot with its home, which is all zeros until it has a fix.
+    /// fills the slot with its home, which is all zeros until it has one
+    /// (as [`wire::latlon`] reads reported positions).
     pub fn home(&self) -> Option<Home> {
         self.home_position.or_else(|| {
             let home = self.mission.onboard.as_ref()?.home.as_ref()?;
@@ -509,13 +510,23 @@ impl Vehicle {
                 self.attitude.observe_attitude_quaternion(message);
             }
             DefaultDialect::GlobalPositionInt(message) if self.is_authoritative(component) => {
-                Arc::make_mut(&mut self.position).observe_global_position_int(message, time);
+                if let Some((lat, lon)) = wire::latlon(message.lat, message.lon) {
+                    let pos = GeoPosition::new(lat, lon);
+                    Arc::make_mut(&mut self.position)
+                        .observe_global_position_int(message, pos, time);
+                }
             }
             DefaultDialect::GlobalPositionIntCov(message) if self.is_authoritative(component) => {
-                Arc::make_mut(&mut self.position).observe_global_position_int_cov(message, time);
+                if let Some((lat, lon)) = wire::latlon(message.lat, message.lon) {
+                    let pos = GeoPosition::new(lat, lon);
+                    Arc::make_mut(&mut self.position)
+                        .observe_global_position_int_cov(message, pos, time);
+                }
             }
             DefaultDialect::HomePosition(message) if self.is_authoritative(component) => {
-                self.home_position = Some(Home::from_message(message));
+                if let Some(home) = Home::from_message(message) {
+                    self.home_position = Some(home);
+                }
             }
             DefaultDialect::MissionCurrent(message) if self.is_authoritative(component) => {
                 self.mission.progress.observe_current(message);
@@ -961,7 +972,11 @@ mod tests {
         vehicle.handle_message(
             t,
             1,
-            &DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt::default()),
+            &DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+                lat: 550_000_000,
+                lon: 100_000_000,
+                ..Default::default()
+            }),
         );
 
         assert!(
@@ -998,6 +1013,34 @@ mod tests {
         let home = vehicle.home().unwrap();
         assert!((home.position.lat - 47.0).abs() < 1e-6);
         assert_eq!(home.altitude_msl, 420.0);
+    }
+
+    /// Before it has a location, ArduPilot reports one of all zeros.
+    #[test]
+    fn a_reported_position_at_zero_is_no_position() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        let report = |lat, lon| {
+            DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+                lat,
+                lon,
+                ..Default::default()
+            })
+        };
+        vehicle.handle_message(t, 1, &report(0, 0));
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::HomePosition(messages::HomePosition::default()),
+        );
+        assert!(vehicle.position.current.is_none());
+        assert!(vehicle.position.trail.is_empty());
+        assert_eq!(vehicle.home(), None);
+
+        // One coordinate at zero is a place (the equator, or Greenwich).
+        vehicle.handle_message(t, 1, &report(0, 100_000_000));
+        assert_eq!(vehicle.location(), Some(GeoPosition::new(0.0, 10.0)));
+        assert_eq!(vehicle.position.trail.len(), 1);
     }
 
     /// Before ArduPilot has a fix, its home slot reads back as all zeros.
