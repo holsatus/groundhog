@@ -25,7 +25,7 @@ use mavio::{
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
-use super::{error::MavError, locks::LockKey, transaction::Busy, *};
+use super::{error::MavError, locks::LockKey, *};
 use crate::{
     SystemId,
     domain::fleet::Fleet,
@@ -163,7 +163,7 @@ async fn command_in_progress_then_rejected() {
 }
 
 #[tokio::test]
-async fn busy_while_command_in_flight() {
+async fn a_command_in_flight_holds_its_lock() {
     let (router, _guard, mut vehicle) = setup();
     let key = LockKey::command(VEHICLE, MavCmd::RequestMessage);
     assert!(!router.is_busy(&key));
@@ -175,12 +175,6 @@ async fn busy_while_command_in_flight() {
         panic!("expected COMMAND_LONG")
     };
     assert!(router.is_busy(&key));
-
-    let second = router
-        .command(VEHICLE, commands::request_message::<SystemTime>())
-        .on_busy(Busy::Fail)
-        .await;
-    assert!(matches!(second, Err(MavError::Busy { .. })));
 
     vehicle.ack(long.command, MavResult::Accepted).await;
     task.await.unwrap().unwrap();

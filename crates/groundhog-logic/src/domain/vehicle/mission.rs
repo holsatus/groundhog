@@ -17,8 +17,6 @@ pub struct MissionProgress {
     pub state: WireMissionState,
     /// The vehicle's id of the mission it holds, when it reports one.
     pub mission_id: Option<u32>,
-    /// The last wire sequence reported as reached.
-    pub reached_seq: Option<u16>,
 }
 
 impl MissionProgress {
@@ -29,10 +27,6 @@ impl MissionProgress {
         self.state = msg.mission_state;
         // Zero means "not supported" in this extension field.
         self.mission_id = (msg.mission_id != 0).then_some(msg.mission_id);
-    }
-
-    pub(crate) fn observe_reached(&mut self, seq: u16) {
-        self.reached_seq = Some(seq);
     }
 
     /// The plan index being executed, under the firmware's layout. `None`

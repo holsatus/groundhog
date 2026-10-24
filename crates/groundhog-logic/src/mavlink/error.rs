@@ -2,8 +2,6 @@
 
 use mavio::default_dialect::enums::{MavMissionResult, MavResult};
 
-use crate::MavlinkId;
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MavError {
     #[error("no link available to reach the target")]
@@ -14,8 +12,6 @@ pub enum MavError {
     Timeout,
     #[error("command rejected with result {0:?}")]
     Rejected(MavResult),
-    #[error("a transaction to {target:?} is already in flight")]
-    Busy { target: MavlinkId },
     #[error("failed to encode message: {0}")]
     Encode(String),
     #[error("parameter value could not be encoded or decoded")]

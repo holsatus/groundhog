@@ -22,8 +22,6 @@ pub struct PositionTrack {
     pub trail: VecDeque<GlobalPosition>,
     /// Velocity in north/east/down, metres per second.
     pub velocity_ned: Option<Vector3<f32>>,
-    /// Altitude above mean sea level, metres.
-    pub altitude_msl: Option<f32>,
     revision: u64,
 }
 
@@ -70,7 +68,6 @@ impl PositionTrack {
             message.vy as f32 / 100.,
             message.vz as f32 / 100.,
         ));
-        self.altitude_msl = Some(message.alt as f32 / 1000.);
     }
 
     /// Fold a position report whose coordinates the caller has decoded, so
@@ -87,7 +84,6 @@ impl PositionTrack {
             alt_agl: message.relative_alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(message.vx, message.vy, message.vz));
-        self.altitude_msl = Some(message.alt as f32 / 1000.);
     }
 
     pub(crate) fn register(&mut self, position: GlobalPosition) {

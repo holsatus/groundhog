@@ -39,8 +39,6 @@ impl MavlinkRouter {
             target,
             command: command.into(),
             response_timeout: RESPONSE_TIMEOUT,
-            progress_timeout: PROGRESS_TIMEOUT,
-            on_busy: Busy::default(),
             retries: RETRY_ATTEMPTS,
             locks: true,
         }
@@ -117,17 +115,6 @@ impl Command {
     }
 }
 
-/// What to do if a command of the same kind is already in flight to the target.
-#[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)] // `Fail` is not used by the UI yet
-pub enum Busy {
-    /// Wait for the prior command(s) to finish
-    #[default]
-    Queue,
-    /// Fail immediately with [`MavError::Busy`]
-    Fail,
-}
-
 /// A command transaction, created by [`MavlinkRouter::command`]. Await it to run it.
 ///
 /// Resolves to the final `COMMAND_ACK` if the command was accepted, and
@@ -139,8 +126,6 @@ pub struct CommandRequest {
     target: MavlinkId,
     command: Command,
     response_timeout: Duration,
-    progress_timeout: Duration,
-    on_busy: Busy,
     retries: u8,
     /// Whether `run` acquires the command lock itself; `false` only for a
     /// caller that already holds the command lock (it would deadlock on
@@ -161,19 +146,6 @@ impl CommandRequest {
         self
     }
 
-    /// How long to wait between `IN_PROGRESS` updates.
-    #[allow(dead_code)] // Builder option not used by the UI yet
-    pub fn progress_timeout(mut self, timeout: Duration) -> Self {
-        self.progress_timeout = timeout;
-        self
-    }
-
-    #[allow(dead_code)] // Builder option not used by the UI yet
-    pub fn on_busy(mut self, on_busy: Busy) -> Self {
-        self.on_busy = on_busy;
-        self
-    }
-
     /// Skip acquiring the command lock in `run`: a caller that already holds
     /// the command lock must not deadlock on itself.
     fn without_lock(mut self) -> Self {
@@ -184,18 +156,10 @@ impl CommandRequest {
     async fn run(self) -> Result<CommandAck> {
         let kind = self.command.kind();
         let key = LockKey::command(self.target, kind);
-        let _lock = if !self.locks {
-            None
+        let _lock = if self.locks {
+            Some(self.router.lock_key(key).await)
         } else {
-            Some(match self.on_busy {
-                Busy::Queue => self.router.lock_key(key).await,
-                Busy::Fail => self
-                    .router
-                    .try_lock_key(key.clone())
-                    .ok_or(MavError::Busy {
-                        target: self.target,
-                    })?,
-            })
+            None
         };
 
         let mut pending = Pending::register(self.router.clone(), self.target, kind);
@@ -219,7 +183,7 @@ impl CommandRequest {
                     MavResult::InProgress => {
                         log::debug!("{kind:?} in progress: {}%", ack.progress);
                         pending.in_progress = true;
-                        timeout = self.progress_timeout;
+                        timeout = PROGRESS_TIMEOUT;
                     }
                     MavResult::Accepted => {
                         pending.in_progress = false;

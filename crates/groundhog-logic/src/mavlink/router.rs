@@ -327,10 +327,6 @@ impl MavlinkRouter {
     }
 
     /// Acquire the lock for `key` only if nobody else holds or waits for it.
-    pub(super) fn try_lock_key(&self, key: LockKey) -> Option<KeyGuard> {
-        self.inner.locks.try_lock(key)
-    }
-
     /// Wait for a slot in the window of PARAM_SET transactions in flight.
     pub(super) async fn param_permit(&self) -> Result<SemaphorePermit<'_>> {
         self.inner

@@ -23,8 +23,6 @@ pub enum Error {
     Rejected(Rejection),
     #[error("the vehicle refused the mission: {0}")]
     MissionRejected(MissionRejection),
-    #[error("another operation of this kind is in progress")]
-    Busy,
     #[error("the vehicle is not known")]
     UnknownVehicle,
     #[error("the vehicle's parameter encoding is not known yet; refusing to write")]
@@ -159,7 +157,6 @@ impl From<MavError> for Error {
             MavError::LinkCongested => Error::LinkCongested,
             MavError::Timeout => Error::Timeout,
             MavError::Rejected(result) => Error::Rejected(result.into()),
-            MavError::Busy { .. } => Error::Busy,
             MavError::Encode(message) => Error::Encode(message),
             MavError::ParamEncoding => Error::ParamEncoding,
             MavError::MissionFailed(result) => Error::MissionRejected(result.into()),

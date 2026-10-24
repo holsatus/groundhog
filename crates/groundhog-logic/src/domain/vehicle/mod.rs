@@ -550,9 +550,6 @@ impl Vehicle {
             DefaultDialect::MissionCurrent(message) if self.is_authoritative(component) => {
                 self.mission.progress.observe_current(message);
             }
-            DefaultDialect::MissionItemReached(message) if self.is_authoritative(component) => {
-                self.mission.progress.observe_reached(message.seq);
-            }
             DefaultDialect::Statustext(message) => {
                 let text =
                     Arc::make_mut(&mut self.status).observe_statustext(component, message, time);

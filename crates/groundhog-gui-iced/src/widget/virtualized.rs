@@ -5,10 +5,9 @@
 //! needs no application state or messages.
 //!
 //! Item heights are either given exactly with [`VirtualList::item_height`],
-//! or measured as items become visible, where unseen items are assumed to be
-//! [`VirtualList::estimated_height`] tall. With measured heights, the
-//! scrollbar and content may shift slightly as items are measured for the
-//! first time.
+//! or, by default, measured as items become visible, unseen items assumed to
+//! be `DEFAULT_ESTIMATE` tall. With measured heights, the scrollbar and
+//! content may shift slightly as items are measured for the first time.
 
 use std::{collections::HashMap, hash::Hash};
 
@@ -23,8 +22,8 @@ use iced::{
 /// Visible height assumed until the list has seen its real viewport.
 const INITIAL_HEIGHT: f32 = 2000.0;
 
-/// Default number of pixels to build beyond the visible edges.
-const DEFAULT_OVERSCAN: f32 = 200.0;
+/// Pixels to build beyond the visible edges, to avoid pop-in while scrolling.
+const OVERSCAN: f32 = 200.0;
 
 /// Default height assumed for items which have not been measured yet.
 const DEFAULT_ESTIMATE: f32 = 32.0;
@@ -45,7 +44,6 @@ where
             estimate: DEFAULT_ESTIMATE,
         },
         spacing: 0.0,
-        overscan: DEFAULT_OVERSCAN,
         keys: Vec::new(),
         children: Vec::new(),
     }
@@ -72,7 +70,6 @@ where
     key: KeyFn<'a, T, K>,
     height: Height<'a, T>,
     spacing: f32,
-    overscan: f32,
 
     // Built during layout, since only then is the visible region known
     keys: Vec<K>,
@@ -95,13 +92,6 @@ where
         self
     }
 
-    /// Measure items as they become visible, assuming this height until then.
-    #[allow(unused)]
-    pub fn estimated_height(mut self, estimate: f32) -> Self {
-        self.height = Height::Measured { estimate };
-        self
-    }
-
     /// Identify items by key rather than by index, so widget state (such as
     /// text input focus) and measured heights follow the item when the list
     /// changes.
@@ -115,7 +105,6 @@ where
             key: Box::new(move |_, item| key(item)),
             height: self.height,
             spacing: self.spacing,
-            overscan: self.overscan,
             keys: Vec::new(),
             children: Vec::new(),
         }
@@ -124,13 +113,6 @@ where
     /// Vertical spacing between items.
     pub fn spacing(mut self, spacing: f32) -> Self {
         self.spacing = spacing;
-        self
-    }
-
-    /// Pixels to build beyond the visible edges, to avoid pop-in while scrolling.
-    #[allow(unused)]
-    pub fn overscan(mut self, overscan: f32) -> Self {
-        self.overscan = overscan;
         self
     }
 }
@@ -218,8 +200,8 @@ where
         let (offset, height) = state.visible.unwrap_or((0.0, INITIAL_HEIGHT));
         let offset = offset.min((estimated_total - height).max(0.0));
 
-        let top = offset - self.overscan;
-        let bottom = offset + height + self.overscan;
+        let top = offset - OVERSCAN;
+        let bottom = offset + height + OVERSCAN;
 
         let mut old: HashMap<K, Tree> = std::mem::take(&mut state.keys)
             .into_iter()

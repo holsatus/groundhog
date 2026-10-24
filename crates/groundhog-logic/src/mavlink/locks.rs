@@ -78,22 +78,6 @@ impl LockMap {
         key_guard
     }
 
-    /// Acquire the lock for `key` only if nobody else holds or waits for it.
-    pub fn try_lock(&self, key: LockKey) -> Option<KeyGuard> {
-        let entry = self.entry(&key);
-
-        // Construct KeyGuard before attempting lock to ensure cleanup on failure
-        let mut key_guard = KeyGuard {
-            guard: None,
-            key,
-            map: self.clone(),
-        };
-
-        key_guard.guard = Some(entry.try_lock_owned().ok()?);
-
-        Some(key_guard)
-    }
-
     /// Whether the lock for `key` is currently held or waited for.
     #[cfg(test)] // Reached only through the router's test-only `is_busy`
     pub fn is_busy(&self, key: &LockKey) -> bool {
