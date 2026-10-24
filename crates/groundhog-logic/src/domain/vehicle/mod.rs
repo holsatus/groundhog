@@ -452,7 +452,9 @@ impl Vehicle {
 
                 // Only the autopilot's heartbeat describes the vehicle as a
                 // whole; a peripheral's must not overwrite type, mode or armed.
-                if self.autopilot == Some(component) {
+                // Nor may a heartbeat naming no autopilot that shares the
+                // autopilot's address: it would make the firmware generic.
+                if self.autopilot == Some(component) && message.autopilot != MavAutopilot::Invalid {
                     self.identity.observe_heartbeat(message);
                 }
             }
@@ -760,6 +762,21 @@ mod tests {
             Some(2),
             "ArduPilot seq 3 is plan item 2"
         );
+    }
+
+    #[test]
+    fn a_heartbeat_naming_no_autopilot_keeps_the_firmware() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let mode = vehicle.flight_mode();
+        assert!(mode.is_some());
+
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Invalid));
+
+        assert_eq!(vehicle.firmware().name(), "ArduPilot");
+        assert!(vehicle.mission_layout().home_slot);
+        assert_eq!(vehicle.flight_mode(), mode);
     }
 
     #[test]
