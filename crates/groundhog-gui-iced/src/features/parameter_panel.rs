@@ -411,9 +411,14 @@ impl ParameterPanel {
             loading.map_or((0, 0), |loading| (loading.loaded(), loading.expected()));
 
         // What the operator is looking at: the component, and how its
-        // values stand against the vehicle's.
+        // values stand against the vehicle's. A set left incomplete (a
+        // download that failed or was cancelled) says so here, since the
+        // activity below shows only while a download runs.
+        let incomplete = !downloading && expected > 0 && got < usize::from(expected);
         let state = if pending > 0 {
             ui::badge(format!("{pending} changed"), Tone::Warning)
+        } else if incomplete {
+            ui::badge(format!("{got} of {expected}"), Tone::Warning)
         } else if got > 0 {
             ui::badge(format!("{got} parameters"), Tone::Muted)
         } else {
@@ -479,7 +484,7 @@ impl ParameterPanel {
             _ => None,
         };
 
-        let progress = (downloading || (expected > 0 && got < usize::from(expected))).then(|| {
+        let progress = downloading.then(|| {
             ui::activity(
                 if expected > 0 {
                     format!("Downloading: {got} of {expected}")

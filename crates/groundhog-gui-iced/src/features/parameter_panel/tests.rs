@@ -261,3 +261,55 @@ async fn a_cancelled_download_ignores_its_late_result() {
         "no success notice for a download the operator stopped"
     );
 }
+
+/// Whether `panel` shows a download's activity.
+fn shows_a_download(panel: &ParameterPanel, env: &Env) -> bool {
+    let snapshot = env.fleet.snapshot();
+    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(ADDRESS.system_id())));
+    simulator
+        .find(
+            |candidate: iced_test::selector::Candidate<'_>| match candidate {
+                iced_test::selector::Candidate::Text { content, .. }
+                    if content.starts_with("Downloading") =>
+                {
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .is_ok()
+}
+
+/// An incomplete set is not a download under way: after one fails or is
+/// cancelled, the activity goes and the header counts what is missing.
+#[tokio::test]
+async fn an_incomplete_set_shows_no_download_once_it_stops() {
+    let mut env = Env::new(&[]);
+    let mut param_id = [0u8; 16];
+    param_id[..4].copy_from_slice(b"GAIN");
+    env.fleet.observe(
+        ADDRESS,
+        Instant::now(),
+        Some(&mavio::DefaultDialect::ParamValue(messages::ParamValue {
+            param_id,
+            param_value: 1.0,
+            param_type: MavParamType::Real32,
+            param_count: 2,
+            param_index: 0,
+        })),
+    );
+    let mut panel = ParameterPanel::default();
+
+    env.step(&mut panel, Message::Reload(ADDRESS));
+    assert!(shows_a_download(&panel, &env));
+
+    env.step(&mut panel, Message::CancelReload(ADDRESS));
+    assert!(!shows_a_download(&panel, &env));
+
+    let snapshot = env.fleet.snapshot();
+    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(ADDRESS.system_id())));
+    assert!(
+        simulator.find("1 of 2").is_ok(),
+        "the header counts what is missing"
+    );
+}
