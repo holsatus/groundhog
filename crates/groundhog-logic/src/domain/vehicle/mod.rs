@@ -172,6 +172,19 @@ impl Vehicle {
         Arc::make_mut(self.components.entry(component).or_default())
     }
 
+    /// `component`'s state to change, if `changes` says the change would
+    /// alter it. A component's state holds its whole parameter set, so it is
+    /// copied out of the last snapshot only for a real change, not for every
+    /// heartbeat.
+    fn component_mut_if(
+        &mut self,
+        component: u8,
+        changes: impl FnOnce(&ComponentState) -> bool,
+    ) -> Option<&mut ComponentState> {
+        let state = self.components.entry(component).or_default();
+        changes(state).then(|| Arc::make_mut(state))
+    }
+
     /// The state of `component`, if it has been heard from.
     pub fn component_state(&self, component: u8) -> Option<&ComponentState> {
         self.components.get(&component).map(Arc::as_ref)
@@ -457,12 +470,12 @@ impl Vehicle {
     ) -> Option<StatusText> {
         match message {
             DefaultDialect::Heartbeat(message) => {
+                let autopilot = Some(message.autopilot);
+                if let Some(state) =
+                    self.component_mut_if(component, |state| state.autopilot != autopilot)
                 {
-                    let state = self.component_mut(component);
-                    if state.autopilot != Some(message.autopilot) {
-                        state.autopilot = Some(message.autopilot);
-                        state.refresh_encoding();
-                    }
+                    state.autopilot = autopilot;
+                    state.refresh_encoding();
                 }
 
                 if message.autopilot != MavAutopilot::Invalid {
@@ -484,29 +497,38 @@ impl Vehicle {
             }
             DefaultDialect::AutopilotVersion(message) => {
                 let system = self.system;
-                let state = self.component_mut(component);
-                if state.capabilities != Some(message.capabilities) {
+                let capabilities = Some(message.capabilities);
+                if let Some(state) =
+                    self.component_mut_if(component, |state| state.capabilities != capabilities)
+                {
                     log::debug!(
                         "Capabilities of {system:?} component {component}: {:?}",
                         message.capabilities
                     );
-                    state.capabilities = Some(message.capabilities);
+                    state.capabilities = capabilities;
                     state.refresh_encoding();
                 }
             }
             DefaultDialect::ComponentInformationBasic(message) => {
-                let state = self.component_mut(component);
-
-                if let Some(model_name) = string_from_cstring(&message.model_name) {
-                    state.model_name = Some(model_name)
-                }
-                if let Some(vendor_name) = string_from_cstring(&message.vendor_name) {
-                    state.vendor_name = Some(vendor_name)
-                }
-
-                if state.capabilities != Some(message.capabilities) {
-                    state.capabilities = Some(message.capabilities);
-                    state.refresh_encoding();
+                let model_name = string_from_cstring(&message.model_name);
+                let vendor_name = string_from_cstring(&message.vendor_name);
+                let capabilities = Some(message.capabilities);
+                let changes = |state: &ComponentState| {
+                    (model_name.is_some() && state.model_name != model_name)
+                        || (vendor_name.is_some() && state.vendor_name != vendor_name)
+                        || state.capabilities != capabilities
+                };
+                if let Some(state) = self.component_mut_if(component, changes) {
+                    if model_name.is_some() {
+                        state.model_name = model_name;
+                    }
+                    if vendor_name.is_some() {
+                        state.vendor_name = vendor_name;
+                    }
+                    if state.capabilities != capabilities {
+                        state.capabilities = capabilities;
+                        state.refresh_encoding();
+                    }
                 }
             }
             DefaultDialect::ParamValue(message) => {
@@ -1033,6 +1055,29 @@ mod tests {
         assert_eq!(texts[0].text, "auto");
         assert_eq!(texts[1].component, 154);
         assert_eq!(texts[1].text, "gimbal");
+    }
+
+    /// A component's state holds its parameters; a heartbeat that changes
+    /// nothing must not copy them.
+    #[test]
+    fn an_unchanged_heartbeat_shares_the_component() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        vehicle.handle_message(t, 1, &param_value("GAIN", 1.0, MavParamType::Real32));
+
+        let snapshot = vehicle.clone();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        assert!(Arc::ptr_eq(
+            &snapshot.components[&1],
+            &vehicle.components[&1]
+        ));
+
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Px4));
+        assert!(!Arc::ptr_eq(
+            &snapshot.components[&1],
+            &vehicle.components[&1]
+        ));
     }
 
     #[test]
