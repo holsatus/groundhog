@@ -298,11 +298,9 @@ impl Vehicle {
     pub fn mission_status(&self) -> Option<MissionStatus> {
         let current = self.current_mission_index()?;
         let onboard = self.mission.onboard.as_deref();
-        let home_slot = usize::from(self.mission_layout().home_slot);
-        let count = onboard.map(|mission| mission.items.len()).or_else(|| {
-            let total = usize::from(self.mission.progress.total?);
-            Some(total.saturating_sub(home_slot))
-        });
+        let count = onboard
+            .map(|mission| mission.items.len())
+            .or_else(|| self.mission.progress.total.map(usize::from));
         let to_current = onboard
             .and_then(|mission| mission.items.get(current)?.position())
             .zip(self.location())
@@ -747,6 +745,42 @@ mod tests {
         assert_eq!(vehicle.mission.progress.current_seq, Some(2));
         assert_eq!(vehicle.mission.progress.total, Some(8));
         assert_eq!(vehicle.mission.progress.state, MissionState::Active);
+    }
+
+    #[test]
+    fn mission_totals_of_zero_and_max_are_no_count() {
+        for total in [0, u16::MAX] {
+            let mut vehicle = vehicle();
+            vehicle.handle_message(
+                Instant::now(),
+                1,
+                &DefaultDialect::MissionCurrent(messages::MissionCurrent {
+                    seq: 1,
+                    total,
+                    ..Default::default()
+                }),
+            );
+            assert_eq!(vehicle.mission.progress.total, None, "total {total}");
+        }
+    }
+
+    /// `MISSION_CURRENT.total` already leaves out ArduPilot's home slot.
+    #[test]
+    fn the_reported_total_counts_plan_items() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::MissionCurrent(messages::MissionCurrent {
+                seq: 1,
+                total: 3,
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(vehicle.mission_status().unwrap().count, Some(3));
     }
 
     #[test]

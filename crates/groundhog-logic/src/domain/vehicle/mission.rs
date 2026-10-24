@@ -11,7 +11,8 @@ use crate::domain::{firmware::MissionLayout, mission::OnboardMission};
 pub struct MissionProgress {
     /// The wire sequence the vehicle is executing.
     pub current_seq: Option<u16>,
-    /// The wire item count, home slot included.
+    /// The number of mission items, home slot excluded (as the message
+    /// defines it, and ArduPilot sends it). `None` while not reported.
     pub total: Option<u16>,
     pub state: WireMissionState,
     /// The vehicle's id of the mission it holds, when it reports one.
@@ -23,7 +24,8 @@ pub struct MissionProgress {
 impl MissionProgress {
     pub(crate) fn observe_current(&mut self, msg: &messages::MissionCurrent) {
         self.current_seq = Some(msg.seq);
-        self.total = Some(msg.total);
+        // Zero means "not supported" and `UINT16_MAX` "no mission".
+        self.total = (msg.total != 0 && msg.total != u16::MAX).then_some(msg.total);
         self.state = msg.mission_state;
         // Zero means "not supported" in this extension field.
         self.mission_id = (msg.mission_id != 0).then_some(msg.mission_id);
