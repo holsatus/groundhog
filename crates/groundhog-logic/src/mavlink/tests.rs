@@ -12,7 +12,7 @@ use mavio::{
     default_dialect::{
         enums::{
             MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
-            MavResult, MavSeverity, MavType,
+            MavResult, MavSeverity, MavState, MavType,
         },
         messages::{
             CommandAck, GlobalPositionInt, Heartbeat, MissionAck, MissionCount, MissionItemInt,
@@ -98,6 +98,20 @@ fn setup() -> (MavlinkRouter, LinkGuard, MockVehicle) {
     };
 
     (client, guard, fake)
+}
+
+#[tokio::test]
+async fn the_gcs_heartbeat_is_well_formed() {
+    let (_router, _guard, mut vehicle) = setup();
+
+    let frame = vehicle.rx.recv().await.expect("transport closed");
+    let Ok(DefaultDialect::Heartbeat(heartbeat)) = frame.decode::<DefaultDialect>() else {
+        panic!("expected HEARTBEAT")
+    };
+    assert_eq!(heartbeat.type_, MavType::Gcs);
+    assert_eq!(heartbeat.autopilot, MavAutopilot::Invalid);
+    assert_eq!(heartbeat.system_status, MavState::Active);
+    assert_eq!(heartbeat.mavlink_version, 3);
 }
 
 #[tokio::test]

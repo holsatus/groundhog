@@ -718,13 +718,17 @@ impl MavlinkRouter {
                         interval.tick().await;
 
                         use mavio::dialects::minimal::{
-                            enums::{MavAutopilot, MavType},
+                            enums::{MavAutopilot, MavState, MavType},
                             messages::Heartbeat,
                         };
 
+                        // The defaults would send protocol version 0 and an
+                        // uninitialised state; the message defines both.
                         let heartbeat = Heartbeat {
                             type_: MavType::Gcs,
                             autopilot: MavAutopilot::Invalid,
+                            system_status: MavState::Active,
+                            mavlink_version: 3,
                             ..Default::default()
                         };
 
