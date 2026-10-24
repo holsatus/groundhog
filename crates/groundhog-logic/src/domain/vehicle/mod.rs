@@ -261,10 +261,16 @@ impl Vehicle {
 
     /// The home position: as reported by `HOME_POSITION`, else as held in the
     /// home slot of the last downloaded mission.
+    ///
+    /// A home slot at latitude and longitude zero means no home: ArduPilot
+    /// fills the slot with its home, which is all zeros until it has a fix.
     pub fn home(&self) -> Option<Home> {
         self.home_position.or_else(|| {
             let home = self.mission.onboard.as_ref()?.home.as_ref()?;
             let position = home.position()?;
+            if position.lat == 0.0 && position.lon == 0.0 {
+                return None;
+            }
             Some(Home {
                 position: GeoPosition::new(position.lat, position.lon),
                 altitude_msl: position.alt_m,
@@ -958,6 +964,25 @@ mod tests {
         let home = vehicle.home().unwrap();
         assert!((home.position.lat - 47.0).abs() < 1e-6);
         assert_eq!(home.altitude_msl, 420.0);
+    }
+
+    /// Before ArduPilot has a fix, its home slot reads back as all zeros.
+    #[test]
+    fn a_home_slot_at_zero_is_no_home() {
+        let mut vehicle = vehicle();
+        vehicle.set_onboard_mission(OnboardMission {
+            items: Vec::new(),
+            home: Some(crate::domain::mission::MissionItem::home(
+                crate::domain::mission::Position {
+                    lat: 0.0,
+                    lon: 0.0,
+                    alt_m: 0.0,
+                },
+            )),
+            opaque_id: 0,
+        });
+
+        assert_eq!(vehicle.home(), None);
     }
 
     /// The controls a frontend offers come from the firmware's protocol and
