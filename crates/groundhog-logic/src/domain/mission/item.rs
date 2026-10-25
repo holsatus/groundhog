@@ -14,7 +14,7 @@ use mavio::default_dialect::{
 };
 
 use super::command::{CommandSpec, Location, ParamKind, spec_of};
-use crate::wire::LATLON_SCALE;
+use crate::wire::{degrees, degrees_e7};
 
 /// A WGS-84 position with altitude, in degrees and metres. The altitude's
 /// reference (home, sea level, terrain) is the item's frame.
@@ -204,8 +204,8 @@ impl MissionItem {
         }
 
         Some(Position {
-            lat: self.x as f64 * LATLON_SCALE,
-            lon: self.y as f64 * LATLON_SCALE,
+            lat: degrees(self.x),
+            lon: degrees(self.y),
             alt_m: self.z,
         })
     }
@@ -218,8 +218,8 @@ impl MissionItem {
 
     /// Move the item horizontally, keeping its altitude.
     pub fn set_lat_lon(&mut self, lat: f64, lon: f64) {
-        self.x = (lat / LATLON_SCALE).round() as i32;
-        self.y = (lon / LATLON_SCALE).round() as i32;
+        self.x = degrees_e7(lat);
+        self.y = degrees_e7(lon);
     }
 
     /// The fields the editor should present, in order.
@@ -266,14 +266,14 @@ impl MissionItem {
                 label: "Latitude",
                 units: "°",
                 kind: FieldKind::Number,
-                value: self.x as f64 * LATLON_SCALE,
+                value: degrees(self.x),
             });
             fields.push(FieldView {
                 field: Field::Longitude,
                 label: "Longitude",
                 units: "°",
                 kind: FieldKind::Number,
-                value: self.y as f64 * LATLON_SCALE,
+                value: degrees(self.y),
             });
             fields.push(FieldView {
                 field: Field::Altitude,
@@ -316,8 +316,8 @@ impl MissionItem {
         let before = self.clone();
 
         match field {
-            Field::Latitude => self.x = (value / LATLON_SCALE).round() as i32,
-            Field::Longitude => self.y = (value / LATLON_SCALE).round() as i32,
+            Field::Latitude => self.x = degrees_e7(value),
+            Field::Longitude => self.y = degrees_e7(value),
             Field::Altitude | Field::Z => self.z = value as f32,
             Field::X => self.x = value as i32,
             Field::Y => self.y = value as i32,

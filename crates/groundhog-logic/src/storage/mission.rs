@@ -20,7 +20,7 @@ use crate::{
         firmware::MissionLayout,
         mission::{MissionItem, codec},
     },
-    wire::LATLON_SCALE,
+    wire::{degrees, degrees_e7},
 };
 
 /// The layout of a WPL file: home in row 0.
@@ -73,8 +73,8 @@ pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> String {
             wire.param2,
             wire.param3,
             wire.param4,
-            wire.x as f64 * LATLON_SCALE,
-            wire.y as f64 * LATLON_SCALE,
+            degrees(wire.x),
+            degrees(wire.y),
             wire.z,
             wire.autocontinue,
         ));
@@ -195,8 +195,8 @@ fn parse_row(line: &str, line_number: usize) -> Result<MissionItemInt, WplError>
         param2,
         param3,
         param4,
-        x: (lat / LATLON_SCALE).round() as i32,
-        y: (lon / LATLON_SCALE).round() as i32,
+        x: degrees_e7(lat),
+        y: degrees_e7(lon),
         z: alt,
         mission_type: MavMissionType::Mission,
         ..Default::default()
