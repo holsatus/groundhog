@@ -185,7 +185,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Adaptive<'_, Message> {
         let limits = limits.width(Length::Fill);
         let width = limits.bounds().width;
         let spacing = self.spacing;
-        tree.state.downcast_mut::<Hidden>().0 = None;
+        let was_hidden = tree.state.downcast_mut::<Hidden>().0.take();
 
         match self.arrangement {
             Arrangement::FormRow {
@@ -301,6 +301,12 @@ impl<Message> Widget<Message, Theme, Renderer> for Adaptive<'_, Message> {
                     (3, 2)
                 };
                 tree.state.downcast_mut::<Hidden>().0 = Some(hidden);
+                // A child that sees no events cannot close what it opened (a
+                // folded menu left open): it is hidden as it was first built,
+                // and shows again that way.
+                if was_hidden != Some(hidden) {
+                    tree.children[hidden] = Tree::new(&self.children[hidden]);
+                }
                 tree.children[hidden].size = Size::ZERO;
 
                 let actions = tree.children[shown].size.width;
@@ -488,6 +494,57 @@ mod tests {
         assert_eq!(columns(300.0, 120.0, 3, 8.0), 2);
         assert_eq!(columns(100.0, 120.0, 3, 8.0), 1, "never none");
         assert_eq!(columns(f32::INFINITY, 120.0, 3, 8.0), 3);
+    }
+
+    /// A header whose tools fold into a menu below some width, its subject a
+    /// button.
+    fn folding_header() -> Element<'static, Message> {
+        crate::ui::header(
+            button(text("Subject")).on_press(Message::Pressed),
+            [],
+            [vec![
+                crate::ui::tool(crate::ui::Icon::Open, "Open a file"),
+                crate::ui::tool(crate::ui::Icon::Save, "Save to a file"),
+            ]],
+        )
+    }
+
+    /// Press and release at `at`, returning the messages it produced.
+    fn tap(simulator: &mut iced_test::Simulator<'_, Message>, at: Point) -> Vec<Message> {
+        simulator.point_at(at);
+        simulator.simulate([
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ]);
+        simulator.drain().collect()
+    }
+
+    /// A menu opened while its header was folded, then hidden by a wider
+    /// window, shows again closed: hidden, it could not have closed itself.
+    /// An open menu takes the next press outside it to close, so the subject
+    /// answers a press only while the menu is closed.
+    #[test]
+    fn a_folded_menu_hidden_and_shown_again_is_closed() {
+        let narrow = Size::new(200.0, 400.0);
+        let trigger = Point::new(narrow.width - 12.0, 14.0);
+        let subject = Point::new(12.0, 14.0);
+
+        let mut simulator =
+            iced_test::Simulator::with_size(Default::default(), narrow, folding_header());
+        assert_eq!(tap(&mut simulator, subject), [Message::Pressed]);
+        tap(&mut simulator, trigger);
+        assert!(
+            tap(&mut simulator, subject).is_empty(),
+            "the open menu took it"
+        );
+
+        tap(&mut simulator, trigger);
+        let mut simulator = simulator.resize(Size::new(800.0, 400.0)).resize(narrow);
+        assert_eq!(
+            tap(&mut simulator, subject),
+            [Message::Pressed],
+            "folded again, the menu is closed"
+        );
     }
 
     /// A form row in a window `width` wide, its control a button 100 tall,
