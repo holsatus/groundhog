@@ -92,6 +92,14 @@ impl Env {
     }
 }
 
+/// The upload of `name` in flight.
+fn in_flight(panel: &ParameterPanel, name: &str) -> Upload {
+    panel
+        .edit(ADDRESS, &ident(name))
+        .and_then(ParamEdit::upload)
+        .expect("an upload in flight")
+}
+
 #[tokio::test]
 async fn unparseable_text_is_kept_but_not_uploadable() {
     let mut env = Env::new(&[("GAIN", 1.0)]);
@@ -142,9 +150,10 @@ async fn upload_results_fold_into_the_edit() {
 
     // The vehicle clamps the value: the edit stays, marked rejected.
     let ticket = panel.uploads.ticket_of(&key).unwrap();
+    let upload = in_flight(&panel, "GAIN");
     env.step(
         &mut panel,
-        Message::Uploaded(key.clone(), ticket, Value::F32(5.0), Ok(Value::F32(3.0))),
+        Message::Uploaded(key.clone(), ticket, upload, Ok(Value::F32(3.0))),
     );
     assert_eq!(
         panel.edit(ADDRESS, &ident("GAIN")).unwrap().status,
@@ -157,9 +166,10 @@ async fn upload_results_fold_into_the_edit() {
     // Retried and accepted: the edit is done.
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
     let ticket = panel.uploads.ticket_of(&key).unwrap();
+    let upload = in_flight(&panel, "GAIN");
     env.step(
         &mut panel,
-        Message::Uploaded(key, ticket, Value::F32(5.0), Ok(Value::F32(5.0))),
+        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
     );
     assert!(panel.edit(ADDRESS, &ident("GAIN")).is_none());
 }
@@ -176,6 +186,7 @@ async fn editing_supersedes_an_upload_in_flight() {
     );
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
     let ticket = panel.uploads.ticket_of(&key).unwrap();
+    let upload = in_flight(&panel, "GAIN");
 
     env.step(
         &mut panel,
@@ -186,10 +197,39 @@ async fn editing_supersedes_an_upload_in_flight() {
     // The cancelled upload's late result is ignored.
     env.step(
         &mut panel,
-        Message::Uploaded(key, ticket, Value::F32(5.0), Ok(Value::F32(5.0))),
+        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
     );
     let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
     assert_eq!(edit.value, Some(Value::F32(6.0)));
+    assert_eq!(edit.status, EditStatus::Pending);
+}
+
+#[tokio::test]
+async fn loading_supersedes_an_upload_in_flight() {
+    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+    let key = (ADDRESS, ident("GAIN"));
+
+    env.step(
+        &mut panel,
+        Message::Edit(ADDRESS, ident("GAIN"), "5".into()),
+    );
+    env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
+    let ticket = panel.uploads.ticket_of(&key).unwrap();
+    let upload = in_flight(&panel, "GAIN");
+
+    let loaded = [(ident("GAIN"), Value::F32(7.0))].into_iter().collect();
+    let path = PathBuf::from("params.param");
+    env.step(&mut panel, Message::Loaded(path, ADDRESS, Ok(loaded)));
+    assert!(!panel.uploads.is_running(&key), "the upload was cancelled");
+
+    // The old upload's result, delivered anyway, leaves the loaded value.
+    env.step(
+        &mut panel,
+        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
+    );
+    let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
+    assert_eq!(edit.value, Some(Value::F32(7.0)));
     assert_eq!(edit.status, EditStatus::Pending);
 }
 

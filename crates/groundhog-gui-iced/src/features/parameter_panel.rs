@@ -19,7 +19,7 @@ use groundhog_logic::{
         fleet::FleetSnapshot,
         parameter::{
             DownloadState, EditStatus, LoadSummary, ParamEdit, ParamEdits, ParamValues, Parameters,
-            ReportedParam, UploadOutcome, group_of, value_to_string, value_type_name,
+            ReportedParam, Upload, UploadOutcome, group_of, value_to_string, value_type_name,
         },
         vehicle::Vehicle,
     },
@@ -96,7 +96,7 @@ pub enum Message {
     ResetAll(MavlinkId),
     Upload(MavlinkId, Ident),
     UploadAll(MavlinkId),
-    Uploaded(UploadKey, Ticket, Value, Result<Value>),
+    Uploaded(UploadKey, Ticket, Upload, Result<Value>),
     SaveDialog(MavlinkId),
     SaveTo(PathBuf, MavlinkId, ParamValues),
     Saved(PathBuf, std::result::Result<(), String>),
@@ -214,7 +214,7 @@ impl ParameterPanel {
                         .map(|ident| self.upload(address, ident, cx)),
                 );
             }
-            Message::Uploaded(key, ticket, requested, result) => {
+            Message::Uploaded(key, ticket, upload, result) => {
                 if !self.uploads.finish(&key, ticket) {
                     return Task::none();
                 }
@@ -223,7 +223,7 @@ impl ParameterPanel {
                 let outcome = self
                     .edits
                     .get_mut(&address)
-                    .and_then(|edits| edits.finish_upload(&ident, requested, result));
+                    .and_then(|edits| edits.finish_upload(&ident, upload, result));
 
                 match outcome {
                     Some(UploadOutcome::Failed(error)) => cx.notices.push(
@@ -307,6 +307,10 @@ impl ParameterPanel {
             }
             Message::Loaded(path, address, result) => match result {
                 Ok(loaded) => {
+                    // Loading replaces these edits: stop sending the old ones.
+                    for ident in loaded.keys() {
+                        self.uploads.cancel(&(address, ident.clone()));
+                    }
                     let LoadSummary { changed, skipped } = self
                         .edits
                         .entry(address)
@@ -337,7 +341,7 @@ impl ParameterPanel {
         ident: Ident,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(value) = self
+        let Some(upload) = self
             .edits
             .get_mut(&address)
             .and_then(|edits| edits.begin_upload(&ident))
@@ -350,8 +354,8 @@ impl ParameterPanel {
 
         self.uploads.start(
             key.clone(),
-            async move { client.set_parameter(ident, value).await },
-            move |ticket, result| Message::Uploaded(key, ticket, value, result),
+            async move { client.set_parameter(ident, upload.value).await },
+            move |ticket, result| Message::Uploaded(key, ticket, upload, result),
         )
     }
 

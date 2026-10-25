@@ -221,6 +221,19 @@ pub struct ParamEdit {
     pub status: EditStatus,
     /// The reported value the edit was made against.
     base: Value,
+    /// The upload of this edit in flight, if any.
+    upload: Option<Upload>,
+}
+
+/// One upload of one edit: handed out by [`ParamEdits::begin_upload`], and
+/// given back to [`ParamEdits::finish_upload`] with its result. A result whose
+/// upload is no longer the edit's (the edit was replaced, reset or uploaded
+/// again meanwhile) is ignored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Upload {
+    /// The value sent.
+    pub value: Value,
+    id: u64,
 }
 
 impl ParamEdit {
@@ -237,6 +250,7 @@ impl ParamEdit {
             text,
             status: EditStatus::Pending,
             base: current,
+            upload: None,
         })
     }
 
@@ -248,6 +262,7 @@ impl ParamEdit {
             value: Some(value),
             status: EditStatus::Pending,
             base: current,
+            upload: None,
         }
     }
 
@@ -268,12 +283,18 @@ impl ParamEdit {
     }
 
     pub fn is_uploading(&self) -> bool {
-        self.status == EditStatus::Uploading
+        self.upload.is_some()
+    }
+
+    /// The upload in flight, if any.
+    pub fn upload(&self) -> Option<Upload> {
+        self.upload
     }
 
     /// Fold an upload result in. Returns `true` when the edit is done (the
     /// component now holds the requested value) and should be dropped.
     fn finish_upload(&mut self, requested: Value, result: Result<Value, String>) -> bool {
+        self.upload = None;
         match result {
             Ok(reported) if reported == requested => true,
             Ok(reported) => {
@@ -291,13 +312,15 @@ impl ParamEdit {
 /// The operator's pending edits to one component's parameters.
 ///
 /// Uploads are the frontend's to run: [`ParamEdits::begin_upload`] hands out
-/// the value to send, and [`ParamEdits::finish_upload`] folds the result in.
-/// A frontend that lets the operator edit or reset a parameter while its
-/// upload is in flight should cancel that upload, so a late result cannot
-/// land on the newer edit.
+/// an [`Upload`] with the value to send, and [`ParamEdits::finish_upload`]
+/// folds its result in. Editing, loading or resetting a parameter replaces its
+/// edit, and a late result of the old edit's upload is then ignored, so a
+/// frontend cancels superseded uploads only to stop sending them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParamEdits {
     edits: BTreeMap<Ident, ParamEdit>,
+    /// The id of the last upload handed out.
+    last_upload: u64,
 }
 
 /// How many entries of a parameter file became edits.
@@ -398,26 +421,37 @@ impl ParamEdits {
             .filter_map(|(ident, edit)| Some((ident, edit.uploadable()?)))
     }
 
-    /// Mark the edit of `ident` as uploading and return the value to send,
+    /// Mark the edit of `ident` as uploading and return the upload to run,
     /// or `None` when there is nothing to upload (no edit, text that does not
-    /// parse, or an upload already in flight).
-    pub fn begin_upload(&mut self, ident: &Ident) -> Option<Value> {
+    /// parse or changes nothing, or an upload already in flight).
+    pub fn begin_upload(&mut self, ident: &Ident) -> Option<Upload> {
         let edit = self.edits.get_mut(ident)?;
         let value = edit.uploadable()?;
+        self.last_upload += 1;
+        let upload = Upload {
+            value,
+            id: self.last_upload,
+        };
         edit.status = EditStatus::Uploading;
-        Some(value)
+        edit.upload = Some(upload);
+        Some(upload)
     }
 
-    /// Fold the result of uploading `requested` to `ident` in: what the
-    /// component reported holding afterwards, or why the upload failed.
-    /// `None` when the edit is gone (reset meanwhile).
+    /// Fold the result of `upload` of `ident` in: what the component reported
+    /// holding afterwards, or why the upload failed. `None`, changing
+    /// nothing, when `upload` is not the edit's upload in flight: the edit
+    /// was replaced or reset meanwhile.
     pub fn finish_upload<E: std::fmt::Display>(
         &mut self,
         ident: &Ident,
-        requested: Value,
+        upload: Upload,
         result: Result<Value, E>,
     ) -> Option<UploadOutcome> {
-        let edit = self.edits.get_mut(ident)?;
+        let edit = self
+            .edits
+            .get_mut(ident)
+            .filter(|edit| edit.upload == Some(upload))?;
+        let requested = upload.value;
         let outcome = match &result {
             Ok(reported) if *reported == requested => UploadOutcome::Set,
             Ok(reported) => UploadOutcome::Rejected {
@@ -641,16 +675,16 @@ mod tests {
         let mut edits = ParamEdits::default();
         edits.edit(ident(), Some(Value::F32(1.0)), "5".into());
 
-        let requested = edits.begin_upload(&ident()).unwrap();
-        assert_eq!(requested, Value::F32(5.0));
+        let upload = edits.begin_upload(&ident()).unwrap();
+        assert_eq!(upload.value, Value::F32(5.0));
         assert_eq!(edits.begin_upload(&ident()), None, "already uploading");
 
         // The vehicle clamps the value: the edit stays, marked rejected.
-        let outcome = edits.finish_upload(&ident(), requested, Ok::<_, String>(Value::F32(3.0)));
+        let outcome = edits.finish_upload(&ident(), upload, Ok::<_, String>(Value::F32(3.0)));
         assert_eq!(
             outcome,
             Some(UploadOutcome::Rejected {
-                requested,
+                requested: upload.value,
                 reported: Value::F32(3.0)
             })
         );
@@ -660,19 +694,60 @@ mod tests {
         ));
 
         // A failure keeps the edit too, ready for a retry.
-        let requested = edits.begin_upload(&ident()).unwrap();
-        let outcome = edits.finish_upload(&ident(), requested, Err("timed out"));
+        let upload = edits.begin_upload(&ident()).unwrap();
+        let outcome = edits.finish_upload(&ident(), upload, Err("timed out"));
         assert_eq!(outcome, Some(UploadOutcome::Failed("timed out".into())));
 
         // Retried and accepted: the edit is done.
-        let requested = edits.begin_upload(&ident()).unwrap();
-        let outcome = edits.finish_upload(&ident(), requested, Ok::<_, String>(requested));
+        let upload = edits.begin_upload(&ident()).unwrap();
+        let outcome = edits.finish_upload(&ident(), upload, Ok::<_, String>(upload.value));
         assert_eq!(outcome, Some(UploadOutcome::Set));
         assert!(edits.is_empty());
 
         // A result for an edit that is gone changes nothing.
-        let late = edits.finish_upload(&ident(), requested, Ok::<_, String>(requested));
+        let late = edits.finish_upload(&ident(), upload, Ok::<_, String>(upload.value));
         assert_eq!(late, None);
+    }
+
+    /// Replacing an edit by `replace` while its upload runs leaves the new
+    /// edit alone whatever the old upload's result.
+    fn assert_replaced_edit_ignores_old_results(replace: impl Fn(&mut ParamEdits)) {
+        let reported = reported(&[("PARAM_ONE", 1.0)]);
+        for result in [Ok(Value::F32(5.0)), Err("timed out")] {
+            let mut edits = ParamEdits::default();
+            edits.edit(ident(), reported.value(&ident()), "5".into());
+            let upload = edits.begin_upload(&ident()).unwrap();
+
+            replace(&mut edits);
+            let replaced = edits.get(&ident()).cloned();
+
+            assert_eq!(edits.finish_upload(&ident(), upload, result), None);
+            assert_eq!(edits.get(&ident()).cloned(), replaced);
+        }
+    }
+
+    #[test]
+    fn a_result_for_a_loaded_over_edit_is_ignored() {
+        let reported = reported(&[("PARAM_ONE", 1.0)]);
+        let loaded: ParamValues = [(ident(), Value::F32(7.0))].into_iter().collect();
+        assert_replaced_edit_ignores_old_results(|edits| {
+            edits.load(Some(&reported), &loaded);
+        });
+    }
+
+    #[test]
+    fn a_result_for_a_retyped_edit_is_ignored() {
+        assert_replaced_edit_ignores_old_results(|edits| {
+            edits.edit(ident(), Some(Value::F32(1.0)), "5".into());
+        });
+    }
+
+    #[test]
+    fn a_result_for_a_reset_and_retyped_edit_is_ignored() {
+        assert_replaced_edit_ignores_old_results(|edits| {
+            edits.reset(&ident());
+            edits.edit(ident(), Some(Value::F32(1.0)), "6".into());
+        });
     }
 
     #[test]
