@@ -101,6 +101,9 @@ pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> Result<St
 /// A [`WplError`] naming the line: a missing or unknown header, a row whose
 /// fields are not the eleven a WPL row has, or a field that is not a number.
 pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
+    // A UTF-8 BOM is not part of the header, but editors add it.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+
     let mut rows = Vec::new();
     let mut header_seen = false;
 
@@ -129,8 +132,15 @@ pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
     }
 
     let mission = codec::decode(&rows, 0, WPL_LAYOUT);
+
+    // The format requires a home row; a zero one is its placeholder, not a
+    // real home (the same rule as other "unknown" sentinels).
+    let home = mission
+        .home
+        .filter(|home| home.x != 0 || home.y != 0 || home.z != 0.0);
+
     Ok(WplMission {
-        home: mission.home,
+        home,
         items: mission.items,
     })
 }
@@ -193,8 +203,28 @@ fn parse_row(line: &str, line_number: usize) -> Result<RawMissionItem, WplError>
     let param4 = float(7, "param4")? as f32;
     let lat = float(8, "latitude")?;
     let lon = float(9, "longitude")?;
-    let alt = float(10, "altitude")? as f32;
+    let alt = float(10, "altitude")?;
     let autocontinue = integer(11, "autocontinue")? != 0;
+
+    if !(-90.0..=90.0).contains(&lat) {
+        return Err(WplError::at(
+            line_number,
+            format!("latitude out of range: {lat}"),
+        ));
+    }
+    if !(-180.0..=180.0).contains(&lon) {
+        return Err(WplError::at(
+            line_number,
+            format!("longitude out of range: {lon}"),
+        ));
+    }
+    if !alt.is_finite() {
+        return Err(WplError::at(
+            line_number,
+            format!("altitude is not a finite number: {alt}"),
+        ));
+    }
+    let alt = alt as f32;
 
     Ok(RawMissionItem {
         frame: import_frame(frame, command),
@@ -332,6 +362,50 @@ mod tests {
         let written = write_wpl(&mission.items, mission.home.as_ref()).expect("fits in a file");
         let reparsed = parse_wpl(&written).expect("the file round-trips");
         assert_eq!(reparsed.items, mission.items);
+    }
+
+    /// The format needs a home row, but its zero placeholder is not a real
+    /// home: a round trip keeps a real one and invents none.
+    #[test]
+    fn a_saved_home_survives_and_a_placeholder_does_not() {
+        let items = vec![waypoint(47.4, 8.5)];
+        let home = MissionItem::home(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 400.0,
+        });
+
+        let text = write_wpl(&items, Some(&home)).expect("fits in a file");
+        assert_eq!(
+            parse_wpl(&text).expect("valid file").home,
+            Some(home),
+            "a real home comes back"
+        );
+
+        let text = write_wpl(&items, None).expect("fits in a file");
+        assert_eq!(
+            parse_wpl(&text).expect("valid file").home,
+            None,
+            "the zero placeholder is not taken for a home"
+        );
+    }
+
+    #[test]
+    fn a_utf8_bom_is_stripped() {
+        let text = "\u{feff}QGC WPL 110\n\
+                    0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n";
+        assert!(parse_wpl(text).is_ok());
+    }
+
+    #[test]
+    fn coordinates_outside_their_range_are_refused() {
+        for (lat, lon) in [(95.0, 8.0), (-91.0, 8.0), (47.0, 181.0), (47.0, -181.0)] {
+            let text = format!("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t{lat}\t{lon}\t400\t1\n");
+            assert!(
+                parse_wpl(&text).is_err(),
+                "({lat}, {lon}) is not a coordinate"
+            );
+        }
     }
 
     #[test]

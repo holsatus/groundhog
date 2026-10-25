@@ -101,41 +101,6 @@ whether the draft has edits.
 **Fix:** reword the banner to match the confirmation, or make the banner hide
 once the operator has been warned.
 
-### MISSION-5 · `nan`/`inf` are accepted for required fields
-**P2** · Effort S · From REVIEW area 5
-
-`set_field_from_str` accepts `"nan"` for any field
-(`domain/mission/item.rs:354`), and `inf` parses as a number. A NaN latitude
-becomes `x = 0` (`degrees_e7` saturates the cast) and an infinite altitude is
-uploaded.
-
-**Fix:** only accept `nan` for optional fields; reject non-finite values for
-required coordinates and for altitude.
-
-**Test:** setting latitude to `nan` and altitude to `inf` is refused.
-
-### MISSION-6 · Saving WPL fabricates a home, and loading drops a real one
-**P2** · Effort S/M · From REVIEW area 5
-
-`write_wpl` calls `codec::encode`, which inserts `(0,0,0)` when no home is
-given (`storage/mission.rs:63`, `codec.rs:27-35`). `parse_wpl` now returns
-`WplMission.home`, but the GUI's `Loaded` uses only `mission.items`
-(`features/mission/mod.rs:301-311`), so load → save loses a real home and
-invents a fake one.
-
-**Fix:** keep the loaded home in the draft (or pass it back on save) and refuse
-to write a home row when none is known, or write a file without one.
-
-### MISSION-7 · A WPL file without a home row loses its first item
-**P3** · Effort S · From REVIEW area 5
-
-`parse_wpl` always decodes under `WPL_LAYOUT` (home slot) and takes seq 0 as
-home (`storage/mission.rs:121`, `codec.rs:55-75`); the `index`/`current`
-columns are parsed and discarded (`:99-107,165-167`).
-
-**Fix:** detect whether row 0 is home from the current/index columns or the
-header convention, and keep it as an item when it is not.
-
 ### MISSION-8 · `MissionDraft::follow` records `seen` before declining
 **P3** · Effort S · From LOGIC-14.1 / CODE-F11.4
 
@@ -146,37 +111,6 @@ local edits.
 
 **Fix:** either skip the `seen` update when declining, or document why the
 one-shot behaviour is intended and test it.
-
-### MISSION-9 · `fields()` ignores the frame that `position()` honours
-**P2** · Effort S/M · From REVIEW area 5
-
-`fields()` presents lat/lon in degrees for every positional command
-(`item.rs:262-284`), while `position()` returns `None` for local frames
-(`:192-211`). A local-frame item is edited as degrees and the map shows
-nothing.
-
-**Fix:** drive the editor fields from the same frame check, or carry the frame
-explicitly in `FieldView`.
-
-### MISSION-10 · Jump targets can outlive their item
-**P3** · Effort S · From REVIEW area 5
-
-`Plan::remove` maps `target > index` down but leaves `target == index`
-(`plan.rs:141-154`); removing the last item can leave a `DO_JUMP` pointing at
-`len`. `codec::shift_targets` clamps a below-home target to 0 rather than
-skipping it (`codec.rs:81-88`).
-
-**Fix:** map a removed target to its successor (or clear it when there is
-none); skip invalid targets instead of clamping.
-
-### MISSION-11 · WPL BOM and out-of-range coordinates
-**P3** · Effort S · From REVIEW area 5
-
-A UTF-8 BOM breaks the header (`storage/mission.rs:99-107`), and out-of-range
-lat/lon saturate to `i32::MAX` and import as a plausible waypoint
-(`wire/mod.rs:23`).
-
-**Fix:** strip the BOM; reject coordinates outside ±90/±180.
 
 ## Parameters
 
@@ -692,7 +626,8 @@ Verified at `5389934`; do not re-open without new evidence.
   channel only with other sets); areas 3, 4, 6 and 8 (C-cast saturation and
   64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
   model with stale values removed); area 1 (transaction cancellations reach a
-  congested queue); areas 7 and 8 (a calibration that waits,
+  congested queue); area 5 (a mission's home, frames, validation and jump
+  targets at the boundaries); areas 7 and 8 (a calibration that waits,
   times out, reboots and explains cancelling; one way to end a session);
   areas 9 and 11 (an overlay that fits the window and keeps clear of the
   system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
@@ -752,6 +687,10 @@ Verified at `5389934`; do not re-open without new evidence.
 
 Real observations that are not worth a dedicated change; fix them only while
 already editing the file.
+
+- **A WPL file without a home row (MISSION-7):** row 0 stays home. Detecting
+  the difference from the `current`/`index` columns risks dropping a real item
+  or inventing a waypoint at home.
 
 - Mechanical: derive ordering, `Default` vs `empty()`, module declarations at
   the bottom of `app.rs`, banner comments, constructor naming, adjacent literal

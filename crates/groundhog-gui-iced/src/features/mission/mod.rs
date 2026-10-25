@@ -19,8 +19,8 @@ use groundhog_logic::{
         fleet::FleetSnapshot,
         geo::GeoPosition,
         mission::{
-            Caution, Field, ItemId, MissionAction, MissionDraft, MissionPlan, OnboardMission,
-            Refusal, SyncStatus, Verdict,
+            Caution, Field, ItemId, MissionAction, MissionDraft, MissionItem, MissionPlan,
+            OnboardMission, Refusal, SyncStatus, Verdict,
         },
     },
     services::{Progress, Result},
@@ -304,8 +304,10 @@ impl MissionEditor {
                 match result {
                     Ok(mission) => {
                         let count = mission.items.len();
+                        let home = mission.home.and_then(|home| home.position());
                         let draft = self.draft_mut(plan);
                         draft.plan_mut().set_items(mission.items);
+                        draft.plan_mut().set_home(home);
                         draft.select(None);
                         cx.notices.push(
                             Notice::success(format!("Loaded {count} mission items"))
@@ -692,7 +694,11 @@ impl MissionEditor {
         };
 
         let items = draft.plan().mission_items();
-        let home = plan
+        // A draft for a vehicle takes the home the vehicle reports; otherwise
+        // the home the file planned is written back, and only when neither is
+        // known does the format's zero placeholder stand in.
+        let planned_home = draft.plan().home().map(MissionItem::home);
+        let vehicle_home = plan
             .and_then(|system| cx.fleet.vehicle(system))
             .and_then(|vehicle| {
                 vehicle
@@ -700,6 +706,7 @@ impl MissionEditor {
                     .map(|home| home.mission_item())
                     .or_else(|| vehicle.mission.onboard.as_ref()?.home.clone())
             });
+        let home = vehicle_home.or(planned_home);
 
         iced_runtime::task::blocking(move |mut sender| {
             let result = write_wpl(&items, home.as_ref())

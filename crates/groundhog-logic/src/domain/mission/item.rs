@@ -277,27 +277,49 @@ impl MissionItem {
         };
 
         if spec.is_positional() {
-            fields.push(FieldView {
-                field: Field::Latitude,
-                label: "Latitude",
-                units: "°",
-                kind: FieldKind::Number,
-                value: degrees(self.x),
-            });
-            fields.push(FieldView {
-                field: Field::Longitude,
-                label: "Longitude",
-                units: "°",
-                kind: FieldKind::Number,
-                value: degrees(self.y),
-            });
-            fields.push(FieldView {
-                field: Field::Altitude,
-                label: "Altitude",
-                units: "m",
-                kind: FieldKind::Number,
-                value: self.z as f64,
-            });
+            if self.has_global_frame() {
+                fields.push(FieldView {
+                    field: Field::Latitude,
+                    label: "Latitude",
+                    units: "°",
+                    kind: FieldKind::Number,
+                    value: degrees(self.x),
+                });
+                fields.push(FieldView {
+                    field: Field::Longitude,
+                    label: "Longitude",
+                    units: "°",
+                    kind: FieldKind::Number,
+                    value: degrees(self.y),
+                });
+                fields.push(FieldView {
+                    field: Field::Altitude,
+                    label: "Altitude",
+                    units: "m",
+                    kind: FieldKind::Number,
+                    value: self.z as f64,
+                });
+            } else {
+                // Local frames are not latitudes and longitudes: edit the
+                // wire fields, as for a command the table does not know.
+                for (field, label, value) in [
+                    (Field::X, "X", self.x as f64),
+                    (Field::Y, "Y", self.y as f64),
+                    (Field::Z, "Z", self.z as f64),
+                ] {
+                    fields.push(FieldView {
+                        field,
+                        label,
+                        units: "",
+                        kind: if field == Field::Z {
+                            FieldKind::Number
+                        } else {
+                            FieldKind::Integer
+                        },
+                        value,
+                    });
+                }
+            }
         }
 
         for (index, param) in spec.params.iter().enumerate() {
@@ -356,9 +378,10 @@ impl MissionItem {
         *self != before
     }
 
-    /// Set one field from editor text. Blank text sets an optional number to
-    /// "vehicle default" (`NaN`); other malformed text changes nothing.
-    /// Returns whether the item changed.
+    /// Set one field from editor text. Blank text (or `nan`) sets an optional
+    /// number to "vehicle default"; a non-finite value is refused everywhere
+    /// else, as are latitudes and longitudes outside ±90/±180. Other malformed
+    /// text changes nothing. Returns whether the item changed.
     pub fn set_field_from_str(&mut self, field: Field, text: &str) -> bool {
         let trimmed = text.trim();
 
@@ -368,6 +391,9 @@ impl MissionItem {
             .any(|view| view.field == field && view.kind == FieldKind::OptionalNumber);
 
         let value = if (trimmed.is_empty() && optional) || trimmed.eq_ignore_ascii_case("nan") {
+            if !optional {
+                return false;
+            }
             f64::NAN
         } else {
             match trimmed.parse::<f64>() {
@@ -375,6 +401,19 @@ impl MissionItem {
                 Err(_) => return false,
             }
         };
+
+        if value.is_infinite() {
+            return false;
+        }
+        if value.is_nan() {
+            return optional && self.set_field(field, value);
+        }
+        if field == Field::Latitude && !(-90.0..=90.0).contains(&value) {
+            return false;
+        }
+        if field == Field::Longitude && !(-180.0..=180.0).contains(&value) {
+            return false;
+        }
 
         self.set_field(field, value)
     }
@@ -494,6 +533,54 @@ mod tests {
         assert!(
             item.position().is_none(),
             "an unknown frame is not read as degrees"
+        );
+    }
+
+    /// Only fields that mean "vehicle default" may be NaN, and no field may
+    /// be infinite; a coordinate outside its range would be sent as nonsense.
+    #[test]
+    fn required_fields_refuse_non_finite_and_out_of_range_values() {
+        let mut item = MissionItem::waypoint(at(47.0, 8.0, 50.0));
+
+        assert!(!item.set_field_from_str(Field::Latitude, "nan"));
+        assert!(!item.set_field_from_str(Field::Altitude, "nan"));
+        assert!(!item.set_field_from_str(Field::Altitude, "inf"));
+        assert!(!item.set_field_from_str(Field::Longitude, "-inf"));
+        assert_eq!(item.position(), Some(at(47.0, 8.0, 50.0)), "unchanged");
+
+        assert!(!item.set_field_from_str(Field::Latitude, "95"));
+        assert!(!item.set_field_from_str(Field::Longitude, "-181"));
+        assert!(item.set_field_from_str(Field::Latitude, "-45.5"));
+        assert!(item.set_field_from_str(Field::Longitude, "179.9"));
+
+        // The yaw is optional: blank and `nan` both mean "vehicle default".
+        assert!(item.set_field_from_str(Field::Param(3), "90"));
+        assert_eq!(item.params[3], 90.0);
+        assert!(item.set_field_from_str(Field::Param(3), ""));
+        assert!(item.params[3].is_nan());
+        assert!(item.set_field_from_str(Field::Param(3), "45"));
+        assert!(item.set_field_from_str(Field::Param(3), "nan"));
+        assert!(item.params[3].is_nan());
+    }
+
+    /// A local frame is not degrees: the editor shows the raw wire fields,
+    /// as the map draws nothing for it.
+    #[test]
+    fn a_local_frame_item_shows_raw_fields() {
+        let mut item = MissionItem::waypoint(at(47.0, 8.0, 50.0));
+        item.frame = MavFrame::LocalNed as u8;
+
+        let fields = item.fields();
+        assert!(fields.iter().any(|view| view.field == Field::X));
+        assert!(fields.iter().any(|view| view.field == Field::Y));
+        assert!(!fields.iter().any(|view| view.field == Field::Latitude));
+        assert!(item.position().is_none());
+
+        item.frame = MavFrame::GlobalRelativeAltInt as u8;
+        assert!(
+            item.fields()
+                .iter()
+                .any(|view| view.field == Field::Latitude)
         );
     }
 

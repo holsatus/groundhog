@@ -47,6 +47,8 @@ impl PlanItem {
 #[derive(Debug, Clone, Default)]
 pub struct MissionPlan {
     items: Vec<PlanItem>,
+    /// The home a file planned, when the plan is not tied to a vehicle's own.
+    home: Option<Position>,
     next_id: u32,
     revision: u64,
 }
@@ -86,6 +88,19 @@ impl MissionPlan {
             .iter()
             .find(|item| item.id == id)
             .map(|item| &item.item)
+    }
+
+    /// The home the plan was loaded with, if any.
+    pub fn home(&self) -> Option<Position> {
+        self.home
+    }
+
+    /// Set the planned home. `None` forgets it, so saving writes no real home.
+    pub fn set_home(&mut self, home: Option<Position>) {
+        if self.home != home {
+            self.home = home;
+            self.touch();
+        }
     }
 
     /// The items without their ids, as they would be uploaded.
@@ -142,9 +157,15 @@ impl MissionPlan {
         let index = self.index_of(id)?;
         let removed = self.items.remove(index);
 
+        // A target at the removed item follows the item that takes its place;
+        // removing the last item sends it to the new last one, never past the
+        // plan.
+        let last = self.items.len();
         self.remap_targets(|target| {
             if target > index {
                 Some(target - 1)
+            } else if target == index {
+                Some(index.min(last.saturating_sub(1)))
             } else {
                 Some(target)
             }
@@ -220,6 +241,7 @@ impl MissionPlan {
 
     pub fn clear(&mut self) {
         self.set_items([]);
+        self.set_home(None);
     }
 
     /// Each positioned item with its id and index, in plan order.
@@ -410,6 +432,50 @@ mod tests {
         assert!(plan.move_up(second));
         assert_eq!(plan.get(jump).unwrap().params[0], 0.0, "followed the move");
         assert_eq!(plan.index_of(second), Some(0));
+    }
+
+    /// A removed jump target follows its successor, and never points past
+    /// the plan.
+    #[test]
+    fn removing_a_jump_target_keeps_it_in_the_plan() {
+        let mut plan = MissionPlan::default();
+        plan.push(waypoint(1.0));
+        let second = plan.push(waypoint(2.0));
+        let third = plan.push(waypoint(3.0));
+        let jump = plan.push(jump_to(1)); // -> second
+
+        plan.remove(second);
+        let target = plan.get(jump).unwrap().params[0];
+        assert_eq!(target, 1.0, "the item that took its place");
+        assert_eq!(plan.index_of(third), Some(1));
+
+        // Removing the last item leaves the target inside the plan.
+        plan.remove(third);
+        let target = plan.get(jump).unwrap().params[0];
+        assert!(
+            target < plan.len() as f32,
+            "a target never points past the plan"
+        );
+    }
+
+    #[test]
+    fn a_planned_home_is_kept_until_the_plan_is_cleared() {
+        let mut plan = MissionPlan::default();
+        let home = Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 400.0,
+        };
+
+        assert_eq!(plan.home(), None);
+        plan.set_home(Some(home));
+        assert_eq!(plan.home(), Some(home));
+
+        plan.push(waypoint(1.0));
+        assert_eq!(plan.home(), Some(home), "editing keeps the planned home");
+
+        plan.clear();
+        assert_eq!(plan.home(), None);
     }
 
     #[test]

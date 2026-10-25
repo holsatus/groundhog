@@ -32,7 +32,7 @@ sections of the issue list.
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
 | 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Done |
-| 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-7, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Todo |
+| 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Done |
 | 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Todo |
 | 13 | [Router link lifecycle](#wp13--router-link-lifecycle) | PROTO-4, PROTO-5 | P2 | — | Todo |
 | 14 | [Duplicate suppression by stream position](#wp14--duplicate-suppression-by-stream-position) | PROTO-2 | P2 | — | Todo |
@@ -291,8 +291,8 @@ next one; dropping a command future sends `COMMAND_CANCEL`, even when the
 control queue is momentarily full.
 
 ### WP11 · Mission model at the boundaries
-**Closes:** MISSION-5, MISSION-6, MISSION-7, MISSION-9, MISSION-10, MISSION-11 ·
-**After:** 2 · **Status:** Todo
+**Closes:** MISSION-5, MISSION-6, MISSION-9, MISSION-10, MISSION-11 ·
+**After:** 2 · **Status:** Done
 
 - **Planned home** (MISSION-6): `MissionPlan` gets `home: Option<Position>`,
   set from a loaded file and used when saving one. A WPL home of exactly zero

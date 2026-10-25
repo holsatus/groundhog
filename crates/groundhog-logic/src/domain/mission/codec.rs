@@ -105,13 +105,18 @@ pub(crate) fn decode(
     }
 }
 
-/// Move every item reference of `item` by `by`, saturating at zero.
+/// Move every item reference of `item` by `by`. A target that would fall
+/// before the plan is left as it is rather than clamped: an invalid target
+/// must not silently become the first item.
 fn shift_targets(item: &mut MissionItem, by: i64) {
     let slots: Vec<usize> = item.item_index_slots().collect();
     for slot in slots {
         let target = item.params[slot];
         if target.is_finite() && target >= 0.0 {
-            item.params[slot] = (target as i64 + by).max(0) as f32;
+            let shifted = target as i64 + by;
+            if shifted >= 0 {
+                item.params[slot] = shifted as f32;
+            }
         }
     }
 }
