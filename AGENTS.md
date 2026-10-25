@@ -465,7 +465,10 @@ the link is configured not to. The status the UI shows is the supervisor's own
   there. In the library crates it only finds unused items that are not
   exported, so keep their public API to what a frontend needs: give
   backend-internal items `pub(crate)` (which the compiler checks again), and
-  remove a `pub` item when the last frontend use goes.
+  remove a `pub` item when the last frontend use goes. Both library crates
+  enable `unreachable_pub`, so a `pub` item that no frontend can reach (one
+  in a private module, not re-exported) is an error under CI's
+  `-D warnings`.
 - **Dependencies:** one crate's dependency goes in that crate's manifest.
   Only a dependency more than one crate uses goes in the root's
   `[workspace.dependencies]`, so they agree on its version. iced, in

@@ -21,7 +21,7 @@ impl mavio::io::AsyncWrite<std::io::Error> for BoxedWriter {
 }
 
 /// Alias for the versionless boxed async reader for type erasure
-pub type AsyncReceiver = mavio::io::AsyncReceiver<
+pub(crate) type AsyncReceiver = mavio::io::AsyncReceiver<
     std::io::Error,
     BoxedReader,
     mavio::prelude::Versionless,
@@ -29,15 +29,15 @@ pub type AsyncReceiver = mavio::io::AsyncReceiver<
 >;
 
 /// Construct a new [`AsyncReceiver`]
-pub fn new_async_receiver<R: DynAsyncReader + 'static>(reader: R) -> AsyncReceiver {
+pub(crate) fn new_async_receiver<R: DynAsyncReader + 'static>(reader: R) -> AsyncReceiver {
     mavio::io::AsyncReceiver::new(BoxedReader(Box::new(reader))).make_stateful()
 }
 
 /// Alias for the versionless boxed async writer for type erasure
-pub type AsyncSender =
+pub(crate) type AsyncSender =
     mavio::io::AsyncSender<std::io::Error, BoxedWriter, mavio::prelude::Versionless>;
 
 /// Construct a new [`AsyncSender`]
-pub fn new_async_sender<W: DynAsyncWriter + 'static>(writer: W) -> AsyncSender {
+pub(crate) fn new_async_sender<W: DynAsyncWriter + 'static>(writer: W) -> AsyncSender {
     mavio::io::AsyncSender::new(BoxedWriter(Box::new(writer)))
 }

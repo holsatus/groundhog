@@ -17,6 +17,10 @@
 //! The MAVLink middleware (`mavlink`), the transports (inside `link`) and the
 //! wire codecs (`wire`) are private to this crate.
 
+// Public items in private modules are invisible to the dead-code and
+// visibility checks the seam relies on; this makes them visible.
+#![warn(unreachable_pub)]
+
 mod address;
 pub mod domain;
 pub mod link;

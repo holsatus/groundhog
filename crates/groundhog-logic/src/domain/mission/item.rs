@@ -59,10 +59,10 @@ impl PartialEq for MissionItem {
 }
 
 /// The frame freshly placed positional items use: altitude above home.
-pub const DEFAULT_FRAME: MavFrame = MavFrame::GlobalRelativeAltInt;
+pub(super) const DEFAULT_FRAME: MavFrame = MavFrame::GlobalRelativeAltInt;
 
 /// The frame of items without a location.
-pub const NON_POSITIONAL_FRAME: MavFrame = MavFrame::Mission;
+pub(super) const NON_POSITIONAL_FRAME: MavFrame = MavFrame::Mission;
 
 /// One editable field of an item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

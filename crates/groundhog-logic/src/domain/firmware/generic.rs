@@ -4,7 +4,7 @@
 use super::{Firmware, FlightMode};
 use crate::{domain::vehicle::class::VehicleClass, wire::param::ParamEncoding};
 
-pub struct Generic;
+pub(super) struct Generic;
 
 impl Firmware for Generic {
     fn name(&self) -> &'static str {

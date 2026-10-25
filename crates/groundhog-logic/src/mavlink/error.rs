@@ -24,4 +24,4 @@ pub enum MavError {
     ResourceClosed,
 }
 
-pub type Result<T, E = MavError> = std::result::Result<T, E>;
+pub(crate) type Result<T, E = MavError> = std::result::Result<T, E>;

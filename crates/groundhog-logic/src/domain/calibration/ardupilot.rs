@@ -33,7 +33,7 @@ use super::{
 use crate::domain::vehicle::class::VehicleClass;
 
 /// The ArduPilot calibration protocol.
-pub struct ArduPilotCalibration;
+pub(crate) struct ArduPilotCalibration;
 
 /// `ACCELCAL_VEHICLE_POS_SUCCESS`.
 const POSITION_SUCCESS: f32 = 16_777_215.0;

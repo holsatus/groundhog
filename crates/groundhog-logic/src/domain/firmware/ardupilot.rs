@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// The ArduPilot adapter.
-pub struct ArduPilot;
+pub(crate) struct ArduPilot;
 
 const fn m(name: &'static str, kind: K, number: u32) -> FlightMode {
     FlightMode::new(name, kind, number)
@@ -31,7 +31,7 @@ const fn r(name: &'static str, kind: K, number: u32) -> FlightMode {
     FlightMode::reported(name, kind, number)
 }
 
-pub const COPTER: &[FlightMode] = &[
+pub(crate) const COPTER: &[FlightMode] = &[
     m("Stabilize", K::Stabilized, 0),
     m("Acro", K::Manual, 1),
     m("AltHold", K::AltitudeHold, 2),
@@ -60,7 +60,7 @@ pub const COPTER: &[FlightMode] = &[
     m("Turtle", K::Other, 28),
 ];
 
-pub const PLANE: &[FlightMode] = &[
+pub(crate) const PLANE: &[FlightMode] = &[
     m("Manual", K::Manual, 0),
     m("Circle", K::Other, 1),
     m("Stabilize", K::Stabilized, 2),
@@ -111,7 +111,7 @@ fn quadplane_disabled(parameters: Option<&Parameters>) -> bool {
     }
 }
 
-pub const ROVER: &[FlightMode] = &[
+pub(crate) const ROVER: &[FlightMode] = &[
     m("Manual", K::Manual, 0),
     m("Acro", K::Other, 1),
     m("Steering", K::Stabilized, 3),
@@ -128,7 +128,7 @@ pub const ROVER: &[FlightMode] = &[
     r("Initialising", K::Other, 16),
 ];
 
-pub const SUB: &[FlightMode] = &[
+pub(crate) const SUB: &[FlightMode] = &[
     m("Stabilize", K::Stabilized, 0),
     m("Acro", K::Other, 1),
     m("Depth Hold", K::AltitudeHold, 2),
@@ -142,7 +142,7 @@ pub const SUB: &[FlightMode] = &[
     m("Surftrak", K::Other, 21),
 ];
 
-pub const TRACKER: &[FlightMode] = &[
+pub(crate) const TRACKER: &[FlightMode] = &[
     m("Manual", K::Manual, 0),
     m("Stop", K::Other, 1),
     m("Scan", K::Other, 2),

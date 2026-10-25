@@ -13,7 +13,10 @@ use std::collections::{BTreeMap, HashSet};
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::MavParamType;
 
-use crate::wire::param::ParamEncoding;
+/// How a component encodes parameter values on the wire: vocabulary for
+/// [`Vehicle::param_encoding`](super::vehicle::Vehicle::param_encoding) and
+/// the firmware adapters. Encoding and decoding stay inside the crate.
+pub use crate::wire::param::ParamEncoding;
 
 /// A plain set of parameter values, as read from or written to a file.
 pub type ParamValues = BTreeMap<Ident, Value>;

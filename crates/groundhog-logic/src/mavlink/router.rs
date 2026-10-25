@@ -104,7 +104,7 @@ const BULK_QUEUE_CAPACITY: usize = 1024;
 
 /// Which outbound queue a frame joins on its link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Priority {
+pub(super) enum Priority {
     /// Heartbeats, commands and transaction traffic: always sent first.
     #[default]
     Control,
@@ -129,7 +129,7 @@ pub enum Event {
 }
 
 /// The receiving end of the router's lossless event channel.
-pub type EventReceiver = mpsc::Receiver<Event>;
+pub(crate) type EventReceiver = mpsc::Receiver<Event>;
 
 struct MessageFilter {
     filter: Box<dyn Fn(&InboundMessage) -> bool + Send>,
@@ -305,7 +305,7 @@ impl MavlinkRouter {
     /// Whether a transaction for `key` is currently in flight or queued.
     /// Useful for reflecting in the UI whether an operation is ongoing.
     #[cfg(test)] // Only exercised by the middleware tests
-    pub fn is_busy(&self, key: &LockKey) -> bool {
+    pub(super) fn is_busy(&self, key: &LockKey) -> bool {
         self.inner.locks.is_busy(key)
     }
 

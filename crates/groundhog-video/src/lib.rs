@@ -18,6 +18,10 @@
 //! The receiver reconnects by itself, with backoff, after the stream
 //! fails or stalls.
 
+// Public items in private modules are invisible to the dead-code and
+// visibility checks the seam relies on; this makes them visible.
+#![warn(unreachable_pub)]
+
 mod frame;
 mod source;
 

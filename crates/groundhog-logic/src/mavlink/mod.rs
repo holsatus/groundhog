@@ -17,7 +17,7 @@ use mavio::default_dialect::messages::{
 use crate::MavlinkId;
 
 mod acks;
-pub mod commands;
+pub(crate) mod commands;
 mod dedup;
 pub(crate) mod error;
 pub(crate) mod io;
@@ -28,15 +28,16 @@ mod recv;
 mod router;
 mod transaction;
 
-pub use error::MavError;
+pub(crate) use error::MavError;
 pub use mission::TransferProgress;
 #[cfg(test)]
-pub use router::LinkGuard;
-pub use router::{Event, EventReceiver, LinkStats, MavlinkRouter};
-pub use transaction::Command;
+pub(crate) use router::LinkGuard;
+pub use router::LinkStats;
+pub(crate) use router::{Event, EventReceiver, MavlinkRouter};
+pub(crate) use transaction::Command;
 
 /// The GCS's default MAVLink identity, stamped on outbound frames.
-pub const DEFAULT_GCS_ID: MavlinkId = MavlinkId {
+pub(crate) const DEFAULT_GCS_ID: MavlinkId = MavlinkId {
     system: 255,
     component: 1,
 };

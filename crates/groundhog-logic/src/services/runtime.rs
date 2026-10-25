@@ -40,7 +40,7 @@ use crate::{
 
 /// The most often a snapshot is published: the UI's redraw cadence for
 /// telemetry. 30 Hz is smooth for a HUD and keeps redraw work bounded.
-pub const PUBLISH_INTERVAL: Duration = Duration::from_millis(33);
+pub(super) const PUBLISH_INTERVAL: Duration = Duration::from_millis(33);
 
 /// How often vehicles are aged for liveness.
 const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -84,7 +84,7 @@ impl std::fmt::Debug for FleetUpdate {
 
 /// Options for [`spawn`].
 #[derive(Debug, Clone, Copy)]
-pub struct RuntimeOptions {
+pub(super) struct RuntimeOptions {
     /// Bootstrap newly registered vehicles (request capabilities and home,
     /// download parameters and mission).
     pub bootstrap: bool,
@@ -101,7 +101,7 @@ impl Default for RuntimeOptions {
 /// the update channel for the (single) reader, and the task, which runs
 /// until aborted: it holds a handle of its own, to bootstrap vehicles, so no
 /// channel closing ends it.
-pub fn spawn(
+pub(super) fn spawn(
     router: MavlinkRouter,
     events: EventReceiver,
     options: RuntimeOptions,

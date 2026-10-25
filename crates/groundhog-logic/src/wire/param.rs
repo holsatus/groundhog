@@ -20,7 +20,7 @@ pub enum ParamEncoding {
 impl ParamEncoding {
     /// The encoding a target advertises in its capabilities, if it advertises
     /// one. `PARAM_FLOAT` predates the explicit flags and means a C cast.
-    pub fn advertised(capabilities: MavProtocolCapability) -> Option<Self> {
+    pub(crate) fn advertised(capabilities: MavProtocolCapability) -> Option<Self> {
         if capabilities.intersects(
             MavProtocolCapability::PARAM_ENCODE_C_CAST | MavProtocolCapability::PARAM_FLOAT,
         ) {
@@ -33,7 +33,7 @@ impl ParamEncoding {
     }
 
     /// Encode `value` for the wire.
-    pub fn encode(self, value: Value) -> (f32, MavParamType) {
+    pub(crate) fn encode(self, value: Value) -> (f32, MavParamType) {
         match self {
             ParamEncoding::CCast => value_into_c_cast(value),
             ParamEncoding::Bytewise => value_into_bytewise(value),
@@ -41,7 +41,7 @@ impl ParamEncoding {
     }
 
     /// Decode a wire value, or `None` for a type `mav_param` cannot hold.
-    pub fn decode(self, param_value: f32, param_type: MavParamType) -> Option<Value> {
+    pub(crate) fn decode(self, param_value: f32, param_type: MavParamType) -> Option<Value> {
         match self {
             ParamEncoding::CCast => value_from_c_cast(param_value, param_type),
             ParamEncoding::Bytewise => value_from_bytewise(param_value, param_type),
@@ -49,7 +49,7 @@ impl ParamEncoding {
     }
 }
 
-pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option<Value> {
+pub(crate) fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option<Value> {
     use mav_param::value::from_bytewise;
 
     let value = match param_type {
@@ -66,7 +66,7 @@ pub fn value_from_bytewise(param_value: f32, param_type: MavParamType) -> Option
     Some(value)
 }
 
-pub fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
+pub(crate) fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
     use mav_param::value::into_bytewise;
 
     match value {
@@ -80,7 +80,7 @@ pub fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
     }
 }
 
-pub fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<Value> {
+pub(crate) fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<Value> {
     let value = match param_type {
         MavParamType::Uint8 => Value::U8(param_value as u8),
         MavParamType::Int8 => Value::I8(param_value as i8),
@@ -95,7 +95,7 @@ pub fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<V
     Some(value)
 }
 
-pub fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
+pub(crate) fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
     match value {
         Value::U8(v) => (v as f32, MavParamType::Uint8),
         Value::I8(v) => (v as f32, MavParamType::Int8),

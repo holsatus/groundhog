@@ -6,7 +6,7 @@
 //! middleware uses them to encode outbound parameters, so neither layer has to
 //! reach into the other for wire logic.
 
-pub mod param;
+pub(crate) mod param;
 
 /// Integer units per WGS-84 degree in `GLOBAL_POSITION_INT`,
 /// `HOME_POSITION` and `MISSION_ITEM_INT`, which count degrees × 1e7. Exact
@@ -14,13 +14,13 @@ pub mod param;
 const UNITS_PER_DEGREE: f64 = 1e7;
 
 /// Degrees from a wire coordinate in degrees × 1e7.
-pub fn degrees(e7: i32) -> f64 {
+pub(crate) fn degrees(e7: i32) -> f64 {
     f64::from(e7) / UNITS_PER_DEGREE
 }
 
 /// A wire coordinate in degrees × 1e7 from degrees, to the nearest unit
 /// (saturating outside the `i32` range).
-pub fn degrees_e7(degrees: f64) -> i32 {
+pub(crate) fn degrees_e7(degrees: f64) -> i32 {
     (degrees * UNITS_PER_DEGREE).round() as i32
 }
 
@@ -28,7 +28,7 @@ pub fn degrees_e7(degrees: f64) -> i32 {
 /// or `None` for exactly zero, which autopilots send while they have no
 /// location: ArduPilot reports the zeroed location it starts with until its
 /// estimator has an origin, and treats zero as "never had a position" itself.
-pub fn latlon(lat: i32, lon: i32) -> Option<(f64, f64)> {
+pub(crate) fn latlon(lat: i32, lon: i32) -> Option<(f64, f64)> {
     (lat != 0 || lon != 0).then_some((degrees(lat), degrees(lon)))
 }
 

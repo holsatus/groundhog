@@ -8,7 +8,7 @@ use crate::link::LinkBuild;
 
 /// A transport error, shareable between the supervisor and the status it
 /// publishes.
-pub type ArcError = Arc<dyn std::error::Error + Send + Sync + 'static>;
+pub(crate) type ArcError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
 /// TCP connect timeout for a transport open: a dead address must fail the
 /// open in bounded time, not hang the pane's connect task.
@@ -27,7 +27,7 @@ fn arc<E: std::error::Error + Send + Sync + 'static>(error: E) -> ArcError {
 
 /// Open the transport described by `build`, returning the reader and writer to
 /// attach to a router. Awaiting this performs any blocking work off-thread.
-pub async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcError> {
+pub(crate) async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter), ArcError> {
     match build {
         LinkBuild::Tcp { sock_addr } => {
             let stream = tokio::time::timeout(
@@ -194,10 +194,10 @@ impl<W: tokio::io::AsyncWrite + Unpin + Send> DynAsyncWriter for W {
 
 // ----- boxed type erasure -----
 
-pub struct BoxedReader(pub Box<dyn DynAsyncReader>);
+pub(crate) struct BoxedReader(pub Box<dyn DynAsyncReader>);
 
 impl BoxedReader {
-    pub fn new(reader: impl DynAsyncReader + 'static) -> Self {
+    pub(crate) fn new(reader: impl DynAsyncReader + 'static) -> Self {
         Self(Box::new(reader))
     }
 }
@@ -209,10 +209,10 @@ impl DynAsyncReader for BoxedReader {
     }
 }
 
-pub struct BoxedWriter(pub Box<dyn DynAsyncWriter>);
+pub(crate) struct BoxedWriter(pub Box<dyn DynAsyncWriter>);
 
 impl BoxedWriter {
-    pub fn new(writer: impl DynAsyncWriter + 'static) -> Self {
+    pub(crate) fn new(writer: impl DynAsyncWriter + 'static) -> Self {
         Self(Box::new(writer))
     }
 }

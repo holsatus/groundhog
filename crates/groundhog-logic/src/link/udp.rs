@@ -42,7 +42,7 @@ struct Peer {
 }
 
 /// The socket shared by the reader and writer halves, and its mode.
-pub struct UdpShared {
+pub(crate) struct UdpShared {
     socket: UdpSocket,
     /// `None` in peer mode (the socket is connected); the heard peers in
     /// listen mode.
@@ -51,7 +51,7 @@ pub struct UdpShared {
 
 impl UdpShared {
     /// A socket already connected to its one fixed peer.
-    pub fn connected(socket: UdpSocket) -> Arc<Self> {
+    pub(crate) fn connected(socket: UdpSocket) -> Arc<Self> {
         Arc::new(Self {
             socket,
             peers: None,
@@ -59,7 +59,7 @@ impl UdpShared {
     }
 
     /// A listening socket that serves every peer it hears from.
-    pub fn listening(socket: UdpSocket) -> Arc<Self> {
+    pub(crate) fn listening(socket: UdpSocket) -> Arc<Self> {
         Arc::new(Self {
             socket,
             peers: Some(Mutex::default()),
@@ -114,7 +114,7 @@ impl UdpShared {
     }
 }
 
-pub struct UdpReader {
+pub(crate) struct UdpReader {
     shared: Arc<UdpShared>,
     buffer: Box<[u8; DATAGRAM_CAPACITY]>,
     head: usize,
@@ -122,7 +122,7 @@ pub struct UdpReader {
 }
 
 impl UdpReader {
-    pub fn new(shared: Arc<UdpShared>) -> Self {
+    pub(crate) fn new(shared: Arc<UdpShared>) -> Self {
         Self {
             shared,
             buffer: Box::new([0u8; DATAGRAM_CAPACITY]),
@@ -186,12 +186,12 @@ impl AsyncRead for UdpReader {
 }
 
 #[derive(Clone)]
-pub struct UdpWriter {
+pub(crate) struct UdpWriter {
     shared: Arc<UdpShared>,
 }
 
 impl UdpWriter {
-    pub fn new(shared: Arc<UdpShared>) -> Self {
+    pub(crate) fn new(shared: Arc<UdpShared>) -> Self {
         Self { shared }
     }
 }

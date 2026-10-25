@@ -30,7 +30,7 @@ use super::{
 use crate::domain::vehicle::class::VehicleClass;
 
 /// The PX4 calibration protocol.
-pub struct Px4Calibration;
+pub(crate) struct Px4Calibration;
 
 const PREFIX: &str = "[cal] ";
 

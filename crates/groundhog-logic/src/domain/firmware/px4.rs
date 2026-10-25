@@ -15,7 +15,7 @@ use crate::{
 use mavio::default_dialect::enums::MavModeFlag;
 
 /// The PX4 adapter.
-pub struct Px4;
+pub(crate) struct Px4;
 
 const MAIN_MANUAL: u32 = 1;
 const MAIN_ALTCTL: u32 = 2;

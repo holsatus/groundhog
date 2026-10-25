@@ -21,7 +21,7 @@ use crate::MavlinkId;
 /// Identifies a resource of which only a single transaction may be in flight
 /// at any time, because the responses cannot be told apart.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LockKey {
+pub(super) enum LockKey {
     /// A command of a specific kind (`MavCmd as u16`) to a specific target
     Command(MavlinkId, u16),
     /// Setting a single parameter on a specific target
@@ -33,7 +33,7 @@ pub enum LockKey {
 }
 
 impl LockKey {
-    pub fn command(target: MavlinkId, command: MavCmd) -> Self {
+    pub(super) fn command(target: MavlinkId, command: MavCmd) -> Self {
         LockKey::Command(target, command as u16)
     }
 }
@@ -63,7 +63,7 @@ impl LockMap {
     }
 
     /// Acquire the lock for `key`, waiting in line if it is already held.
-    pub async fn lock(&self, key: LockKey) -> KeyGuard {
+    pub(super) async fn lock(&self, key: LockKey) -> KeyGuard {
         let entry = self.entry(&key);
 
         // Construct KeyGuard before awaiting to ensure cleanup on canceled future
@@ -80,7 +80,7 @@ impl LockMap {
 
     /// Whether the lock for `key` is currently held or waited for.
     #[cfg(test)] // Reached only through the router's test-only `is_busy`
-    pub fn is_busy(&self, key: &LockKey) -> bool {
+    pub(super) fn is_busy(&self, key: &LockKey) -> bool {
         lock(&self.map)
             .get(key)
             .is_some_and(|mutex| Arc::strong_count(mutex) > 1)
@@ -88,7 +88,7 @@ impl LockMap {
 }
 
 /// Holds a [`LockKey`] until dropped.
-pub struct KeyGuard {
+pub(super) struct KeyGuard {
     guard: Option<OwnedMutexGuard<()>>,
     map: LockMap,
     key: LockKey,
