@@ -756,8 +756,10 @@ against a mock vehicle.
 ### Support another mission command
 
 Add one `CommandSpec` to `domain::mission::command::SPECS`, following
-`common.xml` for the parameter meanings. The editor, the map (for commands
-with a location), the file formats, and jump-target translation (for
+`common.xml` for the parameter meanings. Mark it `.flown_at_z()` when its `z`
+is the altitude the vehicle flies at, so new waypoints may follow it; a
+landing's or a region of interest's `z` must not. The editor, the map (for
+commands with a location), the file formats, and jump-target translation (for
 `ParamKind::ItemIndex` parameters) all pick it up from the table.
 
 ### Add a UI panel

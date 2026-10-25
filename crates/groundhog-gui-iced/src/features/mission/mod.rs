@@ -333,8 +333,15 @@ impl MissionEditor {
 
         match kind {
             MessageKind::AddWaypoint => {
-                let id = draft.mission.add_waypoint(cx.fleet, default_altitude);
-                draft.select(Some(id));
+                match draft.mission.add_waypoint(cx.fleet, default_altitude) {
+                    Some(id) => draft.select(Some(id)),
+                    // Nothing says where it goes: the operator does.
+                    None => {
+                        draft.placing = true;
+                        cx.notices
+                            .push(Notice::info("Click the map where the first waypoint goes"));
+                    }
+                }
             }
             MessageKind::PlaceAt(position) => {
                 if draft.placing {
@@ -359,11 +366,15 @@ impl MissionEditor {
                 draft.select(item);
             }
             MessageKind::ChangeCommand(item, command) => {
-                if draft
+                if !draft
                     .plan_mut()
-                    .update(item, |current| *current = current.with_command(command))
-                    && draft.selected == Some(item)
+                    .change_command(item, command, default_altitude)
                 {
+                    cx.notices
+                        .push(Notice::warning("Place a waypoint first").detail(
+                            "This command needs a location, and the plan has none to give it.",
+                        ));
+                } else if draft.selected == Some(item) {
                     draft.edits.clear();
                 }
             }

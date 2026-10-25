@@ -9,6 +9,8 @@
 //! Jump targets are plan indices. The plan keeps them pointing at the same
 //! item when items are inserted, removed or moved.
 
+use mavio::default_dialect::enums::MavCmd;
+
 use super::item::{MissionItem, Position};
 
 /// A plan-unique, stable item identity.
@@ -229,16 +231,52 @@ impl MissionPlan {
         })
     }
 
-    /// The altitude a new waypoint should get: that of the last positioned
-    /// item, else `fallback`. Never the vehicle's current altitude, which is
-    /// near zero on the ground.
+    /// The altitude a new waypoint should get: the last flight altitude in
+    /// the plan ([`MissionItem::flight_altitude`]), else `fallback`. Never the
+    /// vehicle's current altitude, which is near zero on the ground, nor a
+    /// landing's or a region of interest's.
     pub fn next_altitude(&self, fallback: f32) -> f32 {
-        self.items
+        self.altitude_before(self.items.len(), fallback)
+    }
+
+    /// The last flight altitude among the items before `index`, else
+    /// `fallback`.
+    fn altitude_before(&self, index: usize, fallback: f32) -> f32 {
+        self.items[..index]
             .iter()
             .rev()
-            .find_map(|item| item.item.position())
-            .map(|position| position.alt_m)
+            .find_map(|item| item.item.flight_altitude())
             .unwrap_or(fallback)
+    }
+
+    /// Change the command of `id`, keeping what carries over
+    /// ([`MissionItem::with_command`]). An item that has no location, turned
+    /// into a command that needs one, takes the nearest location in the plan
+    /// (before it, else after it) at the flight altitude that applies there,
+    /// else `default_altitude_m`. Returns `false`, changing nothing, when the
+    /// item does not exist or the plan has no location to give.
+    pub fn change_command(&mut self, id: ItemId, command: MavCmd, default_altitude_m: f32) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        let item = &self.items[index].item;
+
+        let alt_m = item
+            .flight_altitude()
+            .unwrap_or_else(|| self.altitude_before(index, default_altitude_m));
+        let (before, after) = (&self.items[..index], &self.items[index + 1..]);
+        let fallback = before
+            .iter()
+            .rev()
+            .chain(after)
+            .find_map(|slot| slot.item.position())
+            .map(|position| Position { alt_m, ..position });
+
+        let Some(converted) = item.with_command(command, fallback) else {
+            return false;
+        };
+        self.update(id, |item| *item = converted);
+        true
     }
 
     /// Rewrite every jump target through `map`, leaving targets outside the
@@ -262,7 +300,6 @@ impl MissionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mavio::default_dialect::enums::MavCmd;
 
     fn waypoint(lat: f64) -> MissionItem {
         MissionItem::waypoint(Position {
@@ -270,6 +307,59 @@ mod tests {
             lon: 8.5,
             alt_m: 50.0,
         })
+    }
+
+    #[test]
+    fn landings_and_regions_of_interest_lend_no_altitude() {
+        let mut plan = MissionPlan::default();
+        plan.push(waypoint(1.0));
+        plan.push(MissionItem::new(
+            MavCmd::NavLand,
+            Some(Position {
+                lat: 1.0,
+                lon: 8.5,
+                alt_m: 0.0,
+            }),
+        ));
+        assert_eq!(plan.next_altitude(30.0), 50.0);
+
+        let mut roi_only = MissionPlan::default();
+        roi_only.push(MissionItem::new(
+            MavCmd::DoSetRoiLocation,
+            Some(Position {
+                lat: 1.0,
+                lon: 8.5,
+                alt_m: 0.0,
+            }),
+        ));
+        assert_eq!(roi_only.next_altitude(30.0), 30.0);
+    }
+
+    #[test]
+    fn a_command_change_takes_its_location_from_the_plan() {
+        let mut plan = MissionPlan::default();
+        plan.push(waypoint(10.0));
+        let delay = plan.push(MissionItem::new(MavCmd::NavDelay, None));
+
+        assert!(plan.change_command(delay, MavCmd::NavWaypoint, 30.0));
+        let position = plan.get(delay).unwrap().position().unwrap();
+        assert_eq!(
+            (position.lat, position.lon, position.alt_m),
+            (10.0, 8.5, 50.0)
+        );
+    }
+
+    #[test]
+    fn a_command_change_without_a_location_to_give_is_refused() {
+        let mut plan = MissionPlan::default();
+        let delay = plan.push(MissionItem::new(MavCmd::NavDelay, None));
+        let before = plan.get(delay).cloned();
+
+        assert!(!plan.change_command(delay, MavCmd::NavWaypoint, 30.0));
+        assert_eq!(plan.get(delay).cloned(), before);
+
+        // A takeoff needs no location: "from here".
+        assert!(plan.change_command(delay, MavCmd::NavTakeoff, 30.0));
     }
 
     fn jump_to(index: usize) -> MissionItem {

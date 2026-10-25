@@ -146,8 +146,14 @@ impl MissionDraft {
     /// Append a waypoint: at the last positioned item (to be dragged from
     /// there), else where the vehicle is or its home. Its altitude is the
     /// plan's next one ([`MissionPlan::next_altitude`]), never the vehicle's,
-    /// which is zero on the ground.
-    pub fn add_waypoint(&mut self, fleet: &FleetSnapshot, default_altitude_m: f32) -> ItemId {
+    /// which is zero on the ground. `None`, adding nothing, when none of
+    /// these is known: the operator has to say where it goes
+    /// ([`MissionDraft::place_waypoint`]).
+    pub fn add_waypoint(
+        &mut self,
+        fleet: &FleetSnapshot,
+        default_altitude_m: f32,
+    ) -> Option<ItemId> {
         let at = self
             .plan
             .route()
@@ -161,9 +167,8 @@ impl MissionDraft {
                     .as_ref()
                     .map(|position| position.pos)
                     .or_else(|| vehicle.home().map(|home| home.position))
-            })
-            .unwrap_or(GeoPosition::new(0.0, 0.0));
-        self.place_waypoint(at, default_altitude_m)
+            })?;
+        Some(self.place_waypoint(at, default_altitude_m))
     }
 
     /// Append a waypoint at `at`, at the plan's next altitude.
@@ -342,6 +347,18 @@ mod tests {
     }
 
     #[test]
+    fn a_waypoint_with_nowhere_to_go_is_not_added() {
+        let fleet = fleet();
+        let mut offline = MissionDraft::new(None);
+        assert_eq!(offline.add_waypoint(&fleet.snapshot(), 50.0), None);
+        assert!(offline.plan().is_empty());
+
+        // A vehicle with neither a position nor a home knows no better.
+        let mut draft = MissionDraft::new(Some(SYSTEM));
+        assert_eq!(draft.add_waypoint(&fleet.snapshot(), 50.0), None);
+    }
+
+    #[test]
     fn new_waypoints_never_take_the_vehicles_altitude() {
         let mut fleet = fleet();
         let position = mavio::DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
@@ -357,7 +374,7 @@ mod tests {
         // The first waypoint goes where the vehicle is, at the default
         // altitude, not at the vehicle's (zero, on the ground).
         let mut draft = MissionDraft::new(Some(SYSTEM));
-        let first = draft.add_waypoint(&snapshot, 50.0);
+        let first = draft.add_waypoint(&snapshot, 50.0).unwrap();
         let item = draft.plan().get(first).unwrap().position().unwrap();
         assert!((item.lat - 55.0).abs() < 1e-9 && (item.lon - 12.0).abs() < 1e-9);
         assert_eq!(item.alt_m, 50.0);
@@ -367,7 +384,7 @@ mod tests {
             item.set_lat_lon(56.0, 13.0);
             item.set_field_from_str(Field::Altitude, "80");
         });
-        let second = draft.add_waypoint(&snapshot, 50.0);
+        let second = draft.add_waypoint(&snapshot, 50.0).unwrap();
         let item = draft.plan().get(second).unwrap().position().unwrap();
         assert_eq!((item.lat, item.lon, item.alt_m), (56.0, 13.0, 80.0));
     }

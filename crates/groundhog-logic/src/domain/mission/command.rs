@@ -70,6 +70,12 @@ pub struct CommandSpec {
     pub name: &'static str,
     pub category: Category,
     pub location: Location,
+    /// Whether the item's `z` is the altitude the vehicle flies at (a
+    /// waypoint, a loiter, a takeoff's target), rather than the ground (a
+    /// landing) or the altitude of somewhere else (a region of interest).
+    /// New waypoints take the last such altitude in the plan, so a command
+    /// that does not say so never lends its `z` to them.
+    pub flight_altitude: bool,
     /// `param1` to `param4`; `None` for a reserved slot.
     pub params: [Option<ParamSpec>; 4],
 }
@@ -85,6 +91,14 @@ impl CommandSpec {
     pub fn default_params(&self) -> [f32; 4] {
         self.params
             .map(|param| param.map(|param| param.default).unwrap_or(0.0))
+    }
+
+    /// This spec, with `z` the altitude the vehicle flies at.
+    const fn flown_at_z(self) -> Self {
+        CommandSpec {
+            flight_altitude: true,
+            ..self
+        }
     }
 }
 
@@ -140,6 +154,7 @@ const fn spec(
         name,
         category,
         location,
+        flight_altitude: false,
         params,
     }
 }
@@ -195,21 +210,24 @@ pub const SPECS: &[CommandSpec] = &[
             num("Pass radius", "m"),
             yaw(),
         ],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavSplineWaypoint,
         "Spline waypoint",
         Navigation,
         L::Required,
         [num("Hold", "s"), NONE, NONE, NONE],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavTakeoff,
         "Takeoff",
         Navigation,
         L::Optional,
         [num("Pitch", "°"), NONE, NONE, yaw()],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavVtolTakeoff,
         "VTOL takeoff",
@@ -221,14 +239,16 @@ pub const SPECS: &[CommandSpec] = &[
             NONE,
             yaw(),
         ],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavLoiterUnlim,
         "Loiter",
         Navigation,
         L::Required,
         [NONE, NONE, num("Radius", "m"), yaw()],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavLoiterTurns,
         "Loiter turns",
@@ -240,7 +260,8 @@ pub const SPECS: &[CommandSpec] = &[
             num("Radius", "m"),
             num("Exit xtrack", ""),
         ],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavLoiterTime,
         "Loiter time",
@@ -252,7 +273,8 @@ pub const SPECS: &[CommandSpec] = &[
             num("Radius", "m"),
             num("Exit xtrack", ""),
         ],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavLoiterToAlt,
         "Loiter to altitude",
@@ -264,7 +286,8 @@ pub const SPECS: &[CommandSpec] = &[
             NONE,
             num("Exit xtrack", ""),
         ],
-    ),
+    )
+    .flown_at_z(),
     spec(
         MavCmd::NavReturnToLaunch,
         "Return to launch",

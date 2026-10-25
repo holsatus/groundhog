@@ -144,18 +144,29 @@ impl MissionItem {
         }
     }
 
-    /// The same item converted to `command`: the location and altitude carry
-    /// over when both commands have one, parameters reset to the defaults.
-    pub fn with_command(&self, command: MavCmd) -> MissionItem {
-        let mut item = MissionItem::new(command, self.position());
+    /// The same item converted to `command`, parameters reset to the
+    /// defaults. The location and altitude carry over when both commands
+    /// have one. A command that requires a location the item does not have
+    /// takes `fallback`; without one there is no such item (`None`), never
+    /// one at latitude and longitude zero.
+    pub fn with_command(&self, command: MavCmd, fallback: Option<Position>) -> Option<MissionItem> {
+        let required = spec_of(command).is_some_and(|spec| spec.location == Location::Required);
+        let position = match self.position() {
+            Some(position) => Some(position),
+            None if required => Some(fallback?),
+            // An optional location left out means "where the vehicle is".
+            None => None,
+        };
 
-        if item.spec().is_some_and(CommandSpec::is_positional) && self.position().is_none() {
-            // No position to keep, but a freshly chosen altitude still is one.
-            item.z = self.z;
-        }
-
+        let mut item = MissionItem::new(command, position);
         item.autocontinue = self.autocontinue;
-        item
+        Some(item)
+    }
+
+    /// The altitude the vehicle flies at for this item, for commands whose
+    /// `z` is one ([`CommandSpec::flight_altitude`]).
+    pub fn flight_altitude(&self) -> Option<f32> {
+        (self.spec()?.flight_altitude && self.has_global_frame()).then_some(self.z)
     }
 
     /// The metadata of this item's command, if the editor knows it.
@@ -519,11 +530,46 @@ mod tests {
     #[test]
     fn changing_the_command_keeps_the_location() {
         let waypoint = MissionItem::waypoint(at(47.0, 8.0, 80.0));
-        let loiter = waypoint.with_command(MavCmd::NavLoiterUnlim);
+        let elsewhere = Some(at(1.0, 2.0, 3.0));
+        let loiter = waypoint
+            .with_command(MavCmd::NavLoiterUnlim, elsewhere)
+            .unwrap();
         assert_eq!(loiter.position(), waypoint.position());
 
-        let delay = waypoint.with_command(MavCmd::NavDelay);
+        let delay = waypoint.with_command(MavCmd::NavDelay, elsewhere).unwrap();
         assert_eq!(delay.frame, NON_POSITIONAL_FRAME);
         assert!(delay.position().is_none());
+    }
+
+    #[test]
+    fn a_required_location_comes_from_the_fallback_or_nowhere() {
+        let delay = MissionItem::new(MavCmd::NavDelay, None);
+
+        assert_eq!(delay.with_command(MavCmd::NavWaypoint, None), None);
+
+        let waypoint = delay
+            .with_command(MavCmd::NavWaypoint, Some(at(47.0, 8.0, 80.0)))
+            .unwrap();
+        assert_eq!(waypoint.position(), Some(at(47.0, 8.0, 80.0)));
+
+        // An optional location left out means "here", which is no guess.
+        let takeoff = delay.with_command(MavCmd::NavTakeoff, None).unwrap();
+        assert_eq!((takeoff.x, takeoff.y), (0, 0));
+    }
+
+    #[test]
+    fn only_flown_altitudes_are_flight_altitudes() {
+        let waypoint = MissionItem::waypoint(at(47.0, 8.0, 80.0));
+        assert_eq!(waypoint.flight_altitude(), Some(80.0));
+
+        let land = MissionItem::new(MavCmd::NavLand, Some(at(47.0, 8.0, 0.0)));
+        assert_eq!(land.flight_altitude(), None);
+        let roi = MissionItem::new(MavCmd::DoSetRoiLocation, Some(at(47.0, 8.0, 0.0)));
+        assert_eq!(roi.flight_altitude(), None);
+
+        // A takeoff "from here" still says how high it climbs.
+        let mut takeoff = MissionItem::new(MavCmd::NavTakeoff, None);
+        takeoff.z = 30.0;
+        assert_eq!(takeoff.flight_altitude(), Some(30.0));
     }
 }

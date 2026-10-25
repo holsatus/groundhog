@@ -113,12 +113,66 @@ fn draft(editor: &MissionEditor, plan: PlanKey) -> &Draft {
     editor.drafts.get(&plan).expect("draft exists")
 }
 
+/// Place a waypoint on the map at `lat`, as the operator clicks it there.
+fn place(env: &mut Env, editor: &mut MissionEditor, plan: PlanKey, lat: f64) {
+    if !editor.drafts.get(&plan).is_some_and(|draft| draft.placing) {
+        env.step(editor, plan, MessageKind::TogglePlacing);
+    }
+    env.step(
+        editor,
+        plan,
+        MessageKind::PlaceAt(GeoPosition::new(lat, 8.0)),
+    );
+}
+
 fn waypoint(lat: f64) -> MissionItem {
     MissionItem::waypoint(Position {
         lat,
         lon: 8.0,
         alt_m: 40.0,
     })
+}
+
+#[tokio::test]
+async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
+    let mut env = Env::new();
+    let mut editor = MissionEditor::default();
+    editor.sync(&env.fleet.snapshot());
+
+    env.step(&mut editor, None, MessageKind::AddWaypoint);
+
+    let offline = draft(&editor, None);
+    assert!(offline.plan().is_empty(), "nothing at 0, 0");
+    assert!(offline.placing, "the map takes the next click");
+    assert_eq!(
+        env.notices.history().last().unwrap().level,
+        crate::features::notifications::Level::Info
+    );
+}
+
+#[tokio::test]
+async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
+    let mut env = Env::new();
+    let mut editor = MissionEditor::default();
+    editor.sync(&env.fleet.snapshot());
+    editor
+        .draft_mut(None)
+        .plan_mut()
+        .push(MissionItem::new(MavCmd::NavDelay, None));
+    let delay = draft(&editor, None).plan().items()[0].id();
+
+    env.step(
+        &mut editor,
+        None,
+        MessageKind::ChangeCommand(delay, MavCmd::NavWaypoint),
+    );
+
+    let item = draft(&editor, None).plan().get(delay).unwrap();
+    assert_eq!(item.command, MavCmd::NavDelay, "unchanged");
+    assert_eq!(
+        env.notices.history().last().unwrap().level,
+        crate::features::notifications::Level::Warning
+    );
 }
 
 #[tokio::test]
@@ -226,7 +280,7 @@ async fn downloading_over_changes_asks_first() {
     let mut env = Env::new();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
-    env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
+    place(&mut env, &mut editor, Some(A), 1.0);
 
     let effects = env.step(
         &mut editor,
@@ -261,14 +315,14 @@ async fn edits_wait_for_a_running_transfer() {
     );
     assert!(editor.transferring(A));
 
-    env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
+    place(&mut env, &mut editor, Some(A), 1.0);
     assert!(
         draft(&editor, Some(A)).plan().is_empty(),
         "refused during the download"
     );
 
     // The offline plan is unaffected by a vehicle's transfer.
-    env.step(&mut editor, None, MessageKind::AddWaypoint);
+    place(&mut env, &mut editor, None, 1.0);
     assert_eq!(draft(&editor, None).plan().len(), 1);
 }
 
@@ -346,8 +400,8 @@ async fn drags_address_items_by_id() {
     let mut env = Env::new();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
-    env.step(&mut editor, None, MessageKind::AddWaypoint);
-    env.step(&mut editor, None, MessageKind::AddWaypoint);
+    place(&mut env, &mut editor, None, 1.0);
+    place(&mut env, &mut editor, None, 2.0);
 
     let first = draft(&editor, None).plan().items()[0].id();
     env.step(&mut editor, None, MessageKind::MoveDown(first));
@@ -367,7 +421,7 @@ async fn drags_address_items_by_id() {
 
     // An id from before the plan was replaced resolves to nothing.
     env.step(&mut editor, None, MessageKind::Discard);
-    env.step(&mut editor, None, MessageKind::AddWaypoint);
+    place(&mut env, &mut editor, None, 1.0);
     env.step(
         &mut editor,
         None,
