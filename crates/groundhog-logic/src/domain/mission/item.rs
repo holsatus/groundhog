@@ -98,7 +98,9 @@ pub struct FieldView {
     pub label: &'static str,
     pub units: &'static str,
     pub kind: FieldKind,
-    /// The value in display terms (item numbers are 1-based).
+    /// The value in display terms (item numbers are 1-based). Only latitude
+    /// and longitude carry more than `f32` precision; every other field is
+    /// an `f32` on the wire, widened.
     pub value: f64,
 }
 

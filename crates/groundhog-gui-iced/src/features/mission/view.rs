@@ -438,7 +438,10 @@ fn format_value(view: FieldView) -> String {
     match (view.field, view.kind) {
         (Field::Latitude | Field::Longitude, _) => format!("{:.7}", view.value),
         (_, FieldKind::Integer | FieldKind::ItemNumber) => format!("{}", view.value.round()),
-        _ => view.value.to_string(),
+        // Every other field is an `f32` on the wire, widened: narrowing it
+        // back is exact, and prints the shortest text that reads back as the
+        // same value (12.3, not 12.300000190734863).
+        _ => (view.value as f32).to_string(),
     }
 }
 
@@ -458,4 +461,27 @@ fn summary(item: &MissionItem) -> String {
         .map(|view| format!("{} {}", view.label, format_value(*view)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use groundhog_logic::domain::mission::{MissionItem, Position};
+
+    use super::*;
+
+    #[test]
+    fn values_print_without_widening_noise() {
+        let waypoint = MissionItem::waypoint(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 12.3,
+        });
+        let altitude = waypoint
+            .fields()
+            .into_iter()
+            .find(|view| view.field == Field::Altitude)
+            .expect("a waypoint has an altitude");
+
+        assert_eq!(format_value(altitude), "12.3");
+    }
 }
