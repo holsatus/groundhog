@@ -10,7 +10,9 @@
 //!   vehicles (or SITL instances) can share one listening port, and a peer that
 //!   reconnects from a new source port is picked up immediately. MAVLink
 //!   frames are addressed by target system, so a vehicle ignores frames meant
-//!   for another.
+//!   for another. Anyone can send to a listening port, so the table is
+//!   capped at [`MAX_PEERS`]: a flood of senders evicts the oldest instead of
+//!   growing it, and the cost of every write, without bound.
 
 use std::io::Error;
 use std::net::SocketAddr;
@@ -24,6 +26,10 @@ use tokio::net::UdpSocket;
 
 /// A listen-mode peer silent for this long stops receiving our frames.
 const PEER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most listen-mode peers served at once: more vehicles than share a
+/// port in practice.
+const MAX_PEERS: usize = 16;
 
 /// The largest datagram accepted. MAVLink 2 frames are at most 280 bytes, but
 /// routers may pack several frames into one datagram.
@@ -71,6 +77,16 @@ impl UdpShared {
         match peers.iter_mut().find(|peer| peer.addr == addr) {
             Some(peer) => peer.last_heard = now,
             None => {
+                if peers.len() >= MAX_PEERS
+                    && let Some(oldest) = peers
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, peer)| peer.last_heard)
+                        .map(|(index, _)| index)
+                {
+                    let evicted = peers.swap_remove(oldest);
+                    log::info!("UDP peer {} evicted for {addr}", evicted.addr);
+                }
                 log::info!("UDP peer {addr} joined");
                 peers.push(Peer {
                     addr,
@@ -262,6 +278,43 @@ mod tests {
                 .expect("each peer receives the frame")
                 .unwrap();
             assert_eq!(&received[..n], b"hello");
+        }
+    }
+
+    /// A flood of senders does not grow the peer table: past [`MAX_PEERS`],
+    /// the peer heard longest ago makes room.
+    #[tokio::test]
+    async fn listen_mode_serves_the_newest_peers_up_to_the_cap() {
+        let (gcs, gcs_addr) = bound().await;
+        let shared = UdpShared::listening(gcs);
+        let mut reader = UdpReader::new(shared.clone());
+        let mut writer = UdpWriter::new(shared);
+
+        let mut senders = Vec::new();
+        for _ in 0..MAX_PEERS + 4 {
+            let (sender, _) = bound().await;
+            sender.send_to(b"hi", gcs_addr).await.unwrap();
+            let mut buffer = [0u8; 2];
+            reader.read_exact(&mut buffer).await.unwrap();
+            senders.push(sender);
+            // Distinct arrival times, so "oldest" is well defined.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        writer.write_all(b"hello").await.unwrap();
+
+        // Every send happened within the write, so what the served peers
+        // got, the evicted ones would have too.
+        let mut received = [0u8; 16];
+        let (evicted, served) = senders.split_at(4);
+        for sender in served {
+            tokio::time::timeout(Duration::from_secs(1), sender.recv(&mut received))
+                .await
+                .expect("a served peer receives the frame")
+                .unwrap();
+        }
+        for sender in evicted {
+            assert!(sender.try_recv(&mut received).is_err(), "evicted");
         }
     }
 
