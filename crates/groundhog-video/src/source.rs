@@ -44,6 +44,12 @@ pub enum Source {
 
 impl Source {
     /// The source `uri` names, or why it names none.
+    ///
+    /// # Errors
+    ///
+    /// A message for the operator saying what the URI lacks or gets wrong: no
+    /// `scheme://`, an empty host, a port that is not a number, an unknown
+    /// codec, or characters the pipeline's grammar cannot carry.
     pub fn parse(uri: &str) -> Result<Self, String> {
         let uri = uri.trim();
         let Some((scheme, rest)) = uri.split_once("://") else {

@@ -215,6 +215,14 @@ impl VehicleClient {
 
     /// Download the component's parameter list. Progress and the outcome are
     /// visible in the fleet snapshot (see [`DownloadState`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet, or the reason
+    /// the transfer failed: [`Error::Timeout`] if it stopped answering,
+    /// [`Error::NoLink`] if nothing reaches it. A transfer that ends short of
+    /// the count the vehicle announced is not an error here; the snapshot
+    /// reports it as [`DownloadState::Failed`].
     pub async fn fetch_parameters(&self) -> Result<ParamListSummary> {
         // Capabilities are only worth a round trip when they would decide
         // the encoding: a known firmware already implies it.
@@ -252,6 +260,14 @@ impl VehicleClient {
     /// Set one parameter on the component, returning the value it reports
     /// back. Refused while the component's encoding is unknown: writing with
     /// a guessed encoding can store a different value than intended.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ParamEncodingUnknown`] while the component's encoding is not
+    /// known, [`Error::ParamEncoding`] if `value` cannot be represented in it,
+    /// [`Error::Rejected`] if the vehicle refuses the write,
+    /// [`Error::UnknownVehicle`] if it left the fleet, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn set_parameter(&self, ident: Ident, value: Value) -> Result<Value> {
         let (target, encoding) = self.with_vehicle(|vehicle| {
             let component = self.component_of(vehicle);
@@ -271,6 +287,13 @@ impl VehicleClient {
     }
 
     /// Download the vehicle's mission.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::MissionRejected`] if it refuses the transfer,
+    /// [`Error::Protocol`] if it sends a mission this build cannot decode, or
+    /// [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn download_mission(
         &self,
         progress: &(dyn Fn(TransferProgress) + Send + Sync),
@@ -294,6 +317,12 @@ impl VehicleClient {
     }
 
     /// Upload `items` as the vehicle's mission, returning what it now holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::MissionRejected`] if it refuses the plan (no space for it, an
+    /// item it cannot fly, ...), or [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn upload_mission(
         &self,
         items: Vec<MissionItem>,
@@ -328,6 +357,12 @@ impl VehicleClient {
     }
 
     /// Clear the vehicle's mission.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::MissionRejected`] if it refuses, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn clear_mission(&self) -> Result<()> {
         let target = self.with_vehicle(Vehicle::target)?;
 
@@ -347,6 +382,12 @@ impl VehicleClient {
     ///
     /// Uses the acknowledged `MAV_CMD_DO_SET_MISSION_CURRENT`, falling back to
     /// the legacy message for vehicles that do not support the command.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if it refuses both forms, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn set_current_mission_item(&self, index: usize) -> Result<()> {
         let (target, layout) =
             self.with_vehicle(|vehicle| (vehicle.target(), vehicle.mission_layout()))?;
@@ -378,21 +419,45 @@ impl VehicleClient {
     }
 
     /// Start executing the stored mission.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if it refuses to start, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn start_mission(&self) -> Result<()> {
         self.run(commands::mission_start()).await
     }
 
     /// Pause (`true`) or resume (`false`) the running mission.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if it refuses, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn pause_mission(&self, pause: bool) -> Result<()> {
         self.run(commands::pause_continue(pause)).await
     }
 
     /// Arm or disarm, honouring the vehicle's arming checks.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rejected`] if the vehicle refuses (typically a failed arming
+    /// check), [`Error::UnknownVehicle`] if it left the fleet, or
+    /// [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn arm(&self, arm: bool) -> Result<()> {
         self.run(commands::arm_disarm(arm, false)).await
     }
 
     /// Command a flight mode.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if it refuses the mode, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
     pub async fn set_mode(&self, mode: FlightMode) -> Result<()> {
         let command = self.with_vehicle(|vehicle| vehicle.firmware().set_mode(&mode))?;
         self.run(commands::set_mode(
@@ -407,6 +472,13 @@ impl VehicleClient {
     /// for calibrations the firmware completes before acknowledging, the
     /// outcome). The run itself is followed by the fleet runtime and visible
     /// as the vehicle's [`Session`] in the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::CalibrationUnsupported`] if the vehicle's firmware does not
+    /// offer `kind` on this vehicle's class, [`Error::UnknownVehicle`] if it
+    /// left the fleet, [`Error::Rejected`] if it refuses to start, or
+    /// [`Error::Timeout`] / [`Error::NoLink`]. The command is never resent.
     pub async fn start_calibration(&self, kind: CalibrationKind) -> Result<()> {
         let (target, protocol, class) = self.with_vehicle(|vehicle| {
             let protocol = vehicle.firmware().calibration();
@@ -437,6 +509,13 @@ impl VehicleClient {
 
     /// Tell the vehicle the operator did what the running calibration asks
     /// (placed it in the requested orientation).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotCalibrating`] if no run is waiting for a confirmation,
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet, or
+    /// [`Error::Rejected`] / [`Error::Timeout`] / [`Error::NoLink`]. The
+    /// command is never resent.
     pub async fn confirm_calibration_step(&self) -> Result<()> {
         let (target, command) =
             self.with_calibration(|protocol, session| protocol.confirm(session))?;
@@ -455,6 +534,13 @@ impl VehicleClient {
 
     /// Cancel the running calibration. The session ends at once; the vehicle
     /// is told to stop when its firmware has a way to.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotCalibrating`] if no run is going, or
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet. Failing to
+    /// tell the vehicle is logged rather than returned: the session has ended
+    /// either way.
     pub async fn cancel_calibration(&self) -> Result<()> {
         let (target, command) =
             self.with_calibration(|protocol, session| protocol.cancel(session))?;
@@ -506,6 +592,12 @@ impl VehicleClient {
 
     /// Command the vehicle's mode of `kind` (return, land, ...), whatever its
     /// firmware calls it. Returns the mode commanded.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoSuchMode`] if the vehicle has no mode of `kind`,
+    /// [`Error::UnknownVehicle`] if it left the fleet, or whatever
+    /// [`Self::set_mode`] fails with.
     pub async fn set_mode_kind(&self, kind: ModeKind) -> Result<FlightMode> {
         let mode = self
             .with_vehicle(|vehicle| vehicle.mode_of_kind(kind))?

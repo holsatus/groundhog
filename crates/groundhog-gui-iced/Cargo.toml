@@ -3,6 +3,9 @@ name = "groundhog-gui-iced"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 # A library next to the binary so Android can load the application as a
 # `cdylib`: Android has no `main`, it calls the exported `android_main` from
 # `libgroundhog_gui_iced.so`. The binary remains the desktop entry point.

@@ -85,6 +85,11 @@ pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> String {
 
 /// Parse a "QGC WPL 110" document. Blank lines are ignored; the header must be
 /// the first non-blank line; the first row is home.
+///
+/// # Errors
+///
+/// A [`WplError`] naming the line: a missing or unknown header, a row whose
+/// fields are not the eleven a WPL row has, or a field that is not a number.
 pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
     let mut rows = Vec::new();
     let mut header_seen = false;

@@ -5,6 +5,14 @@
 //! display cutout, the navigation bar and the soft keyboard *over* the
 //! application. All of that comes from the [`AndroidApp`] that `android_main`
 //! receives.
+//!
+//! This is the one module allowed `unsafe`: Java objects cross here as raw JNI
+//! pointers that only this glue knows how to pair with their `JavaVM`.
+
+#![expect(
+    unsafe_code,
+    reason = "JNI hands raw pointers that only this module can pair with their VM"
+)]
 
 use std::{
     path::PathBuf,
@@ -52,7 +60,7 @@ static LAST_INSETS: Mutex<Insets> = Mutex::new(Insets::ZERO);
 ///
 /// Called first thing in `android_main`, before iced starts.
 pub fn init(app: AndroidApp) {
-    let _ = APP.set(app);
+    drop(APP.set(app));
 
     android_logger::init_once(
         android_logger::Config::default()

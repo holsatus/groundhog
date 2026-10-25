@@ -265,9 +265,13 @@ impl ParameterPanel {
             }
             Message::SaveTo(path, address, values) => {
                 return iced_runtime::task::blocking(move |mut sender| {
-                    let text = write_parameters(ParamFileFormat::of(&path), &values, address);
+                    let text = write_parameters(
+                        ParamFileFormat::of_file_extension(&path),
+                        &values,
+                        address,
+                    );
                     let result = std::fs::write(&path, text).map_err(|error| error.to_string());
-                    let _ = sender.try_send(Message::Saved(path, result));
+                    drop(sender.try_send(Message::Saved(path, result)));
                 });
             }
             Message::Saved(path, result) => match result {
@@ -298,11 +302,13 @@ impl ParameterPanel {
                     let result = std::fs::read_to_string(&path)
                         .map_err(|error| error.to_string())
                         .and_then(|text| {
-                            read_parameters(ParamFileFormat::of(&path), &text, |ident| {
-                                reported.get(ident).copied()
-                            })
+                            read_parameters(
+                                ParamFileFormat::of_file_extension(&path),
+                                &text,
+                                |ident| reported.get(ident).copied(),
+                            )
                         });
-                    let _ = sender.try_send(Message::Loaded(path, address, result));
+                    drop(sender.try_send(Message::Loaded(path, address, result)));
                 });
             }
             Message::Loaded(path, address, result) => match result {

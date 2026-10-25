@@ -193,14 +193,14 @@ impl Drop for CancelOnDrop<'_> {
     fn drop(&mut self) {
         if self.armed {
             log::debug!("Cancelling mission transfer with {:?}", self.target);
-            let _ = self.router.send_targeted(
+            drop(self.router.send_targeted(
                 self.target,
                 MissionAck {
                     type_: MavMissionResult::MavMissionOperationCancelled,
                     mission_type: self.mission_type,
                     ..Default::default()
                 },
-            );
+            ));
         }
     }
 }

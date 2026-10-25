@@ -137,7 +137,10 @@ where
     /// Draws the [`TitleBar`] with the provided [`Renderer`] and [`Layout`].
     ///
     /// [`Renderer`]: core::Renderer
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a public signature kept identical to upstream"
+    )]
     pub fn draw(
         &self,
         tree: &Tree,
@@ -358,7 +361,10 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a public signature kept identical to upstream"
+    )]
     pub(crate) fn update(
         &mut self,
         tree: &mut Tree,

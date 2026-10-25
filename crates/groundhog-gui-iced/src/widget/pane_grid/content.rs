@@ -140,7 +140,10 @@ where
     /// Draws the [`Content`] with the provided [`Renderer`] and [`Layout`].
     ///
     /// [`Renderer`]: core::Renderer
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a public signature kept identical to upstream"
+    )]
     pub fn draw(
         &self,
         tree: &Tree,
@@ -279,7 +282,10 @@ where
             .operate(body_tree, body_layout, viewport, renderer, operation);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a public signature kept identical to upstream"
+    )]
     pub(crate) fn update(
         &mut self,
         tree: &mut Tree,

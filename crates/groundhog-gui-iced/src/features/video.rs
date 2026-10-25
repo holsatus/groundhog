@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn an_invalid_source_does_not_start() {
         let mut panel = panel(VideoSettings::default());
-        let _ = panel.update(Message::EditSource("5600".to_string()));
+        drop(panel.update(Message::EditSource("5600".to_string())));
 
         let (_, event) = panel.update(Message::Start);
 
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn starting_and_stopping_is_remembered() {
         let mut panel = panel(VideoSettings::default());
-        let _ = panel.update(Message::EditSource(" test:// ".to_string()));
+        drop(panel.update(Message::EditSource(" test:// ".to_string())));
 
         let settings = changed(panel.update(Message::Start).1);
         assert_eq!(settings.uri, "test://");
@@ -453,15 +453,15 @@ mod tests {
         };
 
         // Changing the latency starts a new receiver, the second.
-        let _ = panel.update(Message::LowLatency(false));
-        let _ = panel.update(Message::Updated(0, streaming.clone()));
+        drop(panel.update(Message::LowLatency(false)));
+        drop(panel.update(Message::Updated(0, streaming.clone())));
         assert_ne!(
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming),
             "the first receiver's state is stale"
         );
 
-        let _ = panel.update(Message::Updated(1, streaming.clone()));
+        drop(panel.update(Message::Updated(1, streaming.clone())));
         assert_eq!(
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming)
@@ -471,17 +471,17 @@ mod tests {
     #[test]
     fn full_screen_needs_a_stream_and_ends_with_it() {
         let mut panel = panel(VideoSettings::default());
-        let _ = panel.update(Message::FullScreen(true));
+        drop(panel.update(Message::FullScreen(true)));
         assert!(!panel.is_full_screen(), "nothing to show");
 
-        let _ = panel.update(Message::EditSource("test://".to_string()));
-        let _ = panel.update(Message::Start);
-        let _ = panel.update(Message::FullScreen(true));
+        drop(panel.update(Message::EditSource("test://".to_string())));
+        drop(panel.update(Message::Start));
+        drop(panel.update(Message::FullScreen(true)));
         assert!(panel.is_full_screen());
 
-        let _ = panel.update(Message::Stop);
+        drop(panel.update(Message::Stop));
         assert!(!panel.is_full_screen());
-        let _ = panel.update(Message::Start);
+        drop(panel.update(Message::Start));
         assert!(!panel.is_full_screen(), "a new stream starts in its panel");
     }
 

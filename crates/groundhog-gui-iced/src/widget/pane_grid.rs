@@ -36,8 +36,9 @@
 // would reduce the fork.
 //
 // `dead_code` is allowed because this is a binary crate: much of the vendored API
-// surface is intentionally unused.
-#![allow(dead_code)]
+// surface is intentionally unused. `unwrap_used` is allowed because the vendored
+// code indexes and unwraps on invariants upstream maintains (a `Tree`'s element
+// count matching its widgets); changing it would fork further from upstream.
 //! Pane grids let your users split regions of your application and organize layout dynamically.
 //!
 //! ![Pane grid - Iced](https://iced.rs/examples/pane_grid.gif)
@@ -95,6 +96,20 @@
 //! drag and drop, and hotkey support.
 //!
 //! [`pane_grid` example]: https://github.com/iced-rs/iced/tree/master/examples/pane_grid
+
+#![allow(
+    dead_code,
+    reason = "the vendored API surface is larger than this fork uses"
+)]
+#![allow(
+    clippy::unwrap_used,
+    reason = "upstream relies on invariants this fork keeps unchanged"
+)]
+#![allow(
+    let_underscore_drop,
+    reason = "upstream discards container returns it knows are irrelevant"
+)]
+
 mod axis;
 mod configuration;
 mod content;
@@ -229,7 +244,7 @@ where
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
     drop_target: Option<DropTarget<'a>>,
     incoming: Option<Incoming<'a, Message>>,
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, reason = "a match of iced's own signature")]
     on_resize: Option<(f32, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     class: <Theme as Catalog>::Class<'a>,
     last_mouse_interaction: Option<mouse::Interaction>,

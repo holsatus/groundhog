@@ -20,14 +20,14 @@ use crate::{MavlinkId, domain::parameter::ParamValues};
 /// A parameter file format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamFileFormat {
-    Ini,
+    GroundhogIni,
     MissionPlanner,
-    Qgc,
+    QGroundControl,
 }
 
 impl ParamFileFormat {
     /// The format of a file, by its extension.
-    pub fn of(path: &Path) -> Self {
+    pub fn of_file_extension(path: &Path) -> Self {
         match path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -35,8 +35,8 @@ impl ParamFileFormat {
             .as_deref()
         {
             Some("param" | "parm") => ParamFileFormat::MissionPlanner,
-            Some("params") => ParamFileFormat::Qgc,
-            _ => ParamFileFormat::Ini,
+            Some("params") => ParamFileFormat::QGroundControl,
+            _ => ParamFileFormat::GroundhogIni,
         }
     }
 }
@@ -48,7 +48,7 @@ pub fn write_parameters(
     address: MavlinkId,
 ) -> String {
     match format {
-        ParamFileFormat::Ini => parameters_to_ini_string(parameters),
+        ParamFileFormat::GroundhogIni => parameters_to_ini_string(parameters),
         ParamFileFormat::MissionPlanner => {
             let mut out = String::new();
             for (ident, value) in parameters {
@@ -56,7 +56,7 @@ pub fn write_parameters(
             }
             out
         }
-        ParamFileFormat::Qgc => {
+        ParamFileFormat::QGroundControl => {
             let mut out = String::from("# Vehicle-Id Component-Id Name Value Type\n");
             for (ident, value) in parameters {
                 let _ = writeln!(
@@ -77,13 +77,21 @@ pub fn write_parameters(
 /// Parse a parameter file in `format`. `reported` gives the type of a
 /// parameter as the vehicle reports it, for formats that carry no types;
 /// parameters it does not know are skipped there.
+///
+/// # Errors
+///
+/// A message naming the line that could not be read: a row with too few
+/// fields, or a value that does not parse as its type. For an INI file it is
+/// the INI parser's own description.
 pub fn read_parameters(
     format: ParamFileFormat,
     text: &str,
     reported: impl Fn(&Ident) -> Option<Value>,
 ) -> Result<ParamValues, String> {
     match format {
-        ParamFileFormat::Ini => parameters_from_ini_str(text).map_err(|error| error.to_string()),
+        ParamFileFormat::GroundhogIni => {
+            parameters_from_ini_str(text).map_err(|error| error.to_string())
+        }
         ParamFileFormat::MissionPlanner => {
             let mut values = ParamValues::new();
             for (number, line) in data_lines(text) {
@@ -103,7 +111,7 @@ pub fn read_parameters(
             }
             Ok(values)
         }
-        ParamFileFormat::Qgc => {
+        ParamFileFormat::QGroundControl => {
             let mut values = ParamValues::new();
             for (number, line) in data_lines(text) {
                 let fields: Vec<&str> = line.split_whitespace().collect();
@@ -314,22 +322,25 @@ mod tests {
     #[test]
     fn formats_follow_the_extension() {
         assert_eq!(
-            ParamFileFormat::of(Path::new("a.param")),
+            ParamFileFormat::of_file_extension(Path::new("a.param")),
             ParamFileFormat::MissionPlanner
         );
         assert_eq!(
-            ParamFileFormat::of(Path::new("a.PARM")),
+            ParamFileFormat::of_file_extension(Path::new("a.PARM")),
             ParamFileFormat::MissionPlanner
         );
         assert_eq!(
-            ParamFileFormat::of(Path::new("a.params")),
-            ParamFileFormat::Qgc
+            ParamFileFormat::of_file_extension(Path::new("a.params")),
+            ParamFileFormat::QGroundControl
         );
         assert_eq!(
-            ParamFileFormat::of(Path::new("a.ini")),
-            ParamFileFormat::Ini
+            ParamFileFormat::of_file_extension(Path::new("a.ini")),
+            ParamFileFormat::GroundhogIni
         );
-        assert_eq!(ParamFileFormat::of(Path::new("a")), ParamFileFormat::Ini);
+        assert_eq!(
+            ParamFileFormat::of_file_extension(Path::new("a")),
+            ParamFileFormat::GroundhogIni
+        );
     }
 
     #[test]
@@ -338,9 +349,9 @@ mod tests {
         let reported = |ident: &Ident| values.get(ident).copied();
 
         for format in [
-            ParamFileFormat::Ini,
+            ParamFileFormat::GroundhogIni,
             ParamFileFormat::MissionPlanner,
-            ParamFileFormat::Qgc,
+            ParamFileFormat::QGroundControl,
         ] {
             let text = write_parameters(format, &values, ADDRESS);
             let parsed = read_parameters(format, &text, reported).expect("round trip parses");
@@ -376,7 +387,7 @@ mod tests {
     #[test]
     fn qgc_files_carry_their_own_types() {
         let text = "# Vehicle-Id Component-Id Name Value Type\n1\t1\tRTL_ALT\t1500.000000000000000000\t6\n";
-        let parsed = read_parameters(ParamFileFormat::Qgc, text, |_| None).unwrap();
+        let parsed = read_parameters(ParamFileFormat::QGroundControl, text, |_| None).unwrap();
         assert_eq!(
             parsed[&Ident::from_str_truncated("RTL_ALT")],
             Value::I32(1500)

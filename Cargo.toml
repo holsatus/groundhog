@@ -6,6 +6,12 @@ members = ["crates/groundhog-logic", "crates/groundhog-video", "crates/groundhog
 version = "0.1.0"
 edition = "2024"
 
+# Arithmetic that wraps in release would silently produce a wrong mission
+# item, timeline or link id; the checks cost nothing measurable in a process
+# that spends its time waiting on sockets and the GPU.
+[profile.release]
+overflow-checks = true
+
 # Only dependencies used by more than one crate live here, so the crates that
 # share one always agree on its version and source. A dependency of a single
 # crate is declared in that crate's manifest.
@@ -43,3 +49,22 @@ iced_tiny_skia = { git = "https://github.com/peterkrull/iced", branch = "groundh
 iced_widget = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
 iced_winit = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
 iced_wgpu = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+let_underscore_drop = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+string_slice = "deny"
+let_underscore_future = "deny"
+await_holding_lock = "deny"
+exit = "deny"
+mem_forget = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "deny"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"

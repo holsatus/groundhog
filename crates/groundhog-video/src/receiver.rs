@@ -358,7 +358,7 @@ impl Supervisor {
                     }
                 }
                 gst::MessageView::Latency(_) => {
-                    let _ = pipeline.recalculate_latency();
+                    drop(pipeline.recalculate_latency());
                 }
                 _ => {}
             }

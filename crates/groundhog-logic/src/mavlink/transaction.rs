@@ -273,7 +273,7 @@ impl Drop for Pending {
                 target_component: self.target.component,
                 command: self.kind,
             };
-            _ = self.router.route(self.target, &cancel, Priority::Control);
+            drop(self.router.route(self.target, &cancel, Priority::Control));
         }
     }
 }

@@ -690,7 +690,7 @@ impl MavlinkRouter {
                                     // A closed channel means nobody consumes
                                     // events any more, which is not an error
                                     // for the transactions.
-                                    let _ = router.inner.events.send(event).await;
+                                    drop(router.inner.events.send(event).await);
                                 }
                             }
                             Err(error) => {
@@ -710,7 +710,7 @@ impl MavlinkRouter {
 
             token.cancel();
             if router.remove_link(&id, generation) {
-                let _ = router.inner.events.send(Event::LinkClosed(id)).await;
+                drop(router.inner.events.send(Event::LinkClosed(id)).await);
             }
         });
 
@@ -1189,7 +1189,7 @@ mod tests {
         // its token, and the reader task's tail runs the teardown.
         drop(peer);
         for _ in 0..MAX_CONSECUTIVE_SEND_FAILURES {
-            let _ = router.send_on_link(&id, &Heartbeat::default());
+            drop(router.send_on_link(&id, &Heartbeat::default()));
         }
 
         tokio::time::sleep(Duration::from_millis(200)).await;

@@ -11,7 +11,16 @@
 //!     cargo test -p groundhog-gui-iced gallery -- --ignored
 //! ```
 //!
+//! It drives the application the way a person would, so the `Task` every
+//! update returns is deliberately dropped: the harness exists to bring state
+//! to the shape a picture should show, not to run what the update asked for.
+//!
 //! Existing images are replaced.
+
+#![allow(
+    let_underscore_drop,
+    reason = "the harness discards the tasks it produces; it drives state, not work"
+)]
 
 use std::{path::PathBuf, sync::Arc, time::Instant};
 

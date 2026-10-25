@@ -62,6 +62,6 @@ impl FleetHandle {
     pub(super) fn report(&self, input: Input) {
         // Once the backend is dropped and its runtime stopped, there is
         // nothing left to apply this to.
-        let _ = self.inputs.send(input);
+        drop(self.inputs.send(input));
     }
 }

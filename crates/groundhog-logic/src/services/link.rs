@@ -254,12 +254,12 @@ impl LinkManager {
             entry
                 .last_connected
                 .note(&previous, &LinkStatus::Disconnected);
-            let _ = self.events.send(LinkEvent {
+            drop(self.events.send(LinkEvent {
                 id: id.clone(),
                 name: entry.config.name.clone(),
                 previous,
                 status: LinkStatus::Disconnected,
-            });
+            }));
         }
     }
 
@@ -291,6 +291,15 @@ impl LinkManager {
     /// as it was (the name, whether it connects at start); one whose
     /// transport changed is restarted with the new one. A blank name is
     /// refused, and names are stored trimmed.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkConfigError::EmptyName`] if the name is empty after trimming.
+    ///
+    /// # Panics
+    ///
+    /// If the link found by name a moment earlier is missing from the map.
+    /// Nothing runs between the two lookups, so this cannot happen.
     pub fn save(&mut self, mut config: LinkConfig) -> Result<Saved, LinkConfigError> {
         config.name = config.name.trim().to_string();
         if config.name.is_empty() {
@@ -367,12 +376,12 @@ async fn supervise(
     let publish = |state: LinkStatus| {
         let previous = status.send_replace(state.clone());
         last_connected.note(&previous, &state);
-        let _ = events.send(LinkEvent {
+        drop(events.send(LinkEvent {
             id: id.clone(),
             name: config.name.clone(),
             previous,
             status: state,
-        });
+        }));
     };
 
     let mut attempt = 0u32;
@@ -431,6 +440,11 @@ async fn supervise(
 ///
 /// The blocking OS enumeration runs off-thread; the caller gets a plain future
 /// and decides how to turn it into work.
+///
+/// # Errors
+///
+/// The OS refused to enumerate ports, or the blocking task running the
+/// enumeration panicked; either way the message says which.
 pub async fn detect_serial_ports() -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(|| -> Result<Vec<String>, String> {
         let mut names = serialport::available_ports()

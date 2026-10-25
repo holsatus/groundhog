@@ -81,7 +81,11 @@ impl TlogRecorder {
                 }
             }
 
-            let _ = writer.flush().await;
+            // The final flush decides whether the recording is complete or
+            // truncated, so a failure here is worth reporting.
+            if let Err(error) = writer.flush().await {
+                log::error!("Telemetry log {}: {error}", log_path.display());
+            }
         });
 
         log::info!("Recording telemetry to {}", path.display());
@@ -217,7 +221,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let written = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_dir_all(&directory);
+        drop(std::fs::remove_dir_all(&directory));
 
         assert_eq!(written.len(), 8 + bytes.len());
         assert_eq!(&written[8..], bytes.as_slice());

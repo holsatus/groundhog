@@ -46,6 +46,13 @@ fn sidecar(path: &Path) -> PathBuf {
 /// Write `contents` to `path` atomically: into a sibling temporary file
 /// first, flushed to disk, then renamed over the target, which keeps its
 /// permissions. Creates missing parent directories.
+///
+/// # Errors
+///
+/// The underlying I/O failure: the directory cannot be created, the temporary
+/// file cannot be written or synced, or the rename fails (a read-only or full
+/// filesystem, a directory in the way). The target keeps its old contents
+/// unless the rename succeeded, and a failed save removes its temporary file.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -59,7 +66,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         write_durably(&temporary, contents, path).and_then(|()| std::fs::rename(&temporary, path))
     {
         // A failed save must not leave its sidecar behind.
-        let _ = std::fs::remove_file(&temporary);
+        drop(std::fs::remove_file(&temporary));
         return Err(error);
     }
 
@@ -106,6 +113,13 @@ fn sync_parent(path: &Path) {
 /// `<path>.corrupt` (so a fresh file can be written without losing it).
 /// Any other read error is returned, and the file is left alone: the caller
 /// must then not write it either, or the file is lost after all.
+///
+/// # Errors
+///
+/// A read failure other than "not found": no permission, a directory where the
+/// file should be, .... Text that does not parse is *not* an error (it is set
+/// aside and `Ok(None)` returned), so an error here means the file could not
+/// even be read and is still in place.
 pub fn read_or_set_aside<T, E: Display>(
     path: &Path,
     parse: impl FnOnce(&str) -> Result<T, E>,
@@ -183,7 +197,7 @@ impl<T: Clone + Send + Sync + 'static> SaveQueue<T> {
                     .unwrap_or_else(|error| Err(error.to_string()));
 
                 written_tx.send_replace(number);
-                let _ = outcomes.send(outcome);
+                drop(outcomes.send(outcome));
             }
         });
 
@@ -205,7 +219,7 @@ impl<T: Clone + Send + Sync + 'static> SaveQueue<T> {
         let mut written = self.written.clone();
         async move {
             // A queue whose task is gone has nothing left to write.
-            let _ = written.wait_for(|written| *written >= saved).await;
+            drop(written.wait_for(|written| *written >= saved).await);
         }
     }
 }
@@ -244,7 +258,7 @@ mod tests {
 
     impl Drop for TempFile {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+            drop(std::fs::remove_dir_all(self.0.parent().unwrap()));
         }
     }
 

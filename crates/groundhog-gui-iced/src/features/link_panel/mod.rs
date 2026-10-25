@@ -570,11 +570,11 @@ mod tests {
     async fn delete_emits_links_changed_and_unknown_is_a_noop() {
         let (mut panel, mut backend, mut notices) = panel();
 
-        let _ = panel.update(
+        drop(panel.update(
             Message::Save(config("A")),
             backend.links_mut(),
             &mut notices,
-        );
+        ));
         let id = backend.links().entries().next().unwrap().0.clone();
 
         let (_, event) = panel.update(
@@ -595,11 +595,11 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_link_asks_first() {
         let (mut panel, mut backend, mut notices) = panel();
-        let _ = panel.update(
+        drop(panel.update(
             Message::Save(config("A")),
             backend.links_mut(),
             &mut notices,
-        );
+        ));
         let id = backend.links().entries().next().unwrap().0.clone();
 
         let (_, event) = panel.update(
@@ -618,11 +618,11 @@ mod tests {
     #[tokio::test]
     async fn editing_a_saved_link_loads_it_into_the_editor() {
         let (mut panel, mut backend, mut notices) = panel();
-        let _ = panel.update(
+        drop(panel.update(
             Message::Save(config("A")),
             backend.links_mut(),
             &mut notices,
-        );
+        ));
         let id = backend.links().entries().next().unwrap().0.clone();
 
         let (_, event) = panel.update(Message::EditLink(id), backend.links_mut(), &mut notices);

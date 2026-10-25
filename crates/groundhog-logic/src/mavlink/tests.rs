@@ -882,7 +882,7 @@ async fn an_abandoned_download_is_cancelled_on_the_vehicle() {
     assert_eq!(recv_request_int(&mut vehicle).await, 0);
 
     task.abort();
-    let _ = task.await;
+    drop(task.await);
 
     let ack = recv_ack(&mut vehicle).await;
     assert_eq!(ack.type_, MavMissionResult::MavMissionOperationCancelled);

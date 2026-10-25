@@ -267,7 +267,7 @@ impl MissionEditor {
                 self.finished(plan, operation, ticket, result, cx);
                 Task::none()
             }
-            MessageKind::SaveDialog => self.save_dialog(plan, cx).map(wrap),
+            MessageKind::SaveDialog => self.save_dialog(cx).map(wrap),
             MessageKind::SaveTo(path) => self.save_to(plan, path, cx).map(wrap),
             MessageKind::Saved(path, result) => {
                 match result {
@@ -295,7 +295,7 @@ impl MissionEditor {
                     let result = std::fs::read_to_string(&load_path)
                         .map_err(|error| error.to_string())
                         .and_then(|text| parse_wpl(&text).map_err(|error| error.to_string()));
-                    let _ = sender.try_send(wrap(MessageKind::Loaded(load_path, result)));
+                    drop(sender.try_send(wrap(MessageKind::Loaded(load_path, result))));
                 })
             }
             MessageKind::Loaded(path, result) => {
@@ -670,9 +670,8 @@ impl MissionEditor {
         }
     }
 
-    fn save_dialog(&mut self, plan: PlanKey, cx: &mut Context<Message>) -> Task<MessageKind> {
+    fn save_dialog(&mut self, cx: &mut Context<Message>) -> Task<MessageKind> {
         let dialog = file_dialog(cx.directory).set_file_name("mission.waypoints");
-        let _ = plan;
         Task::future(async move { dialog.save_file().await.map(|file| file.path().to_owned()) })
             .and_then(|path| Task::done(MessageKind::SaveTo(path)))
     }
@@ -700,7 +699,7 @@ impl MissionEditor {
         iced_runtime::task::blocking(move |mut sender| {
             let result = std::fs::write(&path, write_wpl(&items, home.as_ref()))
                 .map_err(|error| error.to_string());
-            let _ = sender.try_send(MessageKind::Saved(path, result));
+            drop(sender.try_send(MessageKind::Saved(path, result)));
         })
     }
 }

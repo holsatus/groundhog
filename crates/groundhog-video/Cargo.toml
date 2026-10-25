@@ -3,6 +3,9 @@ name = "groundhog-video"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 log.workspace = true
 tokio = { workspace = true, features = ["sync"] }

@@ -104,6 +104,11 @@ impl Backend {
 
     /// Start recording every inbound frame into a new `.tlog` file in
     /// `directory`.
+    ///
+    /// # Errors
+    ///
+    /// The file could not be created: the directory cannot be made or written
+    /// to, or no unique name was free in it.
     pub fn record(&self, directory: &Path) -> std::io::Result<TlogRecorder> {
         TlogRecorder::start(&self.router, directory)
     }

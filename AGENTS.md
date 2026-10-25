@@ -27,11 +27,17 @@ cargo run                                              # the application
 cargo test --workspace                                 # every test; a few seconds after building
 cargo fmt --all --check                                # CI gate
 cargo clippy --workspace --all-targets -- -D warnings  # CI gate: warnings are errors
+android/lint.sh                                        # CI gate: the library as built for Android
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly the last three. **A change is done
-when all three pass**, the change has tests, and the docs it touched (module
+CI (`.github/workflows/ci.yml`) runs exactly the last four. **A change is done
+when they pass**, the change has tests, and the docs it touched (module
 docs, this file) still tell the truth.
+
+The Android lint is separate because `platform/android.rs` and the
+`android_main` export only compile for `target_os = "android"`; the desktop
+run never sees them. It needs the NDK and
+`rustup target add aarch64-linux-android` (see `android/build.sh` for both).
 
 To try the application without a vehicle, run ArduPilot or PX4 SITL and add a
 UDP link listening on the port it sends to (usually 14550). In listen mode a
@@ -457,9 +463,30 @@ the link is configured not to. The status the UI shows is the supervisor's own
 
 ### Code
 
-- **Format and lint:** `rustfmt` defaults; clippy with `-D warnings`. Do not
-  add `#[allow(...)]` to silence a lint; fix the cause. The vendored
-  `widget/pane_grid` is the only exception.
+- **Format and lint:** `rustfmt` defaults; clippy with `-D warnings`. The
+  lint set is in the root `Cargo.toml` (`[workspace.lints]`, opt in per crate
+  with `[lints] workspace = true`), not on the command line, so plain
+  `cargo clippy` enforces it; the few settings those lints read (test-code
+  exemptions, in particular) are in `clippy.toml`. `clippy::pedantic` is
+  deliberately **not** enabled: measured against this codebase it was 42%
+  `#[must_use]`-style annotation and 25% `as`-cast objections, which prevents
+  nothing. What is enabled is what the code already satisfies and should
+  never stop satisfying: no `unwrap`/`panic!` outside tests (a panic in the
+  fleet runtime freezes every vehicle's state silently), no `unsafe` outside
+  the JNI module, no `let _ =` on something with a destructor (say
+  `drop(..)` instead), no `process::exit` (it skips the log flush), no
+  `print!` (Android discards stderr), no byte-slicing of strings.
+- **Silencing a lint:** fix the cause. If the lint is genuinely wrong for
+  this code, write `#[expect(clippy::lint, reason = "…")]` — never
+  `#[allow]`: `expect` stops compiling once it is unneeded, so it cannot rot.
+  Every attribute needs a `reason` (`allow_attributes_without_reason` is an
+  error). Scope it as narrowly as the reason allows: an expression, an item,
+  a `mod`. Test code is exempt from the panic-family and print lints in one
+  place, `clippy.toml` (`allow-panic-in-tests`, `allow-unwrap-in-tests`,
+  `allow-expect-in-tests`, `allow-print-in-tests`), because a test's job is
+  to fail loudly; production code keeps them denied. The vendored
+  `widget/pane_grid` carries module-wide exceptions with their reasons in its
+  header.
 - **No dead code.** Delete unused items, or gate test-only helpers with
   `#[cfg(test)]`. The frontend is a binary crate, so the compiler finds them
   there. In the library crates it only finds unused items that are not
@@ -479,7 +506,9 @@ the link is configured not to. The status the UI shows is the supervisor's own
   `pub(crate)`. A frontend that needs one of these needs a new backend
   operation instead.
 - **Panics:** none in non-test code, except `expect("why this holds")` on a
-  proven invariant.
+  proven invariant. The release profile keeps `overflow-checks = true`, so
+  arithmetic that would wrap panics instead: an overflowed mission index or
+  timestamp is a wrong command, not a warning.
 - **Units in names:** `alt_m`, `hold_s`, `yaw_deg`. Convert units exactly:
   `millivolts as f32 / 1000.0`, not `* 1e-3`, which rounds 12000 mV to
   12.000001 V.
@@ -816,6 +845,11 @@ written by a newer build, saves nothing.
 
 ## Pitfalls
 
+- **Desktop clippy never sees the Android code.** `platform/android.rs` and
+  the `android_main` export are `#[cfg(target_os = "android")]`, so
+  `cargo clippy --workspace` skips them entirely — including the crate's only
+  `unsafe`. `android/lint.sh` (a CI job) is what lints them; a change to that
+  module is unverified until it passes.
 - **mavio rejects untruncated MAVLink 2 frames with trailing zero bytes.**
   `Frame::from_header_and_slice` (mavio `protocol/frame.rs`) builds the
   received payload with `Payload::new`, which trims trailing zeros. The header

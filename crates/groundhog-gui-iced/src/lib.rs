@@ -33,6 +33,11 @@ fn application()
 }
 
 /// Runs the desktop application.
+///
+/// # Errors
+///
+/// iced's own: the window or the renderer could not be created, and the
+/// message says which.
 #[cfg(not(target_os = "android"))]
 pub fn run() -> iced::Result {
     platform::init_logging();
@@ -48,6 +53,10 @@ pub fn run() -> iced::Result {
 ///
 /// [`AndroidApp`]: android_activity::AndroidApp
 #[cfg(target_os = "android")]
+#[expect(
+    unsafe_code,
+    reason = "Android's NativeActivity loads the entry point by this name"
+)]
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     platform::android::init(app.clone());
