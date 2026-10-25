@@ -62,7 +62,9 @@ pub struct Application {
     layout: Layout,
     map: Map,
     configuration: Configuration,
-    config_writer: ConfigWriter,
+    /// Saves the configuration; `None` when the file could not be read, so
+    /// it is never overwritten with what this session made up instead.
+    config_writer: Option<ConfigWriter>,
     backend: Backend,
     /// The fleet as last published by the runtime.
     fleet: Arc<FleetSnapshot>,
@@ -154,10 +156,19 @@ impl Application {
     pub fn boot() -> (Self, Task<Message>) {
         let mut notices = Notifications::default();
 
-        let configuration = Configuration::initialize().unwrap_or_else(|error| {
-            notices.push(Notice::error("Could not read the configuration").detail(error));
-            Configuration::default()
-        });
+        // A file that exists but cannot be read is left alone: this session
+        // runs on defaults and saves nothing over it.
+        let (configuration, saving) = match Configuration::initialize() {
+            Ok(configuration) => (configuration, Some(config::spawn_writer())),
+            Err(error) => {
+                notices.push(
+                    Notice::error("Could not read the configuration")
+                        .detail(format!("Changes in this session are not saved. {error:#}")),
+                );
+                (Configuration::default(), None)
+            }
+        };
+        let (config_writer, saved) = saving.unzip();
 
         // The backend spawns its tasks here: boot runs inside the
         // application's async runtime.
@@ -165,8 +176,6 @@ impl Application {
             links: configuration.links.clone(),
             ..BackendOptions::default()
         });
-
-        let (config_writer, saved) = config::spawn_writer();
 
         let layout = configuration
             .workspace
@@ -207,8 +216,9 @@ impl Application {
 
         application.sync_system_bars();
 
-        let saved = futures::stream::unfold(saved, |mut saved| async move {
-            saved.recv().await.map(|outcome| (outcome, saved))
+        let saved = futures::stream::unfold(saved, |saved| async move {
+            let mut saved = saved?;
+            saved.recv().await.map(|outcome| (outcome, Some(saved)))
         });
 
         let tasks = Task::batch([
@@ -234,7 +244,9 @@ impl Application {
     }
 
     fn save_configuration(&self) {
-        self.config_writer.save(self.configuration.clone());
+        if let Some(writer) = &self.config_writer {
+            writer.save(self.configuration.clone());
+        }
     }
 
     fn start_recording(&mut self) {

@@ -167,9 +167,10 @@ impl Configuration {
     /// Load the configuration at `path`.
     ///
     /// A missing file is a fresh install: defaults are written and returned.
-    /// Any other read error is propagated without touching the file. A file
-    /// that reads but does not parse is moved aside (so it survives) before
-    /// defaults are written.
+    /// A file that is not usable (not text, or not parseable) is moved aside,
+    /// so it survives, before defaults are written. Any other read error is
+    /// returned without touching the file, and the caller must not save over
+    /// it either.
     fn initialize_at(path: &Path) -> anyhow::Result<Self> {
         let Some(config) = read_or_set_aside(path, |text| ron::from_str::<Configuration>(text))?
         else {
@@ -234,6 +235,25 @@ mod tests {
 
         let loaded = Configuration::initialize_at(&path).unwrap();
         assert_eq!(serialized(&config), serialized(&loaded));
+
+        cleanup(&path);
+    }
+
+    /// A configuration that cannot be read is left exactly as it is. A
+    /// directory stands in for an unreadable file: reading one fails on
+    /// every platform, and as any user.
+    #[test]
+    fn an_unreadable_configuration_is_not_replaced() {
+        let path = temp_config_path("unreadable");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("inside"), "kept").unwrap();
+
+        assert!(Configuration::initialize_at(&path).is_err());
+        assert!(path.is_dir(), "not replaced by a file");
+        assert_eq!(
+            std::fs::read_to_string(path.join("inside")).unwrap(),
+            "kept"
+        );
 
         cleanup(&path);
     }

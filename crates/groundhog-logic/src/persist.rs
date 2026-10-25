@@ -4,25 +4,29 @@
 //! What a frontend stores, and in which format, is its own business. What
 //! every such file needs is the same, so it is written and tested once here:
 //!
-//! - [`write_atomic`] replaces a file so that a crash or a concurrent save
-//!   never leaves it half-written;
-//! - [`read_or_set_aside`] loads a file, and moves one that does not parse
-//!   aside instead of overwriting it;
+//! - [`write_atomic`] replaces a file so that a crash or a concurrent save,
+//!   from this process or another, never leaves it half-written, and keeps
+//!   its permissions;
+//! - [`read_or_set_aside`] loads a file, and moves one that is not usable
+//!   (not text, or not parseable) aside instead of overwriting it. A file
+//!   that cannot be *read* is left alone, and its caller must then not write
+//!   it either;
 //! - [`SaveQueue`] saves off the caller's thread, one save at a time and the
 //!   newest last.
 
 use std::{
     ffi::OsString,
     fmt::Display,
-    io,
+    fs::File,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use tokio::sync::{mpsc, watch};
 
-/// Uniquifies the sidecar of each write, so two concurrent writers never
-/// write into the same intermediate file.
+/// Uniquifies the sidecar of each write within this process; the process id
+/// does so between processes.
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// `path` with `suffix` appended to its file name.
@@ -32,8 +36,16 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The intermediate file a write of `path` goes through: unique to this
+/// write, so no two writers, in one process or two, share one.
+fn sidecar(path: &Path) -> PathBuf {
+    let write = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    with_suffix(path, &format!(".tmp-{}-{write}", std::process::id()))
+}
+
 /// Write `contents` to `path` atomically: into a sibling temporary file
-/// first, then renamed over the target. Creates missing parent directories.
+/// first, flushed to disk, then renamed over the target, which keeps its
+/// permissions. Creates missing parent directories.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -42,37 +54,74 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let temporary = with_suffix(
-        path,
-        &format!(".tmp-{}", WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)),
-    );
-    std::fs::write(&temporary, contents)?;
-
-    if let Err(error) = std::fs::rename(&temporary, path) {
+    let temporary = sidecar(path);
+    if let Err(error) =
+        write_durably(&temporary, contents, path).and_then(|()| std::fs::rename(&temporary, path))
+    {
         // A failed save must not leave its sidecar behind.
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
+
+    sync_parent(path);
     Ok(())
+}
+
+/// Write `contents` to `temporary`, with the permissions of `target` if it
+/// exists, and flush it to disk: the rename that follows must not reach the
+/// disk before the data does.
+fn write_durably(temporary: &Path, contents: &[u8], target: &Path) -> io::Result<()> {
+    let mut file = File::create(temporary)?;
+    file.write_all(contents)?;
+    match std::fs::metadata(target) {
+        Ok(metadata) => file.set_permissions(metadata.permissions())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    file.sync_all()
+}
+
+/// Flush the directory holding `path`, so the rename itself is durable. Best
+/// effort: not every platform can open a directory.
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+            log::debug!("Could not flush {}: {error}", parent.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Read `path` and `parse` its contents.
 ///
 /// `Ok(None)` when there is nothing usable to load: the file does not exist,
-/// or it does not parse, in which case it is moved aside to
+/// or it is not text or does not parse, in which case it is moved aside to
 /// `<path>.corrupt` (so a fresh file can be written without losing it).
-/// Any other read error is returned, and the file is left alone.
+/// Any other read error is returned, and the file is left alone: the caller
+/// must then not write it either, or the file is lost after all.
 pub fn read_or_set_aside<T, E: Display>(
     path: &Path,
     parse: impl FnOnce(&str) -> Result<T, E>,
 ) -> io::Result<Option<T>> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
 
-    match parse(&contents) {
+    let parsed = match String::from_utf8(contents) {
+        Ok(text) => parse(&text).map_err(|error| error.to_string()),
+        Err(error) => Err(format!("not UTF-8 text ({error})")),
+    };
+
+    match parsed {
         Ok(value) => Ok(Some(value)),
         Err(error) => {
             let backup = with_suffix(path, ".corrupt");
@@ -204,6 +253,42 @@ mod tests {
         assert_eq!(file.siblings(), ["file.txt.corrupt"]);
         let backup = file.0.with_file_name("file.txt.corrupt");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), "not a number");
+    }
+
+    #[test]
+    fn invalid_utf8_is_set_aside() {
+        let file = TempFile::new();
+        let bytes = [0xff, 0xfe, b'x'];
+        std::fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+        std::fs::write(&file.0, bytes).unwrap();
+
+        let loaded = read_or_set_aside(&file.0, |text| text.parse::<u32>());
+        assert_eq!(loaded.unwrap(), None);
+        assert_eq!(file.siblings(), ["file.txt.corrupt"]);
+        let backup = file.0.with_file_name("file.txt.corrupt");
+        assert_eq!(std::fs::read(backup).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_keep_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = TempFile::new();
+        write_atomic(&file.0, b"one").unwrap();
+        std::fs::set_permissions(&file.0, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&file.0, b"two").unwrap();
+        let mode = std::fs::metadata(&file.0).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn sidecars_are_unique_between_processes() {
+        let name = sidecar(Path::new("config.ron"));
+        let pid = std::process::id().to_string();
+        assert!(name.to_string_lossy().contains(&pid), "{}", name.display());
+        assert_ne!(sidecar(Path::new("config.ron")), name);
     }
 
     #[tokio::test]
