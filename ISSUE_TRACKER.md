@@ -25,7 +25,7 @@ sections of the issue list.
 | 1 | [Empty plans upload nothing](#wp1--empty-plans-upload-nothing) | MISSION-1, CAL-8 | P0 | — | Done |
 | 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Done |
 | 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Done |
-| 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Todo |
+| 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Done |
 | 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Todo |
 | 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Todo |
 | 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Todo |
@@ -67,9 +67,6 @@ These change the scope of a package; settle them before it starts.
 When the package that would have applied the issue's own **Fix:** starts, move
 that part to Appendix B with one sentence:
 
-- **PARAM-1's single lock per reply channel** (package 4): it would serialize
-  every set and remove the upload window; sets conflict only with list
-  downloads and with sets of the same parameter.
 - **PARAM-2's "empty complete list"** (package 5): it cannot tell a component
   without parameters from one that never answered.
 - **MISSION-6's "refuse to write a home row"** (package 11): the WPL format
@@ -156,7 +153,7 @@ with result 8 reaches its transaction as unsupported; the existing
 `MAG_CAL_REPORT` test passes through the shared decoder.
 
 ### WP4 · Parameter channel lock
-**Closes:** PARAM-1 · **Status:** Todo
+**Closes:** PARAM-1 · **Status:** Done
 
 A list download and a set both consume `PARAM_VALUE` from the same target, so a
 list value can satisfy a set.

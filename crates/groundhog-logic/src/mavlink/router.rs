@@ -326,6 +326,18 @@ impl MavlinkRouter {
         self.inner.locks.lock(key).await
     }
 
+    /// Take a target's parameter reply channel exclusively: a list download
+    /// holds it while it runs.
+    pub(super) async fn lock_channel(&self, target: MavlinkId) -> KeyGuard {
+        self.inner.locks.lock_channel(target).await
+    }
+
+    /// Share a target's parameter reply channel: a set holds it while it waits
+    /// for its echo.
+    pub(super) async fn lock_channel_shared(&self, target: MavlinkId) -> KeyGuard {
+        self.inner.locks.lock_channel_shared(target).await
+    }
+
     /// Wait for a slot in the window of PARAM_SET transactions in flight.
     pub(super) async fn param_permit(&self) -> Result<SemaphorePermit<'_>> {
         self.inner

@@ -567,6 +567,104 @@ async fn param_set_skips_a_list_value_for_the_same_parameter() {
     assert_eq!(task.await.unwrap().unwrap(), Value::F32(1.5));
 }
 
+/// A download holds the target's reply channel exclusively, so a set started
+/// during it waits instead of taking one of the download's values.
+#[tokio::test]
+async fn param_set_waits_for_a_list_download() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let download = tokio::spawn({
+        let router = router.clone();
+        async move { router.param_list(VEHICLE, false).await }
+    });
+
+    assert!(matches!(
+        vehicle.recv().await,
+        DefaultDialect::ParamRequestList(_)
+    ));
+    assert!(
+        router.is_busy(&LockKey::ParamChannel(VEHICLE)),
+        "the download holds the channel"
+    );
+
+    let set = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .param_set(
+                    VEHICLE,
+                    Ident::try_from(b"TEST_PARAM").unwrap(),
+                    Value::F32(1.5),
+                    crate::wire::param::ParamEncoding::Bytewise,
+                )
+                .await
+        }
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), vehicle.recv())
+            .await
+            .is_err(),
+        "the set sends nothing while the download runs"
+    );
+
+    vehicle.send(&list_value(0, 1)).await;
+    assert_eq!(download.await.unwrap().unwrap(), (1, 1));
+
+    let DefaultDialect::ParamSet(message) = vehicle.recv().await else {
+        panic!("expected PARAM_SET")
+    };
+    vehicle.send(&value_of(&message, 1.5)).await;
+
+    assert_eq!(set.await.unwrap().unwrap(), Value::F32(1.5));
+}
+
+/// Sets of different parameters share the channel and still overlap.
+#[tokio::test]
+async fn parameter_sets_of_different_parameters_overlap() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let first = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .param_set(
+                    VEHICLE,
+                    Ident::try_from(b"FIRST").unwrap(),
+                    Value::F32(1.5),
+                    crate::wire::param::ParamEncoding::Bytewise,
+                )
+                .await
+        }
+    });
+    let DefaultDialect::ParamSet(first_set) = vehicle.recv().await else {
+        panic!("expected PARAM_SET")
+    };
+
+    let second = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .param_set(
+                    VEHICLE,
+                    Ident::try_from(b"SECOND").unwrap(),
+                    Value::F32(2.5),
+                    crate::wire::param::ParamEncoding::Bytewise,
+                )
+                .await
+        }
+    });
+    let DefaultDialect::ParamSet(second_set) = vehicle.recv().await else {
+        panic!("the second set is not held behind the first")
+    };
+
+    vehicle.send(&value_of(&first_set, 1.5)).await;
+    vehicle.send(&value_of(&second_set, 2.5)).await;
+
+    assert_eq!(first.await.unwrap().unwrap(), Value::F32(1.5));
+    assert_eq!(second.await.unwrap().unwrap(), Value::F32(2.5));
+}
+
 #[tokio::test(start_paused = true)]
 async fn param_set_reports_a_clamped_value_after_the_deadline() {
     let (router, _guard, mut vehicle) = setup();

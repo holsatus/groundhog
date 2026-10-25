@@ -131,6 +131,16 @@ impl ParameterPanel {
         self.edits.get(&address)?.get(ident)
     }
 
+    /// Whether `address`'s component is downloading its parameters: the panel
+    /// started a reload, or the vehicle is being read by someone else.
+    fn is_downloading(&self, address: MavlinkId, cx: &Context<Message>) -> bool {
+        self.reloads.is_running(&address)
+            || cx
+                .fleet
+                .parameters(address)
+                .is_some_and(|parameters| *parameters.download() == DownloadState::InProgress)
+    }
+
     pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::FilterIdentPattern(pattern) => self.filter.ident_pattern = pattern,
@@ -197,8 +207,22 @@ impl ParameterPanel {
                     }
                 }
             }
-            Message::Upload(address, ident) => return self.upload(address, ident, cx),
+            Message::Upload(address, ident) => {
+                if self.is_downloading(address, cx) {
+                    cx.notices
+                        .push(Notice::info("Uploads wait for the running download"));
+                    return Task::none();
+                }
+
+                return self.upload(address, ident, cx);
+            }
             Message::UploadAll(address) => {
+                if self.is_downloading(address, cx) {
+                    cx.notices
+                        .push(Notice::info("Uploads wait for the running download"));
+                    return Task::none();
+                }
+
                 let idents: Vec<Ident> = self
                     .edits
                     .get(&address)
@@ -463,13 +487,20 @@ impl ParameterPanel {
                 "Upload".to_string()
             })
             .icon(Icon::Upload)
-            .kind(if pending > 0 && encoding_known {
+            .kind(if pending > 0 && encoding_known && !downloading {
                 ButtonKind::Primary
             } else {
                 ButtonKind::Subtle
             })
-            .hint("Write every changed value to the vehicle")
-            .on_press_maybe((pending > 0 && encoding_known).then_some(Message::UploadAll(address)))
+            .hint(if downloading {
+                "A download is running; uploads wait for it"
+            } else {
+                "Write every changed value to the vehicle"
+            })
+            .on_press_maybe(
+                (pending > 0 && encoding_known && !downloading)
+                    .then_some(Message::UploadAll(address)),
+            )
             .boxed(),
         ]]);
 
@@ -522,7 +553,7 @@ impl ParameterPanel {
                 failure,
                 progress,
                 filter,
-                self.view_param_list(address, parameters, encoding_known),
+                self.view_param_list(address, parameters, encoding_known, downloading),
             ]
             .spacing(ui::space::M),
         )
@@ -533,6 +564,7 @@ impl ParameterPanel {
         address: MavlinkId,
         parameters: Option<&'a Parameters>,
         encoding_known: bool,
+        downloading: bool,
     ) -> Element<'a, Message> {
         // Heights must fit the tallest content of each item kind: a
         // parameter's row holds a field and buttons.
@@ -595,7 +627,7 @@ impl ParameterPanel {
             ]
             .boxed(),
             Item::Param(ident, param, edit) => {
-                view_param_row(address, ident, param, *edit, encoding_known)
+                view_param_row(address, ident, param, *edit, encoding_known, downloading)
             }
         })
         .item_height(move |item| match item {
@@ -639,6 +671,7 @@ fn view_param_row<'a>(
     param: &'a ReportedParam,
     edit: Option<&'a ParamEdit>,
     encoding_known: bool,
+    downloading: bool,
 ) -> Element<'a, Message> {
     let value_text = edit.map_or_else(|| value_to_string(param.value()), |edit| edit.text.clone());
 
@@ -664,8 +697,9 @@ fn view_param_row<'a>(
 
     let uploadable = edit
         .and_then(ParamEdit::uploadable)
-        .filter(|_| encoding_known);
+        .filter(|_| encoding_known && !downloading);
     let upload_hint = match (edit.map(|edit| &edit.status), uploadable) {
+        _ if downloading => "A download is running; uploads wait for it".to_string(),
         _ if edit.is_some_and(ParamEdit::is_uploading) => "Uploading…".to_string(),
         (Some(EditStatus::Failed(error)), _) => format!("Failed: {error}"),
         (Some(EditStatus::Rejected { reported }), _) => {

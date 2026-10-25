@@ -100,6 +100,30 @@ fn in_flight(panel: &ParameterPanel, name: &str) -> Upload {
         .expect("an upload in flight")
 }
 
+/// A download owns the component's reply channel, so the panel refuses to
+/// start uploads into it.
+#[tokio::test]
+async fn uploads_wait_for_a_parameter_download() {
+    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+
+    env.step(
+        &mut panel,
+        Message::Edit(ADDRESS, ident("GAIN"), "1.2".into()),
+    );
+    env.step(&mut panel, Message::Reload(ADDRESS));
+    assert!(panel.reloads.is_running(&ADDRESS));
+
+    let key = (ADDRESS, ident("GAIN"));
+    env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
+    assert!(!panel.uploads.is_running(&key), "the single upload waits");
+
+    env.step(&mut panel, Message::UploadAll(ADDRESS));
+    assert!(!panel.uploads.is_running(&key), "Upload all waits too");
+
+    assert_eq!(env.notices.history().last().unwrap().level, Level::Info);
+}
+
 #[tokio::test]
 async fn unparseable_text_is_kept_but_not_uploadable() {
     let mut env = Env::new(&[("GAIN", 1.0)]);

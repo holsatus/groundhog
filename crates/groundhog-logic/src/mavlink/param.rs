@@ -10,6 +10,11 @@
 //! then re-requests the missing ones by index, in small batches, while the
 //! target keeps answering. The values themselves reach vehicle state through
 //! the inbound message stream, like any other message.
+//!
+//! A download and a set cannot share the reply channel: the download would
+//! answer the set with an old value. A download holds
+//! [`LockKey::ParamChannel`] exclusively and a set holds it shared, so a set
+//! waits for a running download while sets of different parameters overlap.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -60,6 +65,10 @@ impl MavlinkRouter {
         encoding: ParamEncoding,
     ) -> Result<Value> {
         let (param_value, param_type) = encoding.encode(value);
+
+        // Share the target's reply channel with other sets, but keep list
+        // downloads out: their values would otherwise answer this set.
+        let _channel = self.lock_channel_shared(target).await;
 
         // Ensure we are the only ones setting *this* parameter
         let _lock = self.lock_key(LockKey::Param(target, ident.clone())).await;
@@ -125,7 +134,7 @@ impl MavlinkRouter {
         target: MavlinkId,
         request_capabilities: bool,
     ) -> Result<(usize, u16)> {
-        let _lock = self.lock_key(LockKey::ParamList(target)).await;
+        let _lock = self.lock_channel(target).await;
 
         if request_capabilities {
             // Both messages contain the capabilities flag, but AUTOPILOT_VERSION

@@ -27,7 +27,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [PARAM-1](#param-1--parameter-writes-and-list-downloads-share-the-reply-channel) — a list value can satisfy a parameter set |
 | **P1** | [PARAM-2](#param-2--a-component-with-no-parameters-reports-a-failed-download) — a zero-parameter component fails instead of showing 0 |
 | **P1** | [CAL-1](#cal-1--px4-offers-flight-modes-the-vehicle-cannot-fly) — a rover is offered Takeoff and Precision Land |
 | **P1** | [UI-1](#ui-1--the-confirmation-dialog-does-not-fit-a-phone) — the accept button can be off-screen |
@@ -207,22 +206,6 @@ lat/lon saturate to `i32::MAX` and import as a plausible waypoint
 **Fix:** strip the BOM; reject coordinates outside ±90/±180.
 
 ## Parameters
-
-### PARAM-1 · Parameter writes and list downloads share the reply channel
-**P1** · Effort M · From REVIEW-H1 / LOGIC-5
-
-`LockKey::Param(target, ident)` and `LockKey::ParamList(target)` are distinct
-(`locks.rs:28,30`), but both consume `PARAM_VALUE` from the same target.
-`param_set` now prefers a value equal to the request (`param.rs:90-105`), which
-removes the common false rejection, but a missed/late echo still returns an
-old list value. The panel also allows Upload during a download
-(`parameter_panel.rs:472`).
-
-**Fix:** one lock per reply channel (`LockKey::ParamValue(target)`), or hold
-`ParamList` for the duration of a set. Add the UI guard as defence in depth.
-
-**Test:** a list value for the same ident arrives before the echo; the set does
-not return it.
 
 ### PARAM-2 · A component with no parameters reports a failed download
 **P1** · Effort S · From LOGIC-12
@@ -913,7 +896,8 @@ Verified at `5389934`; do not re-open without new evidence.
   ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
   picker confirmation), 5 (parameter echo preference), 9
   (`MISSION_CURRENT.total`), 14.3 (recording names), 14.4 (`reached_seq`).
-- **REVIEW.md:** H4–H16 (parameter idle loop, persist/set-aside/fsync, class
+- **REVIEW.md:** H1 (parameter writes wait for a list download and share the
+  channel only with other sets); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
   calibration offering, runtime stop, calibration drop guard, empty-upload
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload
   identity, back behind confirmation, map drag cancel, pane minimums, adaptive
@@ -930,6 +914,10 @@ Verified at `5389934`; do not re-open without new evidence.
 
 ## Appendix B — Rejected claims
 
+- **`PARAM-1`'s one lock per reply channel:** making every `PARAM_VALUE` of a
+  target one exclusive lock would serialise every set. Sets conflict only with
+  list downloads and with sets of the same parameter, so the channel is
+  shared by sets and held exclusively by a download.
 - **`PROTO-1`'s mission-item patch:** substituting a known command for an
   unknown one (the suggested fixed-offset patch) would upload a different
   command on the next round trip. Mission items are stored raw instead.
