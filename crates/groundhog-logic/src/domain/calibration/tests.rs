@@ -11,7 +11,29 @@ use mavio::default_dialect::{
 use super::{ardupilot::ArduPilotCalibration, px4::Px4Calibration, *};
 
 fn session(protocol: &dyn CalibrationProtocol, kind: CalibrationKind) -> Session {
-    Session::new(kind, protocol.completes_on_ack(kind))
+    Session::new(kind, protocol.completes_on_ack(kind), RunId(1))
+}
+
+#[test]
+fn airspeed_is_offered_only_to_winged_vehicles() {
+    let protocols: [&dyn CalibrationProtocol; 2] = [&ArduPilotCalibration, &Px4Calibration];
+    for protocol in protocols {
+        for class in [
+            VehicleClass::Copter,
+            VehicleClass::Rover,
+            VehicleClass::Submarine,
+        ] {
+            assert!(!protocol.kinds(class).contains(&CalibrationKind::Airspeed));
+            assert!(
+                protocol
+                    .kinds(class)
+                    .contains(&CalibrationKind::Accelerometer)
+            );
+        }
+        for class in [VehicleClass::FixedWing, VehicleClass::Vtol] {
+            assert!(protocol.kinds(class).contains(&CalibrationKind::Airspeed));
+        }
+    }
 }
 
 fn text(protocol: &dyn CalibrationProtocol, session: &mut Session, text: &str) {
@@ -221,6 +243,24 @@ fn ardupilot_compass_fails_when_any_compass_does() {
         protocol.cancel(&session).is_some(),
         "compass runs can be cancelled"
     );
+}
+
+/// The compass number comes from the wire: the last one must not overflow.
+#[test]
+fn the_last_compass_id_is_numbered_without_overflow() {
+    let protocol = ArduPilotCalibration;
+    let mut session = session(&protocol, CalibrationKind::Compass);
+    message(&protocol, &mut session, mag_progress(255, 10));
+    message(
+        &protocol,
+        &mut session,
+        mag_report(255, MagCalStatus::MagCalBadRadius),
+    );
+
+    let Phase::Failed(reason) = &session.phase else {
+        panic!("expected a failure, got {:?}", session.phase);
+    };
+    assert!(reason.starts_with("compass 256"), "{reason}");
 }
 
 #[test]

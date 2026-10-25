@@ -755,8 +755,10 @@ mode tables per `VehicleClass`, parameter encoding, mission layout. Add it to
 ### Support another calibration
 
 Add a `CalibrationKind` (title, preparation, first instruction) and handle it
-in each protocol's `start`, `supports` and `observe`. Feedback a protocol does
-not understand yet can still go to the session's log with `Session::note`.
+in each protocol's `start`, `supports` and `observe`; `supports` gets the
+vehicle's class, so a kind only some vehicles can run (airspeed needs wings)
+is offered only to those. Feedback a protocol does not understand yet can
+still go to the session's log with `Session::note`.
 Test the start parameters per firmware and the feedback sequence, as
 `domain/calibration/tests.rs` does; `services/tests.rs` drives a whole run
 against a mock vehicle.

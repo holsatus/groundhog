@@ -312,7 +312,7 @@ impl Fleet {
 
         // A run replaced by a new one is not reported as finished.
         let calibrating_before =
-            is_calibrating(vehicle) && !matches!(update, CalibrationUpdate::Begin(_));
+            is_calibrating(vehicle) && !matches!(update, CalibrationUpdate::Begin { .. });
         if !vehicle.update_calibration(update) || !calibrating_before {
             return Vec::new();
         }

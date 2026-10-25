@@ -83,6 +83,12 @@ impl VehicleClass {
         self != VehicleClass::NotAVehicle
     }
 
+    /// Whether the vehicle flies on wings, and so may carry an airspeed
+    /// sensor.
+    pub fn has_wings(self) -> bool {
+        matches!(self, VehicleClass::FixedWing | VehicleClass::Vtol)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             VehicleClass::Copter => "Copter",

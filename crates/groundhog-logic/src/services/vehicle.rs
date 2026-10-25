@@ -8,7 +8,10 @@
 //! parameter download) are reported back to the fleet runtime, so every
 //! reader sees them.
 
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use mavio::default_dialect::messages::CommandLong;
 
@@ -22,7 +25,7 @@ use super::{Error, FleetHandle, Result, runtime::Input};
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{CalibrationKind, CalibrationProtocol, CalibrationUpdate, Session},
+        calibration::{CalibrationKind, CalibrationProtocol, CalibrationUpdate, RunId, Session},
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
         parameter::DownloadState,
@@ -86,6 +89,50 @@ impl Drop for DownloadReport<'_> {
                 address: self.address,
                 state: DownloadState::Cancelled,
             });
+        }
+    }
+}
+
+/// The last calibration run handed out; run ids only need to be unique
+/// within the process.
+static LAST_CALIBRATION_RUN: AtomicU64 = AtomicU64::new(0);
+
+/// Reports a calibration start to the runtime, naming its run: begun when
+/// created, then acknowledged, or abandoned if dropped first. A dropped start
+/// must not leave the session starting in every reader's snapshot, and the
+/// run id keeps a late report from landing on a newer run.
+struct CalibrationStart<'a> {
+    client: &'a VehicleClient,
+    run: RunId,
+    finished: bool,
+}
+
+impl<'a> CalibrationStart<'a> {
+    fn begin(client: &'a VehicleClient, kind: CalibrationKind) -> Self {
+        let run = RunId(LAST_CALIBRATION_RUN.fetch_add(1, Ordering::Relaxed) + 1);
+        client.report_calibration(CalibrationUpdate::Begin { kind, run });
+        Self {
+            client,
+            run,
+            finished: false,
+        }
+    }
+
+    fn acknowledged(mut self, result: std::result::Result<(), String>) {
+        self.finished = true;
+        self.client
+            .report_calibration(CalibrationUpdate::Acknowledged {
+                run: self.run,
+                result,
+            });
+    }
+}
+
+impl Drop for CalibrationStart<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.client
+                .report_calibration(CalibrationUpdate::Abandoned { run: self.run });
         }
     }
 }
@@ -361,14 +408,16 @@ impl VehicleClient {
     /// outcome). The run itself is followed by the fleet runtime and visible
     /// as the vehicle's [`Session`] in the snapshot.
     pub async fn start_calibration(&self, kind: CalibrationKind) -> Result<()> {
-        let (target, protocol) =
-            self.with_vehicle(|vehicle| (vehicle.target(), vehicle.firmware().calibration()))?;
+        let (target, protocol, class) = self.with_vehicle(|vehicle| {
+            let protocol = vehicle.firmware().calibration();
+            (vehicle.target(), protocol, vehicle.class())
+        })?;
         let protocol = protocol
-            .filter(|protocol| protocol.supports(kind))
+            .filter(|protocol| protocol.supports(kind, class))
             .ok_or(Error::CalibrationUnsupported)?;
 
         // Before the command: feedback can arrive before the acknowledgement.
-        self.report_calibration(CalibrationUpdate::Begin(kind));
+        let start = CalibrationStart::begin(self, kind);
 
         // Never resent: a duplicate would restart the calibration, or run a
         // second one after the first.
@@ -382,9 +431,7 @@ impl VehicleClient {
             .map(|_| ())
             .map_err(Error::from);
 
-        self.report_calibration(CalibrationUpdate::Acknowledged(
-            result.as_ref().map(|_| ()).map_err(ToString::to_string),
-        ));
+        start.acknowledged(result.as_ref().map(|_| ()).map_err(ToString::to_string));
         result
     }
 

@@ -28,7 +28,7 @@ use mavio::{
     default_dialect::{enums::MavCmd, messages::CommandLong},
 };
 
-use super::vehicle::StatusText;
+use super::vehicle::{StatusText, class::VehicleClass};
 
 /// A calibration an operator can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -274,6 +274,11 @@ pub struct CalibrationControls {
 /// How many vehicle texts a session keeps.
 const MESSAGES: usize = 16;
 
+/// One run of a calibration, so that what the operation running it reports
+/// cannot land on another run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunId(pub(crate) u64);
+
 /// A calibration run on one vehicle, as the operator sees it.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -297,10 +302,12 @@ pub struct Session {
     /// previous run just after a new one starts; results are only trusted
     /// once this is set.
     observed: bool,
+    /// The run this session follows.
+    run: RunId,
 }
 
 impl Session {
-    pub(crate) fn new(kind: CalibrationKind, completes_on_ack: bool) -> Self {
+    pub(crate) fn new(kind: CalibrationKind, completes_on_ack: bool, run: RunId) -> Self {
         Self {
             kind,
             phase: Phase::Starting,
@@ -312,7 +319,13 @@ impl Session {
             needs_reboot: false,
             completes_on_ack,
             observed: false,
+            run,
         }
+    }
+
+    /// Whether the session follows `run`.
+    pub(crate) fn is_run(&self, run: RunId) -> bool {
+        self.run == run
     }
 
     pub fn is_running(&self) -> bool {
@@ -385,7 +398,8 @@ pub enum Feedback<'a> {
 
 /// How one firmware runs calibrations on the wire.
 pub trait CalibrationProtocol: Send + Sync + 'static {
-    fn supports(&self, kind: CalibrationKind) -> bool;
+    /// Whether a vehicle of `class` can run `kind`.
+    fn supports(&self, kind: CalibrationKind, class: VehicleClass) -> bool;
 
     /// The command that starts `kind`.
     fn start(&self, kind: CalibrationKind) -> CommandLong;
@@ -411,22 +425,28 @@ pub trait CalibrationProtocol: Send + Sync + 'static {
     /// Fold the vehicle's feedback into a session that is not finished.
     fn observe(&self, session: &mut Session, feedback: Feedback<'_>);
 
-    /// The calibrations this firmware supports, in display order.
-    fn kinds(&self) -> Vec<CalibrationKind> {
+    /// The calibrations a vehicle of `class` can run, in display order.
+    fn kinds(&self, class: VehicleClass) -> Vec<CalibrationKind> {
         CalibrationKind::ALL
             .into_iter()
-            .filter(|kind| self.supports(*kind))
+            .filter(|kind| self.supports(*kind, class))
             .collect()
     }
 }
 
 /// What the runtime is told about a session by the operation running it.
 #[derive(Debug, Clone)]
-pub enum CalibrationUpdate {
-    /// A start command is about to be sent.
-    Begin(CalibrationKind),
-    /// The start command was acknowledged, or why it failed.
-    Acknowledged(Result<(), String>),
+pub(crate) enum CalibrationUpdate {
+    /// A start command of `run` is about to be sent.
+    Begin { kind: CalibrationKind, run: RunId },
+    /// The start command of `run` was acknowledged, or why it failed.
+    Acknowledged {
+        run: RunId,
+        result: Result<(), String>,
+    },
+    /// The operation running `run` ended before the vehicle answered its
+    /// start. The vehicle may have started; the operator did not cancel.
+    Abandoned { run: RunId },
     /// The operator cancelled.
     Cancel,
     /// The operator is done looking at a finished session.

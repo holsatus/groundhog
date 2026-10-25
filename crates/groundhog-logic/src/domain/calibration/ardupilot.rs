@@ -30,6 +30,7 @@ use super::{
     CalibrationKind, CalibrationProtocol, CompassProgress, CompassStatus, Feedback, Instruction,
     Session, Side, mentions_calibration, preflight_calibration,
 };
+use crate::domain::vehicle::class::VehicleClass;
 
 /// The ArduPilot calibration protocol.
 pub struct ArduPilotCalibration;
@@ -51,8 +52,10 @@ fn side_at(position: f32) -> Option<Side> {
 }
 
 impl CalibrationProtocol for ArduPilotCalibration {
-    fn supports(&self, _kind: CalibrationKind) -> bool {
-        true
+    fn supports(&self, kind: CalibrationKind, class: VehicleClass) -> bool {
+        // `param3` calibrates the airspeed sensor only where there is one;
+        // elsewhere it calibrates the barometer alone.
+        kind != CalibrationKind::Airspeed || class.has_wings()
     }
 
     fn start(&self, kind: CalibrationKind) -> CommandLong {
@@ -200,7 +203,7 @@ fn observe_compass_report(session: &mut Session, report: &MagCalReport) {
         });
 
     match failed {
-        Some((id, reason)) => session.fail(format!("compass {}: {reason}", id + 1)),
+        Some((id, reason)) => session.fail(format!("compass {}: {reason}", u16::from(id) + 1)),
         None => {
             session.needs_reboot = true;
             session.succeed();

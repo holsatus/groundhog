@@ -78,8 +78,12 @@ impl MockVehicle {
     }
 
     async fn heartbeat(&mut self, autopilot: MavAutopilot) {
+        self.heartbeat_of(autopilot, MavType::Quadrotor).await;
+    }
+
+    async fn heartbeat_of(&mut self, autopilot: MavAutopilot, type_: MavType) {
         self.send(&Heartbeat {
-            type_: MavType::Quadrotor,
+            type_,
             autopilot,
             base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
             ..Default::default()
@@ -137,7 +141,11 @@ async fn until(updates: &mut FleetUpdates, done: impl Fn(&FleetSnapshot) -> bool
 }
 
 async fn register(harness: &mut Harness, autopilot: MavAutopilot) {
-    harness.vehicle.heartbeat(autopilot).await;
+    register_as(harness, autopilot, MavType::Quadrotor).await;
+}
+
+async fn register_as(harness: &mut Harness, autopilot: MavAutopilot, type_: MavType) {
+    harness.vehicle.heartbeat_of(autopilot, type_).await;
     until(&mut harness.updates, |fleet| fleet.contains(SYSTEM)).await;
 }
 
@@ -504,7 +512,12 @@ mod calibration {
     #[tokio::test]
     async fn ardupilot_airspeed_completes_with_the_command() {
         let mut harness = harness();
-        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        register_as(
+            &mut harness,
+            MavAutopilot::Ardupilotmega,
+            MavType::FixedWing,
+        )
+        .await;
 
         let client = harness.fleet.vehicle(SYSTEM);
         let start =
@@ -529,6 +542,43 @@ mod calibration {
         start.await.unwrap().expect("succeeded");
         until(&mut harness.updates, |fleet| {
             session(fleet).is_some_and(|session| session.phase == Phase::Succeeded)
+        })
+        .await;
+    }
+
+    /// A copter has no airspeed sensor to calibrate.
+    #[tokio::test]
+    async fn airspeed_is_refused_without_wings() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let result = client.start_calibration(CalibrationKind::Airspeed).await;
+        assert!(matches!(result, Err(Error::CalibrationUnsupported)));
+    }
+
+    /// A start dropped before the vehicle answers must not leave the session
+    /// starting: nothing else would ever end it.
+    #[tokio::test]
+    async fn an_abandoned_start_ends_the_session() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let start = tokio::spawn(async move {
+            client
+                .start_calibration(CalibrationKind::Accelerometer)
+                .await
+        });
+        harness.vehicle.command().await;
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(Session::is_running)
+        })
+        .await;
+
+        start.abort();
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(|session| matches!(session.phase, Phase::Failed(_)))
         })
         .await;
     }

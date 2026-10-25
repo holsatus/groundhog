@@ -27,6 +27,7 @@ use super::{
     CalibrationKind, CalibrationProtocol, Feedback, Instruction, Session, Side,
     mentions_calibration, preflight_calibration,
 };
+use crate::domain::vehicle::class::VehicleClass;
 
 /// The PX4 calibration protocol.
 pub struct Px4Calibration;
@@ -34,8 +35,8 @@ pub struct Px4Calibration;
 const PREFIX: &str = "[cal] ";
 
 impl CalibrationProtocol for Px4Calibration {
-    fn supports(&self, _kind: CalibrationKind) -> bool {
-        true
+    fn supports(&self, kind: CalibrationKind, class: VehicleClass) -> bool {
+        kind != CalibrationKind::Airspeed || class.has_wings()
     }
 
     fn start(&self, kind: CalibrationKind) -> CommandLong {

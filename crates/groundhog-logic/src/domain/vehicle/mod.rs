@@ -372,18 +372,26 @@ impl Vehicle {
     /// protocol cannot begin one.
     pub(crate) fn update_calibration(&mut self, update: CalibrationUpdate) -> bool {
         match update {
-            CalibrationUpdate::Begin(kind) => {
+            CalibrationUpdate::Begin { kind, run } => {
                 let Some(protocol) = self.firmware().calibration() else {
                     return false;
                 };
                 self.calibration = Some(calibration::Session::new(
                     kind,
                     protocol.completes_on_ack(kind),
+                    run,
                 ));
             }
-            CalibrationUpdate::Acknowledged(result) => match &mut self.calibration {
-                Some(session) => session.acknowledged(result),
-                None => return false,
+            // What a run reports applies to that run only.
+            CalibrationUpdate::Acknowledged { run, result } => match &mut self.calibration {
+                Some(session) if session.is_run(run) => session.acknowledged(result),
+                _ => return false,
+            },
+            CalibrationUpdate::Abandoned { run } => match &mut self.calibration {
+                Some(session) if session.is_run(run) => {
+                    session.fail("The start was abandoned before the vehicle answered");
+                }
+                _ => return false,
             },
             CalibrationUpdate::Cancel => match &mut self.calibration {
                 Some(session) => session.cancel(),
@@ -408,7 +416,7 @@ impl Vehicle {
     pub fn calibration_kinds(&self) -> Vec<CalibrationKind> {
         self.firmware()
             .calibration()
-            .map_or_else(Vec::new, |protocol| protocol.kinds())
+            .map_or_else(Vec::new, |protocol| protocol.kinds(self.class()))
     }
 
     /// What the operator can do about the running calibration.
@@ -1188,14 +1196,22 @@ mod tests {
         let mut ardupilot = vehicle();
         assert!(ardupilot.calibration_kinds().is_empty(), "unknown firmware");
         ardupilot.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let kinds = ardupilot.calibration_kinds();
+        assert!(kinds.contains(&CalibrationKind::Accelerometer));
         assert!(
-            ardupilot
-                .calibration_kinds()
-                .contains(&CalibrationKind::Airspeed)
+            !kinds.contains(&CalibrationKind::Airspeed),
+            "a copter has no airspeed sensor"
         );
 
-        ardupilot.update_calibration(CalibrationUpdate::Begin(CalibrationKind::Accelerometer));
-        ardupilot.update_calibration(CalibrationUpdate::Acknowledged(Ok(())));
+        let run = calibration::RunId(1);
+        ardupilot.update_calibration(CalibrationUpdate::Begin {
+            kind: CalibrationKind::Accelerometer,
+            run,
+        });
+        ardupilot.update_calibration(CalibrationUpdate::Acknowledged {
+            run,
+            result: Ok(()),
+        });
         assert_eq!(
             ardupilot.calibration_controls(),
             CalibrationControls::default(),
@@ -1220,7 +1236,10 @@ mod tests {
 
         let mut px4 = vehicle();
         px4.handle_message(t, 1, &heartbeat(MavAutopilot::Px4));
-        px4.update_calibration(CalibrationUpdate::Begin(CalibrationKind::Gyroscope));
+        px4.update_calibration(CalibrationUpdate::Begin {
+            kind: CalibrationKind::Gyroscope,
+            run: calibration::RunId(2),
+        });
         assert_eq!(
             px4.calibration_controls(),
             CalibrationControls {
@@ -1234,5 +1253,30 @@ mod tests {
             CalibrationControls::default(),
             "a finished run has no controls"
         );
+    }
+
+    /// What a run reports lands on that run only: a start abandoned after a
+    /// newer one began leaves the newer one alone.
+    #[test]
+    fn calibration_updates_apply_to_their_own_run() {
+        let mut vehicle = vehicle();
+        vehicle.handle_message(Instant::now(), 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let (old, new) = (calibration::RunId(1), calibration::RunId(2));
+        let begin = |run| CalibrationUpdate::Begin {
+            kind: CalibrationKind::Gyroscope,
+            run,
+        };
+
+        vehicle.update_calibration(begin(old));
+        vehicle.update_calibration(begin(new));
+        assert!(!vehicle.update_calibration(CalibrationUpdate::Abandoned { run: old }));
+        let phase = || vehicle.calibration.as_ref().unwrap().phase.clone();
+        assert_eq!(phase(), calibration::Phase::Starting);
+
+        assert!(vehicle.update_calibration(CalibrationUpdate::Abandoned { run: new }));
+        assert!(matches!(
+            vehicle.calibration.as_ref().unwrap().phase,
+            calibration::Phase::Failed(_)
+        ));
     }
 }

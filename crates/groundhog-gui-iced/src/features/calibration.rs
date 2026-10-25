@@ -244,7 +244,9 @@ impl CalibrationPanel {
                 },
                 CompassStatus::Failed(reason) => format!("failed: {reason}"),
             };
-            card = card.push(ui::caption(format!("Compass {}: {state}", compass.id + 1)).boxed());
+            card = card.push(
+                ui::caption(format!("Compass {}: {state}", u16::from(compass.id) + 1)).boxed(),
+            );
         }
 
         if session.needs_reboot && session.phase == Phase::Succeeded {
