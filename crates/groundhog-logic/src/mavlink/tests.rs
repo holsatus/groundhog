@@ -275,18 +275,103 @@ async fn param_set_returns_echoed_value() {
         })
         .await;
 
-    // Echo back a clamped value
+    // Echo back the value set, with the index a list would use too
     vehicle
         .send(&ParamValue {
             param_id: set.param_id,
-            param_value: 1.0,
+            param_value: set.param_value,
             param_type: set.param_type,
-            ..Default::default()
+            param_index: 3,
+            param_count: 10,
         })
         .await;
 
     let value = task.await.unwrap().expect("echo");
-    assert_eq!(value, Value::F32(1.0));
+    assert_eq!(value, Value::F32(1.5));
+}
+
+/// Start setting `TEST_PARAM` to `requested`, and receive the `PARAM_SET`.
+async fn start_set(
+    router: &MavlinkRouter,
+    vehicle: &mut MockVehicle,
+    requested: f32,
+) -> (
+    tokio::task::JoinHandle<super::error::Result<Value>>,
+    mavio::default_dialect::messages::ParamSet,
+) {
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .param_set(
+                    VEHICLE,
+                    Ident::try_from(b"TEST_PARAM").unwrap(),
+                    Value::F32(requested),
+                    crate::wire::param::ParamEncoding::Bytewise,
+                )
+                .await
+        }
+    });
+    let DefaultDialect::ParamSet(set) = vehicle.recv().await else {
+        panic!("expected PARAM_SET")
+    };
+    (task, set)
+}
+
+/// A `PARAM_VALUE` for the parameter of `set`, reporting `value`.
+fn value_of(set: &mavio::default_dialect::messages::ParamSet, value: f32) -> ParamValue {
+    let (param_value, param_type) =
+        crate::wire::param::ParamEncoding::Bytewise.encode(Value::F32(value));
+    assert_eq!(param_type, set.param_type);
+    ParamValue {
+        param_id: set.param_id,
+        param_value,
+        param_type,
+        param_index: 7,
+        param_count: 300,
+    }
+}
+
+#[tokio::test]
+async fn param_set_skips_a_list_value_for_the_same_parameter() {
+    let (router, _guard, mut vehicle) = setup();
+    let (task, set) = start_set(&router, &mut vehicle, 1.5).await;
+
+    // A list download delivers the old value first, then the echo arrives.
+    vehicle.send(&value_of(&set, 3.0)).await;
+    vehicle.send(&value_of(&set, 1.5)).await;
+
+    assert_eq!(task.await.unwrap().unwrap(), Value::F32(1.5));
+}
+
+#[tokio::test(start_paused = true)]
+async fn param_set_reports_a_clamped_value_after_the_deadline() {
+    let (router, _guard, mut vehicle) = setup();
+    let (task, set) = start_set(&router, &mut vehicle, 1.5).await;
+
+    vehicle.send(&value_of(&set, 1.0)).await;
+
+    assert_eq!(task.await.unwrap().unwrap(), Value::F32(1.0));
+    let resent = tokio::time::timeout(Duration::from_secs(5), vehicle.recv()).await;
+    assert!(
+        resent.is_err(),
+        "a clamped set is not sent again: {resent:?}"
+    );
+}
+
+#[tokio::test]
+async fn param_set_ignores_a_late_echo_of_a_previous_write() {
+    let (router, _guard, mut vehicle) = setup();
+    let (first, set) = start_set(&router, &mut vehicle, 1.5).await;
+    vehicle.send(&value_of(&set, 1.5)).await;
+    assert_eq!(first.await.unwrap().unwrap(), Value::F32(1.5));
+
+    // PX4 echoes again on every link; that copy lands in the next set.
+    let (second, set) = start_set(&router, &mut vehicle, 2.5).await;
+    vehicle.send(&value_of(&set, 1.5)).await;
+    vehicle.send(&value_of(&set, 2.5)).await;
+
+    assert_eq!(second.await.unwrap().unwrap(), Value::F32(2.5));
 }
 
 // ----- mission transfer harness -----

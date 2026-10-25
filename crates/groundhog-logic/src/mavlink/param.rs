@@ -1,7 +1,12 @@
 //! Parameter transactions: setting one parameter, and downloading the list.
 //!
 //! A set waits for the target to echo the parameter's new value, which may
-//! differ from the value sent. A list download requests every parameter,
+//! differ from the value sent. The echo carries nothing that ties it to the
+//! set: no transaction id, and an index that both ArduPilot and PX4 also use
+//! for other `PARAM_VALUE`s of the same parameter (a list download's, a later
+//! read's). So a reply reporting the requested value is taken as the echo at
+//! once, and one reporting another value only if nothing better arrives
+//! before the attempt's deadline. A list download requests every parameter,
 //! then re-requests the missing ones by index, in small batches, while the
 //! target keeps answering. The values themselves reach vehicle state through
 //! the inbound message stream, like any other message.
@@ -13,7 +18,7 @@ use mavio::default_dialect::messages::{
     AutopilotVersion, ComponentInformationBasic, ParamRequestList, ParamRequestRead, ParamSet,
     ParamValue,
 };
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{
     error::{MavError, Result},
@@ -39,6 +44,14 @@ impl MavlinkRouter {
     /// Returns the value reported by the target, which may differ from `value`
     /// if the target rejected or clamped it. Only one set per parameter is in
     /// flight at once, and the total number of sets in flight is limited.
+    ///
+    /// A reply reporting another value than `value` may be the echo of a
+    /// clamped write, or a value someone else asked for (a list download, a
+    /// late echo of an earlier write). It is returned only if no reply
+    /// reporting `value` arrives before the attempt's deadline, so a clamped
+    /// write reports up to [`PARAM_SET_TIMEOUT`] later than it arrived. Once
+    /// such a reply is in hand, the set is not sent again: a clamping target
+    /// would clamp again.
     pub async fn param_set(
         &self,
         target: MavlinkId,
@@ -74,10 +87,21 @@ impl MavlinkRouter {
                 },
             )?;
 
-            if let Ok(Some(reply)) = timeout(PARAM_SET_TIMEOUT, recv_value.next()).await {
-                return encoding
+            let deadline = Instant::now() + PARAM_SET_TIMEOUT;
+            let mut other = None;
+            while let Ok(Some(reply)) = timeout_at(deadline, recv_value.next()).await {
+                let reported = encoding
                     .decode(reply.param_value, reply.param_type)
-                    .ok_or(MavError::ParamEncoding);
+                    .ok_or(MavError::ParamEncoding)?;
+                if reported == value {
+                    return Ok(reported);
+                }
+                // The newest: a list's stale value tends to precede the echo.
+                other = Some(reported);
+            }
+
+            if let Some(reported) = other {
+                return Ok(reported);
             }
         }
 
