@@ -30,7 +30,7 @@ use crate::{
         calibration::{CalibrationKind, CalibrationUpdate, Outcome, Session},
         firmware::FlightMode,
         mission::OnboardMission,
-        parameter::{DownloadState, Parameters},
+        parameter::{DownloadUpdate, Parameters},
         vehicle::{Liveness, StatusText, Vehicle, class::VehicleClass},
     },
 };
@@ -322,10 +322,14 @@ impl Fleet {
 
     /// Record a parameter list download's progress. Returns whether the
     /// vehicle is known.
-    pub(crate) fn set_param_download(&mut self, address: MavlinkId, state: DownloadState) -> bool {
+    pub(crate) fn set_param_download(
+        &mut self,
+        address: MavlinkId,
+        update: DownloadUpdate,
+    ) -> bool {
         match self.vehicle_mut(address.system_id()) {
             Some(vehicle) => {
-                vehicle.set_param_download(address.component, state);
+                vehicle.set_param_download(address.component, update);
                 true
             }
             None => false,

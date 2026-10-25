@@ -26,7 +26,7 @@ sections of the issue list.
 | 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Done |
 | 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Done |
 | 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Done |
-| 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Todo |
+| 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Done |
 | 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Todo |
 | 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Todo |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Todo |
@@ -67,8 +67,6 @@ These change the scope of a package; settle them before it starts.
 When the package that would have applied the issue's own **Fix:** starts, move
 that part to Appendix B with one sentence:
 
-- **PARAM-2's "empty complete list"** (package 5): it cannot tell a component
-  without parameters from one that never answered.
 - **MISSION-6's "refuse to write a home row"** (package 11): the WPL format
   requires one; the fault is reading a zero home back as real.
 - **SVC-3's clearing of position** (package 17, if decided as leaning).
@@ -173,7 +171,7 @@ parameters still overlap. A panel test: Upload is unavailable during a download.
 
 ### WP5 · One parameter download model
 **Closes:** PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 ·
-**After:** 4 · **Status:** Todo
+**After:** 4 · **Status:** Done
 
 `Parameters` keeps two records of one download: `LoadingState`, fed by the
 fold, and `DownloadState`, set from the transaction's result. They disagree
@@ -194,12 +192,14 @@ has.
   cancelled one keeps them.
 - The transaction returns what happened, including "nothing ever arrived".
   The service turns that into a `DownloadOutcome`: `Complete`,
-  `Incomplete { received, expected }`, `NoParameters`, or `Failed(Error)`. It
-  stores the outcome in the snapshot **and** returns the same value, so the
-  panel's notice and banner cannot disagree. `NoParameters` shows as an empty
-  panel with a reason and Retry, not a danger banner.
-- One `Progress { done, total }` in services replaces `TransferProgress`,
-  `ParamListSummary` and `(usize, u16)`.
+  `Incomplete(Progress)`, `NoParameters`, or `Failed(String)` (the snapshot
+  cannot hold a services `Error`). It stores the outcome in the snapshot
+  **and** returns the same value, so the panel's notice and banner cannot
+  disagree. `NoParameters` shows as a warning with a reason and Retry, not a
+  danger banner.
+- One `Progress { done, total }`, shared from the crate root and re-exported
+  by services, replaces `TransferProgress`, `ParamListSummary` and
+  `(usize, u16)`.
 - `on_param_value` uses `component_mut_if` for an unchanged repeat (SVC-11).
 
 **Tests:** a mock that answers `PARAM_REQUEST_LIST` with nothing gives

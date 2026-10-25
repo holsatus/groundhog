@@ -18,12 +18,13 @@ use groundhog_logic::{
     domain::{
         fleet::FleetSnapshot,
         parameter::{
-            DownloadState, EditStatus, LoadSummary, ParamEdit, ParamEdits, ParamValues, Parameters,
-            ReportedParam, Upload, UploadOutcome, group_of, value_to_string, value_type_name,
+            DownloadOutcome, EditStatus, LoadSummary, ParamDownload, ParamEdit, ParamEdits,
+            ParamValues, Parameters, ReportedParam, Upload, UploadOutcome, group_of,
+            value_to_string, value_type_name,
         },
         vehicle::Vehicle,
     },
-    services::{ParamListSummary, Result},
+    services::Result,
     storage::parameter::{ParamFileFormat, read_parameters, write_parameters},
 };
 use iced::{
@@ -87,7 +88,7 @@ pub enum Message {
     Reload(MavlinkId),
     /// Stop a download this panel started.
     CancelReload(MavlinkId),
-    Reloaded(MavlinkId, Ticket, Result<ParamListSummary>),
+    Reloaded(MavlinkId, Ticket, Result<DownloadOutcome>),
     /// The operator typed into a value field.
     Edit(MavlinkId, Ident, String),
     /// Discard a pending edit.
@@ -138,7 +139,7 @@ impl ParameterPanel {
             || cx
                 .fleet
                 .parameters(address)
-                .is_some_and(|parameters| *parameters.download() == DownloadState::InProgress)
+                .is_some_and(|parameters| parameters.download().is_running())
     }
 
     pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
@@ -166,18 +167,26 @@ impl ParameterPanel {
             Message::Reloaded(address, ticket, result) => {
                 if self.reloads.finish(&address, ticket) {
                     match result {
-                        Ok(summary) if summary.received >= usize::from(summary.expected) => {
-                            cx.notices.push(Notice::success(format!(
-                                "Downloaded {} parameters",
-                                summary.received
-                            )));
+                        Ok(DownloadOutcome::Complete) => {
+                            cx.notices.push(Notice::success("Parameter download complete"));
                         }
-                        Ok(summary) => cx.notices.push(
-                            Notice::warning("Parameter download incomplete").detail(format!(
-                                "Received {} of {} parameters",
-                                summary.received, summary.expected
-                            )),
+                        Ok(DownloadOutcome::Incomplete(progress)) => {
+                            cx.notices.push(
+                                Notice::warning("Parameter download incomplete").detail(format!(
+                                    "Received {} of {} parameters",
+                                    progress.done, progress.total
+                                )),
+                            );
+                        }
+                        Ok(DownloadOutcome::NoParameters) => cx.notices.push(
+                            Notice::info("No parameters were reported").detail(
+                                "The component may have none, or may not have answered the request.",
+                            ),
                         ),
+                        Ok(DownloadOutcome::Cancelled) => {}
+                        Ok(DownloadOutcome::Failed(error)) => cx
+                            .notices
+                            .push(Notice::error("Parameter download failed").detail(error)),
                         Err(error) => cx
                             .notices
                             .push(Notice::error("Parameter download failed").detail(error)),
@@ -424,23 +433,22 @@ impl ParameterPanel {
             })
         });
 
-        let downloading = self.reloads.is_running(&address)
-            || parameters
-                .is_some_and(|parameters| *parameters.download() == DownloadState::InProgress);
+        let download = parameters.map(Parameters::download);
+        let downloading =
+            self.reloads.is_running(&address) || download.is_some_and(ParamDownload::is_running);
         // What the operator changed (an upload in flight and text that does
         // not parse included), and what of it can be uploaded now.
         let edits = self.edits.get(&address);
         let changed = edits.map_or(0, ParamEdits::changes);
         let pending = edits.map_or(0, |edits| edits.uploadable().count());
 
-        let loading = parameters.map(Parameters::loading);
-        let (got, expected) =
-            loading.map_or((0, 0), |loading| (loading.loaded(), loading.expected()));
+        let got = download.map_or(0, ParamDownload::received);
+        let expected = download.map_or(0, ParamDownload::expected);
+        let refused = download.map_or(0, ParamDownload::refused);
 
         // What the operator is looking at: the component, and how its
-        // values stand against the vehicle's. A set left incomplete (a
-        // download that failed or was cancelled) says so here, since the
-        // activity below shows only while a download runs.
+        // values stand against the vehicle's. A download left incomplete says
+        // so here, since the activity below shows only while one runs.
         let incomplete = !downloading && expected > 0 && got < usize::from(expected);
         let state = if changed > 0 {
             ui::badge(format!("{changed} changed"), Tone::Warning)
@@ -514,13 +522,25 @@ impl ParameterPanel {
             )
         });
 
-        let failure = match parameters.map(Parameters::download) {
-            Some(DownloadState::Failed(error)) => Some(ui::banner(
+        let failure = match download.and_then(ParamDownload::outcome) {
+            Some(DownloadOutcome::Failed(error)) => Some(ui::banner(
                 format!("The last download failed: {error}"),
                 Tone::Danger,
             )),
+            Some(DownloadOutcome::NoParameters) => Some(ui::banner(
+                "No parameters were reported. The component may have none, or may not \
+                 have answered the request.",
+                Tone::Warning,
+            )),
             _ => None,
         };
+
+        let refused_warning = (refused > 0).then(|| {
+            ui::banner(
+                format!("{refused} parameter values could not be decoded and were left out."),
+                Tone::Warning,
+            )
+        });
 
         let progress = downloading.then(|| {
             ui::activity(
@@ -551,6 +571,7 @@ impl ParameterPanel {
                 actions,
                 encoding_warning,
                 failure,
+                refused_warning,
                 progress,
                 filter,
                 self.view_param_list(address, parameters, encoding_known, downloading),

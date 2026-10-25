@@ -8,10 +8,12 @@ use mavio::{
     DefaultDialect,
     default_dialect::{
         enums::{
-            MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag, MavType,
+            MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
+            MavParamType, MavType,
         },
         messages::{
             Heartbeat, HomePosition, MissionAck, MissionCount, MissionItemInt, MissionRequestInt,
+            ParamValue,
         },
     },
     prelude::V2,
@@ -27,7 +29,7 @@ use crate::{
     domain::{
         fleet::{FleetEvent, FleetSnapshot},
         mission::{MissionItem, Position},
-        parameter::DownloadState,
+        parameter::DownloadOutcome,
     },
     link::LinkId,
     mavlink::{
@@ -173,6 +175,43 @@ async fn register(harness: &mut Harness, autopilot: MavAutopilot) {
 async fn register_as(harness: &mut Harness, autopilot: MavAutopilot, type_: MavType) {
     harness.vehicle.heartbeat_of(autopilot, type_).await;
     until(&mut harness.updates, |fleet| fleet.contains(SYSTEM)).await;
+}
+
+/// The addressed component's parameters, as the snapshot holds them.
+fn parameters(fleet: &FleetSnapshot) -> Option<&crate::domain::parameter::Parameters> {
+    fleet.vehicle(SYSTEM)?.parameters(VEHICLE.component)
+}
+
+/// Start a parameter download and wait for its `PARAM_REQUEST_LIST`.
+async fn start_download(
+    harness: &mut Harness,
+) -> tokio::task::JoinHandle<super::Result<DownloadOutcome>> {
+    let client = harness.fleet.vehicle(SYSTEM);
+    let download = tokio::spawn(async move { client.fetch_parameters().await });
+
+    // An earlier download may have left re-requests in flight; wait for this
+    // download's own request.
+    loop {
+        if matches!(
+            harness.vehicle.recv().await,
+            DefaultDialect::ParamRequestList(_)
+        ) {
+            break;
+        }
+    }
+
+    download
+}
+
+/// One entry of a list download.
+fn param_value(name: &str, value: f32, index: u16, count: u16) -> ParamValue {
+    ParamValue {
+        param_id: *Ident::from_str_truncated(name).as_raw(),
+        param_value: value,
+        param_type: MavParamType::Real32,
+        param_index: index,
+        param_count: count,
+    }
 }
 
 #[tokio::test]
@@ -463,21 +502,183 @@ async fn a_dropped_parameter_download_reports_itself_cancelled() {
     let DefaultDialect::ParamRequestList(_) = harness.vehicle.recv().await else {
         panic!("expected PARAM_REQUEST_LIST")
     };
-    let state = |fleet: &FleetSnapshot| {
-        let parameters = fleet.vehicle(SYSTEM)?.parameters(VEHICLE.component)?;
-        Some(parameters.download().clone())
+    let running = |fleet: &FleetSnapshot| {
+        fleet
+            .vehicle(SYSTEM)
+            .and_then(|vehicle| vehicle.parameters(VEHICLE.component))
+            .is_some_and(|parameters| parameters.download().is_running())
     };
-    until(&mut harness.updates, |fleet| {
-        state(fleet) == Some(DownloadState::InProgress)
-    })
-    .await;
+    until(&mut harness.updates, running).await;
 
     download.abort();
 
-    until(&mut harness.updates, |fleet| {
-        state(fleet) == Some(DownloadState::Cancelled)
+    let cancelled = |fleet: &FleetSnapshot| {
+        fleet
+            .vehicle(SYSTEM)
+            .and_then(|vehicle| vehicle.parameters(VEHICLE.component))
+            .and_then(|parameters| parameters.download().outcome())
+            == Some(&DownloadOutcome::Cancelled)
+    };
+    until(&mut harness.updates, cancelled).await;
+}
+
+/// The download of a component that answers with nothing is not a failure:
+/// the protocol cannot tell "no parameters" from "did not answer".
+#[tokio::test(start_paused = true)]
+async fn a_component_that_reports_nothing_is_not_a_failure() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let download = start_download(&mut harness).await;
+    let outcome = download.await.unwrap().expect("not an error");
+    assert_eq!(outcome, DownloadOutcome::NoParameters);
+
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            parameters.download().outcome() == Some(&DownloadOutcome::NoParameters)
+        })
     })
     .await;
+    assert_eq!(
+        parameters(&fleet).unwrap().download().outcome(),
+        Some(&DownloadOutcome::NoParameters),
+        "the snapshot and the result agree"
+    );
+}
+
+/// A partial list has one verdict: the snapshot's outcome is the one the call
+/// returned.
+#[tokio::test(start_paused = true)]
+async fn a_partial_download_has_one_verdict() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let download = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 1.0, 0, 3))
+        .await;
+
+    let outcome = download
+        .await
+        .unwrap()
+        .expect("an incomplete list is not an error");
+    let expected = DownloadOutcome::Incomplete(Progress { done: 1, total: 3 });
+    assert_eq!(outcome, expected);
+
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet)
+            .is_some_and(|parameters| parameters.download().outcome() == Some(&expected))
+    })
+    .await;
+    assert_eq!(
+        parameters(&fleet).unwrap().download().outcome(),
+        Some(&expected)
+    );
+}
+
+/// A value this build cannot decode still counts as arrived: the download
+/// completes, and says how many values it left out.
+#[tokio::test(start_paused = true)]
+async fn a_refused_value_still_completes_the_download() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let download = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&ParamValue {
+            param_id: *Ident::from_str_truncated("PARAM_BIG").as_raw(),
+            param_value: 1.0,
+            param_type: MavParamType::Uint64,
+            param_index: 0,
+            param_count: 1,
+        })
+        .await;
+
+    assert_eq!(download.await.unwrap().unwrap(), DownloadOutcome::Complete);
+
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            parameters.download().outcome() == Some(&DownloadOutcome::Complete)
+        })
+    })
+    .await;
+    let parameters = parameters(&fleet).unwrap();
+    assert_eq!(parameters.download().refused(), 1);
+    assert_eq!(parameters.download().received(), 1);
+    assert!(parameters.is_empty(), "the refused value is not stored");
+}
+
+/// A complete reload replaces the map: a parameter the component no longer
+/// reports is gone. An incomplete one keeps what the earlier download had.
+#[tokio::test(start_paused = true)]
+async fn a_complete_reload_drops_parameters_the_component_removed() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let a = Ident::from_str_truncated("PARAM_A");
+    let b = Ident::from_str_truncated("PARAM_B");
+
+    // First download: A and B.
+    let download = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 1.0, 0, 2))
+        .await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_B", 2.0, 1, 2))
+        .await;
+    assert_eq!(download.await.unwrap().unwrap(), DownloadOutcome::Complete);
+    until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            parameters.download().received() == 2
+                && parameters.download().outcome() == Some(&DownloadOutcome::Complete)
+        })
+    })
+    .await;
+
+    // Second download is cut short after A: B survives.
+    let download = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 3.0, 0, 2))
+        .await;
+    assert!(matches!(
+        download.await.unwrap().unwrap(),
+        DownloadOutcome::Incomplete(_)
+    ));
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            matches!(
+                parameters.download().outcome(),
+                Some(DownloadOutcome::Incomplete(_))
+            ) && parameters.value(&a) == Some(Value::F32(3.0))
+        })
+    })
+    .await;
+    assert_eq!(
+        parameters(&fleet).unwrap().value(&b),
+        Some(Value::F32(2.0)),
+        "an incomplete download keeps what it did not replace"
+    );
+
+    // A complete download of A alone removes B.
+    let download = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 3.0, 0, 1))
+        .await;
+    assert_eq!(download.await.unwrap().unwrap(), DownloadOutcome::Complete);
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            parameters.download().outcome() == Some(&DownloadOutcome::Complete)
+                && parameters.value(&b).is_none()
+        })
+    })
+    .await;
+    assert_eq!(parameters(&fleet).unwrap().value(&a), Some(Value::F32(3.0)));
 }
 
 #[tokio::test]

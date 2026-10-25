@@ -27,7 +27,7 @@ use crate::{
         calibration::CalibrationUpdate,
         fleet::{Fleet, FleetEvent, FleetSnapshot},
         mission::OnboardMission,
-        parameter::DownloadState,
+        parameter::DownloadUpdate,
     },
     mavlink::{Event, EventReceiver, MavlinkRouter, decode},
 };
@@ -48,7 +48,7 @@ pub(super) enum Input {
     },
     ParamDownload {
         address: MavlinkId,
-        state: DownloadState,
+        update: DownloadUpdate,
     },
     Calibration {
         system: SystemId,
@@ -208,8 +208,8 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
         Input::OnboardMission { system, mission } => {
             fleet.set_onboard_mission(system, mission);
         }
-        Input::ParamDownload { address, state } => {
-            fleet.set_param_download(address, state);
+        Input::ParamDownload { address, update } => {
+            fleet.set_param_download(address, update);
         }
         Input::Calibration { system, update } => {
             return fleet.update_calibration(system, update);

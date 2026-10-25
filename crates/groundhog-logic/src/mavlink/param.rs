@@ -30,7 +30,7 @@ use super::{
     locks::LockKey,
     router::MavlinkRouter,
 };
-use crate::{MavlinkId, wire::param::ParamEncoding};
+use crate::{MavlinkId, Progress, wire::param::ParamEncoding};
 
 const PARAM_SET_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_SET_RETRIES: u8 = 3;
@@ -42,6 +42,17 @@ pub(super) const PARAM_LIST_RETRIES: u8 = 3;
 /// hundreds at once floods a slow radio and mostly produces more losses; the
 /// round repeats while the vehicle keeps answering.
 const PARAM_REREQUEST_BATCH: usize = 32;
+
+/// What a list download ended with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParamListResult {
+    /// Nothing arrived before the retries ran out. The component may report no
+    /// parameters, or may not have answered: the protocol cannot tell them
+    /// apart.
+    Nothing,
+    /// How many distinct indices arrived of the advertised count.
+    Received(Progress),
+}
 
 impl MavlinkRouter {
     /// Set a parameter on `target` and wait for it to echo back its new value.
@@ -128,12 +139,12 @@ impl MavlinkRouter {
     /// If `request_capabilities` is set, `AUTOPILOT_VERSION` is requested first,
     /// since the capabilities determine how parameter values are encoded.
     ///
-    /// Returns `(received, expected)`.
-    pub async fn param_list(
+    /// Returns what arrived; see [`ParamListResult`].
+    pub(crate) async fn param_list(
         &self,
         target: MavlinkId,
         request_capabilities: bool,
-    ) -> Result<(usize, u16)> {
+    ) -> Result<ParamListResult> {
         let _lock = self.lock_channel(target).await;
 
         if request_capabilities {
@@ -209,7 +220,12 @@ impl MavlinkRouter {
             }
         }
 
-        let expected = expected.ok_or(MavError::Timeout)?;
-        Ok((received.len(), expected))
+        Ok(match expected {
+            Some(expected) => ParamListResult::Received(Progress {
+                done: received.len(),
+                total: usize::from(expected),
+            }),
+            None => ParamListResult::Nothing,
+        })
     }
 }

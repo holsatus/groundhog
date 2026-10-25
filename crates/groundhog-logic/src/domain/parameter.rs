@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, HashSet};
 use mav_param::{Ident, Value};
 use mavio::default_dialect::enums::MavParamType;
 
+use crate::Progress;
+
 /// How a component encodes parameter values on the wire: vocabulary for
 /// [`Vehicle::param_encoding`](super::vehicle::Vehicle::param_encoding) and
 /// the firmware adapters. Encoding and decoding stay inside the crate.
@@ -27,6 +29,8 @@ pub struct ReportedParam {
     value: Value,
     raw: f32,
     raw_type: MavParamType,
+    /// The download generation this value was last reported in.
+    generation: u64,
 }
 
 impl ReportedParam {
@@ -36,28 +40,116 @@ impl ReportedParam {
     }
 }
 
-/// Where a component's parameter list download stands.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum DownloadState {
-    #[default]
-    Idle,
-    InProgress,
+/// How a component's parameter download ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadOutcome {
+    /// Every parameter the component advertised arrived.
     Complete,
+    /// The download ended short of the advertised count.
+    Incomplete(Progress),
+    /// Nothing arrived. The component may report no parameters, or may not
+    /// have answered; the protocol cannot tell them apart, so the panel gives
+    /// a reason and offers a retry rather than calling it a failure.
+    NoParameters,
+    /// The transfer failed; values received so far are kept.
     Failed(String),
-    /// Stopped before it finished; the values received so far are kept.
+    /// The operator stopped it; values received so far are kept.
     Cancelled,
+}
+
+/// A component's parameter list download: how far it has come, and how it
+/// ended.
+///
+/// Every download has a generation, and every value remembers the one it was
+/// last reported in. A download that completes removes the values it did not
+/// report; one that fails, is cancelled, or brings nothing keeps them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParamDownload {
+    generation: u64,
+    running: bool,
+    expected: u16,
+    received: HashSet<u16>,
+    refused: u32,
+    outcome: Option<DownloadOutcome>,
+}
+
+impl ParamDownload {
+    /// Whether a download is in flight.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// How many parameters the target advertised, or 0 while unknown.
+    pub fn expected(&self) -> u16 {
+        self.expected
+    }
+
+    /// How many distinct list indices arrived in this download.
+    pub fn received(&self) -> usize {
+        self.received.len()
+    }
+
+    /// How many of them this build could not decode.
+    pub fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// How the last download ended, if it did.
+    pub fn outcome(&self) -> Option<&DownloadOutcome> {
+        self.outcome.as_ref()
+    }
+
+    /// The generation values are stamped with.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn start(&mut self) {
+        self.generation += 1;
+        self.running = true;
+        self.expected = 0;
+        self.received.clear();
+        self.refused = 0;
+        self.outcome = None;
+    }
+
+    /// Note that list index `index` of `count` arrived, refused or not.
+    fn note(&mut self, index: u16, count: u16, refused: bool) {
+        if count == 0 || index >= count {
+            return;
+        }
+
+        self.received.insert(index);
+        self.expected = count;
+        if refused {
+            self.refused += 1;
+        }
+    }
+
+    fn finish(&mut self, outcome: DownloadOutcome) {
+        self.running = false;
+        self.outcome = Some(outcome);
+    }
+}
+
+/// A change to a component's download, reported by the service running it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadUpdate {
+    /// A download started: a new generation begins.
+    Start,
+    /// A download ended.
+    Finish(DownloadOutcome),
 }
 
 /// The parameters of one component.
 #[derive(Debug, Clone, Default)]
 pub struct Parameters {
     map: BTreeMap<Ident, ReportedParam>,
-    loading: LoadingState,
     /// The encoding values are decoded with, once known (advertised by the
     /// component, or implied by its firmware). Until then values are decoded
     /// bytewise for display, and writes are refused.
     encoding: Option<ParamEncoding>,
-    download: DownloadState,
+    download: ParamDownload,
 }
 
 impl Parameters {
@@ -81,11 +173,7 @@ impl Parameters {
         self.map.get(id).map(ReportedParam::value)
     }
 
-    pub fn loading(&self) -> &LoadingState {
-        &self.loading
-    }
-
-    pub fn download(&self) -> &DownloadState {
+    pub fn download(&self) -> &ParamDownload {
         &self.download
     }
 
@@ -111,25 +199,27 @@ impl Parameters {
         // Keep every stored value decoded the same way as this one.
         self.set_encoding(encoding);
 
-        let value = encoding
+        let decoded = encoding
             .unwrap_or(ParamEncoding::Bytewise)
-            .decode(raw, raw_type)
-            .ok_or(UnsupportedType(raw_type))?;
+            .decode(raw, raw_type);
 
+        // Unsolicited echoes (of a set) carry index 65535 and say nothing
+        // about the list. A list index counts as arrived even when its value
+        // cannot be decoded: the download did receive it.
+        if index != u16::MAX {
+            self.download.note(index, count, decoded.is_none());
+        }
+
+        let value = decoded.ok_or(UnsupportedType(raw_type))?;
         self.map.insert(
             ident,
             ReportedParam {
                 value,
                 raw,
                 raw_type,
+                generation: self.download.generation(),
             },
         );
-
-        // Unsolicited echoes (of a set) carry index 65535 and say nothing
-        // about the list.
-        if index != u16::MAX {
-            self.loading.note(index, count);
-        }
 
         Ok(())
     }
@@ -150,12 +240,40 @@ impl Parameters {
         }
     }
 
-    /// Note that a list download started or ended.
-    pub(crate) fn set_download(&mut self, state: DownloadState) {
-        if state == DownloadState::InProgress {
-            self.loading.has_loaded.clear();
+    /// Fold a download's start or outcome in. A completed download drops the
+    /// values it did not report: the component no longer has them.
+    pub(crate) fn set_download(&mut self, update: DownloadUpdate) {
+        match update {
+            DownloadUpdate::Start => self.download.start(),
+            DownloadUpdate::Finish(outcome) => {
+                let generation = self.download.generation;
+                let complete = outcome == DownloadOutcome::Complete;
+
+                self.download.finish(outcome);
+                if complete {
+                    self.map.retain(|_, param| param.generation == generation);
+                }
+            }
         }
-        self.download = state;
+    }
+
+    /// Whether reporting this value would change nothing: an unsolicited echo
+    /// of the value and type already stored, under the same encoding.
+    pub(crate) fn reports_nothing_new(
+        &self,
+        ident: &Ident,
+        raw: f32,
+        raw_type: MavParamType,
+        index: u16,
+        encoding: Option<ParamEncoding>,
+    ) -> bool {
+        index == u16::MAX
+            && self.encoding == encoding
+            && self.map.get(ident).is_some_and(|param| {
+                param.generation == self.download.generation
+                    && param.raw.to_bits() == raw.to_bits()
+                    && param.raw_type == raw_type
+            })
     }
 }
 
@@ -163,37 +281,6 @@ impl Parameters {
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 #[error("unsupported parameter type {0:?}")]
 pub struct UnsupportedType(pub MavParamType);
-
-/// Which parameters of an advertised list have arrived.
-#[derive(Debug, Clone, Default)]
-pub struct LoadingState {
-    has_loaded: HashSet<u16>,
-    expected_count: u16,
-}
-
-impl LoadingState {
-    fn note(&mut self, index: u16, count: u16) {
-        if count == 0 || index >= count {
-            return;
-        }
-        self.has_loaded.insert(index);
-        self.expected_count = count;
-    }
-
-    /// How many parameters have been received so far.
-    pub fn loaded(&self) -> usize {
-        self.has_loaded.len()
-    }
-
-    /// How many parameters the target advertised.
-    pub fn expected(&self) -> u16 {
-        self.expected_count
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.expected_count > 0 && self.has_loaded.len() >= self.expected_count as usize
-    }
-}
 
 /// What became of an upload, once its result is folded in.
 #[derive(Debug, Clone, PartialEq)]
@@ -562,13 +649,15 @@ mod tests {
                 Some(ParamEncoding::CCast),
             )
             .unwrap();
-        assert_eq!(parameters.loading().loaded(), 0);
+        assert_eq!(parameters.download().received(), 0);
         assert_eq!(parameters.value(&ident()), Some(Value::F32(2.0)));
     }
 
     #[test]
-    fn loading_tracks_completion() {
+    fn a_download_tracks_what_arrived() {
         let mut parameters = Parameters::default();
+        parameters.set_download(DownloadUpdate::Start);
+
         for index in 0..3 {
             let name = Ident::from_str_truncated(&format!("P{index}"));
             parameters
@@ -582,13 +671,79 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(parameters.loading().is_complete());
 
-        parameters.set_download(DownloadState::InProgress);
-        assert!(
-            !parameters.loading().is_complete(),
-            "a new download starts over"
+        let download = parameters.download();
+        assert!(download.is_running());
+        assert_eq!(download.received(), 3);
+        assert_eq!(download.expected(), 3);
+        assert_eq!(download.refused(), 0);
+
+        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+        assert!(!parameters.download().is_running());
+        assert_eq!(
+            parameters.download().outcome(),
+            Some(&DownloadOutcome::Complete)
         );
+    }
+
+    #[test]
+    fn a_completed_download_drops_the_parameters_it_did_not_report() {
+        let mut parameters = Parameters::default();
+        let gone = Ident::from_str_truncated("PARAM_GONE");
+        parameters
+            .observe(ident(), 1.0, MavParamType::Real32, 0, 2, None)
+            .unwrap();
+        parameters
+            .observe(gone.clone(), 2.0, MavParamType::Real32, 1, 2, None)
+            .unwrap();
+
+        parameters.set_download(DownloadUpdate::Start);
+        parameters
+            .observe(ident(), 3.0, MavParamType::Real32, 0, 1, None)
+            .unwrap();
+        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters.value(&ident()), Some(Value::F32(3.0)));
+        assert!(parameters.value(&gone).is_none());
+    }
+
+    #[test]
+    fn an_incomplete_download_keeps_the_parameters_it_did_not_report() {
+        let mut parameters = Parameters::default();
+        let kept = Ident::from_str_truncated("PARAM_KEPT");
+        parameters
+            .observe(kept.clone(), 2.0, MavParamType::Real32, 0, 2, None)
+            .unwrap();
+
+        parameters.set_download(DownloadUpdate::Start);
+        parameters
+            .observe(ident(), 3.0, MavParamType::Real32, 0, 2, None)
+            .unwrap();
+        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Incomplete(
+            crate::Progress { done: 1, total: 2 },
+        )));
+
+        assert_eq!(parameters.len(), 2);
+        assert!(parameters.value(&kept).is_some());
+    }
+
+    #[test]
+    fn a_refused_value_still_counts_as_arrived() {
+        let mut parameters = Parameters::default();
+        parameters.set_download(DownloadUpdate::Start);
+
+        let error = parameters
+            .observe(ident(), 1.0, MavParamType::Uint64, 0, 1, None)
+            .expect_err("64-bit types are not representable");
+        assert_eq!(error.0, MavParamType::Uint64);
+
+        let download = parameters.download();
+        assert_eq!(download.received(), 1);
+        assert_eq!(download.refused(), 1);
+
+        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+        assert!(parameters.is_empty(), "the refused value is not stored");
     }
 
     #[test]

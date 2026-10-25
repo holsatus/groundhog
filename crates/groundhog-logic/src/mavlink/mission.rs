@@ -36,7 +36,7 @@ use super::{
     recv::FilteredReceiver,
     router::MavlinkRouter,
 };
-use crate::{MavlinkId, wire::mission_item::RawMissionItem};
+use crate::{MavlinkId, Progress, wire::mission_item::RawMissionItem};
 
 /// Retries after the first attempt.
 const MISSION_MAX_RETRIES: u8 = 5;
@@ -57,13 +57,6 @@ pub(crate) struct DownloadedMission {
     pub(crate) items: Vec<RawMissionItem>,
     /// The `opaque_id` reported by the vehicle, or 0 if it uses none.
     pub(crate) opaque_id: u32,
-}
-
-/// How far a transfer has come: `done` of `total` items.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransferProgress {
-    pub done: u16,
-    pub total: u16,
 }
 
 /// A mission message decoded from the wire, filtered to the mission transaction.
@@ -261,7 +254,7 @@ impl MavlinkRouter {
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
-        progress: &(dyn Fn(TransferProgress) + Send + Sync),
+        progress: &(dyn Fn(Progress) + Send + Sync),
     ) -> Result<DownloadedMission> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
         let mut listener = MissionListener::new(self, target, mission_type);
@@ -275,9 +268,9 @@ impl MavlinkRouter {
         // The vehicle now waits for item requests: abandoning from here on
         // must be announced.
         cancel.armed = count > 0;
-        progress(TransferProgress {
+        progress(Progress {
             done: 0,
-            total: count,
+            total: usize::from(count),
         });
 
         let mut items = Vec::with_capacity(count as usize);
@@ -296,9 +289,9 @@ impl MavlinkRouter {
                 Err(error) => return Err(error),
             }
 
-            progress(TransferProgress {
-                done: seq + 1,
-                total: count,
+            progress(Progress {
+                done: usize::from(seq) + 1,
+                total: usize::from(count),
             });
         }
 
@@ -323,7 +316,7 @@ impl MavlinkRouter {
         target: MavlinkId,
         mission_type: MavMissionType,
         items: &[RawMissionItem],
-        progress: &(dyn Fn(TransferProgress) + Send + Sync),
+        progress: &(dyn Fn(Progress) + Send + Sync),
     ) -> Result<u32> {
         let count = u16::try_from(items.len())
             .map_err(|_| MavError::Encode(format!("{} mission items", items.len())))?;
@@ -334,9 +327,9 @@ impl MavlinkRouter {
         let mut cancel = CancelOnDrop::new(self, target, mission_type);
         let mut highest_served: Option<u16> = None;
 
-        progress(TransferProgress {
+        progress(Progress {
             done: 0,
-            total: count,
+            total: usize::from(count),
         });
 
         for attempt in 0..=MISSION_MAX_RETRIES {
@@ -371,9 +364,9 @@ impl MavlinkRouter {
 
                         if highest_served.is_none_or(|highest| seq > highest) {
                             highest_served = Some(seq);
-                            progress(TransferProgress {
-                                done: seq + 1,
-                                total: count,
+                            progress(Progress {
+                                done: usize::from(seq) + 1,
+                                total: usize::from(count),
                             });
                         }
 

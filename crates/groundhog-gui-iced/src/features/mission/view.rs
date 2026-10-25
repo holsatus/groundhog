@@ -228,7 +228,7 @@ impl MissionEditor {
 
         Some(ui::activity(
             label,
-            progress.map(|progress| (f32::from(progress.done), f32::from(progress.total))),
+            progress.map(|progress| (progress.done as f32, progress.total as f32)),
             Some(message(MessageKind::Cancel(operation))),
         ))
     }

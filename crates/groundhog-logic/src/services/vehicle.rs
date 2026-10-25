@@ -28,13 +28,13 @@ use crate::{
         calibration::{CalibrationKind, CalibrationProtocol, CalibrationUpdate, RunId, Session},
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
-        parameter::DownloadState,
+        parameter::{DownloadOutcome, DownloadUpdate},
         vehicle::Vehicle,
     },
-    mavlink::{MavError, commands},
+    mavlink::{MavError, ParamListResult, commands},
 };
 
-pub use crate::mavlink::TransferProgress;
+use crate::Progress;
 
 /// How long a calibration command may take to be acknowledged. Firmwares run
 /// some calibrations (ArduPilot's gyroscope and level) before acknowledging.
@@ -42,14 +42,6 @@ const CALIBRATION_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a calibration step confirmation may take to be acknowledged.
 const CALIBRATION_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// A summary of a parameter-list download: how many parameters arrived and how
-/// many the target advertised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParamListSummary {
-    pub received: usize,
-    pub expected: u16,
-}
 
 /// Reports a parameter download to the runtime: in progress from the start,
 /// then its outcome, or cancelled if the download is dropped first. A dropped
@@ -64,7 +56,7 @@ impl<'a> DownloadReport<'a> {
     fn start(fleet: &'a FleetHandle, address: MavlinkId) -> Self {
         fleet.report(Input::ParamDownload {
             address,
-            state: DownloadState::InProgress,
+            update: DownloadUpdate::Start,
         });
         Self {
             fleet,
@@ -73,11 +65,11 @@ impl<'a> DownloadReport<'a> {
         }
     }
 
-    fn finish(mut self, state: DownloadState) {
+    fn finish(mut self, outcome: DownloadOutcome) {
         self.finished = true;
         self.fleet.report(Input::ParamDownload {
             address: self.address,
-            state,
+            update: DownloadUpdate::Finish(outcome),
         });
     }
 }
@@ -87,7 +79,7 @@ impl Drop for DownloadReport<'_> {
         if !self.finished {
             self.fleet.report(Input::ParamDownload {
                 address: self.address,
-                state: DownloadState::Cancelled,
+                update: DownloadUpdate::Finish(DownloadOutcome::Cancelled),
             });
         }
     }
@@ -214,16 +206,19 @@ impl VehicleClient {
     }
 
     /// Download the component's parameter list. Progress and the outcome are
-    /// visible in the fleet snapshot (see [`DownloadState`]).
+    /// visible in the fleet snapshot (see [`ParamDownload`]); the returned
+    /// outcome is the same one the snapshot holds.
     ///
     /// # Errors
     ///
     /// [`Error::UnknownVehicle`] if the vehicle left the fleet, or the reason
     /// the transfer failed: [`Error::Timeout`] if it stopped answering,
-    /// [`Error::NoLink`] if nothing reaches it. A transfer that ends short of
-    /// the count the vehicle announced is not an error here; the snapshot
-    /// reports it as [`DownloadState::Failed`].
-    pub async fn fetch_parameters(&self) -> Result<ParamListSummary> {
+    /// [`Error::NoLink`] if nothing reaches it. A download that ends short of
+    /// the count, or with nothing at all, is not an error: it returns
+    /// [`DownloadOutcome::Incomplete`] or [`DownloadOutcome::NoParameters`].
+    ///
+    /// [`ParamDownload`]: crate::domain::parameter::ParamDownload
+    pub async fn fetch_parameters(&self) -> Result<DownloadOutcome> {
         // Capabilities are only worth a round trip when they would decide
         // the encoding: a known firmware already implies it.
         let (target, encoding_known) = self.with_vehicle(|vehicle| {
@@ -240,21 +235,22 @@ impl VehicleClient {
             .fleet
             .router()
             .param_list(target, !encoding_known)
-            .await
-            .map_err(Error::from);
+            .await;
 
-        let state = match &result {
-            Ok((received, expected)) if *received >= usize::from(*expected) => {
-                DownloadState::Complete
+        let outcome = match &result {
+            Ok(ParamListResult::Nothing) => DownloadOutcome::NoParameters,
+            Ok(ParamListResult::Received(progress)) if progress.done >= progress.total => {
+                DownloadOutcome::Complete
             }
-            Ok((received, expected)) => {
-                DownloadState::Failed(format!("received {received} of {expected} parameters"))
-            }
-            Err(error) => DownloadState::Failed(error.to_string()),
+            Ok(ParamListResult::Received(progress)) => DownloadOutcome::Incomplete(*progress),
+            Err(error) => DownloadOutcome::Failed(error.to_string()),
         };
-        report.finish(state);
+        report.finish(outcome.clone());
 
-        result.map(|(received, expected)| ParamListSummary { received, expected })
+        match result {
+            Ok(_) => Ok(outcome),
+            Err(error) => Err(Error::from(error)),
+        }
     }
 
     /// Set one parameter on the component, returning the value it reports
@@ -296,7 +292,7 @@ impl VehicleClient {
     /// [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn download_mission(
         &self,
-        progress: &(dyn Fn(TransferProgress) + Send + Sync),
+        progress: &(dyn Fn(Progress) + Send + Sync),
     ) -> Result<OnboardMission> {
         let (target, layout) =
             self.with_vehicle(|vehicle| (vehicle.target(), vehicle.mission_layout()))?;
@@ -326,7 +322,7 @@ impl VehicleClient {
     pub async fn upload_mission(
         &self,
         items: Vec<MissionItem>,
-        progress: &(dyn Fn(TransferProgress) + Send + Sync),
+        progress: &(dyn Fn(Progress) + Send + Sync),
     ) -> Result<OnboardMission> {
         let (target, layout, home) = self.with_vehicle(|vehicle| {
             (

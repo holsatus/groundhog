@@ -23,7 +23,7 @@ use groundhog_logic::{
             Refusal, SyncStatus, Verdict,
         },
     },
-    services::{Result, TransferProgress},
+    services::{Progress, Result},
     storage::mission::{WplMission, parse_wpl, write_wpl},
 };
 use iced::Task;
@@ -168,7 +168,7 @@ pub enum MessageKind {
         confirmed: bool,
     },
     Cancel(Operation),
-    Progress(Operation, Ticket, TransferProgress),
+    Progress(Operation, Ticket, Progress),
     Finished(Operation, Ticket, Result<Option<OnboardMission>>),
 
     // Editing.
@@ -603,7 +603,7 @@ impl MissionEditor {
         &mut self,
         system: SystemId,
         operation: Operation,
-        run: impl FnOnce(super::operations::Progress) -> Fut,
+        run: impl FnOnce(super::operations::ProgressReporter) -> Fut,
     ) -> Task<Message>
     where
         Fut: std::future::Future<Output = Result<Option<OnboardMission>>> + Send + 'static,

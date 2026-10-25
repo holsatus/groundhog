@@ -54,7 +54,7 @@ use crate::{
         firmware::{self, Firmware, FlightMode, MissionLayout, ModeKind},
         geo::GeoPosition,
         mission::OnboardMission,
-        parameter::{DownloadState, Parameters},
+        parameter::{DownloadUpdate, Parameters},
     },
     wire::{self, param::ParamEncoding},
 };
@@ -166,10 +166,6 @@ impl Vehicle {
             system,
             ..Vehicle::default()
         }
-    }
-
-    fn component_mut(&mut self, component: u8) -> &mut ComponentState {
-        Arc::make_mut(self.components.entry(component).or_default())
     }
 
     /// `component`'s state to change, if `changes` says the change would
@@ -440,11 +436,11 @@ impl Vehicle {
         }
     }
 
-    /// Record a parameter list download's progress for `component`.
-    pub(crate) fn set_param_download(&mut self, component: u8, state: DownloadState) {
+    /// Fold a parameter list download's start or outcome in for `component`.
+    pub(crate) fn set_param_download(&mut self, component: u8, update: DownloadUpdate) {
         Arc::make_mut(self.components.entry(component).or_default())
             .parameters
-            .set_download(state);
+            .set_download(update);
     }
 
     fn on_param_value(&mut self, component: u8, message: &messages::ParamValue) {
@@ -453,9 +449,21 @@ impl Vehicle {
             return;
         };
 
-        let state = self.component_mut(component);
-        let encoding = state.param_encoding();
+        // A repeat of a value already stored (PX4 echoes on every link) leaves
+        // the component's whole parameter set shared with the last snapshot.
+        let Some(state) = self.component_mut_if(component, |state| {
+            !state.parameters.reports_nothing_new(
+                &ident,
+                message.param_value,
+                message.param_type,
+                message.param_index,
+                state.param_encoding(),
+            )
+        }) else {
+            return;
+        };
 
+        let encoding = state.param_encoding();
         if let Err(error) = state.parameters.observe(
             ident,
             message.param_value,

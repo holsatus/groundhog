@@ -398,11 +398,19 @@ fn list_value(index: u16, count: u16) -> ParamValue {
     }
 }
 
+/// The counts of a list download that received anything.
+fn received(result: ParamListResult) -> (usize, usize) {
+    match result {
+        ParamListResult::Received(progress) => (progress.done, progress.total),
+        ParamListResult::Nothing => panic!("the vehicle sent nothing"),
+    }
+}
+
 /// Start downloading the parameter list.
 fn start_list(
     router: &MavlinkRouter,
     capabilities: bool,
-) -> tokio::task::JoinHandle<super::error::Result<(usize, u16)>> {
+) -> tokio::task::JoinHandle<super::error::Result<ParamListResult>> {
     let router = router.clone();
     tokio::spawn(async move { router.param_list(VEHICLE, capabilities).await })
 }
@@ -420,7 +428,7 @@ async fn param_list_completes() {
         vehicle.send(&list_value(index, 5)).await;
     }
 
-    assert_eq!(task.await.unwrap().unwrap(), (5, 5));
+    assert_eq!(received(task.await.unwrap().unwrap()), (5, 5));
     let more = tokio::time::timeout(Duration::from_secs(5), vehicle.recv()).await;
     assert!(more.is_err(), "nothing re-requested: {more:?}");
 }
@@ -441,7 +449,7 @@ async fn param_list_rerequests_the_missing_indices() {
     assert_eq!(read.param_index, 2);
     vehicle.send(&list_value(2, 4)).await;
 
-    assert_eq!(task.await.unwrap().unwrap(), (4, 4));
+    assert_eq!(received(task.await.unwrap().unwrap()), (4, 4));
 }
 
 #[tokio::test(start_paused = true)]
@@ -469,7 +477,7 @@ async fn param_list_ends_although_values_keep_coming() {
         .await
         .expect("the download ends");
 
-    assert_eq!(result.unwrap(), (2, 3));
+    assert_eq!(received(result.unwrap()), (2, 3));
     let rounds = u32::from(param::PARAM_LIST_RETRIES) + 1;
     assert!(started.elapsed() <= param::PARAM_LIST_IDLE_TIMEOUT * (rounds + 1));
 }
@@ -510,7 +518,7 @@ async fn param_list_falls_back_to_component_information() {
         DefaultDialect::ParamRequestList(_)
     ));
     vehicle.send(&list_value(0, 1)).await;
-    assert_eq!(task.await.unwrap().unwrap(), (1, 1));
+    assert_eq!(received(task.await.unwrap().unwrap()), (1, 1));
 }
 
 /// Start setting `TEST_PARAM` to `requested`, and receive the `PARAM_SET`.
@@ -609,7 +617,7 @@ async fn param_set_waits_for_a_list_download() {
     );
 
     vehicle.send(&list_value(0, 1)).await;
-    assert_eq!(download.await.unwrap().unwrap(), (1, 1));
+    assert_eq!(received(download.await.unwrap().unwrap()), (1, 1));
 
     let DefaultDialect::ParamSet(message) = vehicle.recv().await else {
         panic!("expected PARAM_SET")

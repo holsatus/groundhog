@@ -32,3 +32,11 @@ mod wire;
 
 pub use address::{MavlinkId, SystemId};
 pub use services::{Backend, BackendEvents, BackendOptions};
+
+/// A transfer's progress: `done` of `total` units. Shared by the middleware,
+/// the services and the frontends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
+}

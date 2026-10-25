@@ -27,7 +27,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [PARAM-2](#param-2--a-component-with-no-parameters-reports-a-failed-download) — a zero-parameter component fails instead of showing 0 |
 | **P1** | [CAL-1](#cal-1--px4-offers-flight-modes-the-vehicle-cannot-fly) — a rover is offered Takeoff and Precision Land |
 | **P1** | [UI-1](#ui-1--the-confirmation-dialog-does-not-fit-a-phone) — the accept button can be off-screen |
 
@@ -207,18 +206,6 @@ lat/lon saturate to `i32::MAX` and import as a plausible waypoint
 
 ## Parameters
 
-### PARAM-2 · A component with no parameters reports a failed download
-**P1** · Effort S · From LOGIC-12
-
-`expected` is only set from a received `PARAM_VALUE`; a component that sends
-none leaves it `None`, so `param.rs:158,203` returns `Timeout` after the
-retries and the panel stores `Failed` (`services/vehicle.rs:246-254`).
-
-**Fix:** treat "list requested, idle timeout, no values" as an empty complete
-list `(0, 0)`.
-
-**Test:** a mock that answers `PARAM_REQUEST_LIST` with nothing.
-
 ### PARAM-3 · "Save to a file" writes display values while encoding is unknown
 **P2** · Effort S · From REVIEW area 6
 
@@ -249,25 +236,6 @@ duplicates are last-wins (`storage/parameter.rs:104-131,250-276`).
 
 **Fix:** define one policy (skip with a counted warning is friendlier), share
 it, and report truncation/duplicates in the load summary.
-
-### PARAM-6 · A new download does not clear parameters the vehicle removed
-**P2** · Effort S · From REVIEW area 6
-
-`Parameters::loading` clears `has_loaded` but not `map`
-(`parameter.rs:154-158`), so removed parameters survive every reload and every
-exported file.
-
-**Fix:** clear the map when a download starts, or replace it on completion.
-
-### PARAM-7 · A refused value leaves the download badge stuck
-**P2** · Effort S · From REVIEW area 6
-
-A value `observe` refuses (unsupported type) is dropped before `loading.note`
-is updated (`parameter.rs:110-134`), but the transaction still counts its
-index. `DownloadState` can say `Complete` while `LoadingState` never completes.
-
-**Fix:** note the refused index in `LoadingState` too, or count only accepted
-values consistently on both sides.
 
 ### PARAM-8 · "Save to a file" omits pending edits without saying so
 **P3** · Effort S · From REVIEW area 11
@@ -313,27 +281,11 @@ evict every real peer.
 **Fix:** admit a peer only after it has produced a plausible MAVLink frame;
 keep the cap and eviction.
 
-### LINK-3 · C-cast decoding saturates silently
-**P2** · Effort S · From REVIEW area 3
-
-`value_from_c_cast` turns NaN into 0, `-1.0` into 0 for a `Uint8`, and `300.0`
-into 255 (`wire/param.rs:83-96`). A sentinel can be presented as a real
-editable value.
-
-**Fix:** return `None` for non-finite/out-of-range values, or document the
-saturation as intentional.
-
 ### LINK-4 · A serial open cannot be cancelled
 **P3** · Effort M · From REVIEW area 3
 
 `link/transport.rs:70-83` runs the open in `spawn_blocking`; `OPEN_TIMEOUT`
 stops waiting but the thread lives on and retries can contend for the device.
-
-### LINK-5 · 64-bit parameter types decode to `None` without saying so
-**P3** · Effort S · From REVIEW area 3
-
-`wire/param.rs:43,63,92` supports neither `Uint64` nor `Int64`; name them in
-the module doc (or implement them).
 
 ### LINK-6 · Listen-mode UDP splices a truncated datagram onto the next
 **P3** · Effort S · From REVIEW area 3
@@ -424,16 +376,6 @@ for `features/calibration.rs`).
 
 ## Services & vehicle state
 
-### SVC-1 · A partial parameter download has two verdicts
-**P2** · Effort S · From REVIEW area 8
-
-A partial list stores `Failed("received 3 of 500")` in the snapshot while the
-call returns `Ok(ParamListSummary)` (`services/vehicle.rs:216-257`), so the
-panel can show both a danger banner and an incomplete warning.
-
-**Fix:** return the failure to the caller too, or make the snapshot the single
-source of the outcome.
-
 ### SVC-2 · Recording is unbounded and can stop silently
 **P2** · Effort M · From REVIEW area 8
 
@@ -506,13 +448,6 @@ value.
 `PositionTrack` sits behind an `Arc` but is mutated on every fix
 (`vehicle/mod.rs:561-573`), copying up to 1000 positions per publish. Make the
 trail a ring buffer with interior ownership or accept the cost explicitly.
-
-### SVC-11 · Every `PARAM_VALUE` copies the parameter map
-**P3** · Effort S · From REVIEW area 4
-
-`on_param_value` always takes `component_mut` (`vehicle/mod.rs:456`), even for a
-repeat of an unchanged value; `component_mut_if` exists for this. Use it when
-the value and type are unchanged.
 
 ### SVC-12 · Invalid UTF-8 drops a whole name
 **P3** · Effort S · From REVIEW area 4
@@ -817,13 +752,6 @@ so, or give the service layer one failure type.
 `EditStatus::Failed(String)` lose the reason. Keep `String` only for
 display-boundary passthrough and say so in `AGENTS.md`.
 
-### API-5 · Progress has three shapes
-**P3** · Effort M · From CODE-F4.1
-
-`TransferProgress { done, total }`, `ParamListSummary { received, expected }`
-and `Result<(usize, u16)>` describe the same thing. Introduce one `Progress`
-type (or alias) in services.
-
 ### API-6 · Result variants name the same lifecycle differently
 **P3** · Effort S · From CODE-F4.2
 
@@ -890,14 +818,17 @@ Verified at `5389934`; do not re-open without new evidence.
 - **CODE_REVIEW:** F8.1 (module docs), F8.2 (`ui::either`), F8.4 (dead code),
   F11.1 (copy-on-write before change), F11.5 (battery doc); F3.2's regression
   (`Invalid` heartbeat no longer resets firmware, with a test); F4.1's
-  parameter Cancel; F4.3's delete-link confirmation; F5's
-  `CalibrationFinished` payload; F9.1's mission checkbox.
+  parameter Cancel and one `Progress` type; F4.3's delete-link confirmation;
+  F5's `CalibrationFinished` payload; F9.1's mission checkbox.
 - **LOGIC_REVIEW:** 1 (newer enum values: one tolerant decoder for heartbeats,
   ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
   picker confirmation), 5 (parameter echo preference), 9
-  (`MISSION_CURRENT.total`), 14.3 (recording names), 14.4 (`reached_seq`).
+  (`MISSION_CURRENT.total`), 12 (a component that reports no parameters),
+  14.3 (recording names), 14.4 (`reached_seq`).
 - **REVIEW.md:** H1 (parameter writes wait for a list download and share the
-  channel only with other sets); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
+  channel only with other sets); areas 3, 4, 6 and 8 (C-cast saturation and
+  64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
+  model with stale values removed); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
   calibration offering, runtime stop, calibration drop guard, empty-upload
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload
   identity, back behind confirmation, map drag cancel, pane minimums, adaptive
@@ -914,6 +845,9 @@ Verified at `5389934`; do not re-open without new evidence.
 
 ## Appendix B — Rejected claims
 
+- **`PARAM-2`'s "empty complete list":** the protocol cannot tell a component
+  without parameters from one that never answered, so nothing-arrived is its
+  own `NoParameters` outcome with a reason and a retry, not `Complete (0, 0)`.
 - **`PARAM-1`'s one lock per reply channel:** making every `PARAM_VALUE` of a
   target one exclusive lock would serialise every set. Sets conflict only with
   list downloads and with sets of the same parameter, so the channel is

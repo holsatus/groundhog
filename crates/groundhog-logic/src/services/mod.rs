@@ -10,7 +10,7 @@
 //!
 //! No middleware type appears in these APIs, so the middleware stays an
 //! implementation detail. Plain data it produces, such as [`LinkStats`] and
-//! [`TransferProgress`], is re-exported here.
+//! [`Progress`], is re-exported here.
 
 mod backend;
 mod error;
@@ -20,6 +20,7 @@ mod recording;
 mod runtime;
 mod vehicle;
 
+pub use crate::Progress;
 pub use backend::{Backend, BackendEvents, BackendOptions};
 pub use error::{Error, MissionRejection, Rejection, Result};
 pub use fleet::FleetHandle;
@@ -28,7 +29,7 @@ pub use link::{
 };
 pub use recording::TlogRecorder;
 pub use runtime::{FleetUpdate, FleetUpdates};
-pub use vehicle::{ParamListSummary, TransferProgress, VehicleClient};
+pub use vehicle::VehicleClient;
 
 pub use crate::mavlink::LinkStats;
 

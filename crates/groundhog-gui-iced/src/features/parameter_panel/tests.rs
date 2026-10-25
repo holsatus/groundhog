@@ -332,11 +332,10 @@ async fn a_cancelled_download_ignores_its_late_result() {
     assert!(!panel.reloads.is_running(&ADDRESS));
     assert_eq!(env.notices.history().last().unwrap().level, Level::Info);
 
-    let summary = ParamListSummary {
-        received: 1,
-        expected: 1,
-    };
-    env.step(&mut panel, Message::Reloaded(ADDRESS, ticket, Ok(summary)));
+    env.step(
+        &mut panel,
+        Message::Reloaded(ADDRESS, ticket, Ok(DownloadOutcome::Complete)),
+    );
     assert_eq!(
         env.notices.history().last().unwrap().level,
         Level::Info,

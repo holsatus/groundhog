@@ -16,17 +16,17 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 use futures::{StreamExt, channel::mpsc, stream};
 use iced::Task;
 
-use groundhog_logic::services::TransferProgress;
+use groundhog_logic::Progress;
 
 /// A sink for progress reports, handed to operations that make progress.
-pub type Progress = Arc<dyn Fn(TransferProgress) + Send + Sync>;
+pub type ProgressReporter = Arc<dyn Fn(Progress) + Send + Sync>;
 
 struct Running {
     /// Aborts the task when dropped.
     _handle: iced::task::Handle,
     /// Distinguishes this run from a later one under the same key.
     generation: u64,
-    progress: Option<TransferProgress>,
+    progress: Option<Progress>,
 }
 
 /// The operations a feature has in flight, by key.
@@ -69,12 +69,12 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
     }
 
     /// Start an operation that reports progress. `operation` receives the
-    /// [`Progress`] sink; `progress` maps each report to a message.
+    /// [`ProgressReporter`] sink; `progress` maps each report to a message.
     pub fn start_with_progress<T, M, Fut>(
         &mut self,
         key: K,
-        operation: impl FnOnce(Progress) -> Fut,
-        progress: impl Fn(Ticket, TransferProgress) -> M + Send + 'static,
+        operation: impl FnOnce(ProgressReporter) -> Fut,
+        progress: impl Fn(Ticket, Progress) -> M + Send + 'static,
         done: impl FnOnce(Ticket, T) -> M + Send + 'static,
     ) -> Task<M>
     where
@@ -84,7 +84,7 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
     {
         let ticket = self.ticket();
         let (sender, receiver) = mpsc::unbounded();
-        let sink: Progress = Arc::new(move |report| {
+        let sink: ProgressReporter = Arc::new(move |report| {
             let _ = sender.unbounded_send(report);
         });
 
@@ -141,7 +141,7 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
     }
 
     /// Record a progress report of the run `ticket`. Stale reports are ignored.
-    pub fn report(&mut self, key: &K, ticket: Ticket, progress: TransferProgress) {
+    pub fn report(&mut self, key: &K, ticket: Ticket, progress: Progress) {
         if let Some(running) = self.running.get_mut(key)
             && running.generation == ticket.0
         {
@@ -159,7 +159,7 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
     }
 
     /// The last progress report of the operation under `key`.
-    pub fn progress(&self, key: &K) -> Option<TransferProgress> {
+    pub fn progress(&self, key: &K) -> Option<Progress> {
         self.running.get(key).and_then(|running| running.progress)
     }
 
@@ -216,7 +216,7 @@ mod tests {
         let _task = operations.start(1, async {}, |ticket, ()| ticket);
         let ticket = Ticket(operations.next_generation);
 
-        let report = TransferProgress { done: 2, total: 5 };
+        let report = Progress { done: 2, total: 5 };
         operations.report(&1, Ticket(999), report);
         assert_eq!(operations.progress(&1), None, "stale report ignored");
         operations.report(&1, ticket, report);

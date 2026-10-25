@@ -31,7 +31,7 @@ mod transaction;
 
 pub(crate) use decode::{decode, decode_message};
 pub(crate) use error::MavError;
-pub use mission::TransferProgress;
+pub(crate) use param::ParamListResult;
 #[cfg(test)]
 pub(crate) use router::LinkGuard;
 pub use router::LinkStats;

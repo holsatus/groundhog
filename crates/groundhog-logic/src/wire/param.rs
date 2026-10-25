@@ -4,6 +4,10 @@
 //! [`Value`] maps to that pair depends on the target's advertised encoding
 //! capability (C-cast or bytewise). These functions are pure: they touch no
 //! application state, so both the domain and the middleware share them.
+//!
+//! The 64-bit types (`Uint64`, `Int64`) are deliberately unsupported:
+//! `mav_param::Value` cannot hold them, and a wire `f32` cannot represent them.
+//! They decode to `None`, so their values are left out rather than truncated.
 
 use mav_param::Value;
 use mavio::default_dialect::enums::{MavParamType, MavProtocolCapability};
@@ -80,19 +84,32 @@ pub(crate) fn value_into_bytewise(value: Value) -> (f32, MavParamType) {
     }
 }
 
+/// A C-cast value, or `None` for a non-finite value or one outside the type's
+/// range: a sentinel the autopilot sends (`-1`, `UINT16_MAX`, NaN) must not be
+/// presented as an editable value. Fractional values truncate, as a C cast
+/// does.
 pub(crate) fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> Option<Value> {
-    let value = match param_type {
-        MavParamType::Uint8 => Value::U8(param_value as u8),
-        MavParamType::Int8 => Value::I8(param_value as i8),
-        MavParamType::Uint16 => Value::U16(param_value as u16),
-        MavParamType::Int16 => Value::I16(param_value as i16),
-        MavParamType::Uint32 => Value::U32(param_value as u32),
-        MavParamType::Int32 => Value::I32(param_value as i32),
-        MavParamType::Real32 => Value::F32(param_value),
-        _ => return None,
+    let cast = |min: f64, max: f64| {
+        let value = f64::from(param_value);
+        (value.is_finite() && (min..=max).contains(&value)).then_some(value)
     };
 
-    Some(value)
+    Some(match param_type {
+        MavParamType::Uint8 => Value::U8(cast(0.0, 255.0)? as u8),
+        MavParamType::Int8 => Value::I8(cast(-128.0, 127.0)? as i8),
+        MavParamType::Uint16 => Value::U16(cast(0.0, 65_535.0)? as u16),
+        MavParamType::Int16 => Value::I16(cast(-32_768.0, 32_767.0)? as i16),
+        MavParamType::Uint32 => Value::U32(cast(0.0, f64::from(u32::MAX))? as u32),
+        MavParamType::Int32 => Value::I32(cast(f64::from(i32::MIN), f64::from(i32::MAX))? as i32),
+        MavParamType::Real32 => {
+            if !param_value.is_finite() {
+                return None;
+            }
+            Value::F32(param_value)
+        }
+        // 64-bit integers and every other type cannot be held by `Value`.
+        _ => return None,
+    })
 }
 
 pub(crate) fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
@@ -153,6 +170,33 @@ mod tests {
                 let (raw, ty) = encoding.encode(value);
                 assert_eq!(encoding.decode(raw, ty), Some(value), "{encoding:?}");
             }
+        }
+    }
+
+    /// A sentinel or an out-of-range value must not become an editable
+    /// number: the C cast would truncate it silently.
+    #[test]
+    fn c_cast_refuses_values_the_type_cannot_hold() {
+        assert_eq!(value_from_c_cast(f32::NAN, MavParamType::Uint8), None);
+        assert_eq!(value_from_c_cast(f32::INFINITY, MavParamType::Int32), None);
+        assert_eq!(value_from_c_cast(-1.0, MavParamType::Uint8), None);
+        assert_eq!(value_from_c_cast(300.0, MavParamType::Uint8), None);
+        assert_eq!(value_from_c_cast(65_536.0, MavParamType::Uint16), None);
+        assert_eq!(
+            value_from_c_cast(1.9, MavParamType::Uint8),
+            Some(Value::U8(1))
+        );
+        assert_eq!(
+            value_from_c_cast(-1.0, MavParamType::Int8),
+            Some(Value::I8(-1))
+        );
+    }
+
+    #[test]
+    fn unsupported_types_decode_to_none() {
+        for ty in [MavParamType::Uint64, MavParamType::Int64] {
+            assert_eq!(value_from_c_cast(1.0, ty), None);
+            assert_eq!(value_from_bytewise(1.0, ty), None);
         }
     }
 }
