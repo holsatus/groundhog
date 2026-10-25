@@ -94,6 +94,13 @@ pub struct KeyGuard {
     key: LockKey,
 }
 
+impl KeyGuard {
+    /// Whether this guard is the lock for `key`.
+    pub(super) fn covers(&self, key: &LockKey) -> bool {
+        self.key == *key
+    }
+}
+
 impl Drop for KeyGuard {
     fn drop(&mut self) {
         drop(self.guard.take());

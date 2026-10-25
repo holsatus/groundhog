@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use super::{
     Targeted, commands,
     error::{MavError, Result},
-    locks::LockKey,
+    locks::{KeyGuard, LockKey},
     recv::MavlinkMessage,
     router::{MavlinkRouter, Priority},
 };
@@ -33,14 +33,43 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl MavlinkRouter {
     /// Create a command transaction. Nothing is sent until it is awaited.
-    pub fn command(&self, target: MavlinkId, command: impl Into<Command>) -> CommandRequest {
+    pub fn command(
+        &self,
+        target: MavlinkId,
+        command: impl Into<Command>,
+    ) -> CommandRequest<'static> {
         CommandRequest {
             router: self.clone(),
             target,
             command: command.into(),
             response_timeout: RESPONSE_TIMEOUT,
             retries: RETRY_ATTEMPTS,
-            locks: true,
+            lock: None,
+        }
+    }
+
+    /// Create a command transaction that runs under `lock`, which the caller
+    /// already holds and must keep until the request is done.
+    fn command_with_lock<'a>(
+        &self,
+        target: MavlinkId,
+        command: impl Into<Command>,
+        lock: &'a mut KeyGuard,
+    ) -> CommandRequest<'a> {
+        let command = command.into();
+
+        debug_assert!(
+            lock.covers(&LockKey::command(target, command.kind())),
+            "the guard is for a different lock"
+        );
+
+        CommandRequest {
+            router: self.clone(),
+            target,
+            command,
+            response_timeout: RESPONSE_TIMEOUT,
+            retries: RETRY_ATTEMPTS,
+            lock: Some(lock),
         }
     }
 
@@ -51,14 +80,15 @@ impl MavlinkRouter {
     /// (and its own reply filter) for the whole operation.
     pub async fn request_message<M: MavlinkMessage>(&self, target: MavlinkId) -> Result<M> {
         let command = commands::request_message::<M>();
-        let _lock = self
+        let mut lock = self
             .lock_key(LockKey::command(target, command.kind()))
             .await;
 
-        // The inner transaction must not re-acquire the same lock (it would
-        // deadlock on itself); the outer key already serializes it.
+        // The request borrows this guard rather than acquiring the lock again,
+        // which would deadlock on itself. Holding the guard for this whole
+        // function also serializes the reply wait below.
         let mut reply = self.receive_message::<M>(target);
-        let command = self.command(target, command).without_lock();
+        let command = self.command_with_lock(target, command, &mut lock);
 
         // Some systems send the message before (or without) the ACK
         tokio::select! {
@@ -115,25 +145,26 @@ impl Command {
     }
 }
 
-/// A command transaction, created by [`MavlinkRouter::command`]. Await it to run it.
+/// A command transaction, created by [`MavlinkRouter::command`], or by
+/// `command_with_lock` under a guard the caller already holds. Await it to run
+/// it.
 ///
 /// Resolves to the final `COMMAND_ACK` if the command was accepted, and
 /// [`MavError::Rejected`] otherwise. The command is resent if no ACK arrives in
 /// time, and while the target reports `IN_PROGRESS` a longer timeout applies.
 /// Dropping the future while the command is in progress sends `COMMAND_CANCEL`.
-pub struct CommandRequest {
+pub struct CommandRequest<'a> {
     router: MavlinkRouter,
     target: MavlinkId,
     command: Command,
     response_timeout: Duration,
     retries: u8,
-    /// Whether `run` acquires the command lock itself; `false` only for a
-    /// caller that already holds the command lock (it would deadlock on
-    /// the same key otherwise).
-    locks: bool,
+    /// The caller's guard, borrowed exclusively so one guard cannot drive two
+    /// transactions at once. `None` means `run` acquires the lock itself.
+    lock: Option<&'a mut KeyGuard>,
 }
 
-impl CommandRequest {
+impl CommandRequest<'_> {
     /// How long to wait for an ACK before resending.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
@@ -146,20 +177,13 @@ impl CommandRequest {
         self
     }
 
-    /// Skip acquiring the command lock in `run`: a caller that already holds
-    /// the command lock must not deadlock on itself.
-    fn without_lock(mut self) -> Self {
-        self.locks = false;
-        self
-    }
-
-    async fn run(self) -> Result<CommandAck> {
-        let kind = self.command.kind();
+    async fn run(mut self) -> Result<CommandAck> {
+        let kind: MavCmd = self.command.kind();
         let key = LockKey::command(self.target, kind);
-        let _lock = if self.locks {
-            Some(self.router.lock_key(key).await)
-        } else {
-            None
+
+        let _lock = match self.lock.take() {
+            Some(lock) => lock,
+            None => &mut self.router.lock_key(key).await,
         };
 
         let mut pending = Pending::register(self.router.clone(), self.target, kind);
@@ -206,9 +230,9 @@ impl CommandRequest {
     }
 }
 
-impl IntoFuture for CommandRequest {
+impl<'a> IntoFuture for CommandRequest<'a> {
     type Output = Result<CommandAck>;
-    type IntoFuture = BoxFuture<'static, Result<CommandAck>>;
+    type IntoFuture = BoxFuture<'a, Result<CommandAck>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.run())
