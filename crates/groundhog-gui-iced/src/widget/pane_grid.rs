@@ -24,6 +24,8 @@
 //   - a lost finger (`FingerLost`) cancels a pane drag instead of dropping it
 //   - `State::rearrange` replaces the arrangement, keeping the `Pane` of every
 //     kept state (so pane widget state survives a rearrangement)
+//   - `Axis::split` never gives a side a negative length, nor overflows: where
+//     the region cannot hold both minimum sizes, it splits at the ratio
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the

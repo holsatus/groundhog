@@ -22,12 +22,8 @@ impl Axis {
     ) -> (Rectangle, Rectangle, f32) {
         match self {
             Axis::Horizontal => {
-                let height_top = (rectangle.height * ratio - spacing / 2.0)
-                    .round()
-                    .max(min_size_a)
-                    .min(rectangle.height - min_size_b - spacing);
-
-                let height_bottom = (rectangle.height - height_top - spacing).max(min_size_b);
+                let (height_top, height_bottom) =
+                    sides(rectangle.height, ratio, spacing, min_size_a, min_size_b);
 
                 let ratio = (height_top + spacing / 2.0) / rectangle.height;
 
@@ -45,12 +41,8 @@ impl Axis {
                 )
             }
             Axis::Vertical => {
-                let width_left = (rectangle.width * ratio - spacing / 2.0)
-                    .round()
-                    .max(min_size_a)
-                    .min(rectangle.width - min_size_b - spacing);
-
-                let width_right = (rectangle.width - width_left - spacing).max(min_size_b);
+                let (width_left, width_right) =
+                    sides(rectangle.width, ratio, spacing, min_size_a, min_size_b);
 
                 let ratio = (width_left + spacing / 2.0) / rectangle.width;
 
@@ -89,9 +81,38 @@ impl Axis {
     }
 }
 
+/// The lengths of the two sides of a split of `length` at `ratio`: each at
+/// least its minimum where `length` holds both, and otherwise split at the
+/// ratio, so no side is ever negative and the two never overflow `length`.
+fn sides(length: f32, ratio: f32, spacing: f32, min_a: f32, min_b: f32) -> (f32, f32) {
+    let wanted = (length * ratio - spacing / 2.0).round();
+    let a = if length >= min_a + min_b + spacing {
+        wanted.max(min_a).min(length - min_b - spacing)
+    } else {
+        wanted.clamp(0.0, (length - spacing).max(0.0))
+    };
+    (a, (length - a - spacing).max(0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_region_too_small_for_both_minimums_splits_without_overflow() {
+        let region = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 100.0,
+        };
+        let (top, bottom, _) = Axis::Horizontal.split(&region, 0.5, 8.0, 120.0, 120.0);
+        assert!(
+            top.height >= 0.0 && bottom.height >= 0.0,
+            "{top:?} {bottom:?}"
+        );
+        assert_eq!(top.height + 8.0 + bottom.height, 100.0);
+    }
 
     enum Case {
         Horizontal {

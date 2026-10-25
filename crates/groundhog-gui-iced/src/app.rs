@@ -351,6 +351,15 @@ impl Application {
                 Task::none()
             }
             Message::Layout(message) => {
+                // A panel opens where a stack has room; say so where none has.
+                if let layout::Message::Toggle(panel, _) = message
+                    && !self.layout.has_room(panel)
+                {
+                    self.notices.push(
+                        Notice::warning(format!("No room for {}", panel.title()))
+                            .detail("Close a panel or enlarge the window."),
+                    );
+                }
                 if self.layout.update(message) {
                     self.configuration.workspace = Some(self.layout.workspace().clone());
                 }

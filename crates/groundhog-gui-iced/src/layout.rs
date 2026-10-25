@@ -330,24 +330,18 @@ fn arrange<T: Copy>(
 ) -> Configuration<T> {
     let open = |stack: &(&[(T, f32)], f32)| !stack.0.is_empty();
 
-    // The side columns, shrunk together if the window is too narrow.
-    let mut left_width = if open(&left) { left.1 } else { 0.0 };
-    let mut right_width = if open(&right) { right.1 } else { 0.0 };
-    let gaps = [left_width, right_width]
-        .iter()
-        .filter(|width| **width > 0.0)
-        .count() as f32
-        * SPACING;
-    let room = (size.width - MIN_MAP - gaps).max(0.0);
-    if left_width + right_width > room {
-        let scale = room / (left_width + right_width);
-        left_width *= scale;
-        right_width *= scale;
-    }
-    let middle_width = size.width - left_width - right_width - gaps;
+    let Widths {
+        left: left_width,
+        middle: middle_width,
+        ..
+    } = widths(
+        open(&left).then_some(left.1),
+        open(&right).then_some(right.1),
+        size.width,
+    );
 
     let centre = if open(&middle) {
-        let row = middle.1.min(size.height - MIN_MAP - SPACING).max(0.0);
+        let row = middle.1.min(max_row(size)).max(0.0);
         Configuration::Split {
             axis: Axis::Horizontal,
             ratio: ratio(size.height - row - SPACING, size.height),
@@ -385,6 +379,46 @@ fn arrange<T: Copy>(
     } else {
         centre_and_right
     }
+}
+
+/// How wide the left column and the middle are drawn (the right column takes
+/// what is left).
+struct Widths {
+    left: f32,
+    middle: f32,
+    /// The side columns were shrunk below their sizes to keep [`MIN_MAP`].
+    scaled: bool,
+}
+
+/// The widths of the open side columns (`None`: closed) and the middle in a
+/// grid `width` wide: the columns get their sizes, shrunk together where the
+/// map would otherwise get less than [`MIN_MAP`].
+fn widths(left: Option<f32>, right: Option<f32>, width: f32) -> Widths {
+    let (mut left, mut right) = (left.unwrap_or(0.0), right.unwrap_or(0.0));
+    let gaps = [left, right].iter().filter(|width| **width > 0.0).count() as f32 * SPACING;
+    let room = (width - MIN_MAP - gaps).max(0.0);
+    let scaled = left + right > room;
+    if scaled {
+        let scale = room / (left + right);
+        left *= scale;
+        right *= scale;
+    }
+    Widths {
+        left,
+        middle: width - left - right - gaps,
+        scaled,
+    }
+}
+
+/// The tallest the row beneath the map gets in a grid of `size`.
+fn max_row(size: Size) -> f32 {
+    size.height - MIN_MAP - SPACING
+}
+
+/// How many panes of at least [`MIN_PANE`] fit along `length`; at least one,
+/// so an empty stack can always take a pane.
+fn capacity(length: f32) -> usize {
+    (((length + SPACING) / (MIN_PANE + SPACING)).floor() as usize).max(1)
 }
 
 /// The ratio of a split of `length` whose first side is `first` long: the
@@ -532,6 +566,31 @@ impl Workspace {
         self
     }
 
+    /// How the side columns and the middle are drawn in a grid of `size`.
+    fn widths(&self, size: Size) -> Widths {
+        let open = |stack: &Stack| (!stack.panes.is_empty()).then_some(stack.size);
+        widths(open(&self.left), open(&self.right), size.width)
+    }
+
+    /// The length each stack lays its panes along, in a grid of `size`: a
+    /// column's height, the row's width.
+    fn length(&self, slot: Slot, size: Size) -> f32 {
+        match slot {
+            Slot::Left | Slot::Right => size.height,
+            Slot::Middle => self.widths(size).middle,
+        }
+    }
+
+    /// Whether `after`, a rearrangement of this workspace, puts no more panes
+    /// in a stack than fit at [`MIN_PANE`] in a grid of `size`. A stack that
+    /// holds more already (the window shrank) keeps them, but takes no more.
+    fn room_for(&self, after: &Workspace, size: Size) -> bool {
+        Slot::ALL.into_iter().all(|slot| {
+            let (before, now) = (self.stack(slot).panes.len(), after.stack(slot).panes.len());
+            now <= before.max(capacity(after.length(slot, size)))
+        })
+    }
+
     /// The pane grid's arrangement in a grid of `size`; see [`arrange`].
     fn configuration(&self, size: Size) -> Configuration<Panel> {
         arrange(
@@ -545,28 +604,54 @@ impl Workspace {
         )
     }
 
-    /// Take the sizes and shares the grid gave the panes, after the
-    /// operator moved a divider.
-    fn measure(&mut self, regions: &BTreeMap<Panel, Rectangle>) {
+    /// Take the sizes and shares the grid gave the panes in a grid of
+    /// `size`, after the operator moved a divider.
+    ///
+    /// Only what the operator chose is kept: a size [`arrange`] shrank to
+    /// keep the map (the columns in a narrow window, the row in a short one)
+    /// stays as it was, and so do the shares of a stack too crowded for its
+    /// panes to get [`MIN_PANE`], which the grid squeezed rather than chose.
+    fn measure(&mut self, regions: &BTreeMap<Panel, Rectangle>, size: Size) {
+        let scaled = self.widths(size).scaled;
+        let row_capped = self.middle.size > max_row(size);
+
         for slot in Slot::ALL {
             let stack = self.stack_mut(slot);
-            let Some(first) = stack
+            let Some(stack_regions) = stack
                 .panes
-                .first()
-                .and_then(|(panel, _)| regions.get(panel))
+                .iter()
+                .map(|(panel, _)| regions.get(panel).copied())
+                .collect::<Option<Vec<Rectangle>>>()
             else {
                 continue;
             };
-            stack.size = match slot {
-                Slot::Middle => first.height,
-                Slot::Left | Slot::Right => first.width,
+            let Some(first) = stack_regions.first() else {
+                continue;
             };
-            for (panel, share) in &mut stack.panes {
-                if let Some(region) = regions.get(panel) {
-                    *share = match slot {
-                        Slot::Middle => region.width,
-                        Slot::Left | Slot::Right => region.height,
-                    };
+
+            let size_chosen = match slot {
+                Slot::Middle => !row_capped,
+                Slot::Left | Slot::Right => !scaled,
+            };
+            if size_chosen {
+                stack.size = match slot {
+                    Slot::Middle => first.height,
+                    Slot::Left | Slot::Right => first.width,
+                };
+            }
+
+            let along = |region: &Rectangle| match slot {
+                Slot::Middle => region.width,
+                Slot::Left | Slot::Right => region.height,
+            };
+            // A pane the grid held at its minimum was dragged there; one
+            // below it was squeezed.
+            if stack_regions
+                .iter()
+                .all(|region| along(region) >= MIN_PANE - 1.0)
+            {
+                for ((_, share), region) in stack.panes.iter_mut().zip(&stack_regions) {
+                    *share = along(region);
                 }
             }
         }
@@ -740,7 +825,7 @@ impl Layout {
                     .into_iter()
                     .filter_map(|(pane, region)| Some((*self.panes.get(pane)?, region)))
                     .collect();
-                self.workspace.measure(&regions);
+                self.workspace.measure(&regions, size);
             }
             Message::Toggle(panel, slot) => {
                 if self.is_open(panel) {
@@ -776,14 +861,38 @@ impl Layout {
         }
     }
 
+    /// Open `panel` at the end of `slot`, or, if that stack is full, of the
+    /// first other with room (the right column, the left, the row). Nothing
+    /// opens where no stack has room ([`Layout::has_room`]).
     fn open(&mut self, panel: Panel, slot: Slot) {
         if panel.is_fixed() || self.is_open(panel) {
             return;
         }
-        let stack = self.workspace.stack_mut(slot);
-        stack.insert(stack.panes.len(), panel);
+        let Some(opened) = self.opened(panel, slot) else {
+            return;
+        };
+        self.workspace = opened;
         self.arrange();
         self.focus = self.pane_of(panel);
+    }
+
+    /// The workspace with `panel` opened at the end of `slot` or the first
+    /// other stack with room for it.
+    fn opened(&self, panel: Panel, slot: Slot) -> Option<Workspace> {
+        let size = self.size.unwrap_or(ASSUMED_SIZE);
+        [slot, Slot::Right, Slot::Left, Slot::Middle]
+            .into_iter()
+            .find_map(|slot| {
+                let mut opened = self.workspace.clone();
+                let stack = opened.stack_mut(slot);
+                stack.insert(stack.panes.len(), panel);
+                self.workspace.room_for(&opened, size).then_some(opened)
+            })
+    }
+
+    /// Whether `panel` is open, or some stack has room to open it in.
+    pub fn has_room(&self, panel: Panel) -> bool {
+        self.is_open(panel) || panel.is_fixed() || self.opened(panel, Slot::Left).is_some()
     }
 
     /// Close `panel`, unless it is fixed.
@@ -864,7 +973,12 @@ impl Layout {
     ) -> Option<DropHint> {
         let target = self.drop_target_at(dragging, cursor, regions)?;
         let destination = self.destination(target)?;
-        if !self.workspace.clone().place(dragging, destination) {
+        let mut moved = self.workspace.clone();
+        if !moved.place(dragging, destination)
+            || !self
+                .workspace
+                .room_for(&moved, self.size.unwrap_or(ASSUMED_SIZE))
+        {
             return None;
         }
 
@@ -1107,8 +1221,12 @@ impl Layout {
         Some(Target::Pane(pane, region))
     }
 
+    /// Move `panel` to `destination`, if the stack it joins has room.
     fn move_to(&mut self, panel: Panel, destination: Destination) {
-        if self.workspace.place(panel, destination) {
+        let mut moved = self.workspace.clone();
+        let size = self.size.unwrap_or(ASSUMED_SIZE);
+        if moved.place(panel, destination) && self.workspace.room_for(&moved, size) {
+            self.workspace = moved;
             self.arrange();
             self.focus = self.pane_of(panel);
         }
@@ -1150,6 +1268,119 @@ mod tests {
 
     fn close_to(a: f32, b: f32) -> bool {
         (a - b).abs() < 1.5
+    }
+
+    /// A grid short enough that a column holds three panes of [`MIN_PANE`].
+    const SHORT: Size = Size::new(1200.0, 400.0);
+
+    fn stack_of(panels: &[Panel]) -> Stack {
+        Stack {
+            size: 300.0,
+            panes: panels.iter().map(|panel| (*panel, 1.0)).collect(),
+        }
+    }
+
+    #[test]
+    fn crowded_regions_are_never_negative() {
+        let workspace = Workspace {
+            left: stack_of(&[
+                Panel::Vehicles,
+                Panel::Mission,
+                Panel::Parameters,
+                Panel::Calibration,
+                Panel::Links,
+                Panel::Logs,
+            ]),
+            ..Workspace::default()
+        };
+        let layout = layout_at(workspace, SHORT);
+
+        for (panel, region) in regions(&layout) {
+            assert!(
+                region.width >= 0.0 && region.height >= 0.0,
+                "{panel:?}: {region:?}"
+            );
+            assert!(
+                region.y + region.height <= SHORT.height + 0.5,
+                "{panel:?}: {region:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_stack_takes_no_more_panes() {
+        let full = [Panel::Vehicles, Panel::Mission, Panel::Parameters];
+        assert_eq!(capacity(SHORT.height), full.len());
+        let layout = layout_at(
+            Workspace {
+                left: stack_of(&full),
+                ..Workspace::default()
+            },
+            SHORT,
+        );
+
+        // Over the lower half of the bottom pane, a drop would split it.
+        let regions: BTreeMap<_, _> = layout
+            .panes
+            .layout()
+            .pane_regions(SPACING, MIN_PANE, SHORT)
+            .into_iter()
+            .collect();
+        let bottom = regions[&layout.pane_of(Panel::Parameters).unwrap()];
+        let cursor = Point::new(
+            bottom.x + bottom.width / 2.0,
+            bottom.y + bottom.height * 0.9,
+        );
+        assert!(
+            layout
+                .incoming_hint(Panel::Logs, cursor, &regions)
+                .is_none()
+        );
+
+        // A pane already in the stack still moves within it.
+        let top = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let swap = Point::new(top.x + top.width / 2.0, top.y + top.height / 2.0);
+        assert!(
+            layout
+                .drop_hint(layout.pane_of(Panel::Mission).unwrap(), swap, &regions)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_rail_click_into_a_full_stack_opens_in_the_next_with_room() {
+        let mut layout = layout_at(
+            Workspace {
+                left: stack_of(&[Panel::Vehicles, Panel::Mission, Panel::Parameters]),
+                ..Workspace::default()
+            },
+            SHORT,
+        );
+        assert!(layout.has_room(Panel::Logs));
+
+        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
+
+        assert_eq!(layout.workspace.left.panes.len(), 3, "still full");
+        assert_eq!(panels(&layout.workspace.right), [Panel::Logs]);
+    }
+
+    #[test]
+    fn measuring_keeps_the_column_widths_a_narrow_window_scaled() {
+        let mut layout = layout_at(
+            Workspace {
+                left: stack_of(&[Panel::Vehicles]),
+                right: stack_of(&[Panel::Settings]),
+                ..Workspace::default()
+            },
+            Size::new(700.0, 900.0),
+        );
+        let size = layout.size.unwrap();
+        assert!(layout.workspace.widths(size).scaled);
+
+        layout.workspace.measure(&regions(&layout), size);
+
+        assert_eq!(layout.workspace.left.size, 300.0);
+        assert_eq!(layout.workspace.right.size, 300.0);
     }
 
     #[test]

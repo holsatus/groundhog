@@ -334,7 +334,11 @@ left column (click), the row (middle-click or Ctrl/Cmd-click) or the right
 column (right-click or Shift-click), or wherever its button is dragged
 onto the grid; a panel joining `n` others takes
 `1/(n + 1)` of its stack and the others keep their proportions. Clicking
-an open panel's button closes it.
+an open panel's button closes it. A stack holds only as many panes as fit
+at `MIN_PANE`: a click into a full stack opens the panel in the next with
+room (the right column, the left, the row), and a full stack is no drop
+target. A window that shrinks keeps the panes it has, squeezed, and the
+sizes it squeezes are not saved.
 
 Dragging a pane moves it within this shape, and the highlight shows only
 what the shape allows, where the pane would be laid out if it were added
