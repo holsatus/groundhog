@@ -280,6 +280,11 @@ async fn gallery() {
         std::env::var_os("XDG_CONFIG_HOME").is_some(),
         "XDG_CONFIG_HOME must point away from the real configuration"
     );
+    // Boot starts recording telemetry by default, into the data directory.
+    assert!(
+        std::env::var_os("XDG_DATA_HOME").is_some(),
+        "XDG_DATA_HOME must point away from the real recordings"
+    );
     let gallery = Gallery {
         directory: PathBuf::from(directory),
     };
