@@ -302,67 +302,6 @@ Ask when a live link will be disconnected.
 
 ## Firmware & calibration
 
-### CAL-2 · There is no "confirmation sent" state
-**P2** · Effort S · From REVIEW area 7
-
-After the operator confirms an ArduPilot orientation, the session still shows
-`Instruction::Place(side)` and an enabled "In position" button
-(`features/calibration.rs:220-230`). A second press re-sends the position,
-which ArduPilot refuses once measuring has begun, producing a false failure.
-
-**Fix:** record that the confirmation was sent for this side and show an
-"Awaiting vehicle…" instruction until progress arrives; disable the button.
-
-### CAL-3 · A calibration session has no timeout or reboot check
-**P2** · Effort M · From REVIEW area 7
-
-Only `Liveness::Lost` fails a session (`fleet.rs:277-283`). An autopilot reboot
-mid-run leaves the session `Running` forever, with Start disabled and Dismiss
-refused.
-
-**Fix:** time out a session that makes no progress, and fail it on a boot-id
-change or a new heartbeat naming a different boot.
-
-### CAL-4 · The "cannot cancel" caption is wrong for `completes_on_ack` kinds
-**P2** · Effort S · From REVIEW area 7
-
-`calibration/mod.rs:265-271` documents `cancel == false` as "the vehicle keeps
-waiting until it reboots", which is not true for kinds that complete inside the
-start command. The panel shows that caption while a real run progresses
-(`features/calibration.rs:265-276`).
-
-**Fix:** word the caption per kind, and only while the start is still pending.
-
-### CAL-5 · PX4 per-side compass progress is logged, not parsed
-**P2** · Effort S · From REVIEW area 7
-
-PX4 sends `"[cal] … side calibration: progress <n>"`; the parser matches only
-`"progress <"` (`calibration/px4.rs:70-79,139-143`), so the text becomes a note
-and floods the six-line log, evicting actionable warnings.
-
-**Fix:** parse the per-side form (or filter it from the note log).
-
-### CAL-6 · PX4 protocol version and `pending:` handling
-**P3** · Effort S · From REVIEW area 7
-
-The protocol version is ignored, and a `pending:` side whose name cannot be
-matched is treated as done (`px4.rs:83,96-103`), so a renamed orientation can
-be recorded as measured.
-
-### CAL-7 · Cancel retry policy is firmware-blind
-**P3** · Effort S · From CODE-F3.1
-
-`services/vehicle.rs:549-560` always retries the cancel once because PX4
-acknowledges it twice. Put the policy on `CalibrationProtocol` so another
-firmware can answer differently.
-
-### CAL-9 · Missing calibration tests
-**P3** · Effort S · From REVIEW area 7 / CODE-F10
-
-No test covers the compass `pending:` → next-side transition, PX4 per-side
-progress text, or the whole calibration panel flow (there are no panel tests
-for `features/calibration.rs`).
-
 ## Services & vehicle state
 
 ### SVC-2 · Recording is unbounded and can stop silently
@@ -443,23 +382,6 @@ trail a ring buffer with interior ownership or accept the cost explicitly.
 
 `string_from_cstring` (`vehicle/mod.rs:606-616`) rejects the whole name, while
 statustexts decode lossily. One stray byte loses vendor/model.
-
-### SVC-13 · The public `Fleet` folding API is a test seam
-**P2** · Effort S/M · From CODE-F2 / REVIEW-H17
-
-`Fleet::observe` (`fleet.rs:168`) and `set_onboard_mission` (`:292`) are
-`pub`; their only out-of-crate callers are feature tests and
-`app/gallery.rs`. The architecture says only the runtime advances state.
-
-**Fix:** add a `test-support` feature (or a fixture constructor) and make the
-production folds `pub(crate)`. Add a note to `AGENTS.md`.
-
-### SVC-14 · Calibration loss bypasses `update_calibration`
-**P3** · Effort S · From CODE-F11.2
-
-`fleet.rs:277-283` mutates `vehicle.calibration` directly on loss while every
-other update goes through `update_calibration`. Move it, or document why
-liveness is special.
 
 ### SVC-15 · The feature contract and persistence paths are split
 **P3** · Effort M · From CODE-F1
@@ -781,7 +703,7 @@ Verified at `5389934`; do not re-open without new evidence.
 
 - **CODE_REVIEW:** F8.1 (module docs), F8.2 (`ui::either`), F8.4 (dead code),
   F10's shared feature test harness; F11.1 (copy-on-write before change),
-  F11.5 (battery doc); F3.2's regression (`Invalid` heartbeat no longer resets
+  F11.2 (calibration loss through one ending path), F11.5 (battery doc); F3.2's regression (`Invalid` heartbeat no longer resets
   firmware, with a test); F4.1's parameter Cancel and one `Progress` type;
   F4.3's delete-link confirmation; F5's `CalibrationFinished` payload; F9.1's
   mission checkbox and `ui::dialog`/`ui::toast`.
@@ -793,14 +715,16 @@ Verified at `5389934`; do not re-open without new evidence.
 - **REVIEW.md:** H1 (parameter writes wait for a list download and share the
   channel only with other sets); areas 3, 4, 6 and 8 (C-cast saturation and
   64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
-  model with stale values removed); areas 9 and 11 (an overlay that fits the
-  window and keeps clear of the system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
+  model with stale values removed); areas 7 and 8 (a calibration that waits,
+  times out, reboots and explains cancelling; one way to end a session);
+  areas 9 and 11 (an overlay that fits the window and keeps clear of the
+  system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
   calibration offering, runtime stop, calibration drop guard, empty-upload
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload
   identity, back behind confirmation, map drag cancel, pane minimums, adaptive
-  menu); H17's `unreachable_pub` and `ParamEncoding` (the test seam remains,
-  SVC-13); the parameter-specific part of H18 (the `COMMAND_CANCEL` test
-  remains, PROTO-6).
+  menu); H17's `unreachable_pub` and `ParamEncoding` (the test seam is now
+  behind `test-support`); the parameter-specific part of H18 (the
+  `COMMAND_CANCEL` test remains, PROTO-6).
 - **Medium fixes:** persist temp names/permissions, link schema defaults and
   renames, `wire::latlon`, battery summary merge, zero quaternion, mission
   `with_command`/`next_altitude`, compass `id+1` overflow, same-second
@@ -838,8 +762,8 @@ Verified at `5389934`; do not re-open without new evidence.
   `rows * stride` and `frame_of` clamps; it was already correct at the reviewed
   revision.
 - **`CODE_REVIEW` F2's `snapshot`:** `Fleet::snapshot` is read-only; it is not
-  a state-advancing operation. The `observe`/`set_onboard_mission` seam is real
-  (SVC-13).
+  a state-advancing operation. The `observe`/`set_onboard_mission` seam the
+  frontend tests need is behind the `test-support` feature, not public API.
 - **`CODE_REVIEW` F9.4:** both shells title a pane from `Panel::title`, so the
   missing in-panel header is the "say it in AGENTS.md" option the review
   offered, not a defect.

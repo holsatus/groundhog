@@ -3,6 +3,10 @@ name = "groundhog-logic"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Exposes the fleet's state-advancing methods to frontend tests.
+test-support = []
+
 [lints]
 workspace = true
 

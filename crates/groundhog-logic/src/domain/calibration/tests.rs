@@ -399,3 +399,142 @@ fn finished_sessions_ignore_late_acknowledgements() {
     session.cancel();
     assert_eq!(session.phase, Phase::Succeeded);
 }
+
+/// Once the operator says the vehicle is in place, the session waits for the
+/// vehicle's next progress instead of asking again (a repeat is refused).
+#[test]
+fn a_sent_confirmation_waits_for_the_vehicle() {
+    let protocol = ArduPilotCalibration;
+    let mut session = session(&protocol, CalibrationKind::Accelerometer);
+    session.acknowledged(Ok(()));
+    message(&protocol, &mut session, accelcal_position(1.0));
+    assert_eq!(session.instruction, Instruction::Place(Side::Level));
+
+    session.confirmed(Side::Level);
+    assert_eq!(session.instruction, Instruction::Confirming(Side::Level));
+    assert_eq!(protocol.confirm(&session), None, "not asked twice");
+
+    // A failed send asks the operator again.
+    session.confirm_failed(Side::Level);
+    assert_eq!(session.instruction, Instruction::Place(Side::Level));
+
+    session.confirmed(Side::Level);
+    message(&protocol, &mut session, accelcal_position(2.0));
+    assert_eq!(session.instruction, Instruction::Place(Side::Left));
+}
+
+/// The cancel caption is the firmware's (and the kind's) to word: some kinds
+/// finish before acknowledging, the accelerometer keeps waiting.
+#[test]
+fn cancelling_is_explained_per_firmware_and_kind() {
+    let ardupilot = ArduPilotCalibration;
+
+    assert_eq!(
+        ardupilot.cancel_note(CalibrationKind::Compass),
+        None,
+        "a compass run can be stopped"
+    );
+    assert!(
+        ardupilot
+            .cancel_note(CalibrationKind::Accelerometer)
+            .is_some_and(|note| note.contains("orientation"))
+    );
+    assert!(
+        ardupilot
+            .cancel_note(CalibrationKind::Gyroscope)
+            .is_some_and(|note| note.contains("on its own"))
+    );
+
+    assert_eq!(ardupilot.cancel_retries(), 0);
+    assert_eq!(Px4Calibration.cancel_retries(), 1, "PX4 acknowledges twice");
+}
+
+#[test]
+fn px4_sides_move_on_with_the_pending_list() {
+    let protocol = Px4Calibration;
+    let mut session = session(&protocol, CalibrationKind::Accelerometer);
+    session.acknowledged(Ok(()));
+
+    text(
+        &protocol,
+        &mut session,
+        "[cal] calibration started: 2 accel",
+    );
+    text(
+        &protocol,
+        &mut session,
+        "[cal] pending: back front left right up down",
+    );
+    assert_eq!(session.sides.count(), 0, "nothing is done yet");
+
+    text(
+        &protocol,
+        &mut session,
+        "[cal] down side done, rotate to a different side",
+    );
+    assert!(session.sides.is_done(Side::Level));
+
+    text(
+        &protocol,
+        &mut session,
+        "[cal] pending: back front left right up",
+    );
+    assert_eq!(session.sides.count(), 1, "only the level side is done");
+}
+
+/// The per-side progress form is progress, not a log line.
+#[test]
+fn px4_parses_per_side_progress() {
+    let protocol = Px4Calibration;
+    let mut session = session(&protocol, CalibrationKind::Compass);
+    session.acknowledged(Ok(()));
+
+    text(
+        &protocol,
+        &mut session,
+        "[cal] left side calibration: progress <42>",
+    );
+    assert_eq!(session.progress, Some(42));
+    assert!(session.messages.is_empty(), "not kept in the log");
+}
+
+/// A pending list this build cannot name must not mark the unnamed sides
+/// done.
+#[test]
+fn px4_does_not_guess_an_unknown_pending_side() {
+    let protocol = Px4Calibration;
+    let mut session = session(&protocol, CalibrationKind::Accelerometer);
+    session.acknowledged(Ok(()));
+
+    text(
+        &protocol,
+        &mut session,
+        "[cal] pending: back wibble front left right up",
+    );
+    assert_eq!(session.sides.count(), 0);
+    assert!(
+        session
+            .messages
+            .back()
+            .is_some_and(|note| note.contains("wibble")),
+        "the unknown orientation is reported"
+    );
+}
+
+#[test]
+fn px4_notes_an_unexpected_protocol_version() {
+    let protocol = Px4Calibration;
+    let mut session = session(&protocol, CalibrationKind::Gyroscope);
+    session.acknowledged(Ok(()));
+
+    text(&protocol, &mut session, "[cal] calibration started: 2 gyro");
+    assert!(session.messages.is_empty(), "the expected version is quiet");
+
+    text(&protocol, &mut session, "[cal] calibration started: 3 gyro");
+    assert!(
+        session
+            .messages
+            .back()
+            .is_some_and(|note| note.contains("protocol version 3"))
+    );
+}

@@ -30,7 +30,7 @@ sections of the issue list.
 | 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Done |
 | 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Done |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
-| 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Todo |
+| 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
 | 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Todo |
 | 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-7, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Todo |
 | 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Todo |
@@ -40,7 +40,7 @@ sections of the issue list.
 | 16 | [UDP framing per datagram; serial opens](#wp16--udp-framing-per-datagram-serial-opens) | LINK-2, LINK-6, LINK-4 | P2 | 13 | Todo |
 | 17 | [Vehicle state: freshness and health](#wp17--vehicle-state-freshness-and-health) | SVC-3, SVC-4, SVC-12, SVC-16 | P2 | — | Todo |
 | 18 | [Fold cost](#wp18--fold-cost) | SVC-9, SVC-10 | P3 | — | Todo |
-| 19 | [Test-only fleet folding](#wp19--test-only-fleet-folding) | SVC-13 | P2 | 8 | Todo |
+| 19 | [Test-only fleet folding](#wp19--test-only-fleet-folding) | SVC-13 | P2 | 8 | Done |
 | 20 | [Parameter files](#wp20--parameter-files) | PARAM-3, PARAM-4, PARAM-5, PARAM-8, PARAM-9, SVC-17 (parameter files) | P2 | 5 | Todo |
 | 21 | [Recording and runtime robustness](#wp21--recording-and-runtime-robustness) | SVC-2, SVC-5, SVC-6, SVC-7, API-3 | P2 | — | Todo |
 | 22 | [One finger tracker](#wp22--one-finger-tracker) | UI-7, UI-8 | P2 | — | Todo |
@@ -250,7 +250,7 @@ move those modules onto it.
 
 ### WP9 · Calibration session lifecycle
 **Closes:** CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 ·
-**After:** 8 · **Status:** Todo
+**After:** 8 · **Status:** Done
 
 - **Confirmation sent** (CAL-2): `CalibrationUpdate::Confirmed(side)` sets
   `Instruction::Confirming(side)` ("Waiting for the vehicle…"), and
@@ -434,7 +434,7 @@ events carry both values.
 taken before a fix shares all but the last chunk with the one after.
 
 ### WP19 · Test-only fleet folding
-**Closes:** SVC-13 · **After:** 8 · **Status:** Todo
+**Closes:** SVC-13 · **After:** 8 · **Status:** Done
 
 Add a `test-support` feature to `groundhog-logic`, enabled only from
 `groundhog-gui-iced`'s dev-dependency. `Fleet::observe` and

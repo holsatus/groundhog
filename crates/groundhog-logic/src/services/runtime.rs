@@ -212,7 +212,7 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
             fleet.set_param_download(address, update);
         }
         Input::Calibration { system, update } => {
-            return fleet.update_calibration(system, update);
+            return fleet.update_calibration(system, std::time::Instant::now(), update);
         }
     }
     Vec::new()

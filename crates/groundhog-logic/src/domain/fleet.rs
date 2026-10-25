@@ -66,6 +66,8 @@ pub enum FleetEvent {
     /// The vehicle now reports holding a different mission than the one last
     /// transferred.
     OnboardMissionStale(SystemId),
+    /// The autopilot rebooted: its boot time jumped backwards.
+    Rebooted(SystemId),
     /// A calibration ended: succeeded, failed or cancelled.
     CalibrationFinished(SystemId, CalibrationKind, Outcome),
 }
@@ -165,7 +167,28 @@ impl Fleet {
     /// `message` is `None` for a frame that did not decode: it still refreshes
     /// an already registered vehicle's liveness. Frames from systems that are
     /// not (yet) vehicles are ignored.
+    #[cfg(not(feature = "test-support"))]
+    pub(crate) fn observe(
+        &mut self,
+        source: MavlinkId,
+        received_at: Instant,
+        message: Option<&DefaultDialect>,
+    ) -> Vec<FleetEvent> {
+        self.fold(source, received_at, message)
+    }
+
+    /// Fold one inbound frame into vehicle state, exposed to frontend tests.
+    #[cfg(feature = "test-support")]
     pub fn observe(
+        &mut self,
+        source: MavlinkId,
+        received_at: Instant,
+        message: Option<&DefaultDialect>,
+    ) -> Vec<FleetEvent> {
+        self.fold(source, received_at, message)
+    }
+
+    fn fold(
         &mut self,
         source: MavlinkId,
         received_at: Instant,
@@ -217,11 +240,17 @@ impl Fleet {
         let calibrating_before = is_calibrating(vehicle);
         let armed_before = vehicle.armed();
         let mode_before = vehicle.flight_mode();
+        let boots_before = vehicle.boot_count();
         let had_heartbeat = vehicle.identity.base_mode.is_some();
         let stale_before = vehicle.mission.onboard_is_stale();
 
         if let Some(text) = vehicle.handle_message(received_at, source.component, message) {
             events.push(FleetEvent::StatusText(id, text));
+        }
+
+        if vehicle.boot_count() != boots_before {
+            events.push(FleetEvent::Rebooted(id));
+            vehicle.end_calibration("the autopilot rebooted");
         }
 
         if had_heartbeat {
@@ -274,13 +303,15 @@ impl Fleet {
                 });
                 vehicle.liveness = liveness;
 
-                if liveness == Liveness::Lost
-                    && let Some(session) = vehicle.calibration.as_mut()
-                    && session.is_running()
-                {
-                    session.fail("contact with the vehicle was lost");
+                if liveness == Liveness::Lost {
+                    vehicle.end_calibration("contact with the vehicle was lost");
                     events.extend(calibration_finished(*id, vehicle));
                 }
+            }
+
+            if vehicle.calibration_timed_out(now) {
+                Arc::make_mut(vehicle).end_calibration("the calibration made no progress");
+                events.extend(calibration_finished(*id, vehicle));
             }
         }
 
@@ -289,7 +320,19 @@ impl Fleet {
 
     /// Record the mission a vehicle holds after a transfer. Returns whether
     /// the vehicle is known.
+    #[cfg(not(feature = "test-support"))]
+    pub(crate) fn set_onboard_mission(&mut self, id: SystemId, mission: OnboardMission) -> bool {
+        self.set_mission(id, mission)
+    }
+
+    /// Record the mission a vehicle holds after a transfer, exposed to
+    /// frontend tests.
+    #[cfg(feature = "test-support")]
     pub fn set_onboard_mission(&mut self, id: SystemId, mission: OnboardMission) -> bool {
+        self.set_mission(id, mission)
+    }
+
+    fn set_mission(&mut self, id: SystemId, mission: OnboardMission) -> bool {
         match self.vehicle_mut(id) {
             Some(vehicle) => {
                 vehicle.set_onboard_mission(mission);
@@ -299,11 +342,28 @@ impl Fleet {
         }
     }
 
+    /// Start a calibration run on `id` as the service would, for frontend
+    /// tests.
+    #[cfg(feature = "test-support")]
+    pub fn test_begin_calibration(&mut self, id: SystemId, kind: CalibrationKind, now: Instant) {
+        let run = crate::domain::calibration::RunId(0);
+        self.update_calibration(id, now, CalibrationUpdate::Begin { kind, run });
+        self.update_calibration(
+            id,
+            now,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
+    }
+
     /// Apply what a calibration operation reports. Returns the events it
     /// caused; none for an unknown vehicle.
     pub(crate) fn update_calibration(
         &mut self,
         id: SystemId,
+        now: Instant,
         update: CalibrationUpdate,
     ) -> Vec<FleetEvent> {
         let Some(vehicle) = self.vehicle_mut(id) else {
@@ -313,7 +373,7 @@ impl Fleet {
         // A run replaced by a new one is not reported as finished.
         let calibrating_before =
             is_calibrating(vehicle) && !matches!(update, CalibrationUpdate::Begin { .. });
-        if !vehicle.update_calibration(update) || !calibrating_before {
+        if !vehicle.update_calibration(now, update) || !calibrating_before {
             return Vec::new();
         }
 
@@ -690,5 +750,156 @@ mod tests {
         register(&mut fleet, A, Instant::now());
         assert!(fleet.set_onboard_mission(A, OnboardMission::empty()));
         assert!(fleet.vehicle(A).unwrap().mission.onboard.is_some());
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    use crate::domain::calibration::{CalibrationKind, Outcome, RunId, Session, Side};
+    use mavio::default_dialect::{
+        enums::{MavCmd, MavModeFlag, MavType},
+        messages,
+    };
+
+    const A: SystemId = SystemId(1);
+
+    fn source() -> MavlinkId {
+        MavlinkId {
+            system: A.0,
+            component: 1,
+        }
+    }
+
+    fn heartbeat() -> DefaultDialect {
+        DefaultDialect::Heartbeat(messages::Heartbeat {
+            type_: MavType::Quadrotor,
+            autopilot: MavAutopilot::Ardupilotmega,
+            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+            ..Default::default()
+        })
+    }
+
+    fn attitude(time_boot_ms: u32) -> DefaultDialect {
+        DefaultDialect::Attitude(messages::Attitude {
+            time_boot_ms,
+            ..Default::default()
+        })
+    }
+
+    fn accelcal_position(position: f32) -> DefaultDialect {
+        DefaultDialect::CommandLong(messages::CommandLong {
+            command: MavCmd::AccelcalVehiclePos,
+            param1: position,
+            ..Default::default()
+        })
+    }
+
+    fn register(fleet: &mut Fleet, at: Instant) {
+        fleet.observe(source(), at, Some(&heartbeat()));
+    }
+
+    fn start(fleet: &mut Fleet, at: Instant) {
+        let run = RunId(1);
+        fleet.update_calibration(
+            A,
+            at,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Accelerometer,
+                run,
+            },
+        );
+        fleet.update_calibration(
+            A,
+            at,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
+    }
+
+    fn running(fleet: &Fleet) -> bool {
+        fleet
+            .vehicle(A)
+            .and_then(|vehicle| vehicle.calibration.as_ref())
+            .is_some_and(Session::is_running)
+    }
+
+    fn finished(events: &[FleetEvent]) -> Option<&str> {
+        events.iter().find_map(|event| match event {
+            FleetEvent::CalibrationFinished(_, _, Outcome::Failed(reason)) => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_reboot_ends_a_running_calibration() {
+        let mut fleet = Fleet::default();
+        let at = Instant::now();
+        register(&mut fleet, at);
+        start(&mut fleet, at);
+        assert!(running(&fleet));
+
+        // A boot time stepping forward is normal.
+        fleet.observe(source(), at, Some(&attitude(50_000)));
+        assert!(running(&fleet), "no reboot yet");
+
+        let events = fleet.observe(source(), at, Some(&attitude(1_000)));
+        assert!(events.contains(&FleetEvent::Rebooted(A)));
+        assert!(
+            finished(&events).is_some_and(|reason| reason.contains("rebooted")),
+            "the calibration ends with the reboot: {events:?}"
+        );
+        assert!(!running(&fleet));
+    }
+
+    #[test]
+    fn a_calibration_times_out_only_while_the_vehicle_is_to_act() {
+        let mut fleet = Fleet::default();
+        let start_at = Instant::now();
+        register(&mut fleet, start_at);
+        start(&mut fleet, start_at);
+
+        // The vehicle asks for the level side: the operator may take as long
+        // as they need.
+        fleet.observe(source(), start_at, Some(&accelcal_position(1.0)));
+        assert_eq!(
+            fleet
+                .vehicle(A)
+                .unwrap()
+                .calibration
+                .as_ref()
+                .unwrap()
+                .instruction,
+            crate::domain::calibration::Instruction::Place(Side::Level)
+        );
+
+        let waited = start_at + Duration::from_secs(120);
+        fleet.observe(source(), waited, Some(&heartbeat()));
+        let events = fleet.tick(waited);
+        assert!(
+            finished(&events).is_none(),
+            "not while waiting for the operator"
+        );
+        assert!(running(&fleet));
+
+        // Confirmed: the vehicle takes over, and owes progress.
+        fleet.update_calibration(
+            A,
+            waited,
+            CalibrationUpdate::Confirmed {
+                run: RunId(1),
+                side: Side::Level,
+            },
+        );
+        let later = waited + Duration::from_secs(61);
+        fleet.observe(source(), later, Some(&heartbeat()));
+        let events = fleet.tick(later);
+        assert!(
+            finished(&events).is_some_and(|reason| reason.contains("no progress")),
+            "a silent vehicle fails the run: {events:?}"
+        );
+        assert!(!running(&fleet));
     }
 }

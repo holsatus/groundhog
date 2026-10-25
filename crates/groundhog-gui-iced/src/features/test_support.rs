@@ -22,6 +22,7 @@ use mavio::{
 
 use super::{
     Context, Effect,
+    calibration::{CalibrationPanel, Message as CalibrationMessage},
     mission::{Message as MissionMessage, MissionEditor},
     parameter_panel::{Message as ParameterMessage, ParameterPanel},
     vehicles::{Message as VehicleMessage, VehiclePanel},
@@ -108,6 +109,16 @@ pub fn run<M, F: Feature<M>>(env: &mut Env, feature: &mut F, message: M) -> Vec<
 /// A panel whose `update` a test can drive through [`Env::step`].
 pub trait Feature<M> {
     fn update(&mut self, message: M, cx: &mut Context<M>) -> Task<M>;
+}
+
+impl Feature<CalibrationMessage> for CalibrationPanel {
+    fn update(
+        &mut self,
+        message: CalibrationMessage,
+        cx: &mut Context<CalibrationMessage>,
+    ) -> Task<CalibrationMessage> {
+        CalibrationPanel::update(self, message, cx)
+    }
 }
 
 impl Feature<MissionMessage> for MissionEditor {

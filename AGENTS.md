@@ -681,7 +681,9 @@ comes with a test that fails without the fix.
 Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
 backend with `BackendOptions { bootstrap: false, .. }`; the snapshots they
 hand to the feature come from a `Fleet` they fold messages into with
-`Fleet::observe`. To simulate an operation's
+`Fleet::observe`. The folding methods and `Fleet::test_begin_calibration` are
+public only under `groundhog-logic`'s `test-support` feature, which the
+frontend enables from its dev-dependency. To simulate an operation's
 result, take its ticket with `Operations::ticket_of` (test-only).
 
 Tests must not touch the user's files. Write into a temporary directory, or

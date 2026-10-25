@@ -170,6 +170,8 @@ pub enum Instruction {
     HoldStill,
     /// Place the vehicle on `side`, then confirm (the vehicle waits for it).
     Place(Side),
+    /// The confirmation of `side` was sent; the vehicle takes it from here.
+    Confirming(Side),
     /// Hold the vehicle still on any side not yet done; the vehicle detects
     /// which.
     HoldOnPendingSide,
@@ -183,6 +185,14 @@ pub enum Instruction {
 }
 
 impl Instruction {
+    /// Whether the vehicle is waiting for the operator rather than working:
+    /// a session in this state must not time out.
+    pub(crate) fn waits_for_operator(self) -> bool {
+        matches!(self, Instruction::Place(_))
+    }
+}
+
+impl Instruction {
     pub fn text(self) -> String {
         match self {
             Instruction::Wait => "Waiting for the vehicle…".to_string(),
@@ -190,6 +200,10 @@ impl Instruction {
             Instruction::Place(side) => {
                 format!("Place the vehicle {} and keep it still", side.placement())
             }
+            Instruction::Confirming(side) => format!(
+                "Waiting for the vehicle to measure the {} side…",
+                side.placement()
+            ),
             Instruction::HoldOnPendingSide => {
                 "Hold the vehicle still on one of the remaining sides".to_string()
             }
@@ -266,9 +280,11 @@ pub struct CalibrationControls {
     /// The vehicle waits for the operator to confirm the current step.
     pub confirm: bool,
     /// The vehicle can be told to stop. Without that, cancelling only stops
-    /// following the run: the vehicle keeps waiting until it reboots or a new
-    /// run starts.
+    /// following the run.
     pub cancel: bool,
+    /// What cancelling does to the vehicle when it cannot be told to stop,
+    /// shown only while the start is still pending.
+    pub cancel_note: Option<&'static str>,
 }
 
 /// How many vehicle texts a session keeps.
@@ -280,7 +296,7 @@ const MESSAGES: usize = 16;
 pub(crate) struct RunId(pub(crate) u64);
 
 /// A calibration run on one vehicle, as the operator sees it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub kind: CalibrationKind,
     pub phase: Phase,
@@ -328,6 +344,11 @@ impl Session {
         self.run == run
     }
 
+    /// The run this session follows.
+    pub(crate) fn run(&self) -> RunId {
+        self.run
+    }
+
     pub fn is_running(&self) -> bool {
         !self.phase.is_finished()
     }
@@ -342,6 +363,21 @@ impl Session {
             Err(reason) => self.fail(reason),
             Ok(()) if self.completes_on_ack => self.succeed(),
             Ok(()) => self.phase = Phase::Running,
+        }
+    }
+
+    /// The confirmation of `side` was sent: the vehicle takes over, and the
+    /// operator waits for its next progress.
+    pub(crate) fn confirmed(&mut self, side: Side) {
+        if !self.phase.is_finished() && self.instruction == Instruction::Place(side) {
+            self.instruction = Instruction::Confirming(side);
+        }
+    }
+
+    /// Sending the confirmation of `side` failed: ask the operator again.
+    pub(crate) fn confirm_failed(&mut self, side: Side) {
+        if !self.phase.is_finished() && self.instruction == Instruction::Confirming(side) {
+            self.instruction = Instruction::Place(side);
         }
     }
 
@@ -422,6 +458,19 @@ pub trait CalibrationProtocol: Send + Sync + 'static {
         None
     }
 
+    /// What cancelling does to the vehicle when [`Self::cancel`] has no
+    /// command, and only while the start is pending: some kinds finish before
+    /// acknowledging, others keep waiting for the operator.
+    fn cancel_note(&self, _kind: CalibrationKind) -> Option<&'static str> {
+        None
+    }
+
+    /// How many times the cancel command is repeated: some firmwares
+    /// acknowledge it twice.
+    fn cancel_retries(&self) -> u8 {
+        0
+    }
+
     /// Fold the vehicle's feedback into a session that is not finished.
     fn observe(&self, session: &mut Session, feedback: Feedback<'_>);
 
@@ -447,6 +496,10 @@ pub(crate) enum CalibrationUpdate {
     /// The operation running `run` ended before the vehicle answered its
     /// start. The vehicle may have started; the operator did not cancel.
     Abandoned { run: RunId },
+    /// The confirmation of `side` was sent.
+    Confirmed { run: RunId, side: Side },
+    /// Sending the confirmation of `side` failed.
+    ConfirmFailed { side: Side },
     /// The operator cancelled.
     Cancel,
     /// The operator is done looking at a finished session.

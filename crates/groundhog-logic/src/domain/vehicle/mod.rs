@@ -59,6 +59,13 @@ use crate::{
     wire::{self, param::ParamEncoding},
 };
 
+/// How long a calibration may make no progress before it is failed.
+const CALIBRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How far an autopilot's `time_boot_ms` must step backwards to mean a
+/// reboot, rather than frames arriving out of order.
+const BOOT_REWIND_MS: u32 = 2_000;
+
 /// How recently a vehicle has been heard from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Liveness {
@@ -156,6 +163,12 @@ pub struct Vehicle {
     components: BTreeMap<u8, Arc<ComponentState>>,
     /// The latest calibration run, until dismissed.
     pub calibration: Option<calibration::Session>,
+    /// When the calibration last advanced, for its no-progress timeout.
+    calibration_progress_at: Option<Instant>,
+    /// The last `time_boot_ms` the autopilot reported.
+    last_boot_time: Option<u32>,
+    /// How many times the autopilot's boot time has jumped backwards.
+    boots: u32,
     pub last_seen: Option<Instant>,
     pub liveness: Liveness,
 }
@@ -366,8 +379,10 @@ impl Vehicle {
     /// Apply what the operation running a calibration reports. Returns
     /// whether it was applied: a vehicle whose firmware has no calibration
     /// protocol cannot begin one.
-    pub(crate) fn update_calibration(&mut self, update: CalibrationUpdate) -> bool {
-        match update {
+    pub(crate) fn update_calibration(&mut self, now: Instant, update: CalibrationUpdate) -> bool {
+        let before = self.calibration.clone();
+
+        let applied = match update {
             CalibrationUpdate::Begin { kind, run } => {
                 let Some(protocol) = self.firmware().calibration() else {
                     return false;
@@ -377,21 +392,43 @@ impl Vehicle {
                     protocol.completes_on_ack(kind),
                     run,
                 ));
+                true
             }
             // What a run reports applies to that run only.
             CalibrationUpdate::Acknowledged { run, result } => match &mut self.calibration {
-                Some(session) if session.is_run(run) => session.acknowledged(result),
-                _ => return false,
+                Some(session) if session.is_run(run) => {
+                    session.acknowledged(result);
+                    true
+                }
+                _ => false,
             },
             CalibrationUpdate::Abandoned { run } => match &mut self.calibration {
                 Some(session) if session.is_run(run) => {
                     session.fail("The start was abandoned before the vehicle answered");
+                    true
                 }
-                _ => return false,
+                _ => false,
+            },
+            CalibrationUpdate::Confirmed { run, side } => match &mut self.calibration {
+                Some(session) if session.is_run(run) => {
+                    session.confirmed(side);
+                    true
+                }
+                _ => false,
+            },
+            CalibrationUpdate::ConfirmFailed { side } => match &mut self.calibration {
+                Some(session) => {
+                    session.confirm_failed(side);
+                    true
+                }
+                None => false,
             },
             CalibrationUpdate::Cancel => match &mut self.calibration {
-                Some(session) => session.cancel(),
-                None => return false,
+                Some(session) => {
+                    session.cancel();
+                    true
+                }
+                None => false,
             },
             CalibrationUpdate::Dismiss => {
                 if self
@@ -399,12 +436,18 @@ impl Vehicle {
                     .as_ref()
                     .is_some_and(calibration::Session::is_running)
                 {
-                    return false;
+                    false
+                } else {
+                    self.calibration = None;
+                    true
                 }
-                self.calibration = None;
             }
+        };
+
+        if applied && self.calibration != before {
+            self.calibration_progress_at = Some(now);
         }
-        true
+        applied
     }
 
     /// The calibrations the vehicle's firmware can run, in display order;
@@ -418,21 +461,84 @@ impl Vehicle {
     /// What the operator can do about the running calibration.
     pub fn calibration_controls(&self) -> CalibrationControls {
         match (self.firmware().calibration(), &self.calibration) {
-            (Some(protocol), Some(session)) if session.is_running() => CalibrationControls {
-                confirm: protocol.confirm(session).is_some(),
-                cancel: protocol.cancel(session).is_some(),
-            },
+            (Some(protocol), Some(session)) if session.is_running() => {
+                let cancel = protocol.cancel(session).is_some();
+                CalibrationControls {
+                    confirm: protocol.confirm(session).is_some(),
+                    cancel,
+                    cancel_note: (!cancel && session.phase == calibration::Phase::Starting)
+                        .then(|| protocol.cancel_note(session.kind))
+                        .flatten(),
+                }
+            }
             _ => CalibrationControls::default(),
         }
     }
 
-    /// Fold the autopilot's feedback into a running calibration.
-    fn observe_calibration(&mut self, feedback: Feedback<'_>) {
-        let protocol = self.firmware().calibration();
-        if let (Some(protocol), Some(session)) = (protocol, &mut self.calibration)
-            && session.is_running()
+    /// End the running calibration, if any, with `reason`. Reports whether
+    /// one was running.
+    pub(crate) fn end_calibration(&mut self, reason: impl Into<String>) -> bool {
+        match &mut self.calibration {
+            Some(session) if session.is_running() => {
+                session.fail(reason);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the running calibration has made no progress for too long,
+    /// while the vehicle (not the operator) is the one to act.
+    pub(crate) fn calibration_timed_out(&self, now: Instant) -> bool {
+        self.calibration.as_ref().is_some_and(|session| {
+            session.is_running()
+                && !session.instruction.waits_for_operator()
+                && self
+                    .calibration_progress_at
+                    .is_some_and(|at| now.saturating_duration_since(at) > CALIBRATION_TIMEOUT)
+        })
+    }
+
+    /// How many times the autopilot has rebooted, as far as this build can
+    /// tell from its boot time.
+    pub(crate) fn boot_count(&self) -> u32 {
+        self.boots
+    }
+
+    /// Follow the autopilot's boot time: a large step backwards means it
+    /// rebooted between two messages.
+    fn observe_boot_time(&mut self, time_boot_ms: u32) {
+        if let Some(last) = self.last_boot_time
+            && last.saturating_sub(time_boot_ms) > BOOT_REWIND_MS
         {
-            protocol.observe(session, feedback);
+            self.boots = self.boots.saturating_add(1);
+            log::info!(
+                "Vehicle {} rebooted (boot time {last} ms -> {time_boot_ms} ms)",
+                self.system
+            );
+        }
+        self.last_boot_time = Some(time_boot_ms);
+    }
+
+    /// Fold the autopilot's feedback into a running calibration, noting when
+    /// it advanced.
+    fn observe_calibration(&mut self, time: Instant, feedback: Feedback<'_>) {
+        let protocol = self.firmware().calibration();
+        let Some(protocol) = protocol else {
+            return;
+        };
+
+        let Some(session) = &mut self.calibration else {
+            return;
+        };
+        if !session.is_running() {
+            return;
+        }
+
+        let before = session.clone();
+        protocol.observe(session, feedback);
+        if *session != before {
+            self.calibration_progress_at = Some(time);
         }
     }
 
@@ -561,12 +667,14 @@ impl Vehicle {
                 self.battery.observe_battery_status(message);
             }
             DefaultDialect::Attitude(message) if self.is_authoritative(component) => {
+                self.observe_boot_time(message.time_boot_ms);
                 self.attitude.observe_attitude(message);
             }
             DefaultDialect::AttitudeQuaternion(message) if self.is_authoritative(component) => {
                 self.attitude.observe_attitude_quaternion(message);
             }
             DefaultDialect::GlobalPositionInt(message) if self.is_authoritative(component) => {
+                self.observe_boot_time(message.time_boot_ms);
                 if let Some((lat, lon)) = wire::latlon(message.lat, message.lon) {
                     let pos = GeoPosition::new(lat, lon);
                     Arc::make_mut(&mut self.position)
@@ -594,7 +702,7 @@ impl Vehicle {
                 if let Some(text) = &text
                     && self.is_authoritative(component)
                 {
-                    self.observe_calibration(Feedback::Text(text));
+                    self.observe_calibration(time, Feedback::Text(text));
                 }
                 return text;
             }
@@ -602,7 +710,7 @@ impl Vehicle {
         }
 
         if self.is_authoritative(component) {
-            self.observe_calibration(Feedback::Message(message));
+            self.observe_calibration(time, Feedback::Message(message));
         }
 
         None
@@ -1212,14 +1320,20 @@ mod tests {
         );
 
         let run = calibration::RunId(1);
-        ardupilot.update_calibration(CalibrationUpdate::Begin {
-            kind: CalibrationKind::Accelerometer,
-            run,
-        });
-        ardupilot.update_calibration(CalibrationUpdate::Acknowledged {
-            run,
-            result: Ok(()),
-        });
+        ardupilot.update_calibration(
+            t,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Accelerometer,
+                run,
+            },
+        );
+        ardupilot.update_calibration(
+            t,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
         assert_eq!(
             ardupilot.calibration_controls(),
             CalibrationControls::default(),
@@ -1238,24 +1352,29 @@ mod tests {
             ardupilot.calibration_controls(),
             CalibrationControls {
                 confirm: true,
-                cancel: false
+                cancel: false,
+                cancel_note: None,
             }
         );
 
         let mut px4 = vehicle();
         px4.handle_message(t, 1, &heartbeat(MavAutopilot::Px4));
-        px4.update_calibration(CalibrationUpdate::Begin {
-            kind: CalibrationKind::Gyroscope,
-            run: calibration::RunId(2),
-        });
+        px4.update_calibration(
+            t,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Gyroscope,
+                run: calibration::RunId(2),
+            },
+        );
         assert_eq!(
             px4.calibration_controls(),
             CalibrationControls {
                 confirm: false,
-                cancel: true
+                cancel: true,
+                cancel_note: None,
             }
         );
-        px4.update_calibration(CalibrationUpdate::Cancel);
+        px4.update_calibration(t, CalibrationUpdate::Cancel);
         assert_eq!(
             px4.calibration_controls(),
             CalibrationControls::default(),
@@ -1275,13 +1394,17 @@ mod tests {
             run,
         };
 
-        vehicle.update_calibration(begin(old));
-        vehicle.update_calibration(begin(new));
-        assert!(!vehicle.update_calibration(CalibrationUpdate::Abandoned { run: old }));
+        vehicle.update_calibration(Instant::now(), begin(old));
+        vehicle.update_calibration(Instant::now(), begin(new));
+        assert!(
+            !vehicle.update_calibration(Instant::now(), CalibrationUpdate::Abandoned { run: old })
+        );
         let phase = || vehicle.calibration.as_ref().unwrap().phase.clone();
         assert_eq!(phase(), calibration::Phase::Starting);
 
-        assert!(vehicle.update_calibration(CalibrationUpdate::Abandoned { run: new }));
+        assert!(
+            vehicle.update_calibration(Instant::now(), CalibrationUpdate::Abandoned { run: new })
+        );
         assert!(matches!(
             vehicle.calibration.as_ref().unwrap().phase,
             calibration::Phase::Failed(_)

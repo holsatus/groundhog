@@ -263,17 +263,14 @@ impl CalibrationPanel {
         }
 
         let buttons = if running {
-            let stoppable = controls.cancel;
             row![
-                ui::button(if stoppable { "Cancel" } else { "Abandon" })
+                ui::button(if controls.cancel { "Cancel" } else { "Abandon" })
                     .danger()
                     .on_press_maybe(
                         (!self.is_busy(system, Action::Cancel)).then_some(Message::Cancel(system))
                     )
                     .boxed(),
-                (!stoppable).then(|| {
-                    ui::caption("The vehicle keeps waiting until it reboots or a new run starts.")
-                }),
+                controls.cancel_note.map(ui::caption),
             ]
         } else {
             row![
@@ -297,7 +294,9 @@ impl CalibrationPanel {
 /// The six orientations: done, current, or still to do.
 fn view_sides(session: &Session) -> Element<'_, Message> {
     let current = match session.instruction {
-        Instruction::Place(side) | Instruction::Measuring(side) => Some(side),
+        Instruction::Place(side) | Instruction::Confirming(side) | Instruction::Measuring(side) => {
+            Some(side)
+        }
         Instruction::Rotate(side) => side,
         _ => None,
     };
@@ -337,3 +336,6 @@ fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
         .vehicle(system),
     );
 }
+
+#[cfg(test)]
+mod tests;

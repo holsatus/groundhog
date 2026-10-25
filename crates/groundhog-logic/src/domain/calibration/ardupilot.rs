@@ -106,6 +106,22 @@ impl CalibrationProtocol for ArduPilotCalibration {
         })
     }
 
+    fn cancel_note(&self, kind: CalibrationKind) -> Option<&'static str> {
+        match kind {
+            CalibrationKind::Compass => None,
+            CalibrationKind::Accelerometer => Some(
+                "The vehicle keeps waiting for the next orientation until it is restarted or \
+                 reboots.",
+            ),
+            CalibrationKind::Level | CalibrationKind::Gyroscope | CalibrationKind::Airspeed => {
+                Some(
+                    "The vehicle finishes this calibration on its own; cancelling only stops \
+                 waiting for its answer.",
+                )
+            }
+        }
+    }
+
     fn observe(&self, session: &mut Session, feedback: Feedback<'_>) {
         match feedback {
             Feedback::Text(text) => {

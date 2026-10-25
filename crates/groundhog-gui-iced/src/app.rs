@@ -618,6 +618,9 @@ impl Application {
             ))
             .detail("Download it to see the vehicle's current mission.")
             .vehicle(system),
+            FleetEvent::Rebooted(system) => {
+                Notice::warning(format!("{} rebooted", name(system))).vehicle(system)
+            }
             FleetEvent::CalibrationFinished(system, kind, outcome) => {
                 let subject = format!("{kind} calibration of {}", name(system));
                 match outcome {

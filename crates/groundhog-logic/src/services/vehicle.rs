@@ -13,8 +13,6 @@ use std::{
     time::Duration,
 };
 
-use mavio::default_dialect::messages::CommandLong;
-
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
     enums::{MavMissionType, MavResult},
@@ -25,7 +23,9 @@ use super::{Error, FleetHandle, Result, runtime::Input};
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{CalibrationKind, CalibrationProtocol, CalibrationUpdate, RunId, Session},
+        calibration::{
+            CalibrationKind, CalibrationProtocol, CalibrationUpdate, Instruction, RunId, Session,
+        },
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
         parameter::{DownloadOutcome, DownloadUpdate},
@@ -516,19 +516,37 @@ impl VehicleClient {
     /// [`Error::Rejected`] / [`Error::Timeout`] / [`Error::NoLink`]. The
     /// command is never resent.
     pub async fn confirm_calibration_step(&self) -> Result<()> {
-        let (target, command) =
-            self.with_calibration(|protocol, session| protocol.confirm(session))?;
+        let (target, (command, run, side)) = self.with_calibration(|protocol, session| {
+            let side = match session.instruction {
+                Instruction::Place(side) => Some(side),
+                _ => None,
+            };
+            (protocol.confirm(session), session.run(), side)
+        })?;
         let command = command.ok_or(Error::NotCalibrating)?;
+        let side = side.ok_or(Error::NotCalibrating)?;
+
+        // The operator is done; the vehicle takes over. Until its next
+        // progress the session must not ask again: a repeat would be refused
+        // once measuring has begun.
+        self.report_calibration(CalibrationUpdate::Confirmed { run, side });
 
         // Not resent either: once the vehicle measures, a repeat is refused.
-        self.fleet
+        let result = self
+            .fleet
             .router()
             .command(target, command)
             .timeout(CALIBRATION_CONFIRM_TIMEOUT)
             .retries(0)
             .await
             .map(|_| ())
-            .map_err(Error::from)
+            .map_err(Error::from);
+
+        if result.is_err() {
+            self.report_calibration(CalibrationUpdate::ConfirmFailed { side });
+        }
+
+        result
     }
 
     /// Cancel the running calibration. The session ends at once; the vehicle
@@ -541,18 +559,20 @@ impl VehicleClient {
     /// tell the vehicle is logged rather than returned: the session has ended
     /// either way.
     pub async fn cancel_calibration(&self) -> Result<()> {
-        let (target, command) =
-            self.with_calibration(|protocol, session| protocol.cancel(session))?;
+        let (target, (command, retries)) = self.with_calibration(|protocol, session| {
+            (protocol.cancel(session), protocol.cancel_retries())
+        })?;
         self.report_calibration(CalibrationUpdate::Cancel);
 
         if let Some(command) = command {
-            // PX4 acknowledges a cancel twice, once refusing it as a new
-            // command while busy: the outcome shows in its texts instead.
+            // The retry count is the firmware's: PX4 acknowledges a cancel
+            // twice, once refusing it as a new command while busy, and the
+            // outcome shows in its texts instead.
             if let Err(error) = self
                 .fleet
                 .router()
                 .command(target, command)
-                .retries(1)
+                .retries(retries)
                 .await
             {
                 log::debug!("Calibration cancel on {target:?}: {error}");
@@ -574,10 +594,10 @@ impl VehicleClient {
     }
 
     /// Read the running calibration and its protocol.
-    fn with_calibration(
+    fn with_calibration<T>(
         &self,
-        read: impl FnOnce(&dyn CalibrationProtocol, &Session) -> Option<CommandLong>,
-    ) -> Result<(MavlinkId, Option<CommandLong>)> {
+        read: impl FnOnce(&dyn CalibrationProtocol, &Session) -> T,
+    ) -> Result<(MavlinkId, T)> {
         self.with_vehicle(|vehicle| {
             let protocol = vehicle.firmware().calibration()?;
             let session = vehicle

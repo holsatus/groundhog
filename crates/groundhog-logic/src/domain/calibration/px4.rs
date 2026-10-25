@@ -34,6 +34,10 @@ pub(crate) struct Px4Calibration;
 
 const PREFIX: &str = "[cal] ";
 
+/// The calibration protocol version this build follows, as the narration
+/// names it.
+const PROTOCOL_VERSION: u8 = 2;
+
 impl CalibrationProtocol for Px4Calibration {
     fn supports(&self, kind: CalibrationKind, class: VehicleClass) -> bool {
         kind != CalibrationKind::Airspeed || class.has_wings()
@@ -53,6 +57,12 @@ impl CalibrationProtocol for Px4Calibration {
         Some(preflight_calibration([0.0; 7]))
     }
 
+    /// PX4 acknowledges a cancel twice: once refusing it as a new command
+    /// while it is busy.
+    fn cancel_retries(&self) -> u8 {
+        1
+    }
+
     fn observe(&self, session: &mut Session, feedback: Feedback<'_>) {
         let Feedback::Text(text) = feedback else {
             return;
@@ -67,21 +77,18 @@ impl CalibrationProtocol for Px4Calibration {
 }
 
 fn observe_narration(session: &mut Session, text: &str) {
-    if let Some(percent) = text
-        .strip_prefix("progress <")
-        .and_then(|rest| rest.strip_suffix('>'))
-    {
-        // Too frequent to keep in the log.
-        if let Ok(percent) = percent.parse::<u16>() {
-            session.progress = Some(percent.min(100) as u8);
-        }
+    // The overall progress, and the per-side form some PX4 versions send
+    // ("left side calibration: progress <42>"). Both are too frequent to keep
+    // in the log.
+    if let Some(percent) = progress_of(text) {
+        session.progress = Some(percent);
         return;
     }
 
     session.observe_running();
 
-    if text.starts_with("calibration started") {
-        // Running, as any narration shows.
+    if let Some(rest) = text.strip_prefix("calibration started") {
+        note_protocol_version(session, rest);
     } else if text.starts_with("calibration done") {
         if needs_sides(session.kind) {
             for side in Side::ALL {
@@ -94,11 +101,26 @@ fn observe_narration(session: &mut Session, text: &str) {
     } else if text.starts_with("calibration cancelled") {
         session.cancel();
     } else if let Some(pending) = text.strip_prefix("pending:") {
-        let pending: Vec<Side> = pending.split_whitespace().filter_map(side_named).collect();
-        for side in Side::ALL {
-            if !pending.contains(&side) {
-                session.sides.mark(side);
+        let names: Vec<&str> = pending.split_whitespace().collect();
+        let sides: Vec<Side> = names.iter().filter_map(|name| side_named(name)).collect();
+
+        if sides.len() == names.len() {
+            for side in Side::ALL {
+                if !sides.contains(&side) {
+                    session.sides.mark(side);
+                }
             }
+        } else {
+            // An orientation this build does not name: marking every other
+            // side done could record a side as measured that never was.
+            let unknown: Vec<&str> = names
+                .into_iter()
+                .filter(|name| side_named(name).is_none())
+                .collect();
+            session.note(&format!(
+                "unrecognised orientation in the pending list: {}",
+                unknown.join(", ")
+            ));
         }
         session.instruction = Instruction::HoldOnPendingSide;
     } else if text.starts_with("hold vehicle still on a pending side") {
@@ -140,6 +162,32 @@ fn observe_narration(session: &mut Session, text: &str) {
         // What the session does not already show: warnings ("detected
         // motion, hold still..."), sensor results, retries.
         session.note(text);
+    }
+}
+
+/// The percentage in a progress narration, wherever the prefix puts it.
+fn progress_of(text: &str) -> Option<u8> {
+    let (_, rest) = text.rsplit_once("progress <")?;
+    let percent = rest.strip_suffix('>')?.trim().parse::<u16>().ok()?;
+    Some(percent.min(100) as u8)
+}
+
+/// The protocol version the narration starts with, when it names one that
+/// differs from the one this build follows.
+fn note_protocol_version(session: &mut Session, rest: &str) {
+    let Some(version) = rest
+        .strip_prefix(':')
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return;
+    };
+
+    match version.parse::<u8>() {
+        Ok(version) if version == PROTOCOL_VERSION => {}
+        Ok(version) => session.note(&format!(
+            "calibration protocol version {version}; this build follows {PROTOCOL_VERSION}"
+        )),
+        Err(_) => {}
     }
 }
 
