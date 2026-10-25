@@ -24,6 +24,7 @@ use groundhog_logic::domain::geo::GeoPosition;
 use iced::{
     Padding, Point, Rectangle, Renderer, Theme, keyboard, mouse, touch,
     widget::canvas::{self, Action, Event, Frame, Geometry},
+    window,
 };
 use slippery::Viewpoint;
 
@@ -415,13 +416,17 @@ impl<Message> Overlay<'_, Message> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let point = point.filter(|_| inside)?;
+                // A press while a gesture is live means its release was lost:
+                // end that gesture before starting this one.
+                let cancelled = self.cancel(state);
                 let target = self.hit(&view, point, source.hit_radius());
                 state.pointer = Pointer::Pressed { at: point, target };
 
                 // Only a draggable handle keeps the map from panning.
-                target
+                let pressed = target
                     .filter(|target| target.draggable)
-                    .map(|_| Action::capture())
+                    .map(|_| Action::capture());
+                cancelled.or(pressed)
             }
 
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -498,10 +503,13 @@ impl<Message> Overlay<'_, Message> {
                 })
             }
 
+            // Escape, or a window that lost focus and may never see the
+            // release (alt-tab mid-drag), ends the gesture.
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
                 ..
-            }) => self.cancel(state),
+            })
+            | Event::Window(window::Event::Unfocused) => self.cancel(state),
 
             Event::Mouse(mouse::Event::CursorLeft) => {
                 state.hovered.take().map(|_| Action::request_redraw())
@@ -511,13 +519,16 @@ impl<Message> Overlay<'_, Message> {
         }
     }
 
-    /// Ends the drag in progress, if any: the gesture will not end on its own
-    /// (escape, or a finger the system took away).
+    /// Ends the gesture in progress, if any, when it will not end on its
+    /// own: escape, the window losing focus, a press while one is live, a
+    /// finger the system took away. A drag is cancelled on its layer, which
+    /// restores its origin; a press is forgotten, so its release is no click.
     fn cancel(&self, state: &mut State) -> Option<Action<Message>> {
-        let Pointer::Dragging { target } = state.pointer else {
-            return None;
+        let target = match std::mem::take(&mut state.pointer) {
+            Pointer::Dragging { target } => target,
+            Pointer::Pressed { .. } | Pointer::Panning => return Some(Action::request_redraw()),
+            Pointer::Idle => return None,
         };
-        state.pointer = Pointer::Idle;
 
         let message = self.send(
             target.layer,
@@ -716,7 +727,18 @@ mod tests {
         overlay.update(&mut state, &press(), BOUNDS, centre);
         overlay.update(&mut state, &moved(far), BOUNDS, far);
 
-        let escape = Event::Keyboard(keyboard::Event::KeyPressed {
+        let (cancelled, _) = message(overlay.update(&mut state, &escape(), BOUNDS, far));
+        assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
+
+        // The release after a cancel does nothing.
+        assert_eq!(
+            message(overlay.update(&mut state, &release(), BOUNDS, far)).0,
+            None
+        );
+    }
+
+    fn escape() -> Event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(keyboard::key::Named::Escape),
             modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
             physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
@@ -724,14 +746,65 @@ mod tests {
             modifiers: keyboard::Modifiers::default(),
             text: None,
             repeat: false,
-        });
-        let (cancelled, _) = message(overlay.update(&mut state, &escape, BOUNDS, far));
-        assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
+        })
+    }
 
-        // The release after a cancel does nothing.
+    /// A window that loses focus mid-drag may never see the release: the
+    /// drag ends there, and the pointer coming back drags nothing.
+    #[test]
+    fn losing_focus_cancels_a_drag() {
+        let overlay = overlay();
+        let mut state = State::default();
+        let centre = at(CENTRE.0, CENTRE.1);
+        let far = at(CENTRE.0 + 30.0, CENTRE.1);
+
+        overlay.update(&mut state, &press(), BOUNDS, centre);
+        overlay.update(&mut state, &moved(far), BOUNDS, far);
+
+        let unfocused = Event::Window(window::Event::Unfocused);
+        let (cancelled, _) = message(overlay.update(&mut state, &unfocused, BOUNDS, far));
+        assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
+        assert_eq!(state.pointer, Pointer::Idle);
+
+        let back = at(CENTRE.0 + 60.0, CENTRE.1);
         assert_eq!(
-            message(overlay.update(&mut state, &release(), BOUNDS, far)).0,
-            None
+            message(overlay.update(&mut state, &moved(back), BOUNDS, back)).0,
+            None,
+            "no drag without a button held"
+        );
+    }
+
+    /// A press while a drag is live means its release was lost: the drag is
+    /// cancelled before the new press starts.
+    #[test]
+    fn a_press_during_a_drag_cancels_it_first() {
+        let overlay = overlay();
+        let mut state = State::default();
+        let centre = at(CENTRE.0, CENTRE.1);
+        let far = at(CENTRE.0 + 30.0, CENTRE.1);
+
+        overlay.update(&mut state, &press(), BOUNDS, centre);
+        overlay.update(&mut state, &moved(far), BOUNDS, far);
+
+        let corner = at(10.0, 10.0);
+        let (cancelled, _) = message(overlay.update(&mut state, &press(), BOUNDS, corner));
+        assert_eq!(cancelled, Some(Msg::Cancelled(MARKER)));
+        assert!(matches!(state.pointer, Pointer::Pressed { .. }));
+    }
+
+    /// Escape forgets a press, so its release places nothing.
+    #[test]
+    fn escape_cancels_a_press() {
+        let overlay = overlay();
+        let mut state = State::default();
+        let corner = at(10.0, 10.0);
+
+        overlay.update(&mut state, &press(), BOUNDS, corner);
+        overlay.update(&mut state, &escape(), BOUNDS, corner);
+        assert_eq!(
+            message(overlay.update(&mut state, &release(), BOUNDS, corner)).0,
+            None,
+            "no click"
         );
     }
 
