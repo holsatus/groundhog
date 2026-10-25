@@ -14,7 +14,7 @@ use mavio::default_dialect::messages::{
     ParamRequestRead, ParamSet,
 };
 
-use crate::MavlinkId;
+use crate::{MavlinkId, wire::mission_item::RawMissionItem};
 
 mod acks;
 pub(crate) mod commands;
@@ -88,4 +88,5 @@ impl_targeted!(
     ParamRequestList,
     ParamRequestRead,
     ParamSet,
+    RawMissionItem,
 );

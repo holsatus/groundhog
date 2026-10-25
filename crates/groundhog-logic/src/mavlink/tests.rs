@@ -8,7 +8,7 @@ use std::{
 
 use mav_param::{Ident, Value};
 use mavio::{
-    DefaultDialect,
+    DefaultDialect, Frame,
     default_dialect::{
         enums::{
             MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
@@ -20,8 +20,8 @@ use mavio::{
             SysStatus, SystemTime,
         },
     },
-    prelude::V2,
-    protocol::FrameBuilder,
+    prelude::{V2, Versionless},
+    protocol::{FrameBuilder, IntoPayload, MavLinkVersion, MessageSpec},
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -31,6 +31,7 @@ use crate::{
     domain::fleet::Fleet,
     link::LinkId,
     mavlink::io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
+    wire::mission_item::RawMissionItem,
 };
 
 const VEHICLE: MavlinkId = MavlinkId {
@@ -73,6 +74,37 @@ impl MockVehicle {
             .into_versionless();
         self.sequence = self.sequence.wrapping_add(1);
         self.tx.send(&frame).await.unwrap();
+    }
+
+    /// Sends a mission item whose command and frame the bundled dialect does
+    /// not know, built from the raw payload.
+    async fn send_raw(&mut self, message: &RawMissionItem) {
+        let payload = message.encode(MavLinkVersion::V2).expect("encodable");
+        let frame = FrameBuilder::new()
+            .system_id(VEHICLE.system)
+            .component_id(VEHICLE.component)
+            .version(V2)
+            .sequence(self.sequence)
+            .message_id(payload.id())
+            .payload(payload.bytes())
+            .crc_extra(message.crc_extra())
+            .build()
+            .into_versionless();
+        self.sequence = self.sequence.wrapping_add(1);
+        self.tx.send(&frame).await.unwrap();
+    }
+
+    /// The next frame from the GCS that is not a heartbeat, undecoded.
+    async fn recv_frame(&mut self) -> Frame<Versionless> {
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), self.rx.recv())
+                .await
+                .expect("the GCS sends something")
+                .expect("transport open");
+            if frame.message_id() != 0 {
+                return frame;
+            }
+        }
     }
 
     async fn ack(&mut self, command: MavCmd, result: MavResult) {
@@ -523,6 +555,20 @@ fn mission_item(seq: u16, x: i32) -> MissionItemInt {
     }
 }
 
+/// The same item in the raw form an upload takes.
+fn wire_item(seq: u16, x: i32) -> RawMissionItem {
+    RawMissionItem {
+        seq,
+        x,
+        y: 0,
+        z: 0.0,
+        frame: MavFrame::GlobalInt as u8,
+        command: MavCmd::NavWaypoint as u16,
+        mission_type: MavMissionType::Mission as u8,
+        ..Default::default()
+    }
+}
+
 async fn recv_request_list(vehicle: &mut MockVehicle) -> MissionRequestList {
     let DefaultDialect::MissionRequestList(request) = vehicle.recv().await else {
         panic!("expected MISSION_REQUEST_LIST")
@@ -589,7 +635,7 @@ async fn mission_download_transfers_all_items() {
 #[tokio::test]
 async fn mission_upload_sends_items_and_returns_id() {
     let (router, _guard, mut vehicle) = setup();
-    let items = vec![mission_item(0, 11), mission_item(1, 22)];
+    let items = vec![wire_item(0, 11), wire_item(1, 22)];
 
     let task = tokio::spawn({
         let router = router.clone();
@@ -635,10 +681,105 @@ async fn mission_upload_sends_items_and_returns_id() {
     assert_eq!(task.await.unwrap().expect("upload should succeed"), 99);
 }
 
+/// A vehicle may hold an item whose command or frame is newer than this
+/// build's dialect. Downloading it must keep the whole item, and uploading it
+/// again must send the same bytes.
+#[tokio::test]
+async fn mission_items_newer_than_the_dialect_round_trip() {
+    let (router, _guard, mut vehicle) = setup();
+    let served = RawMissionItem {
+        seq: 0,
+        frame: 255,
+        command: 31_050,
+        params: [1.0, 2.0, 3.0, 4.0],
+        x: 11,
+        y: 22,
+        z: 33.0,
+        mission_type: MavMissionType::Mission as u8,
+        ..Default::default()
+    };
+
+    // Download: the vehicle serves the item, which the dialect cannot name.
+    let download = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    vehicle
+        .send(&MissionCount {
+            count: 1,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 4,
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+    vehicle.send_raw(&served).await;
+    recv_ack(&mut vehicle).await;
+
+    let downloaded = download.await.unwrap().expect("the item is tolerated");
+    assert_eq!(downloaded.items, vec![served]);
+
+    // Upload the same plan: the vehicle receives the item unchanged, apart
+    // from the target fields the router fills in.
+    let upload = tokio::spawn({
+        let router = router.clone();
+        let items = downloaded.items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(count) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    assert_eq!(count.count, 1);
+
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    let expected = RawMissionItem {
+        target_system: VEHICLE.system,
+        target_component: VEHICLE.component,
+        ..served
+    };
+    let frame = vehicle.recv_frame().await;
+    assert_eq!(frame.message_id(), 73);
+    assert_eq!(
+        frame.payload().bytes(),
+        expected
+            .encode(MavLinkVersion::V2)
+            .expect("encodable")
+            .bytes(),
+        "the unknown command and frame travel back unchanged"
+    );
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    assert!(upload.await.unwrap().is_ok());
+}
+
 #[tokio::test]
 async fn mission_upload_answers_legacy_mission_request() {
     let (router, _guard, mut vehicle) = setup();
-    let items = vec![mission_item(0, 11), mission_item(1, 22)];
+    let items = vec![wire_item(0, 11), wire_item(1, 22)];
 
     let task = tokio::spawn({
         let router = router.clone();
@@ -809,7 +950,7 @@ async fn mission_download_ignores_traffic_for_another_gcs() {
 #[tokio::test]
 async fn mission_upload_ignores_acks_for_another_mission_type() {
     let (router, _guard, mut vehicle) = setup();
-    let items = vec![mission_item(0, 11)];
+    let items = vec![wire_item(0, 11)];
 
     let task = tokio::spawn({
         let router = router.clone();

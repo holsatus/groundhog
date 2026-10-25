@@ -10,17 +10,14 @@
 //! degrees and uses the float global frames. Positional frames are normalized
 //! to their `_INT` counterparts on the way in (`0/3/10 -> 5/6/11`) and back out.
 
-use mavio::default_dialect::{
-    enums::{MavCmd, MavFrame, MavMissionType},
-    messages::MissionItemInt,
-};
+use mavio::default_dialect::enums::{MavCmd, MavFrame, MavMissionType};
 
 use crate::{
     domain::{
         firmware::MissionLayout,
         mission::{MissionItem, PlanTooLong, codec},
     },
-    wire::{degrees, degrees_e7},
+    wire::{degrees, degrees_e7, mission_item::RawMissionItem},
 };
 
 /// The layout of a WPL file: home in row 0.
@@ -80,12 +77,12 @@ pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> Result<St
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             wire.seq,
             if wire.seq == 0 { 1 } else { 0 },
-            frame as u16,
-            wire.command as u16,
-            wire.param1,
-            wire.param2,
-            wire.param3,
-            wire.param4,
+            u16::from(frame),
+            wire.command,
+            wire.params[0],
+            wire.params[1],
+            wire.params[2],
+            wire.params[3],
             degrees(wire.x),
             degrees(wire.y),
             wire.z,
@@ -149,7 +146,7 @@ fn validate_header(line: &str) -> Result<(), String> {
     }
 }
 
-fn parse_row(line: &str, line_number: usize) -> Result<MissionItemInt, WplError> {
+fn parse_row(line: &str, line_number: usize) -> Result<RawMissionItem, WplError> {
     let fields: Vec<&str> = line.split('\t').collect();
 
     if fields.len() != 12 {
@@ -183,18 +180,12 @@ fn parse_row(line: &str, line_number: usize) -> Result<MissionItemInt, WplError>
     integer(1, "current")?;
 
     let frame_raw = integer(2, "frame")?;
-    let frame = MavFrame::try_from(
-        u8::try_from(frame_raw)
-            .map_err(|_| WplError::at(line_number, format!("frame out of range: {frame_raw}")))?,
-    )
-    .map_err(|_| WplError::at(line_number, format!("unknown frame: {frame_raw}")))?;
+    let frame = u8::try_from(frame_raw)
+        .map_err(|_| WplError::at(line_number, format!("frame out of range: {frame_raw}")))?;
 
     let command_raw = integer(3, "command")?;
-    let command =
-        MavCmd::try_from(u16::try_from(command_raw).map_err(|_| {
-            WplError::at(line_number, format!("command out of range: {command_raw}"))
-        })?)
-        .map_err(|_| WplError::at(line_number, format!("unknown command: {command_raw}")))?;
+    let command = u16::try_from(command_raw)
+        .map_err(|_| WplError::at(line_number, format!("command out of range: {command_raw}")))?;
 
     let param1 = float(4, "param1")? as f32;
     let param2 = float(5, "param2")? as f32;
@@ -205,52 +196,54 @@ fn parse_row(line: &str, line_number: usize) -> Result<MissionItemInt, WplError>
     let alt = float(10, "altitude")? as f32;
     let autocontinue = integer(11, "autocontinue")? != 0;
 
-    Ok(MissionItemInt {
+    Ok(RawMissionItem {
         frame: import_frame(frame, command),
         command,
         autocontinue: u8::from(autocontinue),
-        param1,
-        param2,
-        param3,
-        param4,
+        params: [param1, param2, param3, param4],
         x: degrees_e7(lat),
         y: degrees_e7(lon),
         z: alt,
-        mission_type: MavMissionType::Mission,
+        mission_type: MavMissionType::Mission as u8,
         ..Default::default()
     })
 }
 
-/// Whether `command` carries a location, per the command table.
-fn is_positional_command(command: MavCmd) -> bool {
-    crate::domain::mission::command::spec_of(command).is_some_and(|spec| spec.is_positional())
+/// Whether `command` carries a location, per the command table. Unknown
+/// commands (newer than the table) are not positional: their raw frame is
+/// left as it is.
+fn is_positional_command(command: u16) -> bool {
+    MavCmd::try_from(command)
+        .ok()
+        .and_then(crate::domain::mission::command::spec_of)
+        .is_some_and(|spec| spec.is_positional())
 }
 
 /// Map our global-INT frame back to the float global frame WPL uses.
-fn export_frame(frame: MavFrame, command: MavCmd) -> MavFrame {
+fn export_frame(frame: u8, command: u16) -> u8 {
     if !is_positional_command(command) {
         return frame;
     }
 
-    match frame {
-        MavFrame::GlobalInt => MavFrame::Global,
-        MavFrame::GlobalRelativeAltInt => MavFrame::GlobalRelativeAlt,
-        MavFrame::GlobalTerrainAltInt => MavFrame::GlobalTerrainAlt,
-        other => other,
+    match MavFrame::try_from(frame) {
+        Ok(MavFrame::GlobalInt) => MavFrame::Global as u8,
+        Ok(MavFrame::GlobalRelativeAltInt) => MavFrame::GlobalRelativeAlt as u8,
+        Ok(MavFrame::GlobalTerrainAltInt) => MavFrame::GlobalTerrainAlt as u8,
+        _ => frame,
     }
 }
 
 /// Map WPL's float global frame to the global-INT frame our model expects.
-fn import_frame(frame: MavFrame, command: MavCmd) -> MavFrame {
+fn import_frame(frame: u8, command: u16) -> u8 {
     if !is_positional_command(command) {
         return frame;
     }
 
-    match frame {
-        MavFrame::Global => MavFrame::GlobalInt,
-        MavFrame::GlobalRelativeAlt => MavFrame::GlobalRelativeAltInt,
-        MavFrame::GlobalTerrainAlt => MavFrame::GlobalTerrainAltInt,
-        other => other,
+    match MavFrame::try_from(frame) {
+        Ok(MavFrame::Global) => MavFrame::GlobalInt as u8,
+        Ok(MavFrame::GlobalRelativeAlt) => MavFrame::GlobalRelativeAltInt as u8,
+        Ok(MavFrame::GlobalTerrainAlt) => MavFrame::GlobalTerrainAltInt as u8,
+        _ => frame,
     }
 }
 
@@ -265,7 +258,7 @@ mod tests {
             lon,
             alt_m: 120.0,
         });
-        item.frame = MavFrame::GlobalInt;
+        item.frame = MavFrame::GlobalInt as u8;
         item.params = [3.0, 1.5, 2.5, 90.0];
         item
     }
@@ -321,8 +314,24 @@ mod tests {
         assert_eq!(mission.items.len(), 1);
 
         let item = &mission.items[0];
-        assert_eq!(item.frame, MavFrame::GlobalRelativeAltInt);
+        assert_eq!(item.known_frame(), Some(MavFrame::GlobalRelativeAltInt));
         assert!(item.position().is_some());
+    }
+
+    #[test]
+    fn unknown_commands_and_frames_round_trip_in_a_file() {
+        let text = "QGC WPL 110\n\
+                    0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n\
+                    1\t0\t255\t31050\t1\t2\t3\t4\t12\t-34\t56\t1\n";
+
+        let mission = parse_wpl(text).expect("a newer command still loads");
+        let item = &mission.items[0];
+        assert_eq!(item.command, 31_050);
+        assert_eq!(item.frame, 255);
+
+        let written = write_wpl(&mission.items, mission.home.as_ref()).expect("fits in a file");
+        let reparsed = parse_wpl(&written).expect("the file round-trips");
+        assert_eq!(reparsed.items, mission.items);
     }
 
     #[test]

@@ -240,11 +240,11 @@ async fn uploads_to_ardupilot_fill_the_home_slot() {
 
     assert_eq!(received[0].x, 471_000_000, "home in slot 0");
     assert_eq!(received[0].z, 420.0);
-    assert_eq!(
-        MissionItem::from_wire(&received[1]),
-        waypoint,
-        "the plan from slot 1"
-    );
+    assert_eq!(received[1].x, waypoint.x, "the plan from slot 1");
+    assert_eq!(received[1].y, waypoint.y);
+    assert_eq!(received[1].z, waypoint.z);
+    assert_eq!(received[1].command, MavCmd::NavWaypoint);
+    assert_eq!(received[1].frame, MavFrame::GlobalRelativeAltInt);
 
     harness
         .vehicle

@@ -22,8 +22,8 @@ use mavio::{
     default_dialect::{
         enums::{MavMissionResult, MavMissionType},
         messages::{
-            MissionAck, MissionClearAll, MissionCount, MissionItemInt, MissionRequestInt,
-            MissionRequestList, MissionSetCurrent,
+            MissionAck, MissionClearAll, MissionCount, MissionRequestInt, MissionRequestList,
+            MissionSetCurrent,
         },
     },
 };
@@ -36,7 +36,7 @@ use super::{
     recv::FilteredReceiver,
     router::MavlinkRouter,
 };
-use crate::MavlinkId;
+use crate::{MavlinkId, wire::mission_item::RawMissionItem};
 
 /// Retries after the first attempt.
 const MISSION_MAX_RETRIES: u8 = 5;
@@ -53,10 +53,10 @@ const MISSION_ITEM_INT: u32 = 73;
 
 /// A mission plan downloaded from a vehicle, in wire form.
 #[derive(Debug, Clone)]
-pub struct DownloadedMission {
-    pub items: Vec<MissionItemInt>,
+pub(crate) struct DownloadedMission {
+    pub(crate) items: Vec<RawMissionItem>,
     /// The `opaque_id` reported by the vehicle, or 0 if it uses none.
-    pub opaque_id: u32,
+    pub(crate) opaque_id: u32,
 }
 
 /// How far a transfer has come: `done` of `total` items.
@@ -69,7 +69,7 @@ pub struct TransferProgress {
 /// A mission message decoded from the wire, filtered to the mission transaction.
 enum MissionMessage {
     Count(MissionCount),
-    Item(MissionItemInt),
+    Item(RawMissionItem),
     /// An item request, normalised from either `MISSION_REQUEST` or
     /// `MISSION_REQUEST_INT`.
     Request {
@@ -120,18 +120,29 @@ impl MissionListener {
                 return None;
             };
 
+            // Items travel through the tolerant codec: the dialect drops the
+            // whole message when its command or frame is newer than the
+            // definitions it was generated from.
+            if inbound.frame.message_id() == MISSION_ITEM_INT {
+                let Ok(item) = inbound.frame.decode_message::<RawMissionItem>() else {
+                    continue;
+                };
+
+                if !self.is_for_us(item.target_system, item.target_component)
+                    || item.mission_type != self.mission_type as u8
+                {
+                    continue;
+                }
+
+                return Some(MissionMessage::Item(item));
+            }
+
             let message = match inbound.frame.decode::<DefaultDialect>() {
                 Ok(DefaultDialect::MissionCount(m))
                     if self.is_for_us(m.target_system, m.target_component)
                         && m.mission_type == self.mission_type =>
                 {
                     MissionMessage::Count(m)
-                }
-                Ok(DefaultDialect::MissionItemInt(m))
-                    if self.is_for_us(m.target_system, m.target_component)
-                        && m.mission_type == self.mission_type =>
-                {
-                    MissionMessage::Item(m)
                 }
                 Ok(DefaultDialect::MissionRequestInt(m))
                     if self.is_for_us(m.target_system, m.target_component)
@@ -246,7 +257,7 @@ impl MavlinkRouter {
     }
 
     /// Download the full mission from `target`, reporting progress per item.
-    pub async fn mission_download(
+    pub(crate) async fn mission_download(
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
@@ -307,11 +318,11 @@ impl MavlinkRouter {
 
     /// Upload `items` to `target`, returning the `opaque_id` it acknowledges
     /// with. Progress counts the distinct items the vehicle has requested.
-    pub async fn mission_upload(
+    pub(crate) async fn mission_upload(
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
-        items: &[MissionItemInt],
+        items: &[RawMissionItem],
         progress: &(dyn Fn(TransferProgress) + Send + Sync),
     ) -> Result<u32> {
         let count = u16::try_from(items.len())
@@ -356,7 +367,7 @@ impl MavlinkRouter {
                 match listener.next(remaining).await {
                     Some(MissionMessage::Request { seq }) if seq < count => {
                         cancel.armed = true;
-                        self.send_targeted(target, items[seq as usize].clone())?;
+                        self.send_targeted(target, items[seq as usize])?;
 
                         if highest_served.is_none_or(|highest| seq > highest) {
                             highest_served = Some(seq);
@@ -450,7 +461,7 @@ impl MavlinkRouter {
         mission_type: MavMissionType,
         seq: u16,
         item_timeout: Duration,
-    ) -> Result<MissionItemInt> {
+    ) -> Result<RawMissionItem> {
         for attempt in 0..=MISSION_MAX_RETRIES {
             if attempt > 0 {
                 log::debug!("Re-requesting mission item {seq} from {target:?} ({attempt})");

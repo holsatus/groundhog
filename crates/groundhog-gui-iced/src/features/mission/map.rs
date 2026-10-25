@@ -57,9 +57,9 @@ fn item_of(handle: HandleId) -> ItemId {
 
 /// The loiter radius of an item, in metres, if it loiters.
 fn loiter_radius(item: &MissionItem) -> Option<f32> {
-    let slot = match item.command {
-        MavCmd::NavLoiterUnlim | MavCmd::NavLoiterTurns | MavCmd::NavLoiterTime => 2,
-        MavCmd::NavLoiterToAlt => 1,
+    let slot = match item.known_command() {
+        Some(MavCmd::NavLoiterUnlim | MavCmd::NavLoiterTurns | MavCmd::NavLoiterTime) => 2,
+        Some(MavCmd::NavLoiterToAlt) => 1,
         _ => return None,
     };
     let radius = item.params[slot].abs();

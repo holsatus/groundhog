@@ -164,11 +164,11 @@ async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
     env.step(
         &mut editor,
         None,
-        MessageKind::ChangeCommand(delay, MavCmd::NavWaypoint),
+        MessageKind::ChangeCommand(delay, MavCmd::NavWaypoint as u16),
     );
 
     let item = draft(&editor, None).plan().get(delay).unwrap();
-    assert_eq!(item.command, MavCmd::NavDelay, "unchanged");
+    assert_eq!(item.known_command(), Some(MavCmd::NavDelay), "unchanged");
     assert_eq!(
         env.notices.history().last().unwrap().level,
         crate::features::notifications::Level::Warning

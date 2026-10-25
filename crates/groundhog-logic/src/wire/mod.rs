@@ -6,6 +6,7 @@
 //! middleware uses them to encode outbound parameters, so neither layer has to
 //! reach into the other for wire logic.
 
+pub(crate) mod mission_item;
 pub(crate) mod param;
 
 /// Integer units per WGS-84 degree in `GLOBAL_POSITION_INT`,

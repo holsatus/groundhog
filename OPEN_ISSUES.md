@@ -40,20 +40,19 @@ modules, `L` a design or multi-subsystem change.
 ### PROTO-1 · Tolerate enum values newer than the bundled dialect
 **P0** · Effort M · From LOGIC-1
 
-`mavlink/mission.rs:123` (`MissionListener::next`) drops anything
-`DefaultDialect` cannot decode; `services/runtime.rs:224-241` special-cases
-only `MAG_CAL_REPORT`. A `HEARTBEAT` with a newer `MavType`/`MavAutopilot`
-never registers the vehicle; a `MISSION_ITEM_INT` with a newer command,
-frame or mission type is re-requested until the transfer times out. A
-`COMMAND_ACK` with a newer command is silently dropped (`router.rs:546`).
+Mission items are decoded raw now (`wire::mission_item`), so a newer command
+or frame no longer breaks a transfer. The other decoders are still strict:
+`services/runtime.rs:224-241` special-cases only `MAG_CAL_REPORT`, so a
+`HEARTBEAT` with a newer `MavType`/`MavAutopilot` never registers the
+vehicle, and a `COMMAND_ACK` with a newer result is silently dropped
+(`router.rs:546`).
 
-**Fix:** add tolerant decoders for `HEARTBEAT` and `MISSION_ITEM_INT` using
-fixed offsets and a patched payload, as `decode_mag_cal_report` does, or
-decode the raw fields and represent unknown enum values. At minimum, report
-"the vehicle holds an item this build cannot decode" instead of timing out.
+**Fix:** one shared tolerant decoder used by the runtime, the router's ACK
+routing and the mission listener, with a short table of enum fields that have
+a meaningful fallback (the package in `ISSUE_TRACKER.md`).
 
-**Test:** encode a heartbeat with an unknown `MavType` and a mission item with
-an unknown command; assert registration and download still succeed.
+**Test:** encode a heartbeat with an unknown `MavType` and assert its vehicle
+registers; an ACK with a newer result reaches its transaction.
 
 ### PROTO-2 · A duplicate backlog longer than the window is accepted
 **P2** · Effort M · From REVIEW-H2
@@ -948,6 +947,9 @@ Verified at `5389934`; do not re-open without new evidence.
 
 ## Appendix B — Rejected claims
 
+- **`PROTO-1`'s mission-item patch:** substituting a known command for an
+  unknown one (the suggested fixed-offset patch) would upload a different
+  command on the next round trip. Mission items are stored raw instead.
 - **`REVIEW.md` C1:** `select-stream` receives `(GstElement *object,
   guint arg0, GstCaps *arg1)`; glib passes the instance as `values[0]`, so
   `values.get(2)` is correct. `gst-inspect-1.0 rtspsrc` confirms the signature.

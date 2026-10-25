@@ -23,7 +23,7 @@ sections of the issue list.
 | # | Package | Closes | Priority | After | Status |
 |---|---|---|---|---|---|
 | 1 | [Empty plans upload nothing](#wp1--empty-plans-upload-nothing) | MISSION-1, CAL-8 | P0 | — | Done |
-| 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Todo |
+| 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Done |
 | 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Todo |
 | 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Todo |
 | 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Todo |
@@ -67,9 +67,6 @@ These change the scope of a package; settle them before it starts.
 When the package that would have applied the issue's own **Fix:** starts, move
 that part to Appendix B with one sentence:
 
-- **PROTO-1's patching fix for mission items** (package 2): substituting a known
-  command for an unknown one uploads a different command on the next round
-  trip.
 - **PARAM-1's single lock per reply channel** (package 4): it would serialize
   every set and remove the upload window; sets conflict only with list
   downloads and with sets of the same parameter.
@@ -106,7 +103,7 @@ oversized plan is refused; `services/tests.rs` uploads an empty plan and the
 mock vehicle receives count 0.
 
 ### WP2 · Raw mission items
-**Closes:** PROTO-1 (mission half) · **After:** 1 · **Status:** Todo
+**Closes:** PROTO-1 (mission half) · **After:** 1 · **Status:** Done
 
 `MissionItem.command` is a `MavCmd` and `frame` a `MavFrame`, so an item whose
 command or frame is newer than the dialect cannot be represented: its

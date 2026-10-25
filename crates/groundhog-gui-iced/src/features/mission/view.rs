@@ -26,15 +26,19 @@ use crate::{
     widget::virtualized::virtual_list,
 };
 
-/// A command in the command picker.
+/// A command in the command picker. The raw number, so a command newer than
+/// this build's dialect can still be shown as the current value.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct CommandChoice(MavCmd);
+struct CommandChoice(u16);
 
 impl fmt::Display for CommandChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match spec_of(self.0) {
-            Some(spec) => f.write_str(spec.name),
-            None => write!(f, "{:?}", self.0),
+        match MavCmd::try_from(self.0) {
+            Ok(command) => match spec_of(command) {
+                Some(spec) => f.write_str(spec.name),
+                None => write!(f, "{command:?}"),
+            },
+            Err(_) => write!(f, "Command {}", self.0),
         }
     }
 }
@@ -296,13 +300,10 @@ fn view_editor<'a>(
     let message = move |kind| Message { plan, kind };
     let index = draft.plan().index_of(id).unwrap_or_default();
 
-    let mut choices: Vec<CommandChoice> = SPECS
+    let choices: Vec<CommandChoice> = SPECS
         .iter()
-        .map(|spec| CommandChoice(spec.command))
+        .map(|spec| CommandChoice(spec.command as u16))
         .collect();
-    if item.spec().is_none() {
-        choices.insert(0, CommandChoice(item.command));
-    }
 
     let command = ui::pick_list(
         Some(CommandChoice(item.command)),

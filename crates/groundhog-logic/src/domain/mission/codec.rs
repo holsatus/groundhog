@@ -6,10 +6,11 @@
 //! carried separately so the editor's item numbers match what the operator
 //! planned, whatever the firmware.
 
-use mavio::default_dialect::{enums::MavMissionType, messages::MissionItemInt};
+use mavio::default_dialect::enums::MavMissionType;
 
 use super::{MissionItem, OnboardMission, PlanTooLong, Position};
 use crate::domain::firmware::MissionLayout;
+use crate::wire::mission_item::RawMissionItem;
 
 /// Encode `items` for upload under `layout`. An empty plan encodes to nothing:
 /// a lone home row is not sent, because a firmware that reserves the home slot
@@ -26,7 +27,7 @@ pub(crate) fn encode(
     home: Option<&MissionItem>,
     layout: MissionLayout,
     mission_type: MavMissionType,
-) -> Result<Vec<MissionItemInt>, PlanTooLong> {
+) -> Result<Vec<RawMissionItem>, PlanTooLong> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -57,7 +58,7 @@ pub(crate) fn home_row(
     home: Option<&MissionItem>,
     layout: MissionLayout,
     mission_type: MavMissionType,
-) -> Option<MissionItemInt> {
+) -> Option<RawMissionItem> {
     layout.home_slot.then(|| {
         home.cloned()
             .unwrap_or_else(|| {
@@ -75,11 +76,11 @@ pub(crate) fn home_row(
 /// sequence number; the home slot (if the layout has one) becomes
 /// [`OnboardMission::home`].
 pub(crate) fn decode(
-    wire: &[MissionItemInt],
+    wire: &[RawMissionItem],
     opaque_id: u32,
     layout: MissionLayout,
 ) -> OnboardMission {
-    let mut wire: Vec<&MissionItemInt> = wire.iter().collect();
+    let mut wire: Vec<&RawMissionItem> = wire.iter().collect();
     wire.sort_by_key(|item| item.seq);
 
     let mut home = None;
@@ -139,7 +140,7 @@ mod tests {
         items: &[MissionItem],
         home: Option<&MissionItem>,
         layout: MissionLayout,
-    ) -> Vec<MissionItemInt> {
+    ) -> Vec<RawMissionItem> {
         encode(items, home, layout, MavMissionType::Mission).expect("the plan fits on the wire")
     }
 
@@ -156,8 +157,8 @@ mod tests {
         assert_eq!(wire[0].seq, 0);
         assert_eq!(MissionItem::from_wire(&wire[0]), home);
         assert_eq!(wire[1].seq, 1);
-        assert_eq!(wire[2].command, MavCmd::DoJump);
-        assert_eq!(wire[2].param1, 1.0, "the jump targets wire seq 1");
+        assert_eq!(wire[2].command, MavCmd::DoJump as u16);
+        assert_eq!(wire[2].params[0], 1.0, "the jump targets wire seq 1");
 
         let onboard = decode(&wire, 9, ARDUPILOT);
         assert_eq!(
@@ -173,7 +174,7 @@ mod tests {
     fn without_a_home_slot_the_plan_travels_as_is() {
         let wire = encoded(&plan(), None, PX4);
         assert_eq!(wire.len(), 2);
-        assert_eq!(wire[1].param1, 0.0);
+        assert_eq!(wire[1].params[0], 0.0);
 
         let onboard = decode(&wire, 0, PX4);
         assert_eq!(onboard.items, plan());

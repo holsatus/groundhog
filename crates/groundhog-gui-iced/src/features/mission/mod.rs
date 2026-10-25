@@ -177,7 +177,9 @@ pub enum MessageKind {
     MoveUp(ItemId),
     MoveDown(ItemId),
     Select(Option<ItemId>),
-    ChangeCommand(ItemId, MavCmd),
+    /// The raw `MAV_CMD` chosen in the picker; every offered choice is one
+    /// this build knows.
+    ChangeCommand(ItemId, u16),
     EditField(ItemId, Field, String),
     /// Empty the draft (the vehicle is untouched).
     Discard,
@@ -371,16 +373,19 @@ impl MissionEditor {
                 draft.select(item);
             }
             MessageKind::ChangeCommand(item, command) => {
-                if !draft
-                    .plan_mut()
-                    .change_command(item, command, default_altitude)
-                {
-                    cx.notices
-                        .push(Notice::warning("Place a waypoint first").detail(
-                            "This command needs a location, and the plan has none to give it.",
-                        ));
-                } else if draft.selected == Some(item) {
-                    draft.edits.clear();
+                // The picker offers only commands this build names.
+                if let Ok(command) = MavCmd::try_from(command) {
+                    if !draft
+                        .plan_mut()
+                        .change_command(item, command, default_altitude)
+                    {
+                        cx.notices
+                            .push(Notice::warning("Place a waypoint first").detail(
+                                "This command needs a location, and the plan has none to give it.",
+                            ));
+                    } else if draft.selected == Some(item) {
+                        draft.edits.clear();
+                    }
                 }
             }
             MessageKind::EditField(item, field, text) => {
