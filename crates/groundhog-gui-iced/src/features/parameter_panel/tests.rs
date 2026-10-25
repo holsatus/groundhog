@@ -1,19 +1,13 @@
 //! Tests of the parameter panel: edits, uploads, downloads and files,
 //! driven through a [`Context`] over a synthetic fleet.
 
-use std::time::Instant;
-
-use groundhog_logic::{Backend, BackendOptions, domain::fleet::Fleet, services::FleetHandle};
-use mavio::default_dialect::{
-    enums::{MavAutopilot, MavModeFlag, MavParamType, MavType},
-    messages,
+use mavio::{
+    DefaultDialect,
+    default_dialect::{enums::MavParamType, messages::ParamValue},
 };
 
 use super::*;
-use crate::{
-    config::Settings,
-    features::notifications::{Level, Notifications},
-};
+use crate::features::{notifications::Level, test_support::Env};
 
 const ADDRESS: MavlinkId = MavlinkId {
     system: 1,
@@ -24,72 +18,25 @@ fn ident(name: &str) -> Ident {
     Ident::from_str_truncated(name)
 }
 
-struct Env {
-    fleet: Fleet,
-    handle: FleetHandle,
-    notices: Notifications,
-    settings: Settings,
-}
+/// An ArduPilot vehicle reporting `params` (all `REAL32`).
+fn env(params: &[(&str, f32)]) -> Env {
+    let mut env = Env::new();
+    env.observe_vehicle(ADDRESS, false, 0);
 
-impl Env {
-    /// An ArduPilot vehicle reporting `params` (all `REAL32`).
-    fn new(params: &[(&str, f32)]) -> Self {
-        let (backend, _events) = Backend::start(BackendOptions {
-            bootstrap: false,
-            ..BackendOptions::default()
-        });
-        let handle = backend.fleet().clone();
-
-        let mut fleet = Fleet::default();
-        let observe = |fleet: &mut Fleet, message| {
-            fleet.observe(ADDRESS, Instant::now(), Some(&message));
-        };
-
-        observe(
-            &mut fleet,
-            mavio::DefaultDialect::Heartbeat(messages::Heartbeat {
-                type_: MavType::Quadrotor,
-                autopilot: MavAutopilot::Ardupilotmega,
-                base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
-                ..Default::default()
+    for (index, (name, value)) in params.iter().enumerate() {
+        env.observe(
+            ADDRESS,
+            &DefaultDialect::ParamValue(ParamValue {
+                param_id: *ident(name).as_raw(),
+                param_value: *value,
+                param_type: MavParamType::Real32,
+                param_count: params.len() as u16,
+                param_index: index as u16,
             }),
         );
-
-        for (index, (name, value)) in params.iter().enumerate() {
-            let mut param_id = [0u8; 16];
-            param_id[..name.len()].copy_from_slice(name.as_bytes());
-            observe(
-                &mut fleet,
-                mavio::DefaultDialect::ParamValue(messages::ParamValue {
-                    param_id,
-                    param_value: *value,
-                    param_type: MavParamType::Real32,
-                    param_count: params.len() as u16,
-                    param_index: index as u16,
-                }),
-            );
-        }
-
-        Self {
-            fleet,
-            handle,
-            notices: Notifications::default(),
-            settings: Settings::default(),
-        }
     }
 
-    fn step(&mut self, panel: &mut ParameterPanel, message: Message) -> Vec<Effect<Message>> {
-        let snapshot = self.fleet.snapshot();
-        let mut cx = Context::new(
-            &snapshot,
-            &self.handle,
-            &mut self.notices,
-            None,
-            &self.settings,
-        );
-        let _task = panel.update(message, &mut cx);
-        cx.into_effects()
-    }
+    env
 }
 
 /// The upload of `name` in flight.
@@ -104,7 +51,7 @@ fn in_flight(panel: &ParameterPanel, name: &str) -> Upload {
 /// start uploads into it.
 #[tokio::test]
 async fn uploads_wait_for_a_parameter_download() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
 
     env.step(
@@ -126,7 +73,7 @@ async fn uploads_wait_for_a_parameter_download() {
 
 #[tokio::test]
 async fn unparseable_text_is_kept_but_not_uploadable() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
 
     env.step(
@@ -143,7 +90,7 @@ async fn unparseable_text_is_kept_but_not_uploadable() {
 
 #[tokio::test]
 async fn a_decimal_can_be_typed_over_an_integral_value() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
 
     // "1." parses to the reported 1.0, but is half of "1.5": it stays.
@@ -161,7 +108,7 @@ async fn a_decimal_can_be_typed_over_an_integral_value() {
 
 #[tokio::test]
 async fn upload_results_fold_into_the_edit() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
     let key = (ADDRESS, ident("GAIN"));
 
@@ -200,7 +147,7 @@ async fn upload_results_fold_into_the_edit() {
 
 #[tokio::test]
 async fn editing_supersedes_an_upload_in_flight() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
     let key = (ADDRESS, ident("GAIN"));
 
@@ -230,7 +177,7 @@ async fn editing_supersedes_an_upload_in_flight() {
 
 #[tokio::test]
 async fn loading_supersedes_an_upload_in_flight() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
     let key = (ADDRESS, ident("GAIN"));
 
@@ -259,7 +206,7 @@ async fn loading_supersedes_an_upload_in_flight() {
 
 #[tokio::test]
 async fn a_loaded_file_becomes_edits_and_a_notice() {
-    let mut env = Env::new(&[("GAIN", 1.0), ("RATE", 2.0)]);
+    let mut env = env(&[("GAIN", 1.0), ("RATE", 2.0)]);
     let mut panel = ParameterPanel::default();
 
     let mut loaded = ParamValues::new();
@@ -284,7 +231,7 @@ async fn a_loaded_file_becomes_edits_and_a_notice() {
 
 #[tokio::test]
 async fn upload_all_starts_every_ready_edit() {
-    let mut env = Env::new(&[("A_ONE", 1.0), ("A_TWO", 2.0), ("A_THREE", 3.0)]);
+    let mut env = env(&[("A_ONE", 1.0), ("A_TWO", 2.0), ("A_THREE", 3.0)]);
     let mut panel = ParameterPanel::default();
 
     env.step(
@@ -323,7 +270,7 @@ fn the_filter_matches_case_insensitively() {
 
 #[tokio::test]
 async fn a_cancelled_download_ignores_its_late_result() {
-    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
     env.step(&mut panel, Message::Reload(ADDRESS));
     let ticket = panel.reloads.ticket_of(&ADDRESS).unwrap();
@@ -365,19 +312,18 @@ fn shows_a_download(panel: &ParameterPanel, env: &Env) -> bool {
 /// cancelled, the activity goes and the header counts what is missing.
 #[tokio::test]
 async fn an_incomplete_set_shows_no_download_once_it_stops() {
-    let mut env = Env::new(&[]);
+    let mut env = env(&[]);
     let mut param_id = [0u8; 16];
     param_id[..4].copy_from_slice(b"GAIN");
-    env.fleet.observe(
+    env.observe(
         ADDRESS,
-        Instant::now(),
-        Some(&mavio::DefaultDialect::ParamValue(messages::ParamValue {
+        &DefaultDialect::ParamValue(ParamValue {
             param_id,
             param_value: 1.0,
             param_type: MavParamType::Real32,
             param_count: 2,
             param_index: 0,
-        })),
+        }),
     );
     let mut panel = ParameterPanel::default();
 

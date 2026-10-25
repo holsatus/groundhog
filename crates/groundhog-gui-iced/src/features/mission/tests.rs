@@ -1,112 +1,60 @@
 //! Tests of the mission editor: drafts, transfers and their confirmations,
 //! driven through a [`Context`] over a synthetic fleet.
 
-use std::time::Instant;
-
 use groundhog_logic::{
-    Backend, BackendOptions, MavlinkId,
-    domain::{
-        fleet::Fleet,
-        mission::{MissionItem, Position},
-    },
-    services::FleetHandle,
+    MavlinkId,
+    domain::mission::{MissionItem, Position},
 };
-use mavio::default_dialect::{
-    enums::{MavAutopilot, MavModeFlag, MavType},
-    messages,
-};
+use mavio::{DefaultDialect, default_dialect::messages};
 
 use super::*;
-use crate::{config::Settings, features::notifications::Notifications};
+use crate::features::test_support::{Env, run};
 
 const A: SystemId = SystemId(1);
+const ADDRESS: MavlinkId = MavlinkId {
+    system: A.0,
+    component: 1,
+};
 
-struct Env {
-    fleet: Fleet,
-    handle: FleetHandle,
-    notices: Notifications,
-    settings: Settings,
+/// An ArduPilot copter on the ground.
+fn env() -> Env {
+    let mut env = Env::new();
+    env.observe_vehicle(ADDRESS, false, 0);
+    env
 }
 
-impl Env {
-    fn new() -> Self {
-        let (backend, _events) = Backend::start(BackendOptions {
-            bootstrap: false,
-            ..BackendOptions::default()
-        });
-        let handle = backend.fleet().clone();
+/// Put the vehicle on the ground at a known spot (altitude zero).
+fn place_vehicle(env: &mut Env) {
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+            lat: 474_000_000,
+            lon: 85_000_000,
+            relative_alt: 0,
+            ..Default::default()
+        }),
+    );
+}
 
-        let mut fleet = Fleet::default();
-        fleet.observe(
-            MavlinkId {
-                system: A.0,
-                component: 1,
-            },
-            Instant::now(),
-            Some(&mavio::DefaultDialect::Heartbeat(messages::Heartbeat {
-                type_: MavType::Quadrotor,
-                autopilot: MavAutopilot::Ardupilotmega,
-                base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
-                ..Default::default()
-            })),
-        );
+fn set_onboard(env: &mut Env, editor: &mut MissionEditor, items: Vec<MissionItem>, opaque_id: u32) {
+    env.fleet.set_onboard_mission(
+        A,
+        OnboardMission {
+            items,
+            home: None,
+            opaque_id,
+        },
+    );
+    editor.sync(&env.fleet.snapshot());
+}
 
-        Self {
-            fleet,
-            handle,
-            notices: Notifications::default(),
-            settings: Settings::default(),
-        }
-    }
-
-    /// Put the vehicle on the ground at a known spot (altitude zero).
-    fn place_vehicle(&mut self) {
-        self.fleet.observe(
-            MavlinkId {
-                system: A.0,
-                component: 1,
-            },
-            Instant::now(),
-            Some(&mavio::DefaultDialect::GlobalPositionInt(
-                messages::GlobalPositionInt {
-                    lat: 474_000_000,
-                    lon: 85_000_000,
-                    relative_alt: 0,
-                    ..Default::default()
-                },
-            )),
-        );
-    }
-
-    fn step(
-        &mut self,
-        editor: &mut MissionEditor,
-        plan: PlanKey,
-        kind: MessageKind,
-    ) -> Vec<Effect<Message>> {
-        let snapshot = self.fleet.snapshot();
-        let mut cx = Context::new(
-            &snapshot,
-            &self.handle,
-            &mut self.notices,
-            None,
-            &self.settings,
-        );
-        let _task = editor.update(Message { plan, kind }, &mut cx);
-        cx.into_effects()
-    }
-
-    fn set_onboard(&mut self, editor: &mut MissionEditor, items: Vec<MissionItem>, opaque_id: u32) {
-        self.fleet.set_onboard_mission(
-            A,
-            OnboardMission {
-                items,
-                home: None,
-                opaque_id,
-            },
-        );
-        editor.sync(&self.fleet.snapshot());
-    }
+fn step(
+    env: &mut Env,
+    editor: &mut MissionEditor,
+    plan: PlanKey,
+    kind: MessageKind,
+) -> Vec<Effect<Message>> {
+    run(env, editor, Message { plan, kind })
 }
 
 fn draft(editor: &MissionEditor, plan: PlanKey) -> &Draft {
@@ -116,9 +64,10 @@ fn draft(editor: &MissionEditor, plan: PlanKey) -> &Draft {
 /// Place a waypoint on the map at `lat`, as the operator clicks it there.
 fn place(env: &mut Env, editor: &mut MissionEditor, plan: PlanKey, lat: f64) {
     if !editor.drafts.get(&plan).is_some_and(|draft| draft.placing) {
-        env.step(editor, plan, MessageKind::TogglePlacing);
+        step(env, editor, plan, MessageKind::TogglePlacing);
     }
-    env.step(
+    step(
+        env,
         editor,
         plan,
         MessageKind::PlaceAt(GeoPosition::new(lat, 8.0)),
@@ -135,11 +84,11 @@ fn waypoint(lat: f64) -> MissionItem {
 
 #[tokio::test]
 async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    env.step(&mut editor, None, MessageKind::AddWaypoint);
+    step(&mut env, &mut editor, None, MessageKind::AddWaypoint);
 
     let offline = draft(&editor, None);
     assert!(offline.plan().is_empty(), "nothing at 0, 0");
@@ -152,7 +101,7 @@ async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
 
 #[tokio::test]
 async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
     editor
@@ -161,7 +110,8 @@ async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
         .push(MissionItem::new(MavCmd::NavDelay, None));
     let delay = draft(&editor, None).plan().items()[0].id();
 
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         None,
         MessageKind::ChangeCommand(delay, MavCmd::NavWaypoint as u16),
@@ -177,12 +127,12 @@ async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
 
 #[tokio::test]
 async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
-    let mut env = Env::new();
-    env.place_vehicle();
+    let mut env = env();
+    place_vehicle(&mut env);
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
+    step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
 
     let plan = &draft(&editor, Some(A)).plan();
     let position = plan.items()[0].item.position().unwrap();
@@ -194,13 +144,15 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
 
     // Further waypoints take the previous waypoint's altitude.
     let first = plan.items()[0].id();
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::EditField(first, Field::Altitude, "120".into()),
     );
-    env.step(&mut editor, Some(A), MessageKind::TogglePlacing);
-    env.step(
+    step(&mut env, &mut editor, Some(A), MessageKind::TogglePlacing);
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(47.5, 8.5)),
@@ -211,19 +163,21 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
 
 #[tokio::test]
 async fn map_clicks_only_place_while_placing() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(1.0, 1.0)),
     );
     assert!(draft(&editor, Some(A)).plan().is_empty());
 
-    env.step(&mut editor, Some(A), MessageKind::TogglePlacing);
-    env.step(
+    step(&mut env, &mut editor, Some(A), MessageKind::TogglePlacing);
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::PlaceAt(GeoPosition::new(1.0, 1.0)),
@@ -233,7 +187,7 @@ async fn map_clicks_only_place_while_placing() {
 
 #[tokio::test]
 async fn an_unmodified_draft_follows_the_onboard_mission() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
     assert_eq!(
@@ -241,7 +195,7 @@ async fn an_unmodified_draft_follows_the_onboard_mission() {
         SyncStatus::Unknown
     );
 
-    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
     assert!(draft(&editor, Some(A)).plan().matches(&[waypoint(1.0)]));
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
@@ -250,23 +204,23 @@ async fn an_unmodified_draft_follows_the_onboard_mission() {
 
     // Another GCS uploads a different mission: still unmodified here, so the
     // draft follows.
-    env.set_onboard(&mut editor, vec![waypoint(2.0), waypoint(3.0)], 2);
+    set_onboard(&mut env, &mut editor, vec![waypoint(2.0), waypoint(3.0)], 2);
     assert_eq!(draft(&editor, Some(A)).plan().len(), 2);
 }
 
 #[tokio::test]
 async fn a_modified_draft_is_never_overwritten() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
-    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
 
-    env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
+    step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
         SyncStatus::Modified
     );
 
-    env.set_onboard(&mut editor, vec![waypoint(9.0)], 2);
+    set_onboard(&mut env, &mut editor, vec![waypoint(9.0)], 2);
     let plan = &draft(&editor, Some(A)).plan();
     assert_eq!(plan.len(), 2, "the operator's edit survives");
     assert_eq!(
@@ -277,12 +231,13 @@ async fn a_modified_draft_is_never_overwritten() {
 
 #[tokio::test]
 async fn downloading_over_changes_asks_first() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
     place(&mut env, &mut editor, Some(A), 1.0);
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Download { confirmed: false },
@@ -294,7 +249,8 @@ async fn downloading_over_changes_asks_first() {
     );
     assert!(!editor.transferring(A), "nothing started yet");
 
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Download { confirmed: true },
@@ -304,11 +260,12 @@ async fn downloading_over_changes_asks_first() {
 
 #[tokio::test]
 async fn edits_wait_for_a_running_transfer() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Download { confirmed: false },
@@ -328,11 +285,12 @@ async fn edits_wait_for_a_running_transfer() {
 
 #[tokio::test]
 async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Download { confirmed: true },
@@ -347,7 +305,8 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
         home: None,
         opaque_id: 3,
     };
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission.clone()))),
@@ -356,8 +315,9 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
     assert!(!editor.transferring(A));
 
     // The same result again (a stale ticket) changes nothing.
-    env.step(&mut editor, Some(A), MessageKind::Discard);
-    env.step(
+    step(&mut env, &mut editor, Some(A), MessageKind::Discard);
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission))),
@@ -367,12 +327,13 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
 
 #[tokio::test]
 async fn uploading_an_empty_plan_asks_first() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
-    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
-    env.step(&mut editor, Some(A), MessageKind::Discard);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
+    step(&mut env, &mut editor, Some(A), MessageKind::Discard);
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Upload { confirmed: false },
@@ -387,12 +348,13 @@ async fn uploading_an_empty_plan_asks_first() {
 
 #[tokio::test]
 async fn starting_says_when_the_vehicle_flies_another_mission() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
-    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
     place(&mut env, &mut editor, Some(A), 2.0);
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Start { confirmed: false },
@@ -407,11 +369,12 @@ async fn starting_says_when_the_vehicle_flies_another_mission() {
 
 #[tokio::test]
 async fn resuming_asks_and_pausing_does_not() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
-    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Resume { confirmed: false },
@@ -419,19 +382,20 @@ async fn resuming_asks_and_pausing_does_not() {
     assert!(matches!(effects.as_slice(), [Effect::Confirm(_)]));
     assert!(!editor.operations.is_running(&(A, Operation::Resume)));
 
-    let effects = env.step(&mut editor, Some(A), MessageKind::Pause);
+    let effects = step(&mut env, &mut editor, Some(A), MessageKind::Pause);
     assert!(effects.is_empty(), "a safety stop never asks");
     assert!(editor.operations.is_running(&(A, Operation::Pause)));
 }
 
 #[tokio::test]
 async fn failures_are_shown_to_the_operator() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
     // An empty plan asks first; this one was confirmed.
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Upload { confirmed: true },
@@ -440,7 +404,8 @@ async fn failures_are_shown_to_the_operator() {
         .operations
         .ticket_of(&(A, Operation::Upload))
         .unwrap();
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Finished(
@@ -457,15 +422,16 @@ async fn failures_are_shown_to_the_operator() {
 
 #[tokio::test]
 async fn drags_address_items_by_id() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
     place(&mut env, &mut editor, None, 1.0);
     place(&mut env, &mut editor, None, 2.0);
 
     let first = draft(&editor, None).plan().items()[0].id();
-    env.step(&mut editor, None, MessageKind::MoveDown(first));
-    env.step(
+    step(&mut env, &mut editor, None, MessageKind::MoveDown(first));
+    step(
+        &mut env,
         &mut editor,
         None,
         MessageKind::Drop(first, GeoPosition::new(10.0, 20.0)),
@@ -480,9 +446,10 @@ async fn drags_address_items_by_id() {
     );
 
     // An id from before the plan was replaced resolves to nothing.
-    env.step(&mut editor, None, MessageKind::Discard);
+    step(&mut env, &mut editor, None, MessageKind::Discard);
     place(&mut env, &mut editor, None, 1.0);
-    env.step(
+    step(
+        &mut env,
         &mut editor,
         None,
         MessageKind::Drop(first, GeoPosition::new(-5.0, -5.0)),
@@ -493,12 +460,13 @@ async fn drags_address_items_by_id() {
 
 #[tokio::test]
 async fn jumping_needs_a_synced_plan_and_a_confirmation() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
-    env.set_onboard(&mut editor, vec![waypoint(1.0), waypoint(2.0)], 1);
+    set_onboard(&mut env, &mut editor, vec![waypoint(1.0), waypoint(2.0)], 1);
     let second = draft(&editor, Some(A)).plan().items()[1].id();
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::SetCurrent {
@@ -509,8 +477,9 @@ async fn jumping_needs_a_synced_plan_and_a_confirmation() {
     assert!(matches!(effects.as_slice(), [Effect::Confirm(_)]));
 
     // Once the plan is modified, item numbers no longer match the vehicle.
-    env.step(&mut editor, Some(A), MessageKind::AddWaypoint);
-    let effects = env.step(
+    step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::SetCurrent {
@@ -528,11 +497,12 @@ async fn jumping_needs_a_synced_plan_and_a_confirmation() {
 
 #[tokio::test]
 async fn clearing_the_vehicle_always_asks() {
-    let mut env = Env::new();
+    let mut env = env();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
-    let effects = env.step(
+    let effects = step(
+        &mut env,
         &mut editor,
         Some(A),
         MessageKind::Clear { confirmed: false },

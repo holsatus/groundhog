@@ -752,13 +752,6 @@ Ten of the eleven vendored files start with `use`/items, not `//!`; one has a
 `//` header. Add a one-line `//!` to each, or record the exemption in
 `AGENTS.md`.
 
-### API-10 · Test harnesses are triplicated
-**P3** · Effort S · From CODE-F10
-
-`mission/tests.rs:25`, `parameter_panel/tests.rs:30`, `vehicles/tests.rs:23`
-each define `Env { fleet, handle, notices, settings }` and `step`. Extract a
-`#[cfg(test)] features/test_support.rs` when adding the next feature test.
-
 ### API-11 · Missing test coverage for command features
 **P3** · Effort M · From CODE-F10
 
@@ -787,11 +780,11 @@ is the next step.
 Verified at `5389934`; do not re-open without new evidence.
 
 - **CODE_REVIEW:** F8.1 (module docs), F8.2 (`ui::either`), F8.4 (dead code),
-  F11.1 (copy-on-write before change), F11.5 (battery doc); F3.2's regression
-  (`Invalid` heartbeat no longer resets firmware, with a test); F4.1's
-  parameter Cancel and one `Progress` type; F4.3's delete-link confirmation;
-  F5's `CalibrationFinished` payload; F9.1's mission checkbox and
-  `ui::dialog`/`ui::toast`.
+  F10's shared feature test harness; F11.1 (copy-on-write before change),
+  F11.5 (battery doc); F3.2's regression (`Invalid` heartbeat no longer resets
+  firmware, with a test); F4.1's parameter Cancel and one `Progress` type;
+  F4.3's delete-link confirmation; F5's `CalibrationFinished` payload; F9.1's
+  mission checkbox and `ui::dialog`/`ui::toast`.
 - **LOGIC_REVIEW:** 1 (newer enum values: one tolerant decoder for heartbeats,
   ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
   picker confirmation), 5 (parameter echo preference), 9

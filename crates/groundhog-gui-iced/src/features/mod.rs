@@ -17,6 +17,8 @@ pub mod notifications;
 pub mod operations;
 pub mod parameter_panel;
 pub mod settings_panel;
+#[cfg(test)]
+mod test_support;
 pub mod vehicles;
 pub mod video;
 
