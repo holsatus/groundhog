@@ -302,9 +302,9 @@ impl MavlinkRouter {
         self.inner.gcs_id
     }
 
-    /// Whether a transaction for `key` is currently in flight or queued.
-    /// Useful for reflecting in the UI whether an operation is ongoing.
-    #[cfg(test)] // Only exercised by the middleware tests
+    /// Whether a transaction for `key` is currently in flight or queued:
+    /// for the middleware tests.
+    #[cfg(test)]
     pub(super) fn is_busy(&self, key: &LockKey) -> bool {
         self.inner.locks.is_busy(key)
     }
@@ -326,7 +326,6 @@ impl MavlinkRouter {
         self.inner.locks.lock(key).await
     }
 
-    /// Acquire the lock for `key` only if nobody else holds or waits for it.
     /// Wait for a slot in the window of PARAM_SET transactions in flight.
     pub(super) async fn param_permit(&self) -> Result<SemaphorePermit<'_>> {
         self.inner

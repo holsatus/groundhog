@@ -24,7 +24,7 @@ touch the area it describes.
 
 ```sh
 cargo run                                              # the application
-cargo test --workspace                                 # every test; fast (< 1 s after building)
+cargo test --workspace                                 # every test; a few seconds after building
 cargo fmt --all --check                                # CI gate
 cargo clippy --workspace --all-targets -- -D warnings  # CI gate: warnings are errors
 ```

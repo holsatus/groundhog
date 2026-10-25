@@ -43,14 +43,13 @@ iced upstream treats mobile as out of scope (`iced-rs/iced#302`). The
 community fork `iced-mobile/iced` tracks iced master and carries the minimal
 shell support as six small commits. That is the basis of this pass.
 
-## Approach: a local iced fork, patched in
+## Approach: an iced fork, patched in
 
-A local clone of iced at the revision this repository pins
-(`08eb93ad476597889eb4597f22b4198f5545abb9`) with the six `iced-mobile`
-commits cherry-picked on top:
+The fork is the `groundhog-compat` branch of `github.com/peterkrull/iced`:
+iced master with the six `iced-mobile` commits cherry-picked on top, and a
+documentation fix iced's `missing_docs` needs:
 
 ```
-/home/peterkrull/git/iced-android     branch "android", base 08eb93a
   85dc904 fix: make arboard compile on Android
   7e05b15 fix conversion of event
   9828383 add `run_android` method and recreate surface when `Resumed` …
@@ -64,40 +63,30 @@ The `arboard` fix is in the fork: `arboard` is redirected to the
 `iced-mobile/arboard` fork (a dummy backend that returns "clipboard
 unavailable"), so the iced clipboard API still exists on Android.
 
-The workspace root redirects **every iced crate a dependency requests directly**
-to that clone. `iced` alone is not enough: `slippery` also depends on
-`iced_core` and `iced_graphics`, and the frontend on `iced_runtime`, so each
-needs its own `[patch]` entry or Cargo builds two copies of iced and the types
-stop matching.
+The workspace root (`Cargo.toml`) redirects **every iced crate a dependency
+requests directly** to that branch. `iced` alone is not enough: `slippery`
+also depends on `iced_core` and `iced_graphics`, and the frontend on
+`iced_runtime`, so each needs its own `[patch]` entry or Cargo builds two
+copies of iced and the types stop matching. `Cargo.lock` pins the branch's
+revision.
 
 ```toml
 [patch."https://github.com/iced-rs/iced"]
-iced           = { path = "../iced-android" }
-iced_core      = { path = "../iced-android/core" }
-iced_debug     = { path = "../iced-android/debug" }
-iced_futures   = { path = "../iced-android/futures" }
-iced_graphics  = { path = "../iced-android/graphics" }
-iced_program   = { path = "../iced-android/program" }
-iced_renderer  = { path = "../iced-android/renderer" }
-iced_runtime   = { path = "../iced-android/runtime" }
-iced_test      = { path = "../iced-android/test" }
-iced_tiny_skia = { path = "../iced-android/tiny_skia" }
-iced_widget    = { path = "../iced-android/widget" }
-iced_winit     = { path = "../iced-android/winit" }
-iced_wgpu      = { path = "../iced-android/wgpu" }
+iced      = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+iced_core = { git = "https://github.com/peterkrull/iced", branch = "groundhog-compat" }
+# ... and so on for every iced crate, as in Cargo.toml
 ```
 
-`slippery` needs the same treatment for a different reason: it fetches map
-tiles through `reqwest`, whose Android certificate verifier
-(`rustls-platform-verifier`) needs a JVM-side Kotlin component that only a
-Gradle build can add — without one the verifier **panics** and every tile
-fetch fails. The local `slippery` fork gives Android a `rustls` client
-trusting Mozilla's bundled roots (`webpki-roots`), which needs no Java.
+To work on the fork itself, point these entries at a local clone with
+`path = "../iced"` (one per crate, e.g. `path = "../iced/core"`) for the
+time being, and do not commit that.
 
-```toml
-[patch."https://github.com/peterkrull/slippery"]
-slippery = { path = "../slippery-android" }
-```
+`slippery` fetches map tiles through `reqwest`, whose Android certificate
+verifier (`rustls-platform-verifier`) needs a JVM-side Kotlin component
+that only a Gradle build can add; without one the verifier **panics** and
+every tile fetch fails. `slippery` itself gives Android a `rustls` client
+trusting Mozilla's bundled roots (`webpki-roots`, an Android-only
+dependency), which needs no Java, so it needs no patch here.
 
 Because `rfd` cannot be made to build for Android, it is a desktop-only
 dependency (`[target.'cfg(not(target_os = "android"))'.dependencies]`) and the
@@ -265,9 +254,8 @@ the drag source.
   background.
 - The release library is not stripped, so the debug APK is ~34 MB; a
   distribution build should strip the `.so` (and split per ABI).
-- The forks are local paths (`../iced-android`, `../slippery-android`); CI or
-  another checkout needs the same directories, submodules, or published forks
-  with matching `[patch]` URLs.
+- iced comes from a fork branch (`groundhog-compat`) until upstream iced
+  supports Android; each update of iced means rebasing that branch.
 
 ## Verification
 
@@ -278,7 +266,7 @@ the drag source.
 3. `adb install` succeeds and the activity starts. ✅ (Pixel 7, Android 16;
    the map loads OpenStreetMap tiles, the UI draws, and the insets keep the
    content clear of the system bars and the keyboard.)
-4. Host gates still pass: `cargo test --workspace` (188 tests),
+4. Host gates still pass: `cargo test --workspace`,
    `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
    The Android target also passes `cargo clippy --target aarch64-linux-android
    -p groundhog-gui-iced --lib -- -D warnings`. ✅
