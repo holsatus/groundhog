@@ -1037,6 +1037,29 @@ mod tests {
         assert_eq!(router.best_link_for(SOURCE), Some(slow));
     }
 
+    /// A link that stalls and then flushes its backlog delivers only copies:
+    /// none reaches consumers, and the link that delivered first stays the
+    /// route.
+    #[test]
+    fn a_lagging_links_backlog_is_dropped_and_keeps_no_route() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (live, lagging) = (LinkId::new("live"), LinkId::new("lagging"));
+
+        for seq in 0..20u8 {
+            let frame = frame_from(SOURCE, seq, &Heartbeat::default());
+            assert!(router.handle_frame(&live, frame).is_some());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        for seq in 0..20u8 {
+            let frame = frame_from(SOURCE, seq, &Heartbeat::default());
+            assert!(
+                router.handle_frame(&lagging, frame).is_none(),
+                "copy {seq} of the backlog reached consumers"
+            );
+        }
+        assert_eq!(router.best_link_for(SOURCE), Some(live));
+    }
+
     #[tokio::test]
     async fn is_attached_reflects_the_links_map() {
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);

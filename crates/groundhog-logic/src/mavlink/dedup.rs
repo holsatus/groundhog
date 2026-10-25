@@ -1,9 +1,10 @@
 //! Cross-link duplicate suppression.
 //!
-//! The same packet can reach the router on more than one link (multipath, or a
-//! shared upstream). Folding it twice would double-count into vehicle state
-//! (duplicated status texts, doubled trail points), so the first arriving copy
-//! of a packet from a source wins and the rest are dropped.
+//! The same packet can reach the router on more than one link (a relay, a
+//! shared upstream, a retransmitting modem). Folding it twice would
+//! double-count into vehicle state (duplicated status texts, doubled trail
+//! points), so the first arriving copy of a packet from a source wins and the
+//! rest are dropped.
 //!
 //! A packet is identified by its [`PacketKey`]: the sequence number *and* the
 //! message id and frame checksum. The sequence alone is not enough: autopilots
@@ -11,6 +12,19 @@
 //! carry different packets whose sequence numbers collide all the time. The
 //! checksum covers the sequence, message id and payload, so a forwarded copy of
 //! a packet matches it exactly while an unrelated packet practically never does.
+//! What is caught is therefore byte-identical copies, not repeated content: an
+//! autopilot sending the same text on two channels sends two packets.
+//!
+//! A packet inside the window is always a duplicate, however many arrive in a
+//! row: a link that stalls and then delivers its backlog (a store-and-forward
+//! radio, a TCP connection catching up) delivers nothing but copies, and
+//! accepting any of them would fold them again and make the lagging link the
+//! preferred route. A sender that reboots and starts its sequence again is
+//! not mistaken for its old packets, because its new packets differ in
+//! content. The exception is one that replays exactly the same bytes (a
+//! deterministic simulator restarted at once): its first packets drop until
+//! [`SEQUENCE_RESET_GAP`] after the last accepted one, when the window is
+//! flushed, a bounded loss at a moment the vehicle reads as lost anyway.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -41,14 +55,6 @@ const DUPLICATE_WINDOW: usize = 192;
 /// fresh window cannot mistake a reboot's first frames for old duplicates.
 const SEQUENCE_RESET_GAP: Duration = Duration::from_secs(10);
 
-/// Consecutive dropped frames after which the duplicate rule gives way and
-/// the frame is accepted.
-///
-/// Eight consecutive drops cannot be multipath: it is a sequence reset (or an
-/// aliased sender), and accepting one packet resynchronizes the window — the
-/// sequence enters it, and the normal rule continues from there.
-const MAX_CONSECUTIVE_DROPS: u8 = 8;
-
 /// What identifies one packet from a source, for duplicate detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PacketKey {
@@ -65,9 +71,6 @@ struct SequenceWindow {
     /// When a frame from this source was last accepted (as opposed to
     /// dropped): a long silence flushes the window for a sequence reset.
     last_accepted: Instant,
-    /// Consecutive frames dropped: beyond a handful the duplicate rule must
-    /// give way to a suspected sequence reset.
-    consecutive_drops: u8,
 }
 
 impl SequenceWindow {
@@ -75,7 +78,6 @@ impl SequenceWindow {
         Self {
             sequences: VecDeque::new(),
             last_accepted: now,
-            consecutive_drops: 0,
         }
     }
 }
@@ -91,11 +93,9 @@ impl Dedup {
     /// already inside [`DUPLICATE_WINDOW`], i.e. the frame is a cross-link
     /// duplicate.
     ///
-    /// Two guards keep a sender's sequence reset (reboot) from being mistaken
-    /// for duplicates: a [`SEQUENCE_RESET_GAP`]-sized silence since the last
-    /// accepted frame flushes the window outright, and
-    /// [`MAX_CONSECUTIVE_DROPS`] consecutive dropped frames force the next one
-    /// through, which resynchronizes the window.
+    /// A [`SEQUENCE_RESET_GAP`]-sized silence since the last accepted frame
+    /// flushes the window, so a sender that rebooted is not held to the
+    /// packets of its previous run.
     pub(super) fn seen_before(&self, source: MavlinkId, packet: PacketKey, now: Instant) -> bool {
         let mut seen = lock(&self.seen);
         let window = seen
@@ -107,24 +107,10 @@ impl Dedup {
         // unexpired duplicate.
         if now.duration_since(window.last_accepted) >= SEQUENCE_RESET_GAP {
             window.sequences.clear();
-            window.consecutive_drops = 0;
         }
 
         if window.sequences.contains(&packet) {
-            // Within the intact window, this is a cross-link duplicate.
-            window.consecutive_drops += 1;
-
-            if window.consecutive_drops >= MAX_CONSECUTIVE_DROPS {
-                // More consecutive drops than multipath duplication can
-                // produce: clear the window and accept; entering this frame
-                // resynchronizes the window for the frames after it.
-                window.sequences.clear();
-                window.consecutive_drops = 0;
-            } else {
-                return true;
-            }
-        } else {
-            window.consecutive_drops = 0;
+            return true;
         }
 
         window.sequences.push_back(packet);
@@ -178,33 +164,22 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_drops_give_way_after_the_threshold() {
+    fn a_backlog_of_copies_is_dropped_however_long() {
         let dedup = Dedup::default();
-
-        // Accept sequence 7 once so it sits in the window; its repeats then
-        // repeat at a rate that cannot trip the long-gap flush.
         let mut now = Instant::now();
-        assert!(!dedup.seen_before(SOURCE, packet(7), now));
 
-        for attempt in 0..(MAX_CONSECUTIVE_DROPS - 1) {
-            now += Duration::from_millis(10);
+        // One link delivers 40 packets; the other then flushes its backlog
+        // of the same 40, as a stalled radio or TCP connection does.
+        for sequence in 0..40 {
+            assert!(!dedup.seen_before(SOURCE, packet(sequence), now));
+        }
+        for sequence in 0..40 {
+            now += Duration::from_millis(1);
             assert!(
-                dedup.seen_before(SOURCE, packet(7), now),
-                "drop {attempt} must still apply the normal duplicate rule"
+                dedup.seen_before(SOURCE, packet(sequence), now),
+                "copy {sequence} of the backlog must drop"
             );
         }
-
-        // The 8th consecutive drop cannot be multipath: the window flushes
-        // and the frame is accepted, which resynchronizes it.
-        now += Duration::from_millis(10);
-        assert!(
-            !dedup.seen_before(SOURCE, packet(7), now),
-            "the threshold consecutive drop must be accepted"
-        );
-
-        // And the normal rule continues from the resynchronized window.
-        now += Duration::from_millis(10);
-        assert!(dedup.seen_before(SOURCE, packet(7), now));
     }
 
     #[test]
