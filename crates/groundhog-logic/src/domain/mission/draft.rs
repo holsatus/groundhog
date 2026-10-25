@@ -9,6 +9,8 @@
 //!
 //! Whether a draft matches the vehicle is derived, never tracked: the plan is
 //! compared with the onboard mission in the snapshot ([`MissionDraft::status`]).
+//! What follows from that for the operator's actions is decided here too
+//! ([`MissionDraft::check`]): which ask first, and which are refused.
 //! What a frontend shows *around* a draft (the selected item, half-typed field
 //! text, a placing mode) is its own.
 
@@ -35,6 +37,67 @@ pub enum SyncStatus {
     /// The vehicle reports holding a mission other than the one last
     /// transferred: someone else changed it.
     VehicleChanged,
+}
+
+/// What the operator asks of a vehicle's mission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissionAction {
+    /// Replace the plan with the vehicle's mission.
+    Download,
+    /// Replace the vehicle's mission with the plan.
+    Upload,
+    /// Delete the vehicle's mission.
+    Clear,
+    /// Fly the vehicle's mission from its first item.
+    Start,
+    /// Hold the mission. A safety stop: it never asks.
+    Pause,
+    /// Continue the paused mission.
+    Resume,
+    /// Continue the mission at this plan item.
+    Jump(ItemId),
+}
+
+/// Why an action needs the operator's word first. A frontend words each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caution {
+    /// The plan has edits the action replaces.
+    DiscardsEdits,
+    /// The vehicle is armed, or its armed state is unknown: a change to its
+    /// mission may take effect in flight.
+    Armed,
+    /// The vehicle's mission is deleted: by clearing it, or by uploading an
+    /// empty plan.
+    DeletesMission,
+    /// The vehicle's mission was changed elsewhere since the last transfer,
+    /// and the action replaces that change.
+    ReplacesChangeElsewhere,
+    /// The vehicle flies its stored mission, which is not the plan shown.
+    FliesAnotherMission,
+    /// The vehicle flies its stored mission, which was never transferred
+    /// here.
+    FliesUnseenMission,
+}
+
+/// Why an action cannot run at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The offline plan has no vehicle to act on.
+    NoVehicle,
+    /// The plan is not what the vehicle holds, so its item numbers mean
+    /// something else on the vehicle.
+    NotSynced,
+    /// The item is not in the plan.
+    NoSuchItem,
+}
+
+/// Whether an action may run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Go,
+    /// Ask the operator first. Some actions always ask, with no caution.
+    Confirm(Vec<Caution>),
+    Refuse(Refusal),
 }
 
 /// A plan for one vehicle, or the offline plan, and what it was last synced
@@ -102,6 +165,86 @@ impl MissionDraft {
             SyncStatus::Synced
         } else {
             SyncStatus::Modified
+        }
+    }
+
+    /// Whether `action` may run on the draft's vehicle now, should ask first,
+    /// or cannot run. One rule set, so no frontend decides one on its own:
+    ///
+    /// | Action | Asks | Cautions |
+    /// |---|---|---|
+    /// | Download | when cautioned | edits are discarded |
+    /// | Upload | when cautioned | armed (or unknown); empty plan deletes; changed elsewhere |
+    /// | Clear | always | deletes; armed (or unknown) |
+    /// | Start, Resume | always | the stored mission is not the plan shown, or unseen |
+    /// | Pause | never | none |
+    /// | Jump | always | none; refused unless synced |
+    ///
+    /// The offline plan refuses every action.
+    pub fn check(&self, action: MissionAction, fleet: &FleetSnapshot) -> Verdict {
+        let Some(system) = self.vehicle else {
+            return Verdict::Refuse(Refusal::NoVehicle);
+        };
+        let status = self.status(fleet);
+        let armed = fleet
+            .vehicle(system)
+            .and_then(|vehicle| vehicle.armed())
+            .unwrap_or(true);
+
+        // What the vehicle flies on Start or Resume, when it is not the plan.
+        let flies_stored = match status {
+            SyncStatus::Modified | SyncStatus::VehicleChanged => Some(Caution::FliesAnotherMission),
+            SyncStatus::Unknown => Some(Caution::FliesUnseenMission),
+            SyncStatus::Synced | SyncStatus::Offline => None,
+        };
+
+        let mut cautions = Vec::new();
+        let always_asks = match action {
+            MissionAction::Download => {
+                if self.is_modified() {
+                    cautions.push(Caution::DiscardsEdits);
+                }
+                false
+            }
+            MissionAction::Upload => {
+                if armed {
+                    cautions.push(Caution::Armed);
+                }
+                if self.plan.is_empty() {
+                    cautions.push(Caution::DeletesMission);
+                }
+                if status == SyncStatus::VehicleChanged {
+                    cautions.push(Caution::ReplacesChangeElsewhere);
+                }
+                false
+            }
+            MissionAction::Clear => {
+                cautions.push(Caution::DeletesMission);
+                if armed {
+                    cautions.push(Caution::Armed);
+                }
+                true
+            }
+            MissionAction::Start | MissionAction::Resume => {
+                cautions.extend(flies_stored);
+                true
+            }
+            MissionAction::Pause => false,
+            MissionAction::Jump(item) => {
+                if status != SyncStatus::Synced {
+                    return Verdict::Refuse(Refusal::NotSynced);
+                }
+                if self.plan.index_of(item).is_none() {
+                    return Verdict::Refuse(Refusal::NoSuchItem);
+                }
+                true
+            }
+        };
+
+        if always_asks || !cautions.is_empty() {
+            Verdict::Confirm(cautions)
+        } else {
+            Verdict::Go
         }
     }
 
@@ -333,6 +476,139 @@ mod tests {
         });
         fleet.observe(ADDRESS, Instant::now(), Some(&current));
         assert_eq!(draft.status(&fleet.snapshot()), SyncStatus::VehicleChanged);
+    }
+
+    /// A fleet whose vehicle is armed, or not.
+    fn armed_fleet(armed: bool) -> Fleet {
+        let mut fleet = Fleet::default();
+        let mut base_mode = MavModeFlag::CUSTOM_MODE_ENABLED;
+        if armed {
+            base_mode |= MavModeFlag::SAFETY_ARMED;
+        }
+        let heartbeat = mavio::DefaultDialect::Heartbeat(messages::Heartbeat {
+            type_: MavType::Quadrotor,
+            autopilot: MavAutopilot::Ardupilotmega,
+            base_mode,
+            ..Default::default()
+        });
+        fleet.observe(ADDRESS, Instant::now(), Some(&heartbeat));
+        fleet
+    }
+
+    /// A draft synced with a two-waypoint mission on a disarmed vehicle.
+    fn synced() -> (Fleet, MissionDraft) {
+        let mut fleet = armed_fleet(false);
+        let mut draft = MissionDraft::new(Some(SYSTEM));
+        report(&mut fleet, onboard(vec![waypoint(1.0), waypoint(2.0)], 1));
+        draft.follow(&fleet.snapshot());
+        (fleet, draft)
+    }
+
+    #[test]
+    fn an_empty_upload_asks_because_it_deletes_the_mission() {
+        let (fleet, mut draft) = synced();
+        draft.plan_mut().clear();
+        assert_eq!(
+            draft.check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Confirm(vec![Caution::DeletesMission])
+        );
+    }
+
+    #[test]
+    fn an_upload_over_a_change_elsewhere_asks() {
+        let (mut fleet, mut draft) = synced();
+        draft.plan_mut().push(waypoint(3.0));
+        let current = mavio::DefaultDialect::MissionCurrent(messages::MissionCurrent {
+            total: 2,
+            mission_id: 8,
+            ..Default::default()
+        });
+        fleet.observe(ADDRESS, Instant::now(), Some(&current));
+
+        assert_eq!(
+            draft.check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Confirm(vec![Caution::ReplacesChangeElsewhere])
+        );
+    }
+
+    #[test]
+    fn an_upload_asks_while_the_vehicle_is_armed_or_may_be() {
+        let mut fleet = armed_fleet(true);
+        let mut draft = MissionDraft::new(Some(SYSTEM));
+        draft.plan_mut().push(waypoint(1.0));
+        assert!(matches!(
+            draft.check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Confirm(cautions) if cautions.contains(&Caution::Armed)
+        ));
+
+        // A vehicle the fleet knows nothing of may be armed too.
+        fleet = Fleet::default();
+        assert!(matches!(
+            draft.check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Confirm(cautions) if cautions.contains(&Caution::Armed)
+        ));
+
+        // Disarmed, with nothing else to say: no question.
+        let (fleet, mut draft) = synced();
+        draft.plan_mut().push(waypoint(3.0));
+        assert_eq!(
+            draft.check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Go
+        );
+    }
+
+    #[test]
+    fn start_says_when_the_vehicle_flies_another_mission() {
+        let (fleet, mut draft) = synced();
+        assert_eq!(
+            draft.check(MissionAction::Start, &fleet.snapshot()),
+            Verdict::Confirm(vec![])
+        );
+
+        draft.plan_mut().push(waypoint(3.0));
+        for action in [MissionAction::Start, MissionAction::Resume] {
+            assert_eq!(
+                draft.check(action, &fleet.snapshot()),
+                Verdict::Confirm(vec![Caution::FliesAnotherMission])
+            );
+        }
+
+        let never_downloaded = MissionDraft::new(Some(SYSTEM));
+        assert_eq!(
+            never_downloaded.check(MissionAction::Start, &armed_fleet(false).snapshot()),
+            Verdict::Confirm(vec![Caution::FliesUnseenMission])
+        );
+    }
+
+    #[test]
+    fn a_jump_needs_a_synced_plan() {
+        let (fleet, mut draft) = synced();
+        let second = draft.plan().items()[1].id();
+        assert_eq!(
+            draft.check(MissionAction::Jump(second), &fleet.snapshot()),
+            Verdict::Confirm(vec![])
+        );
+
+        draft.plan_mut().push(waypoint(3.0));
+        assert_eq!(
+            draft.check(MissionAction::Jump(second), &fleet.snapshot()),
+            Verdict::Refuse(Refusal::NotSynced)
+        );
+    }
+
+    #[test]
+    fn pause_never_asks_and_the_offline_plan_refuses() {
+        let fleet = armed_fleet(true);
+        let mut draft = MissionDraft::new(Some(SYSTEM));
+        draft.plan_mut().push(waypoint(1.0));
+        assert_eq!(
+            draft.check(MissionAction::Pause, &fleet.snapshot()),
+            Verdict::Go
+        );
+        assert_eq!(
+            MissionDraft::new(None).check(MissionAction::Upload, &fleet.snapshot()),
+            Verdict::Refuse(Refusal::NoVehicle)
+        );
     }
 
     #[test]

@@ -366,15 +366,75 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
 }
 
 #[tokio::test]
+async fn uploading_an_empty_plan_asks_first() {
+    let mut env = Env::new();
+    let mut editor = MissionEditor::default();
+    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    env.step(&mut editor, Some(A), MessageKind::Discard);
+
+    let effects = env.step(
+        &mut editor,
+        Some(A),
+        MessageKind::Upload { confirmed: false },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::Confirm(confirmation)]
+            if confirmation.body.contains("deletes the vehicle's mission")),
+        "an empty upload says what it deletes"
+    );
+    assert!(!editor.transferring(A), "nothing sent before the answer");
+}
+
+#[tokio::test]
+async fn starting_says_when_the_vehicle_flies_another_mission() {
+    let mut env = Env::new();
+    let mut editor = MissionEditor::default();
+    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+    place(&mut env, &mut editor, Some(A), 2.0);
+
+    let effects = env.step(
+        &mut editor,
+        Some(A),
+        MessageKind::Start { confirmed: false },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::Confirm(confirmation)]
+            if confirmation.body.contains("not the plan shown")),
+        "the confirmation says the plan shown is not what flies"
+    );
+    assert!(!editor.operations.is_running(&(A, Operation::Start)));
+}
+
+#[tokio::test]
+async fn resuming_asks_and_pausing_does_not() {
+    let mut env = Env::new();
+    let mut editor = MissionEditor::default();
+    env.set_onboard(&mut editor, vec![waypoint(1.0)], 1);
+
+    let effects = env.step(
+        &mut editor,
+        Some(A),
+        MessageKind::Resume { confirmed: false },
+    );
+    assert!(matches!(effects.as_slice(), [Effect::Confirm(_)]));
+    assert!(!editor.operations.is_running(&(A, Operation::Resume)));
+
+    let effects = env.step(&mut editor, Some(A), MessageKind::Pause);
+    assert!(effects.is_empty(), "a safety stop never asks");
+    assert!(editor.operations.is_running(&(A, Operation::Pause)));
+}
+
+#[tokio::test]
 async fn failures_are_shown_to_the_operator() {
     let mut env = Env::new();
     let mut editor = MissionEditor::default();
     editor.sync(&env.fleet.snapshot());
 
+    // An empty plan asks first; this one was confirmed.
     env.step(
         &mut editor,
         Some(A),
-        MessageKind::Upload { confirmed: false },
+        MessageKind::Upload { confirmed: true },
     );
     let ticket = editor
         .operations

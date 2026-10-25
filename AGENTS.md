@@ -431,6 +431,13 @@ unknown, wherever it comes from (the mode picker or a quick button); a
 disarmed vehicle does not act on its mode until it is armed, and arming
 asks.
 
+Which mission actions ask, and which are refused, is decided in one place,
+`MissionDraft::check`: resuming asks like starting, and both say when the
+vehicle flies a mission other than the plan shown; an upload asks while the
+vehicle is armed (or may be), when the plan is empty (it deletes the
+vehicle's mission), and when the vehicle's mission was changed elsewhere;
+pausing, a safety stop, never asks.
+
 ### Links are supervised
 
 `services::LinkManager` spawns a supervisor per connected link. The supervisor

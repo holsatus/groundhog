@@ -16,7 +16,7 @@ mod draft;
 mod item;
 mod plan;
 
-pub use draft::{MissionDraft, SyncStatus};
+pub use draft::{Caution, MissionAction, MissionDraft, Refusal, SyncStatus, Verdict};
 pub use item::{Field, FieldKind, FieldView, MissionItem, Position};
 pub use plan::{ItemId, MissionPlan};
 

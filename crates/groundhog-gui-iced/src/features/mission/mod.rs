@@ -18,7 +18,10 @@ use groundhog_logic::{
     domain::{
         fleet::FleetSnapshot,
         geo::GeoPosition,
-        mission::{Field, ItemId, MissionDraft, MissionPlan, OnboardMission, SyncStatus},
+        mission::{
+            Caution, Field, ItemId, MissionAction, MissionDraft, MissionPlan, OnboardMission,
+            Refusal, SyncStatus, Verdict,
+        },
     },
     services::{Result, TransferProgress},
     storage::mission::{WplMission, parse_wpl, write_wpl},
@@ -157,7 +160,9 @@ pub enum MessageKind {
         confirmed: bool,
     },
     Pause,
-    Resume,
+    Resume {
+        confirmed: bool,
+    },
     SetCurrent {
         item: ItemId,
         confirmed: bool,
@@ -235,9 +240,9 @@ impl MissionEditor {
             MessageKind::Download { confirmed } => self.download(plan, confirmed, cx),
             MessageKind::Upload { confirmed } => self.upload(plan, confirmed, cx),
             MessageKind::Clear { confirmed } => self.clear(plan, confirmed, cx),
-            MessageKind::Start { confirmed } => self.start(plan, confirmed, cx),
-            MessageKind::Pause => self.command(plan, Operation::Pause, cx),
-            MessageKind::Resume => self.command(plan, Operation::Resume, cx),
+            MessageKind::Start { confirmed } => self.fly(plan, Flight::Start, confirmed, cx),
+            MessageKind::Pause => self.fly(plan, Flight::Pause, false, cx),
+            MessageKind::Resume { confirmed } => self.fly(plan, Flight::Resume, confirmed, cx),
             MessageKind::SetCurrent { item, confirmed } => {
                 self.set_current(plan, item, confirmed, cx)
             }
@@ -405,35 +410,67 @@ impl MissionEditor {
         }
     }
 
+    /// Whether `action` may run now, by [`MissionDraft::check`]: the vehicle
+    /// to run it on, or `None` after asking the operator (the confirmation
+    /// sends `again`) or telling them why not. A confirmed request is still
+    /// checked, so a confirmation the situation outgrew cannot run a refused
+    /// action.
+    fn cleared(
+        &self,
+        plan: PlanKey,
+        action: MissionAction,
+        confirmed: bool,
+        again: MessageKind,
+        cx: &mut Context<Message>,
+    ) -> Option<SystemId> {
+        let system = plan?;
+        let fresh;
+        let draft = match self.drafts.get(&plan) {
+            Some(draft) => &draft.mission,
+            None => {
+                fresh = MissionDraft::new(plan);
+                &fresh
+            }
+        };
+
+        match draft.check(action, cx.fleet) {
+            Verdict::Go => Some(system),
+            Verdict::Confirm(_) if confirmed => Some(system),
+            Verdict::Confirm(cautions) => {
+                let confirmation = confirmation(
+                    action,
+                    &cautions,
+                    &cx.fleet.vehicle_name(system),
+                    draft,
+                    Message { plan, kind: again },
+                );
+                cx.confirm(confirmation);
+                None
+            }
+            Verdict::Refuse(Refusal::NotSynced) => {
+                cx.notices.push(
+                    Notice::warning("Upload the plan first")
+                        .detail("The plan differs from the vehicle's mission, so its item numbers do not match.")
+                        .vehicle(system),
+                );
+                None
+            }
+            // Nothing the operator could act on: the offline plan offers no
+            // vehicle actions, and a vanished item has no row to press.
+            Verdict::Refuse(Refusal::NoVehicle | Refusal::NoSuchItem) => None,
+        }
+    }
+
     fn download(
         &mut self,
         plan: PlanKey,
         confirmed: bool,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(system) = plan else {
+        let again = MessageKind::Download { confirmed: true };
+        let Some(system) = self.cleared(plan, MissionAction::Download, confirmed, again, cx) else {
             return Task::none();
         };
-
-        if !confirmed
-            && self
-                .drafts
-                .get(&plan)
-                .is_some_and(|draft| draft.mission.is_modified())
-        {
-            cx.confirm(
-                Confirmation::new(
-                    "Replace your changes?",
-                    "Downloading replaces the plan you edited with the vehicle's mission.",
-                    Message {
-                        plan,
-                        kind: MessageKind::Download { confirmed: true },
-                    },
-                )
-                .accept_label("Download"),
-            );
-            return Task::none();
-        }
 
         let client = cx.services.vehicle(system);
         self.transfer(system, Operation::Download, move |progress| async move {
@@ -447,34 +484,13 @@ impl MissionEditor {
         confirmed: bool,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(system) = plan else {
+        let again = MessageKind::Upload { confirmed: true };
+        let Some(system) = self.cleared(plan, MissionAction::Upload, confirmed, again, cx) else {
             return Task::none();
         };
         let Some(draft) = self.drafts.get(&plan) else {
             return Task::none();
         };
-
-        let armed = cx
-            .fleet
-            .vehicle(system)
-            .and_then(|vehicle| vehicle.armed())
-            .unwrap_or(false);
-
-        if !confirmed && armed {
-            cx.confirm(
-                Confirmation::new(
-                    format!("Upload to armed {}?", cx.fleet.vehicle_name(system)),
-                    "The vehicle is armed. If it is flying the mission, the new plan takes effect immediately.",
-                    Message {
-                        plan,
-                        kind: MessageKind::Upload { confirmed: true },
-                    },
-                )
-                .accept_label("Upload")
-                .danger(),
-            );
-            return Task::none();
-        }
 
         let items = draft.plan().mission_items();
         let client = cx.services.vehicle(system);
@@ -489,25 +505,10 @@ impl MissionEditor {
         confirmed: bool,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(system) = plan else {
+        let again = MessageKind::Clear { confirmed: true };
+        let Some(system) = self.cleared(plan, MissionAction::Clear, confirmed, again, cx) else {
             return Task::none();
         };
-
-        if !confirmed {
-            cx.confirm(
-                Confirmation::new(
-                    format!("Clear the mission on {}?", cx.fleet.vehicle_name(system)),
-                    "The vehicle's stored mission is deleted. Your plan here is kept.",
-                    Message {
-                        plan,
-                        kind: MessageKind::Clear { confirmed: true },
-                    },
-                )
-                .accept_label("Clear")
-                .danger(),
-            );
-            return Task::none();
-        }
 
         let client = cx.services.vehicle(system);
         self.transfer(system, Operation::Clear, move |_| async move {
@@ -515,32 +516,47 @@ impl MissionEditor {
         })
     }
 
-    fn start(
+    /// Start, pause or resume the vehicle's mission.
+    fn fly(
         &mut self,
         plan: PlanKey,
+        flight: Flight,
         confirmed: bool,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(system) = plan else {
+        let (action, operation, again) = match flight {
+            Flight::Start => (
+                MissionAction::Start,
+                Operation::Start,
+                MessageKind::Start { confirmed: true },
+            ),
+            Flight::Pause => (MissionAction::Pause, Operation::Pause, MessageKind::Pause),
+            Flight::Resume => (
+                MissionAction::Resume,
+                Operation::Resume,
+                MessageKind::Resume { confirmed: true },
+            ),
+        };
+        let Some(system) = self.cleared(plan, action, confirmed, again, cx) else {
             return Task::none();
         };
 
-        if !confirmed {
-            cx.confirm(
-                Confirmation::new(
-                    format!("Start the mission on {}?", cx.fleet.vehicle_name(system)),
-                    "The vehicle starts flying its stored mission from the beginning.",
-                    Message {
-                        plan,
-                        kind: MessageKind::Start { confirmed: true },
-                    },
-                )
-                .accept_label("Start"),
-            );
-            return Task::none();
-        }
-
-        self.command(plan, Operation::Start, cx)
+        let client = cx.services.vehicle(system);
+        self.operations.start(
+            (system, operation),
+            async move {
+                match flight {
+                    Flight::Start => client.start_mission().await,
+                    Flight::Pause => client.pause_mission(true).await,
+                    Flight::Resume => client.pause_mission(false).await,
+                }
+                .map(|()| None)
+            },
+            move |ticket, result| Message {
+                plan: Some(system),
+                kind: MessageKind::Finished(operation, ticket, result),
+            },
+        )
     }
 
     fn set_current(
@@ -550,21 +566,14 @@ impl MissionEditor {
         confirmed: bool,
         cx: &mut Context<Message>,
     ) -> Task<Message> {
-        let Some(system) = plan else {
+        let again = MessageKind::SetCurrent {
+            item,
+            confirmed: true,
+        };
+        let Some(system) = self.cleared(plan, MissionAction::Jump(item), confirmed, again, cx)
+        else {
             return Task::none();
         };
-
-        // Indices only mean the same thing on the vehicle when the plan is
-        // what the vehicle holds.
-        if self.status(plan, cx.fleet) != SyncStatus::Synced {
-            cx.notices.push(
-                Notice::warning("Upload the plan first")
-                    .detail("The plan differs from the vehicle's mission, so its item numbers do not match.")
-                    .vehicle(system),
-            );
-            return Task::none();
-        }
-
         let Some(index) = self
             .drafts
             .get(&plan)
@@ -573,24 +582,6 @@ impl MissionEditor {
             return Task::none();
         };
 
-        if !confirmed {
-            cx.confirm(
-                Confirmation::new(
-                    format!("Continue at item {}?", index + 1),
-                    "The vehicle skips to this item of its mission.",
-                    Message {
-                        plan,
-                        kind: MessageKind::SetCurrent {
-                            item,
-                            confirmed: true,
-                        },
-                    },
-                )
-                .accept_label("Jump"),
-            );
-            return Task::none();
-        }
-
         let client = cx.services.vehicle(system);
         self.operations.start(
             (system, Operation::SetCurrent),
@@ -598,35 +589,6 @@ impl MissionEditor {
             move |ticket, result| Message {
                 plan,
                 kind: MessageKind::Finished(Operation::SetCurrent, ticket, result),
-            },
-        )
-    }
-
-    /// Run a mission command (start, pause, resume).
-    fn command(
-        &mut self,
-        plan: PlanKey,
-        operation: Operation,
-        cx: &mut Context<Message>,
-    ) -> Task<Message> {
-        let Some(system) = plan else {
-            return Task::none();
-        };
-
-        let client = cx.services.vehicle(system);
-        self.operations.start(
-            (system, operation),
-            async move {
-                match operation {
-                    Operation::Start => client.start_mission().await,
-                    Operation::Pause => client.pause_mission(true).await,
-                    _ => client.pause_mission(false).await,
-                }
-                .map(|()| None)
-            },
-            move |ticket, result| Message {
-                plan: Some(system),
-                kind: MessageKind::Finished(operation, ticket, result),
             },
         )
     }
@@ -740,6 +702,94 @@ impl MissionEditor {
                 .map_err(|error| error.to_string());
             let _ = sender.try_send(MessageKind::Saved(path, result));
         })
+    }
+}
+
+/// The mission commands that fly the vehicle (the others are transfers and
+/// jumps), each named, so none can stand in for another.
+#[derive(Debug, Clone, Copy)]
+enum Flight {
+    Start,
+    Pause,
+    Resume,
+}
+
+/// The question asked before `action` on `vehicle`, saying every caution.
+fn confirmation(
+    action: MissionAction,
+    cautions: &[Caution],
+    vehicle: &str,
+    draft: &MissionDraft,
+    accept: Message,
+) -> Confirmation<Message> {
+    let (title, what, label) = match action {
+        MissionAction::Download => ("Replace your changes?".to_string(), None, "Download"),
+        MissionAction::Upload => (format!("Upload to {vehicle}?"), None, "Upload"),
+        MissionAction::Clear => (format!("Clear the mission on {vehicle}?"), None, "Clear"),
+        MissionAction::Start => (
+            format!("Start the mission on {vehicle}?"),
+            Some("The vehicle starts flying its stored mission from the beginning."),
+            "Start",
+        ),
+        MissionAction::Resume => (
+            format!("Resume the mission on {vehicle}?"),
+            Some("The vehicle continues its paused mission."),
+            "Resume",
+        ),
+        MissionAction::Pause => (format!("Pause the mission on {vehicle}?"), None, "Pause"),
+        MissionAction::Jump(item) => (
+            match draft.plan().index_of(item) {
+                Some(index) => format!("Continue at item {}?", index + 1),
+                None => "Continue at this item?".to_string(),
+            },
+            Some("The vehicle skips to this item of its mission."),
+            "Jump",
+        ),
+    };
+
+    let body = what
+        .into_iter()
+        .chain(
+            cautions
+                .iter()
+                .map(|caution| caution_text(action, *caution)),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let confirmation = Confirmation::new(title, body, accept).accept_label(label);
+    if cautions
+        .iter()
+        .any(|caution| matches!(caution, Caution::Armed | Caution::DeletesMission))
+    {
+        confirmation.danger()
+    } else {
+        confirmation
+    }
+}
+
+/// One sentence saying `caution` about `action`.
+fn caution_text(action: MissionAction, caution: Caution) -> &'static str {
+    match caution {
+        Caution::DiscardsEdits => {
+            "Downloading replaces the plan you edited with the vehicle's mission."
+        }
+        Caution::Armed => {
+            "The vehicle is armed, or may be: if it is flying the mission, the change takes effect immediately."
+        }
+        Caution::DeletesMission if action == MissionAction::Upload => {
+            "The plan is empty: uploading it deletes the vehicle's mission."
+        }
+        Caution::DeletesMission => {
+            "The vehicle's stored mission is deleted. Your plan here is kept."
+        }
+        Caution::ReplacesChangeElsewhere => {
+            "The vehicle's mission was changed elsewhere since it was last transferred here, and uploading replaces that change."
+        }
+        Caution::FliesAnotherMission => {
+            "That mission is not the plan shown here, which has changes not uploaded."
+        }
+        Caution::FliesUnseenMission => "That mission has not been downloaded here.",
     }
 }
 

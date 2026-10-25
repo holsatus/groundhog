@@ -151,7 +151,7 @@ impl MissionEditor {
                     .boxed(),
                 ui::button("Resume")
                     .hint("Resume the paused mission")
-                    .on_press_maybe(on_vehicle(MessageKind::Resume))
+                    .on_press_maybe(on_vehicle(MessageKind::Resume { confirmed: false }))
                     .boxed(),
             ]
         });
