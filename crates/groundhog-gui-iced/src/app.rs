@@ -666,7 +666,12 @@ impl Application {
             self.save_configuration();
         }
 
-        self.sync_recording();
+        // Only a change of the setting: a recording that could not start is
+        // not retried (and its failure not announced again) on every other
+        // settings message, such as each step of a scale slider.
+        if self.configuration.settings.record_telemetry != before.record_telemetry {
+            self.sync_recording();
+        }
         self.sync_system_bars();
     }
 
