@@ -140,6 +140,11 @@ pub enum Message {
     Insets(Insets),
     /// Put the whole application in full screen, or take it out (F11).
     ToggleFullScreen,
+    /// The operator went back (see [`back_event`]); `captured` when a widget
+    /// took the key, as a text input takes Escape.
+    Back {
+        captured: bool,
+    },
 }
 
 /// Idle time after the last layout change before the layout is persisted.
@@ -276,6 +281,24 @@ impl Application {
             Message::Window(size) => {
                 self.window = Some(size);
                 Task::none()
+            }
+            Message::Back { captured } => {
+                let target = back_target(
+                    captured,
+                    self.confirmation.is_some(),
+                    self.video.is_full_screen(),
+                    self.shell() == Shell::Floating,
+                );
+                match target {
+                    Some(BackTarget::Dismiss) => self.update(Message::Confirm(Answer::Dismiss)),
+                    Some(BackTarget::LeaveVideo) => {
+                        self.update(Message::Video(video::Message::FullScreen(false)))
+                    }
+                    Some(BackTarget::StepBack) => {
+                        self.update(Message::Floating(shell::Message::Back))
+                    }
+                    None => Task::none(),
+                }
             }
             Message::Floating(message) => {
                 // Back with nowhere left to go leaves, as a phone app does.
@@ -819,43 +842,7 @@ impl Application {
             _ => None,
         });
 
-        // Escape, or the system's back (a phone's gesture, a mouse's back
-        // button), leaves the full-screen video; elsewhere in the floating
-        // shell, back and Escape where nothing else took it step back.
-        let back = if self.video.is_full_screen() {
-            iced::event::listen_with(|event, _, _| {
-                let leave = match event {
-                    iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => matches!(
-                        key,
-                        keyboard::Key::Named(
-                            keyboard::key::Named::Escape | keyboard::key::Named::BrowserBack
-                        )
-                    ),
-                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-                        iced::mouse::Button::Back,
-                    )) => true,
-                    _ => false,
-                };
-                leave.then_some(Message::Video(video::Message::FullScreen(false)))
-            })
-        } else if self.shell() == Shell::Floating {
-            iced::event::listen_with(|event, status, _| {
-                let back = match event {
-                    iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
-                        matches!(key, keyboard::Key::Named(keyboard::key::Named::BrowserBack))
-                            || (status == iced::event::Status::Ignored
-                                && key == keyboard::Key::Named(keyboard::key::Named::Escape))
-                    }
-                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-                        iced::mouse::Button::Back,
-                    )) => true,
-                    _ => false,
-                };
-                back.then_some(Message::Floating(shell::Message::Back))
-            })
-        } else {
-            Subscription::none()
-        };
+        let back = iced::event::listen_with(back_event);
 
         Subscription::batch([
             layout_tick,
@@ -901,6 +888,64 @@ impl FullScreen {
     }
 }
 
+/// A back gesture, if `event` is one: Escape, the system's back (a phone's
+/// back gesture arrives as BrowserBack), or a mouse's back button. The one
+/// definition of "back", answered by [`back_target`].
+fn back_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::Back {
+            captured: status == iced::event::Status::Captured,
+        }),
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::BrowserBack),
+            ..
+        })
+        | iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Back)) => {
+            Some(Message::Back { captured: false })
+        }
+        _ => None,
+    }
+}
+
+/// What a back gesture steps out of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackTarget {
+    /// The open confirmation, as its Dismiss would.
+    Dismiss,
+    /// The full-screen video.
+    LeaveVideo,
+    /// One level of the floating shell (from the bare map: the application).
+    StepBack,
+}
+
+/// Who answers a back gesture, in order: an open confirmation, so back
+/// never acts behind the question; the full-screen video; the floating
+/// shell. A `captured` gesture (Escape in a text input) answers nothing but
+/// the full-screen video, which nothing else on screen could leave.
+fn back_target(
+    captured: bool,
+    confirming: bool,
+    video_full_screen: bool,
+    floating: bool,
+) -> Option<BackTarget> {
+    if confirming && !captured {
+        Some(BackTarget::Dismiss)
+    } else if video_full_screen {
+        Some(BackTarget::LeaveVideo)
+    } else if floating && !captured {
+        Some(BackTarget::StepBack)
+    } else {
+        None
+    }
+}
+
 mod floating;
 #[cfg(test)]
 mod gallery;
@@ -908,8 +953,40 @@ mod tiled;
 
 #[cfg(test)]
 mod tests {
-    use super::FullScreen;
+    use super::{BackTarget, FullScreen, back_target};
     use iced::window::Mode;
+
+    #[test]
+    fn back_dismisses_a_confirmation_before_anything_else() {
+        for (video, floating) in [(false, false), (false, true), (true, true)] {
+            assert_eq!(
+                back_target(false, true, video, floating),
+                Some(BackTarget::Dismiss)
+            );
+        }
+    }
+
+    #[test]
+    fn back_leaves_the_video_then_steps_the_floating_shell() {
+        assert_eq!(
+            back_target(false, false, true, true),
+            Some(BackTarget::LeaveVideo)
+        );
+        assert_eq!(
+            back_target(false, false, false, true),
+            Some(BackTarget::StepBack)
+        );
+        assert_eq!(back_target(false, false, false, false), None, "tiled");
+    }
+
+    #[test]
+    fn a_captured_escape_only_leaves_the_video() {
+        assert_eq!(back_target(true, true, false, true), None);
+        assert_eq!(
+            back_target(true, true, true, true),
+            Some(BackTarget::LeaveVideo)
+        );
+    }
 
     #[test]
     fn leaving_the_video_keeps_the_application_full_screen() {

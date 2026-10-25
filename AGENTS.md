@@ -385,9 +385,10 @@ A panel's content is the same wherever it is shown
   others are pages: a top bar, then the panel, or a list of the
   destination's panels (`ui::entry` rows) that opens each as a page with a
   way back. The system's back gesture (the back key; also Escape and a
-  mouse's back button) steps out one level at a time (`Floating::back`),
-  and from the bare map sends the application to the background, as a
-  phone app does. A scrim under the status bar keeps its icons legible
+  mouse's back button) first dismisses an open confirmation, in either
+  shell; then it steps out one level at a time (`Floating::back`), and
+  from the bare map sends the application to the background, as a phone
+  app does. A scrim under the status bar keeps its icons legible
   over any tile. Where the operator is, is view state; nothing about the
   floating shell is persisted.
 
