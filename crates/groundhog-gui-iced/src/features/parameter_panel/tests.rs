@@ -110,6 +110,24 @@ async fn unparseable_text_is_kept_but_not_uploadable() {
 }
 
 #[tokio::test]
+async fn a_decimal_can_be_typed_over_an_integral_value() {
+    let mut env = Env::new(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+
+    // "1." parses to the reported 1.0, but is half of "1.5": it stays.
+    for text in ["1", "1.", "1.5"] {
+        env.step(
+            &mut panel,
+            Message::Edit(ADDRESS, ident("GAIN"), text.into()),
+        );
+    }
+
+    let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
+    assert_eq!(edit.text, "1.5");
+    assert_eq!(edit.uploadable(), Some(Value::F32(1.5)));
+}
+
+#[tokio::test]
 async fn upload_results_fold_into_the_edit() {
     let mut env = Env::new(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();

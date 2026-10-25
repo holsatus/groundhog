@@ -207,6 +207,11 @@ pub enum EditStatus {
 }
 
 /// The operator's pending change to one parameter.
+///
+/// The typed text is kept verbatim, even where it parses to the value the
+/// edit was made against (`1.` while the parameter is `1`): the operator is
+/// still typing, and taking the text back would swallow what they type next.
+/// Such an edit changes nothing, so it is neither uploadable nor a change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamEdit {
     /// The text as typed, kept verbatim so partial input survives.
@@ -214,40 +219,52 @@ pub struct ParamEdit {
     /// The text parsed as the parameter's type, if it parses.
     pub value: Option<Value>,
     pub status: EditStatus,
+    /// The reported value the edit was made against.
+    base: Value,
 }
 
 impl ParamEdit {
     /// An edit of a parameter currently at `current` to `text`, or `None` when
-    /// `text` parses to the current value (nothing to change).
+    /// `text` is the current value as it is shown (the operator typed it
+    /// back).
     pub fn new(current: Value, text: String) -> Option<ParamEdit> {
-        let value = value_parse_as(current, &text);
-
-        if value == Some(current) {
+        if text.trim() == value_to_string(current) {
             return None;
         }
 
         Some(ParamEdit {
+            value: value_parse_as(current, &text),
             text,
-            value,
             status: EditStatus::Pending,
+            base: current,
         })
     }
 
-    /// An edit to `value`, as loaded from a file.
-    pub fn to_value(value: Value) -> ParamEdit {
+    /// An edit to `value`, as loaded from a file, of a parameter reported at
+    /// `current`.
+    pub fn to_value(value: Value, current: Value) -> ParamEdit {
         ParamEdit {
             text: value_to_string(value),
             value: Some(value),
             status: EditStatus::Pending,
+            base: current,
         }
     }
 
-    /// The value to upload, if the edit is ready to be uploaded.
+    /// The value to upload, if the edit is ready to be uploaded: it parses,
+    /// differs from the value it was made against, and is not uploading.
     pub fn uploadable(&self) -> Option<Value> {
         match self.status {
             EditStatus::Uploading => None,
-            _ => self.value,
+            _ => self.value.filter(|value| *value != self.base),
         }
+    }
+
+    /// Whether the operator would call this parameter changed: its text does
+    /// not parse, parses to another value, or an upload of it is in flight or
+    /// did not succeed.
+    pub fn is_change(&self) -> bool {
+        self.status != EditStatus::Pending || self.value != Some(self.base)
     }
 
     pub fn is_uploading(&self) -> bool {
@@ -324,7 +341,7 @@ impl ParamEdits {
     }
 
     /// The operator typed `text` for `ident`, which the component reports at
-    /// `current`. Text that parses to the current value, or a parameter the
+    /// `current`. The current value typed back as shown, or a parameter the
     /// component does not report, leaves no edit.
     pub fn edit(&mut self, ident: Ident, current: Option<Value>, text: String) {
         match current.and_then(|current| ParamEdit::new(current, text)) {
@@ -357,7 +374,7 @@ impl ParamEdits {
                 Some(current) if value_type_matches(current, *value) => {
                     if current != *value {
                         self.edits
-                            .insert(ident.clone(), ParamEdit::to_value(*value));
+                            .insert(ident.clone(), ParamEdit::to_value(*value, current));
                         summary.changed += 1;
                     }
                 }
@@ -368,7 +385,13 @@ impl ParamEdits {
         summary
     }
 
-    /// The edits that can be uploaded now: parsed, and not uploading.
+    /// How many parameters the operator changed ([`ParamEdit::is_change`]).
+    pub fn changes(&self) -> usize {
+        self.edits.values().filter(|edit| edit.is_change()).count()
+    }
+
+    /// The edits that can be uploaded now: parsed, changed, and not
+    /// uploading.
     pub fn uploadable(&self) -> impl Iterator<Item = (&Ident, Value)> {
         self.edits
             .iter()
@@ -533,7 +556,8 @@ mod tests {
 
     #[test]
     fn an_edit_to_the_current_value_is_no_edit() {
-        assert!(ParamEdit::new(Value::F32(1.0), "1.0".into()).is_none());
+        assert!(ParamEdit::new(Value::F32(1.0), "1".into()).is_none());
+        assert!(ParamEdit::new(Value::F32(1.0), " 1 ".into()).is_none());
         let edit = ParamEdit::new(Value::F32(1.0), "2".into()).unwrap();
         assert_eq!(edit.value, Some(Value::F32(2.0)));
         let partial = ParamEdit::new(Value::U8(1), "30".into()).unwrap();
@@ -566,11 +590,40 @@ mod tests {
         edits.edit(ident(), Some(Value::F32(1.0)), "2".into());
         assert_eq!(edits.len(), 1);
 
-        edits.edit(ident(), Some(Value::F32(1.0)), "1.0".into());
+        edits.edit(ident(), Some(Value::F32(1.0)), "1".into());
         assert!(edits.is_empty());
 
         edits.edit(ident(), None, "2".into());
         assert!(edits.is_empty(), "an unreported parameter takes no edit");
+    }
+
+    #[test]
+    fn typed_text_that_parses_to_the_current_value_survives() {
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), Some(Value::F32(1.0)), "1.".into());
+
+        let edit = edits.get(&ident()).expect("the text is kept");
+        assert_eq!(edit.text, "1.");
+        assert_eq!(edit.uploadable(), None, "it changes nothing");
+        assert!(!edit.is_change());
+        assert_eq!(edits.changes(), 0);
+
+        edits.edit(ident(), Some(Value::F32(1.0)), "1.5".into());
+        let edit = edits.get(&ident()).unwrap();
+        assert_eq!(edit.uploadable(), Some(Value::F32(1.5)));
+        assert_eq!(edits.changes(), 1);
+    }
+
+    #[test]
+    fn changes_count_unparseable_and_uploading_edits() {
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), Some(Value::F32(1.0)), "abc".into());
+        let other = Ident::from_str_truncated("PARAM_TWO");
+        edits.edit(other.clone(), Some(Value::F32(1.0)), "2".into());
+        edits.begin_upload(&other).unwrap();
+
+        assert_eq!(edits.uploadable().count(), 0);
+        assert_eq!(edits.changes(), 2);
     }
 
     #[test]

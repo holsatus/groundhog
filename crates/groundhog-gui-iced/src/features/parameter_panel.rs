@@ -131,14 +131,6 @@ impl ParameterPanel {
         self.edits.get(&address)?.get(ident)
     }
 
-    /// The pending edits of `address`, for tests and the view.
-    fn edits_of(&self, address: MavlinkId) -> impl Iterator<Item = (&Ident, &ParamEdit)> {
-        self.edits
-            .get(&address)
-            .into_iter()
-            .flat_map(ParamEdits::iter)
-    }
-
     pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::FilterIdentPattern(pattern) => self.filter.ident_pattern = pattern,
@@ -401,10 +393,11 @@ impl ParameterPanel {
         let downloading = self.reloads.is_running(&address)
             || parameters
                 .is_some_and(|parameters| *parameters.download() == DownloadState::InProgress);
-        let pending = self
-            .edits_of(address)
-            .filter(|(_, edit)| edit.uploadable().is_some())
-            .count();
+        // What the operator changed (an upload in flight and text that does
+        // not parse included), and what of it can be uploaded now.
+        let edits = self.edits.get(&address);
+        let changed = edits.map_or(0, ParamEdits::changes);
+        let pending = edits.map_or(0, |edits| edits.uploadable().count());
 
         let loading = parameters.map(Parameters::loading);
         let (got, expected) =
@@ -415,8 +408,8 @@ impl ParameterPanel {
         // download that failed or was cancelled) says so here, since the
         // activity below shows only while a download runs.
         let incomplete = !downloading && expected > 0 && got < usize::from(expected);
-        let state = if pending > 0 {
-            ui::badge(format!("{pending} changed"), Tone::Warning)
+        let state = if changed > 0 {
+            ui::badge(format!("{changed} changed"), Tone::Warning)
         } else if incomplete {
             ui::badge(format!("{got} of {expected}"), Tone::Warning)
         } else if got > 0 {
@@ -441,14 +434,18 @@ impl ParameterPanel {
                 .hint("Read every parameter from the vehicle")
                 .on_press(Message::Reload(address))
                 .boxed(),
-            ui::button(if pending > 0 {
-                format!("Restore {pending}")
+            ui::button(if changed > 0 {
+                format!("Restore {changed}")
             } else {
                 "Restore".to_string()
             })
             .icon(Icon::Restore)
             .hint("Restore all locally changed parameters")
-            .on_press_maybe((pending > 0).then_some(Message::ResetAll(address)))
+            .on_press_maybe(
+                edits
+                    .is_some_and(|edits| !edits.is_empty())
+                    .then_some(Message::ResetAll(address)),
+            )
             .boxed(),
             ui::button(if pending > 0 {
                 format!("Upload {pending}")
