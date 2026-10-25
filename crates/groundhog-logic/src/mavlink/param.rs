@@ -18,7 +18,7 @@ use mavio::default_dialect::messages::{
     AutopilotVersion, ComponentInformationBasic, ParamRequestList, ParamRequestRead, ParamSet,
     ParamValue,
 };
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, timeout_at};
 
 use super::{
     error::{MavError, Result},
@@ -30,8 +30,8 @@ use crate::{MavlinkId, wire::param::ParamEncoding};
 const PARAM_SET_TIMEOUT: Duration = Duration::from_secs(1);
 const PARAM_SET_RETRIES: u8 = 3;
 
-const PARAM_LIST_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-const PARAM_LIST_RETRIES: u8 = 3;
+pub(super) const PARAM_LIST_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+pub(super) const PARAM_LIST_RETRIES: u8 = 3;
 
 /// The most missing parameters re-requested per idle round. Re-requesting
 /// hundreds at once floods a slow radio and mostly produces more losses; the
@@ -110,6 +110,10 @@ impl MavlinkRouter {
 
     /// Download the full parameter list of `target`, re-requesting any missing parameters.
     ///
+    /// Ends when every parameter arrived, or after [`PARAM_LIST_RETRIES`]
+    /// rounds of [`PARAM_LIST_IDLE_TIMEOUT`] in a row in which no parameter
+    /// arrived that was not received before.
+    ///
     /// The received values are delivered to the application through the normal
     /// inbound message stream; this only drives the protocol to completion.
     /// If `request_capabilities` is set, `AUTOPILOT_VERSION` is requested first,
@@ -139,30 +143,40 @@ impl MavlinkRouter {
 
         let mut recv_values = self.receive_message::<ParamValue>(target);
         let mut received = BTreeSet::new();
-        let mut expected = None;
-        let mut retries = 0;
+        let mut expected: Option<u16> = None;
+
+        // The download ends when every index arrived, or after
+        // PARAM_LIST_RETRIES rounds in a row without progress, a round being
+        // PARAM_LIST_IDLE_TIMEOUT without a parameter not received before.
+        // Values that bring nothing new (a repeat, a set's echo at index
+        // UINT16_MAX, another GCS's download) do not extend a round.
+        let mut idle_rounds = 0;
+        let mut round_ends = Instant::now() + PARAM_LIST_IDLE_TIMEOUT;
 
         self.send_targeted(target, ParamRequestList::default())?;
 
-        loop {
-            if let Some(count) = expected
-                && received.len() >= count as usize
-            {
-                break;
-            }
-
-            match timeout(PARAM_LIST_IDLE_TIMEOUT, recv_values.next()).await {
+        while expected.is_none_or(|count| received.len() < usize::from(count)) {
+            match timeout_at(round_ends, recv_values.next()).await {
+                Ok(None) => return Err(MavError::Timeout),
                 Ok(Some(value)) => {
-                    retries = 0;
-                    if value.param_index < value.param_count {
-                        expected = Some(value.param_count);
-                        received.insert(value.param_index);
+                    // The first count stands; a value counting otherwise is
+                    // from another list.
+                    let count = *expected.get_or_insert(value.param_count);
+                    if value.param_count == count
+                        && value.param_index < count
+                        && received.insert(value.param_index)
+                    {
+                        idle_rounds = 0;
+                        round_ends = Instant::now() + PARAM_LIST_IDLE_TIMEOUT;
                     }
                 }
-                Ok(None) => return Err(MavError::Timeout),
-                Err(_) if retries >= PARAM_LIST_RETRIES => break,
                 Err(_) => {
-                    retries += 1;
+                    idle_rounds += 1;
+                    if idle_rounds > PARAM_LIST_RETRIES {
+                        break;
+                    }
+                    round_ends = Instant::now() + PARAM_LIST_IDLE_TIMEOUT;
+
                     match expected {
                         // We do not know how many we are missing, so request all again
                         None => self.send_targeted(target, ParamRequestList::default())?,

@@ -45,13 +45,18 @@ struct MockVehicle {
 }
 
 impl MockVehicle {
-    /// Receive the next non-heartbeat message sent by the client.
+    /// Receive the next non-heartbeat message sent by the client. A frame
+    /// that does not decode fails the test: the client sent it corrupt.
     async fn recv(&mut self) -> DefaultDialect {
         loop {
             let frame = self.rx.recv().await.expect("transport closed");
             match frame.decode::<DefaultDialect>() {
-                Ok(DefaultDialect::Heartbeat(_)) | Err(_) => continue,
+                Ok(DefaultDialect::Heartbeat(_)) => continue,
                 Ok(message) => return message,
+                Err(error) => panic!(
+                    "the client sent message {} undecodable: {error}",
+                    frame.message_id()
+                ),
             }
         }
     }
@@ -288,6 +293,135 @@ async fn param_set_returns_echoed_value() {
 
     let value = task.await.unwrap().expect("echo");
     assert_eq!(value, Value::F32(1.5));
+}
+
+/// Entry `index` of a list of `count` parameters named `P<index>`.
+fn list_value(index: u16, count: u16) -> ParamValue {
+    let mut param_id = [0u8; 16];
+    let name = format!("P{index}");
+    param_id[..name.len()].copy_from_slice(name.as_bytes());
+    ParamValue {
+        param_id,
+        param_value: f32::from(index),
+        param_type: mavio::default_dialect::enums::MavParamType::Real32,
+        param_index: index,
+        param_count: count,
+    }
+}
+
+/// Start downloading the parameter list.
+fn start_list(
+    router: &MavlinkRouter,
+    capabilities: bool,
+) -> tokio::task::JoinHandle<super::error::Result<(usize, u16)>> {
+    let router = router.clone();
+    tokio::spawn(async move { router.param_list(VEHICLE, capabilities).await })
+}
+
+#[tokio::test(start_paused = true)]
+async fn param_list_completes() {
+    let (router, _guard, mut vehicle) = setup();
+    let task = start_list(&router, false);
+
+    assert!(matches!(
+        vehicle.recv().await,
+        DefaultDialect::ParamRequestList(_)
+    ));
+    for index in 0..5 {
+        vehicle.send(&list_value(index, 5)).await;
+    }
+
+    assert_eq!(task.await.unwrap().unwrap(), (5, 5));
+    let more = tokio::time::timeout(Duration::from_secs(5), vehicle.recv()).await;
+    assert!(more.is_err(), "nothing re-requested: {more:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn param_list_rerequests_the_missing_indices() {
+    let (router, _guard, mut vehicle) = setup();
+    let task = start_list(&router, false);
+
+    vehicle.recv().await;
+    for index in [0, 1, 3] {
+        vehicle.send(&list_value(index, 4)).await;
+    }
+
+    let DefaultDialect::ParamRequestRead(read) = vehicle.recv().await else {
+        panic!("expected PARAM_REQUEST_READ")
+    };
+    assert_eq!(read.param_index, 2);
+    vehicle.send(&list_value(2, 4)).await;
+
+    assert_eq!(task.await.unwrap().unwrap(), (4, 4));
+}
+
+#[tokio::test(start_paused = true)]
+async fn param_list_ends_although_values_keep_coming() {
+    let (router, _guard, mut vehicle) = setup();
+    let started = tokio::time::Instant::now();
+    let mut task = start_list(&router, false);
+
+    vehicle.recv().await;
+    vehicle.send(&list_value(0, 3)).await;
+    vehicle.send(&list_value(1, 3)).await;
+
+    // Index 0 again, every half round, for as long as the download lasts.
+    let repeating = async {
+        loop {
+            tokio::select! {
+                result = &mut task => break result.unwrap(),
+                _ = tokio::time::sleep(param::PARAM_LIST_IDLE_TIMEOUT / 2) => {
+                    vehicle.send(&list_value(0, 3)).await;
+                }
+            }
+        }
+    };
+    let result = tokio::time::timeout(param::PARAM_LIST_IDLE_TIMEOUT * 60, repeating)
+        .await
+        .expect("the download ends");
+
+    assert_eq!(result.unwrap(), (2, 3));
+    let rounds = u32::from(param::PARAM_LIST_RETRIES) + 1;
+    assert!(started.elapsed() <= param::PARAM_LIST_IDLE_TIMEOUT * (rounds + 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn param_list_falls_back_to_component_information() {
+    use mavio::default_dialect::messages::{AutopilotVersion, ComponentInformationBasic};
+
+    let (router, _guard, mut vehicle) = setup();
+    let task = start_list(&router, true);
+
+    let requested = |message: DefaultDialect| match message {
+        DefaultDialect::CommandLong(command) if command.command == MavCmd::RequestMessage => {
+            command.param1 as u32
+        }
+        other => panic!("expected REQUEST_MESSAGE, got {other:?}"),
+    };
+
+    assert_eq!(
+        requested(vehicle.recv().await),
+        AutopilotVersion::message_id()
+    );
+    vehicle
+        .ack(MavCmd::RequestMessage, MavResult::Unsupported)
+        .await;
+
+    assert_eq!(
+        requested(vehicle.recv().await),
+        ComponentInformationBasic::message_id()
+    );
+    vehicle
+        .ack(MavCmd::RequestMessage, MavResult::Accepted)
+        .await;
+    vehicle.send(&ComponentInformationBasic::default()).await;
+
+    assert!(matches!(
+        vehicle.recv().await,
+        DefaultDialect::ParamRequestList(_)
+    ));
+    vehicle.send(&list_value(0, 1)).await;
+    assert_eq!(task.await.unwrap().unwrap(), (1, 1));
 }
 
 /// Start setting `TEST_PARAM` to `requested`, and receive the `PARAM_SET`.
