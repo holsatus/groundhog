@@ -137,26 +137,26 @@ impl MissionListener {
                 return Some(MissionMessage::Item(item));
             }
 
-            let message = match inbound.frame.decode::<DefaultDialect>() {
-                Ok(DefaultDialect::MissionCount(m))
+            let message = match super::decode(&inbound.frame) {
+                Some(DefaultDialect::MissionCount(m))
                     if self.is_for_us(m.target_system, m.target_component)
                         && m.mission_type == self.mission_type =>
                 {
                     MissionMessage::Count(m)
                 }
-                Ok(DefaultDialect::MissionRequestInt(m))
+                Some(DefaultDialect::MissionRequestInt(m))
                     if self.is_for_us(m.target_system, m.target_component)
                         && m.mission_type == self.mission_type =>
                 {
                     MissionMessage::Request { seq: m.seq }
                 }
-                Ok(DefaultDialect::MissionRequest(m))
+                Some(DefaultDialect::MissionRequest(m))
                     if self.is_for_us(m.target_system, m.target_component)
                         && m.mission_type == self.mission_type =>
                 {
                     MissionMessage::Request { seq: m.seq }
                 }
-                Ok(DefaultDialect::MissionAck(m))
+                Some(DefaultDialect::MissionAck(m))
                     if self.is_for_us(m.target_system, m.target_component)
                         && m.mission_type == self.mission_type =>
                 {

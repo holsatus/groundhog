@@ -14,12 +14,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use mavio::{
-    DefaultDialect,
-    default_dialect::{enums::MagCalStatus, messages::MagCalReport},
-    error::SpecError,
-    mavspec::rust::spec::Dialect,
-};
 use tokio::{
     sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
@@ -35,7 +29,7 @@ use crate::{
         mission::OnboardMission,
         parameter::DownloadState,
     },
-    mavlink::{Event, EventReceiver, MavlinkRouter},
+    mavlink::{Event, EventReceiver, MavlinkRouter, decode},
 };
 
 /// The most often a snapshot is published: the UI's redraw cadence for
@@ -224,55 +218,6 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
     Vec::new()
 }
 
-/// Decode a frame into the default dialect, quietly skipping messages from
-/// other dialects.
-fn decode(frame: &mavio::Frame<mavio::prelude::Versionless>) -> Option<DefaultDialect> {
-    match frame.decode::<DefaultDialect>() {
-        Ok(message) => Some(message),
-        Err(mavio::Error::Spec(SpecError::InvalidEnumValue { .. }))
-            if frame.message_id() == MagCalReport::message_id() =>
-        {
-            decode_mag_cal_report(frame)
-        }
-        Err(mavio::Error::Spec(SpecError::NotInDialect(id))) => {
-            log::trace!("mavlink message id {id} is not in the default dialect");
-            None
-        }
-        Err(error) => {
-            log::trace!("could not decode mavlink frame: {error}");
-            None
-        }
-    }
-}
-
-/// The offset of `cal_status` in the `MAG_CAL_REPORT` payload: after ten
-/// `f32`s, `compass_id` and `cal_mask`.
-const MAG_CAL_REPORT_STATUS: usize = 42;
-
-/// Decode a `MAG_CAL_REPORT` whose status the bundled dialect does not know.
-///
-/// The message definitions mavio generates from predate the failure reasons
-/// ArduPilot reports since (`MAG_CAL_FAILED_OFFSETS` and later), and a report
-/// carrying one would not decode at all: the calibration would never be seen
-/// to fail. Such a status is read as the generic `MAG_CAL_FAILED`.
-fn decode_mag_cal_report(
-    frame: &mavio::Frame<mavio::prelude::Versionless>,
-) -> Option<DefaultDialect> {
-    frame
-        .validate_checksum_with_crc_extra(MagCalReport::crc_extra())
-        .ok()?;
-
-    let payload = frame.payload();
-    let mut bytes = payload.bytes().to_vec();
-    // MAVLink 2 truncates trailing zeroes; the status is never trailing.
-    let status = bytes.get_mut(MAG_CAL_REPORT_STATUS)?;
-    log::debug!("MAG_CAL_REPORT with unknown status {status}; reading it as failed");
-    *status = MagCalStatus::MagCalFailed as u8;
-
-    let patched = mavio::protocol::Payload::new(payload.id(), &bytes, payload.version());
-    DefaultDialect::decode(&patched).ok()
-}
-
 /// The reading end of the runtime's publications.
 pub struct FleetUpdates {
     snapshot: watch::Receiver<Arc<FleetSnapshot>>,
@@ -318,9 +263,12 @@ impl FleetUpdates {
 mod tests {
     use crate::MavlinkId;
 
-    use mavio::default_dialect::{
-        enums::{MavAutopilot, MavParamType, MavType},
-        messages,
+    use mavio::{
+        DefaultDialect,
+        default_dialect::{
+            enums::{MavAutopilot, MavParamType, MavType},
+            messages,
+        },
     };
     use std::time::Instant;
 

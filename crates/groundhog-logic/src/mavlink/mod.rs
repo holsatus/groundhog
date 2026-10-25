@@ -18,6 +18,7 @@ use crate::{MavlinkId, wire::mission_item::RawMissionItem};
 
 mod acks;
 pub(crate) mod commands;
+mod decode;
 mod dedup;
 pub(crate) mod error;
 pub(crate) mod io;
@@ -28,6 +29,7 @@ mod recv;
 mod router;
 mod transaction;
 
+pub(crate) use decode::{decode, decode_message};
 pub(crate) use error::MavError;
 pub use mission::TransferProgress;
 #[cfg(test)]

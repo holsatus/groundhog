@@ -129,7 +129,7 @@ impl<M: MavlinkMessage> MessageReceiver<M> {
     pub async fn next(&mut self) -> Option<M> {
         loop {
             let inbound = self.receiver.next().await?;
-            let Ok(message) = inbound.frame.decode_message::<M>() else {
+            let Some(message) = super::decode_message::<M>(&inbound.frame) else {
                 continue;
             };
 

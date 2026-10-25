@@ -76,6 +76,30 @@ impl MockVehicle {
         self.tx.send(&frame).await.unwrap();
     }
 
+    /// Sends `message` with payload byte `offset` replaced, as a newer
+    /// firmware whose enum value the bundled dialect does not know would.
+    async fn send_patched<M: mavio::Message>(&mut self, message: &M, offset: usize, value: u8) {
+        let payload = message.encode(MavLinkVersion::V2).expect("encodable");
+        let mut bytes = payload.bytes().to_vec();
+        if bytes.len() <= offset {
+            bytes.resize(offset + 1, 0);
+        }
+        bytes[offset] = value;
+
+        let frame = FrameBuilder::new()
+            .system_id(VEHICLE.system)
+            .component_id(VEHICLE.component)
+            .version(V2)
+            .sequence(self.sequence)
+            .message_id(payload.id())
+            .payload(&bytes)
+            .crc_extra(message.crc_extra())
+            .build()
+            .into_versionless();
+        self.sequence = self.sequence.wrapping_add(1);
+        self.tx.send(&frame).await.unwrap();
+    }
+
     /// Sends a mission item whose command and frame the bundled dialect does
     /// not know, built from the raw payload.
     async fn send_raw(&mut self, message: &RawMissionItem) {
@@ -197,6 +221,39 @@ async fn command_in_progress_then_rejected() {
 
     let result = task.await.unwrap();
     assert!(matches!(result, Err(MavError::Rejected(MavResult::Denied))));
+}
+
+/// A result value newer than the bundled dialect's still reaches the
+/// transaction, as the generic "not supported".
+#[tokio::test]
+async fn a_command_ack_with_a_newer_result_reaches_its_transaction() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let command = router.command(VEHICLE, commands::request_message::<SystemTime>());
+    let task = tokio::spawn(command.into_future());
+
+    let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
+        panic!("expected COMMAND_LONG")
+    };
+    vehicle
+        .send_patched(
+            &CommandAck {
+                command: long.command,
+                result: MavResult::Accepted,
+                target_system: DEFAULT_GCS_ID.system,
+                target_component: DEFAULT_GCS_ID.component,
+                ..Default::default()
+            },
+            2,
+            200,
+        )
+        .await;
+
+    let result = task.await.unwrap();
+    assert!(matches!(
+        result,
+        Err(MavError::Rejected(MavResult::Unsupported))
+    ));
 }
 
 #[tokio::test]

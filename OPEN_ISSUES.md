@@ -27,7 +27,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P0** | [PROTO-1](#proto-1--tolerate-enum-values-newer-than-the-bundled-dialect) — a newer enum value can hide a vehicle or break a whole mission |
 | **P1** | [PARAM-1](#param-1--parameter-writes-and-list-downloads-share-the-reply-channel) — a list value can satisfy a parameter set |
 | **P1** | [PARAM-2](#param-2--a-component-with-no-parameters-reports-a-failed-download) — a zero-parameter component fails instead of showing 0 |
 | **P1** | [CAL-1](#cal-1--px4-offers-flight-modes-the-vehicle-cannot-fly) — a rover is offered Takeoff and Precision Land |
@@ -36,23 +35,6 @@ modules, `L` a design or multi-subsystem change.
 ---
 
 ## Protocol & middleware
-
-### PROTO-1 · Tolerate enum values newer than the bundled dialect
-**P0** · Effort M · From LOGIC-1
-
-Mission items are decoded raw now (`wire::mission_item`), so a newer command
-or frame no longer breaks a transfer. The other decoders are still strict:
-`services/runtime.rs:224-241` special-cases only `MAG_CAL_REPORT`, so a
-`HEARTBEAT` with a newer `MavType`/`MavAutopilot` never registers the
-vehicle, and a `COMMAND_ACK` with a newer result is silently dropped
-(`router.rs:546`).
-
-**Fix:** one shared tolerant decoder used by the runtime, the router's ACK
-routing and the mission listener, with a short table of enum fields that have
-a meaningful fallback (the package in `ISSUE_TRACKER.md`).
-
-**Test:** encode a heartbeat with an unknown `MavType` and assert its vehicle
-registers; an ACK with a newer result reaches its transaction.
 
 ### PROTO-2 · A duplicate backlog longer than the window is accepted
 **P2** · Effort M · From REVIEW-H2
@@ -927,9 +909,10 @@ Verified at `5389934`; do not re-open without new evidence.
   (`Invalid` heartbeat no longer resets firmware, with a test); F4.1's
   parameter Cancel; F4.3's delete-link confirmation; F5's
   `CalibrationFinished` payload; F9.1's mission checkbox.
-- **LOGIC_REVIEW:** 2 (GCS heartbeat), 3 (mode picker confirmation), 5
-  (parameter echo preference), 9 (`MISSION_CURRENT.total`), 14.3 (recording
-  names), 14.4 (`reached_seq`).
+- **LOGIC_REVIEW:** 1 (newer enum values: one tolerant decoder for heartbeats,
+  ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
+  picker confirmation), 5 (parameter echo preference), 9
+  (`MISSION_CURRENT.total`), 14.3 (recording names), 14.4 (`reached_seq`).
 - **REVIEW.md:** H4–H16 (parameter idle loop, persist/set-aside/fsync, class
   calibration offering, runtime stop, calibration drop guard, empty-upload
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload

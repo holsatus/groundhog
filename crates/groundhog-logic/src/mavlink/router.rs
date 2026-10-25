@@ -543,7 +543,7 @@ impl MavlinkRouter {
 
         let inbound = Arc::new(inbound);
 
-        if let Ok(ack) = inbound.frame.decode_message::<CommandAck>() {
+        if let Some(ack) = super::decode_message::<CommandAck>(&inbound.frame) {
             self.inner
                 .acks
                 .route_ack(self.inner.gcs_id, inbound.source_mav, &ack);

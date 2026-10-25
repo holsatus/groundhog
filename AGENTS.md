@@ -860,10 +860,11 @@ written by a newer build, saves nothing.
 - **The dialect is `ardupilotmega`**, a superset of `common` (mavio's
   `dlct-ardupilotmega` feature). mavio generates it from MAVLink definitions
   older than current firmware, so some enums lack recent values. A message
-  with an unknown enum value fails to decode and is dropped, unnoticed. The
-  runtime works around this for `MAG_CAL_REPORT`
-  (`services/runtime.rs`, `decode_mag_cal_report`); check for the same when
-  you rely on another enum-carrying message.
+  with an unknown enum value fails to decode and is dropped, unnoticed.
+  `mavlink/decode.rs` is the one tolerant decoder: it patches the fields
+  listed in `TOLERANT` to documented fallbacks. Add a row there (and a test)
+  when you rely on another enum-carrying message; mission items use the raw
+  codec `wire::mission_item` instead.
 - **Groundhog does not request telemetry streams.** It shows what the
   autopilot sends by default: `SYS_STATUS` (battery, sensor health),
   `GPS_RAW_INT`, positions, attitude. A value that stays "–" may simply not

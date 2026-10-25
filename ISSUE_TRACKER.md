@@ -24,7 +24,7 @@ sections of the issue list.
 |---|---|---|---|---|---|
 | 1 | [Empty plans upload nothing](#wp1--empty-plans-upload-nothing) | MISSION-1, CAL-8 | P0 | — | Done |
 | 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Done |
-| 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Todo |
+| 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Done |
 | 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Todo |
 | 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Todo |
 | 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Todo |
@@ -129,7 +129,7 @@ download succeeds and re-uploading sends identical bytes. A WPL row with an
 unknown command round-trips. Existing codec and editor tests still pass.
 
 ### WP3 · One tolerant decoder
-**Closes:** PROTO-1 (status-message half) · **Status:** Todo
+**Closes:** PROTO-1 (status-message half) · **Status:** Done
 
 Four places decode frames on their own (`services/runtime.rs`,
 `MissionListener::next`, the router's ACK routing, `mavlink/recv.rs`), and only
