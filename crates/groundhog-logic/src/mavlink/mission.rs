@@ -75,6 +75,9 @@ struct MissionListener {
     receiver: FilteredReceiver,
     gcs: MavlinkId,
     mission_type: MavMissionType,
+    /// Ignore replies received before this moment: a transfer starting now
+    /// must not take a late reply to an earlier one.
+    not_before: Option<Instant>,
 }
 
 impl MissionListener {
@@ -90,6 +93,7 @@ impl MissionListener {
             receiver,
             gcs: router.gcs_id(),
             mission_type,
+            not_before: None,
         }
     }
 
@@ -112,6 +116,13 @@ impl MissionListener {
             let Ok(Some(inbound)) = timeout(remaining, self.receiver.next()).await else {
                 return None;
             };
+
+            if self
+                .not_before
+                .is_some_and(|since| inbound.received_at < since)
+            {
+                continue;
+            }
 
             // Items travel through the tolerant codec: the dialect drops the
             // whole message when its command or frame is newer than the
@@ -197,14 +208,14 @@ impl Drop for CancelOnDrop<'_> {
     fn drop(&mut self) {
         if self.armed {
             log::debug!("Cancelling mission transfer with {:?}", self.target);
-            drop(self.router.send_targeted(
+            self.router.send_cancellation(
                 self.target,
                 MissionAck {
                     type_: MavMissionResult::MavMissionOperationCancelled,
                     mission_type: self.mission_type,
                     ..Default::default()
                 },
-            ));
+            );
         }
     }
 }
@@ -379,6 +390,19 @@ impl MavlinkRouter {
                         )));
                     }
                     Some(MissionMessage::Ack(ack)) => {
+                        // An accepted ACK is only credible once every item
+                        // was served: a late one from an earlier transfer
+                        // must not complete this one.
+                        if count > 0
+                            && ack.type_ == MavMissionResult::MavMissionAccepted
+                            && highest_served != Some(count - 1)
+                        {
+                            log::debug!(
+                                "Ignoring an accepted MISSION_ACK before every item was served"
+                            );
+                            continue;
+                        }
+
                         cancel.armed = false;
                         return accept(ack.type_).map(|()| ack.opaque_id);
                     }
@@ -425,6 +449,9 @@ impl MavlinkRouter {
                     ..Default::default()
                 },
             )?;
+            // Only a count that answers this request counts; a late one from
+            // an earlier transfer must not.
+            listener.not_before = Some(Instant::now());
 
             let deadline = Instant::now() + ack_timeout;
             loop {

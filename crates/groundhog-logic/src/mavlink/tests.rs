@@ -256,6 +256,37 @@ async fn a_command_ack_with_a_newer_result_reaches_its_transaction() {
     ));
 }
 
+/// Dropping a command the vehicle reported in progress tells it to stop.
+#[tokio::test]
+async fn dropping_a_command_in_progress_sends_a_cancel() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .command(VEHICLE, commands::request_message::<SystemTime>())
+                .into_future()
+                .await
+        }
+    });
+
+    let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
+        panic!("expected COMMAND_LONG")
+    };
+    vehicle.ack(long.command, MavResult::InProgress).await;
+
+    // Let the transaction fold the progress in and start waiting.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    task.abort();
+    drop(task.await);
+
+    let DefaultDialect::CommandCancel(cancel) = vehicle.recv().await else {
+        panic!("expected COMMAND_CANCEL")
+    };
+    assert_eq!(cancel.command, long.command);
+}
+
 #[tokio::test]
 async fn a_command_in_flight_holds_its_lock() {
     let (router, _guard, mut vehicle) = setup();
@@ -937,6 +968,87 @@ async fn mission_items_newer_than_the_dialect_round_trip() {
         })
         .await;
     assert!(upload.await.unwrap().is_ok());
+}
+
+/// An accepted ACK is only credible once every item was served; a late one
+/// from a timed-out transfer must not complete the next one.
+#[tokio::test(start_paused = true)]
+async fn a_stale_accepted_ack_does_not_complete_the_next_upload() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![wire_item(0, 11)];
+
+    let first = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(_) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    let _ = vehicle.recv().await;
+    assert!(matches!(first.await.unwrap(), Err(MavError::Timeout)));
+
+    // The next transfer starts; its own count is out, but it has served
+    // nothing yet.
+    let mut second = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+    loop {
+        if matches!(vehicle.recv().await, DefaultDialect::MissionCount(_)) {
+            break;
+        }
+    }
+
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "the stale ACK is ignored"
+    );
+
+    // Serving the item makes the next accepted ACK real.
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    let _ = vehicle.recv().await;
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 7,
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(second.await.unwrap().unwrap(), 7);
 }
 
 #[tokio::test]

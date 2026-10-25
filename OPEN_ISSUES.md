@@ -48,22 +48,6 @@ module doc, which currently says "however many arrive in a row".
 **Test:** replay a backlog longer than `DUPLICATE_WINDOW` and assert the tail
 is dropped.
 
-### PROTO-3 · Mission transfers have no identity beyond target and type
-**P2** · Effort M · From LOGIC-4
-
-`MissionListener` filters by source, target and mission type only
-(`mission.rs:88-105`). A late `MISSION_ACK` (or a `MISSION_COUNT` from a
-previous download) can be consumed by the next transfer after a timeout,
-failing it or reporting success for a transfer that never ran. The described
-"cancel → ACK" trigger is wrong (see Appendix B), but the race is real.
-
-**Fix:** after taking the lock, drain replies that predate the new request, or
-correlate the first reply with the `MISSION_REQUEST_LIST`/`MISSION_COUNT`
-just sent, or require a short quiet period.
-
-**Test:** begin a transfer, time it out, let its ACK arrive, start a new
-transfer and assert the old ACK is ignored.
-
 ### PROTO-4 · Liveness depends on a heartbeat that a full queue may skip
 **P2** · Effort M · From REVIEW area 1
 
@@ -83,15 +67,6 @@ link lost while `route()` can still `try_send` into a cancelled writer and
 return success for a frame never sent.
 
 **Fix:** remove first, then cancel, or have `closed()` await teardown.
-
-### PROTO-6 · Cancellation messages go through the congested path and drop errors
-**P3** · Effort S · From REVIEW area 1
-
-`COMMAND_CANCEL` (`transaction.rs:269-277`) and `MISSION_ACK(cancelled)`
-(`mission.rs:192-205`) use `route(..)` and discard the result, although the
-module docs promise the vehicle is told. There is also no test that dropping a
-command future sends `COMMAND_CANCEL` (the mission download equivalent is
-tested).
 
 ## Mission
 
@@ -709,13 +684,15 @@ Verified at `5389934`; do not re-open without new evidence.
   mission checkbox and `ui::dialog`/`ui::toast`.
 - **LOGIC_REVIEW:** 1 (newer enum values: one tolerant decoder for heartbeats,
   ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
-  picker confirmation), 5 (parameter echo preference), 9
+  picker confirmation), 4 (mission transfer identity), 5 (parameter echo
+  preference), 9
   (`MISSION_CURRENT.total`), 12 (a component that reports no parameters),
   14.3 (recording names), 14.4 (`reached_seq`).
 - **REVIEW.md:** H1 (parameter writes wait for a list download and share the
   channel only with other sets); areas 3, 4, 6 and 8 (C-cast saturation and
   64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
-  model with stale values removed); areas 7 and 8 (a calibration that waits,
+  model with stale values removed); area 1 (transaction cancellations reach a
+  congested queue); areas 7 and 8 (a calibration that waits,
   times out, reboots and explains cancelling; one way to end a session);
   areas 9 and 11 (an overlay that fits the window and keeps clear of the
   system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
@@ -723,8 +700,7 @@ Verified at `5389934`; do not re-open without new evidence.
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload
   identity, back behind confirmation, map drag cancel, pane minimums, adaptive
   menu); H17's `unreachable_pub` and `ParamEncoding` (the test seam is now
-  behind `test-support`); the parameter-specific part of H18 (the
-  `COMMAND_CANCEL` test remains, PROTO-6).
+  behind `test-support`); the parameter-specific part of H18.
 - **Medium fixes:** persist temp names/permissions, link schema defaults and
   renames, `wire::latlon`, battery summary merge, zero quaternion, mission
   `with_command`/`next_altitude`, compass `id+1` overflow, same-second
@@ -752,8 +728,9 @@ Verified at `5389934`; do not re-open without new evidence.
   to TCP, so it does not fail. Do not apply either "fix"; add the missing RTSP
   test instead (VIDEO-1).
 - **`LOGIC_REVIEW` 4's trigger:** ArduPilot and PX4 do not answer a GCS-sent
-  `MISSION_ACK` with another ACK. The structural lack of transfer identity is
-  still real (PROTO-3).
+  `MISSION_ACK` with another ACK. The structural lack of transfer identity was
+  real, and is fixed by correlating an accepted ACK with the served items and
+  a reply with its own request.
 - **`LOGIC_REVIEW` 6's impact:** ArduPilot ignores writes to mission slot 0 and
   reads home from AHRS (`AP_Mission::replace_cmd`, `read_cmd_from_storage`), so
   home is not moved to 0,0. The empty-mission append case is real and is

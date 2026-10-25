@@ -50,6 +50,12 @@ use crate::{
 /// Maximum number of PARAM_SET transactions in flight at once.
 const PARAM_SET_PERMITS: usize = 4;
 
+/// How long a transaction's cancellation waits for room in the control queue.
+const CANCELLATION_WAIT: Duration = Duration::from_secs(2);
+
+/// How often it retries while the queue is full.
+const CANCELLATION_POLL: Duration = Duration::from_millis(20);
+
 /// Consecutive failed sends the writer task tolerates before it gives up and
 /// cancels the link. The reader task's tail performs the actual teardown.
 const MAX_CONSECUTIVE_SEND_FAILURES: u32 = 10;
@@ -336,6 +342,39 @@ impl MavlinkRouter {
     /// for its echo.
     pub(super) async fn lock_channel_shared(&self, target: MavlinkId) -> KeyGuard {
         self.inner.locks.lock_channel_shared(target).await
+    }
+
+    /// Tell `target` that a transaction is ending, from a `Drop` that cannot
+    /// await: a short task waits for room in the control queue instead of
+    /// losing the message to a momentarily full one.
+    pub(super) fn send_cancellation<M>(&self, target: MavlinkId, message: M)
+    where
+        M: Targeted + Clone + Send + 'static,
+    {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::warn!("No runtime to send a transaction cancellation to {target:?}");
+            return;
+        };
+        let router = self.clone();
+
+        runtime.spawn(async move {
+            let deadline = tokio::time::Instant::now() + CANCELLATION_WAIT;
+
+            loop {
+                match router.send_targeted(target, message.clone()) {
+                    Ok(()) => return,
+                    Err(MavError::LinkCongested) if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(CANCELLATION_POLL).await;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Could not send a transaction cancellation to {target:?}: {error}"
+                        );
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// Wait for a slot in the window of PARAM_SET transactions in flight.
@@ -799,8 +838,11 @@ impl LinkGuard {
 mod tests {
     use super::*;
     use crate::mavlink::DEFAULT_GCS_ID;
-    use mavio::default_dialect::messages::Attitude;
     use mavio::dialects::minimal::messages::Heartbeat;
+    use mavio::{
+        DefaultDialect,
+        default_dialect::{enums::MavMissionResult, messages::Attitude, messages::MissionAck},
+    };
 
     /// A link whose queues are drained by the returned receivers (or not, if
     /// they are dropped).
@@ -1246,6 +1288,53 @@ mod tests {
             !router.is_attached(&id),
             "a failed heartbeat must tear the link down"
         );
+    }
+
+    /// A cancellation is not lost when the control queue is momentarily full:
+    /// it waits for the writer to make room.
+    #[tokio::test]
+    async fn a_cancellation_waits_for_room_in_a_full_queue() {
+        use mavio::mavspec::rust::spec::Dialect;
+
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (link, mut control, _bulk) = link_with_receiver();
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            link.send(&MissionAck::default(), Priority::Control)
+                .expect("room in the new queue");
+        }
+        lock(&router.inner.links).insert(LinkId::new("full"), link);
+
+        router.send_cancellation(
+            MavlinkId {
+                system: 1,
+                component: 1,
+            },
+            MissionAck {
+                type_: MavMissionResult::MavMissionOperationCancelled,
+                ..Default::default()
+            },
+        );
+
+        let mut cancelled = false;
+        for _ in 0..=CONTROL_QUEUE_CAPACITY {
+            let outbound = tokio::time::timeout(Duration::from_secs(2), control.recv())
+                .await
+                .expect("the writer reads the queue")
+                .expect("the queue stays open");
+
+            if matches!(
+                DefaultDialect::decode(&outbound.payload),
+                Ok(DefaultDialect::MissionAck(MissionAck {
+                    type_: MavMissionResult::MavMissionOperationCancelled,
+                    ..
+                }))
+            ) {
+                cancelled = true;
+                break;
+            }
+        }
+
+        assert!(cancelled, "the cancellation reached the queue");
     }
 
     #[test]

@@ -31,7 +31,7 @@ sections of the issue list.
 | 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Done |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
-| 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Todo |
+| 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Done |
 | 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-7, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Todo |
 | 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Todo |
 | 13 | [Router link lifecycle](#wp13--router-link-lifecycle) | PROTO-4, PROTO-5 | P2 | — | Todo |
@@ -274,7 +274,7 @@ move those modules onto it.
   and a panel test of a whole accelerometer run.
 
 ### WP10 · Mission transfer identity and cancellation
-**Closes:** PROTO-3, PROTO-6 · **After:** 2 · **Status:** Todo
+**Closes:** PROTO-3, PROTO-6 · **After:** 2 · **Status:** Done
 
 - **Correlation** (PROTO-3): an upload of `n > 0` items accepts an `Accepted`
   ACK only after it served item `n - 1`; an error ACK is accepted at any time,
