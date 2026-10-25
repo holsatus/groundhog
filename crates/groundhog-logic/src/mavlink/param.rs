@@ -13,7 +13,7 @@ use mavio::default_dialect::messages::{
     AutopilotVersion, ComponentInformationBasic, ParamRequestList, ParamRequestRead, ParamSet,
     ParamValue,
 };
-use tokio::{select, time::timeout};
+use tokio::time::timeout;
 
 use super::{
     error::{MavError, Result},
@@ -100,13 +100,16 @@ impl MavlinkRouter {
         let _lock = self.lock_key(LockKey::ParamList(target)).await;
 
         if request_capabilities {
-            let res = select!(
-                res = self.request_message::<AutopilotVersion>(target) => res.map(|_|()),
-                res = self.request_message::<ComponentInformationBasic>(target) => res.map(|_|()),
-            );
-
-            if let Err(error) = res {
-                log::warn!("Failed to fetch capabilities for {target:?}: {error}");
+            // Both messages contain the capabilities flag, but AUTOPILOT_VERSION
+            // is more likely to give a response, so try that first.
+            if let Err(error) = self.request_message::<AutopilotVersion>(target).await {
+                log::warn!("Failed to get AUTOPILOT_VERSION for {target:?}: {error}");
+                if let Err(error) = self
+                    .request_message::<ComponentInformationBasic>(target)
+                    .await
+                {
+                    log::warn!("Failed to get COMPONENT_INFORMATION_BASIC for {target:?}: {error}");
+                }
             }
         }
 
