@@ -47,7 +47,7 @@ fn default_true() -> bool {
 }
 
 /// The parsed, serialisable description of how to open a link.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LinkBuild {
     #[serde(rename = "Tcp")]
     Tcp { sock_addr: SocketAddrV4 },

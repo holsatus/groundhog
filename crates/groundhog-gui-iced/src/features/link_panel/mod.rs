@@ -19,7 +19,7 @@ use iced::{
 pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkField, LinkVariant};
 use groundhog_logic::{
     link::{LinkConfig, LinkId},
-    services::{self, LinkManager, LinkStats, LinkStatus},
+    services::{self, LinkManager, LinkStats, LinkStatus, Saved},
 };
 
 use super::{
@@ -141,10 +141,22 @@ impl LinkPanel {
             }
             Message::Save(config) => {
                 // Saving a link with an existing name updates it in place,
-                // keeping its id and dropping any live connection; the set
-                // always changed, so it is always persisted.
-                manager.save(config);
-                return (Task::none(), Some(Event::LinksChanged(manager.configs())));
+                // keeping its id, and its connection unless the transport
+                // changed.
+                let name = config.name.trim().to_string();
+                match manager.save(config) {
+                    Ok(saved) => {
+                        if let Saved::Reconnected(_) = saved {
+                            notices.push(Notice::info(format!(
+                                "Reconnecting {name} with the new settings"
+                            )));
+                        }
+                        return (Task::none(), Some(Event::LinksChanged(manager.configs())));
+                    }
+                    Err(error) => {
+                        notices.push(Notice::warning("Could not save the link").detail(error))
+                    }
+                }
             }
             Message::Connect(id) => {
                 // The manager refuses a second supervisor on an active link.
@@ -195,7 +207,7 @@ impl LinkPanel {
 
         let overwrites = manager
             .entries()
-            .any(|(_, config, _)| config.name == self.configurator.name);
+            .any(|(_, config, _)| config.name == self.configurator.name.trim());
 
         ui::panel(scrollable(
             column![
@@ -244,7 +256,13 @@ impl LinkPanel {
                 ),
                 row![
                     Space::new().width(Length::Fill),
-                    save_button(&link.name, overwrites, link.parse().map(Message::Save)),
+                    save_button(
+                        link.name.trim(),
+                        overwrites,
+                        link.parse()
+                            .filter(|config| !config.name.trim().is_empty())
+                            .map(Message::Save),
+                    ),
                 ],
             ]
             .spacing(ui::space::S),

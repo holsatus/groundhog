@@ -23,7 +23,9 @@ mod vehicle;
 pub use backend::{Backend, BackendEvents, BackendOptions};
 pub use error::{Error, MissionRejection, Rejection, Result};
 pub use fleet::FleetHandle;
-pub use link::{LinkEvent, LinkEvents, LinkManager, LinkStatus, detect_serial_ports};
+pub use link::{
+    LinkConfigError, LinkEvent, LinkEvents, LinkManager, LinkStatus, Saved, detect_serial_ports,
+};
 pub use recording::TlogRecorder;
 pub use runtime::{FleetUpdate, FleetUpdates};
 pub use vehicle::{ParamListSummary, TransferProgress, VehicleClient};

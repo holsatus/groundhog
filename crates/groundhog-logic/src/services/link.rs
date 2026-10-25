@@ -124,6 +124,34 @@ impl LinkEntry {
     }
 }
 
+/// What saving a link did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Saved {
+    /// A new link, under a fresh id.
+    Added(LinkId),
+    /// The same-named link, updated; its connection, if any, kept.
+    Updated(LinkId),
+    /// The same-named link, updated, and its live connection restarted on
+    /// the new transport.
+    Reconnected(LinkId),
+}
+
+impl Saved {
+    /// The link saved.
+    pub fn id(&self) -> &LinkId {
+        match self {
+            Saved::Added(id) | Saved::Updated(id) | Saved::Reconnected(id) => id,
+        }
+    }
+}
+
+/// Why a link configuration cannot be saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LinkConfigError {
+    #[error("A link needs a name")]
+    EmptyName,
+}
+
 /// Owns the configured links and their supervisors.
 pub struct LinkManager {
     router: MavlinkRouter,
@@ -259,30 +287,42 @@ impl LinkManager {
     /// Add a link, or update the existing one with the same name in place.
     ///
     /// Reusing the id of a same-named link keeps its identity stable across
-    /// edits; any live connection is dropped, since the configuration it was
-    /// attached under no longer applies. Returns the link's id.
-    pub fn save(&mut self, config: LinkConfig) -> LinkId {
+    /// edits. A live connection survives an update that leaves its transport
+    /// as it was (the name, whether it connects at start); one whose
+    /// transport changed is restarted with the new one. A blank name is
+    /// refused, and names are stored trimmed.
+    pub fn save(&mut self, mut config: LinkConfig) -> Result<Saved, LinkConfigError> {
+        config.name = config.name.trim().to_string();
+        if config.name.is_empty() {
+            return Err(LinkConfigError::EmptyName);
+        }
+
         let existing = self
             .links
             .iter()
             .find(|(_, entry)| entry.config.name == config.name)
             .map(|(id, _)| id.clone());
-        let id = existing.unwrap_or_else(|| self.fresh_id());
+        let Some(id) = existing else {
+            let id = self.fresh_id();
+            self.links.insert(id.clone(), LinkEntry::new(config));
+            return Ok(Saved::Added(id));
+        };
 
-        self.disconnect(&id);
-        let last_connected = self
-            .links
-            .get(&id)
-            .map(|entry| entry.last_connected.clone())
-            .unwrap_or_default();
-        self.links.insert(
-            id.clone(),
-            LinkEntry {
-                last_connected,
-                ..LinkEntry::new(config)
-            },
-        );
-        id
+        let active = self.status(&id).is_active();
+        let entry = self.links.get_mut(&id).expect("the link was just found");
+        // What its supervisor reads when it starts.
+        let transport_changed = entry.config.build != config.build
+            || entry.config.high_latency != config.high_latency
+            || entry.config.auto_reconnect != config.auto_reconnect;
+        entry.config = config;
+
+        if transport_changed && active {
+            self.disconnect(&id);
+            self.connect(&id);
+            Ok(Saved::Reconnected(id))
+        } else {
+            Ok(Saved::Updated(id))
+        }
     }
 
     /// Remove a configured link, dropping any live connection with it.
@@ -476,23 +516,73 @@ mod tests {
         assert_eq!(manager.status(&auto_connect[0]), LinkStatus::Disconnected);
     }
 
+    /// Save `config` as a new link, and return its id.
+    fn add(manager: &mut LinkManager, config: LinkConfig) -> LinkId {
+        match manager.save(config) {
+            Ok(Saved::Added(id)) => id,
+            other => panic!("expected a new link, got {other:?}"),
+        }
+    }
+
     #[test]
     fn save_adds_then_updates_by_name_reusing_the_id() {
         let (mut manager, _, _) = manager();
 
-        let first = manager.save(config("A"));
-        let second = manager.save(config("A"));
-        assert_eq!(first, second);
+        let first = add(&mut manager, config("A"));
+        assert_eq!(manager.save(config("A")), Ok(Saved::Updated(first)));
         assert_eq!(manager.configs().len(), 1);
 
-        manager.save(config("B"));
+        add(&mut manager, config("B"));
         assert_eq!(manager.configs().len(), 2);
+    }
+
+    #[test]
+    fn a_blank_name_is_refused() {
+        let (mut manager, _, _) = manager();
+        assert_eq!(manager.save(config("  ")), Err(LinkConfigError::EmptyName));
+        assert!(manager.configs().is_empty());
+
+        add(&mut manager, config(" A "));
+        assert_eq!(manager.configs()[0].name, "A", "stored trimmed");
+    }
+
+    #[tokio::test]
+    async fn saving_an_unchanged_transport_keeps_the_connection() {
+        let (mut manager, mut events, _router) = manager();
+        let id = add(&mut manager, config("A"));
+        manager.connect(&id);
+        wait_for(&mut events, LinkStatus::is_connected).await;
+
+        let saved = manager.save(LinkConfig {
+            auto_connect: true,
+            ..config("A")
+        });
+        assert_eq!(saved, Ok(Saved::Updated(id.clone())));
+        assert!(manager.status(&id).is_connected());
+        assert!(events.0.try_recv().is_err(), "no status change");
+    }
+
+    #[tokio::test]
+    async fn saving_a_changed_transport_reconnects() {
+        let (mut manager, mut events, _router) = manager();
+        let id = add(&mut manager, config("A"));
+        manager.connect(&id);
+        wait_for(&mut events, LinkStatus::is_connected).await;
+
+        let saved = manager.save(LinkConfig {
+            high_latency: true,
+            ..config("A")
+        });
+        assert_eq!(saved, Ok(Saved::Reconnected(id.clone())));
+        wait_for(&mut events, |status| *status == LinkStatus::Disconnected).await;
+        wait_for(&mut events, LinkStatus::is_connected).await;
+        assert!(manager.configs()[0].high_latency);
     }
 
     #[test]
     fn remove_drops_the_link_and_unknown_is_a_noop() {
         let (mut manager, _, _) = manager();
-        let id = manager.save(config("A"));
+        let id = add(&mut manager, config("A"));
 
         assert!(!manager.remove(&LinkId::new("does-not-exist")));
         assert!(manager.remove(&id));
@@ -502,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn connect_attaches_and_disconnect_detaches() {
         let (mut manager, mut events, router) = manager();
-        let id = manager.save(config("A"));
+        let id = add(&mut manager, config("A"));
 
         assert!(manager.connect(&id));
         assert!(
@@ -523,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn events_carry_the_status_they_replace() {
         let (mut manager, mut events, _router) = manager();
-        let id = manager.save(config("A"));
+        let id = add(&mut manager, config("A"));
 
         manager.connect(&id);
         let connected = wait_for_event(&mut events, LinkStatus::is_connected).await;
@@ -552,10 +642,13 @@ mod tests {
         };
         drop(listener);
 
-        let id = manager.save(LinkConfig {
-            build: LinkBuild::Tcp { sock_addr: addr },
-            ..config("tcp")
-        });
+        let id = add(
+            &mut manager,
+            LinkConfig {
+                build: LinkBuild::Tcp { sock_addr: addr },
+                ..config("tcp")
+            },
+        );
         assert!(manager.connect(&id));
 
         let status = wait_for(&mut events, |status| {
@@ -580,11 +673,14 @@ mod tests {
         };
         drop(listener);
 
-        let id = manager.save(LinkConfig {
-            build: LinkBuild::Tcp { sock_addr: addr },
-            auto_reconnect: false,
-            ..config("tcp")
-        });
+        let id = add(
+            &mut manager,
+            LinkConfig {
+                build: LinkBuild::Tcp { sock_addr: addr },
+                auto_reconnect: false,
+                ..config("tcp")
+            },
+        );
         manager.connect(&id);
 
         wait_for(&mut events, |status| {
