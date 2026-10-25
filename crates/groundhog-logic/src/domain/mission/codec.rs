@@ -8,40 +8,67 @@
 
 use mavio::default_dialect::{enums::MavMissionType, messages::MissionItemInt};
 
-use super::{MissionItem, OnboardMission};
+use super::{MissionItem, OnboardMission, PlanTooLong, Position};
 use crate::domain::firmware::MissionLayout;
 
-/// Encode `items` for upload under `layout`. `home` fills the home slot when
-/// the layout has one; without a known home, a zero position is sent. That
-/// is safe because ArduPilot, the firmware with a home slot, ignores what is
-/// written to it and reads it back as its own home (`AP_Mission::replace_cmd`
-/// and `read_cmd_from_storage`).
+/// Encode `items` for upload under `layout`. An empty plan encodes to nothing:
+/// a lone home row is not sent, because a firmware that reserves the home slot
+/// appends it to an empty mission as a waypoint. The zero home placeholder is
+/// therefore sent only beside items, where it is harmless: ArduPilot, the
+/// firmware with a home slot, ignores what is written there and reads it back
+/// as its own home (`AP_Mission::replace_cmd` and `read_cmd_from_storage`).
+///
+/// # Errors
+///
+/// [`PlanTooLong`] when `items` cannot be numbered with 16-bit wire sequences.
 pub(crate) fn encode(
     items: &[MissionItem],
     home: Option<&MissionItem>,
     layout: MissionLayout,
     mission_type: MavMissionType,
-) -> Vec<MissionItemInt> {
-    let mut wire = Vec::with_capacity(items.len() + 1);
+) -> Result<Vec<MissionItemInt>, PlanTooLong> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    if layout.home_slot {
-        let home = home.cloned().unwrap_or_else(|| {
-            MissionItem::home(super::Position {
-                lat: 0.0,
-                lon: 0.0,
-                alt_m: 0.0,
-            })
-        });
-        wire.push(home.to_wire(0, mission_type));
+    if items.len() > layout.max_items() {
+        return Err(PlanTooLong);
+    }
+
+    let mut wire = Vec::with_capacity(items.len() + usize::from(layout.home_slot));
+
+    if let Some(home) = home_row(home, layout, mission_type) {
+        wire.push(home);
     }
 
     for (index, item) in items.iter().enumerate() {
         let mut item = item.clone();
         shift_targets(&mut item, i64::from(layout.offset()));
-        wire.push(item.to_wire(layout.wire_seq(index), mission_type));
+        let seq = layout.wire_seq(index).ok_or(PlanTooLong)?;
+        wire.push(item.to_wire(seq, mission_type));
     }
 
-    wire
+    Ok(wire)
+}
+
+/// The home slot's wire row for `layout`, or `None` when the layout has no
+/// home slot. Without a known `home`, the row holds a zero position.
+pub(crate) fn home_row(
+    home: Option<&MissionItem>,
+    layout: MissionLayout,
+    mission_type: MavMissionType,
+) -> Option<MissionItemInt> {
+    layout.home_slot.then(|| {
+        home.cloned()
+            .unwrap_or_else(|| {
+                MissionItem::home(Position {
+                    lat: 0.0,
+                    lon: 0.0,
+                    alt_m: 0.0,
+                })
+            })
+            .to_wire(0, mission_type)
+    })
 }
 
 /// Decode a downloaded mission under `layout`. Items are ordered by their
@@ -108,6 +135,14 @@ mod tests {
         vec![waypoint, jump]
     }
 
+    fn encoded(
+        items: &[MissionItem],
+        home: Option<&MissionItem>,
+        layout: MissionLayout,
+    ) -> Vec<MissionItemInt> {
+        encode(items, home, layout, MavMissionType::Mission).expect("the plan fits on the wire")
+    }
+
     #[test]
     fn the_home_slot_shifts_items_and_jump_targets() {
         let home = MissionItem::home(Position {
@@ -115,7 +150,7 @@ mod tests {
             lon: 8.1,
             alt_m: 400.0,
         });
-        let wire = encode(&plan(), Some(&home), ARDUPILOT, MavMissionType::Mission);
+        let wire = encoded(&plan(), Some(&home), ARDUPILOT);
 
         assert_eq!(wire.len(), 3);
         assert_eq!(wire[0].seq, 0);
@@ -136,7 +171,7 @@ mod tests {
 
     #[test]
     fn without_a_home_slot_the_plan_travels_as_is() {
-        let wire = encode(&plan(), None, PX4, MavMissionType::Mission);
+        let wire = encoded(&plan(), None, PX4);
         assert_eq!(wire.len(), 2);
         assert_eq!(wire[1].param1, 0.0);
 
@@ -147,8 +182,47 @@ mod tests {
 
     #[test]
     fn decoding_orders_by_sequence() {
-        let mut wire = encode(&plan(), None, PX4, MavMissionType::Mission);
+        let mut wire = encoded(&plan(), None, PX4);
         wire.reverse();
         assert_eq!(decode(&wire, 0, PX4).items, plan());
+    }
+
+    #[test]
+    fn an_empty_plan_encodes_to_nothing_even_with_a_home_slot() {
+        let home = MissionItem::home(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 400.0,
+        });
+
+        assert_eq!(
+            encoded(&[], Some(&home), ARDUPILOT),
+            vec![],
+            "a lone home row would become a waypoint on an empty ArduPilot mission"
+        );
+        assert_eq!(encoded(&[], None, PX4), vec![]);
+    }
+
+    #[test]
+    fn a_plan_that_the_wire_cannot_number_is_refused() {
+        let item = MissionItem::waypoint(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 40.0,
+        });
+
+        for layout in [ARDUPILOT, PX4] {
+            let fits = vec![item.clone(); layout.max_items()];
+            assert!(
+                encode(&fits, None, layout, MavMissionType::Mission).is_ok(),
+                "{layout:?} numbers its largest plan"
+            );
+
+            let one_too_many = vec![item.clone(); layout.max_items() + 1];
+            assert_eq!(
+                encode(&one_too_many, None, layout, MavMissionType::Mission),
+                Err(PlanTooLong)
+            );
+        }
     }
 }

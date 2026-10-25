@@ -336,7 +336,8 @@ impl VehicleClient {
             )
         })?;
 
-        let wire = codec::encode(&items, home.as_ref(), layout, MavMissionType::Mission);
+        let wire = codec::encode(&items, home.as_ref(), layout, MavMissionType::Mission)
+            .map_err(|_| Error::PlanTooLong)?;
         let opaque_id = self
             .fleet
             .router()
@@ -391,7 +392,9 @@ impl VehicleClient {
     pub async fn set_current_mission_item(&self, index: usize) -> Result<()> {
         let (target, layout) =
             self.with_vehicle(|vehicle| (vehicle.target(), vehicle.mission_layout()))?;
-        let seq = layout.wire_seq(index);
+        let seq = layout
+            .wire_seq(index)
+            .ok_or_else(|| Error::Protocol(format!("mission item {index} is out of range")))?;
         let router = self.fleet.router();
 
         match router

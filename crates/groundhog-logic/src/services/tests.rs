@@ -282,6 +282,36 @@ async fn uploads_to_ardupilot_fill_the_home_slot() {
     );
 }
 
+/// An empty plan must travel as `MISSION_COUNT = 0`, never as a lone home
+/// item: ArduPilot appends that to an empty mission as a waypoint at 0,0.
+#[tokio::test]
+async fn uploading_an_empty_plan_sends_a_count_of_zero() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let client = harness.fleet.vehicle(SYSTEM);
+    let upload = tokio::spawn(async move { client.upload_mission(Vec::new(), &|_| {}).await });
+
+    let DefaultDialect::MissionCount(count) = harness.vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    assert_eq!(count.count, 0, "nothing to transfer");
+
+    harness
+        .vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 12,
+            ..Default::default()
+        })
+        .await;
+
+    let onboard = upload.await.unwrap().expect("the upload succeeds");
+    assert!(onboard.items.is_empty());
+    assert_eq!(onboard.opaque_id, 12);
+}
+
 #[tokio::test]
 async fn downloads_from_ardupilot_set_the_home_slot_apart() {
     let mut harness = harness();

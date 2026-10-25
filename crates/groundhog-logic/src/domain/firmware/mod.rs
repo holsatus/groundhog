@@ -108,9 +108,21 @@ impl MissionLayout {
         u16::from(self.home_slot)
     }
 
-    /// The wire sequence of plan item `index`.
-    pub(crate) fn wire_seq(self, index: usize) -> u16 {
-        index as u16 + self.offset()
+    /// The wire sequence of plan item `index`, or `None` when the plan is too
+    /// long for MAVLink's 16-bit sequence numbers.
+    pub(crate) fn wire_seq(self, index: usize) -> Option<u16> {
+        u16::try_from(index).ok()?.checked_add(self.offset())
+    }
+
+    /// The largest plan this layout can number on the wire.
+    pub(crate) fn max_items(self) -> usize {
+        // Without a home slot, plan item 0 is sequence 0; with one, it is
+        // sequence 1, so one fewer item fits below u16::MAX.
+        if self.home_slot {
+            usize::from(u16::MAX)
+        } else {
+            usize::from(u16::MAX) + 1
+        }
     }
 
     /// The plan index of wire sequence `seq`, or `None` for the home slot.
@@ -197,13 +209,22 @@ mod tests {
     #[test]
     fn the_home_slot_offsets_every_plan_index() {
         let ardupilot = MissionLayout { home_slot: true };
-        assert_eq!(ardupilot.wire_seq(0), 1);
+        assert_eq!(ardupilot.wire_seq(0), Some(1));
         assert_eq!(ardupilot.plan_index(1), Some(0));
         assert_eq!(ardupilot.plan_index(0), None, "seq 0 is home");
+        assert_eq!(ardupilot.max_items(), usize::from(u16::MAX));
+        assert_eq!(
+            ardupilot.wire_seq(usize::from(u16::MAX) - 1),
+            Some(u16::MAX)
+        );
+        assert_eq!(ardupilot.wire_seq(usize::from(u16::MAX)), None);
 
         let px4 = MissionLayout { home_slot: false };
-        assert_eq!(px4.wire_seq(0), 0);
+        assert_eq!(px4.wire_seq(0), Some(0));
         assert_eq!(px4.plan_index(0), Some(0));
+        assert_eq!(px4.max_items(), usize::from(u16::MAX) + 1);
+        assert_eq!(px4.wire_seq(usize::from(u16::MAX)), Some(u16::MAX));
+        assert_eq!(px4.wire_seq(usize::from(u16::MAX) + 1), None);
     }
 
     #[test]

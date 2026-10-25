@@ -697,8 +697,9 @@ impl MissionEditor {
             });
 
         iced_runtime::task::blocking(move |mut sender| {
-            let result = std::fs::write(&path, write_wpl(&items, home.as_ref()))
-                .map_err(|error| error.to_string());
+            let result = write_wpl(&items, home.as_ref())
+                .map_err(|error| error.to_string())
+                .and_then(|text| std::fs::write(&path, text).map_err(|error| error.to_string()));
             drop(sender.try_send(MessageKind::Saved(path, result)));
         })
     }

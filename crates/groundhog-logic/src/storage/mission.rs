@@ -18,7 +18,7 @@ use mavio::default_dialect::{
 use crate::{
     domain::{
         firmware::MissionLayout,
-        mission::{MissionItem, codec},
+        mission::{MissionItem, PlanTooLong, codec},
     },
     wire::{degrees, degrees_e7},
 };
@@ -55,12 +55,25 @@ impl WplError {
 }
 
 /// Serialize a plan as a "QGC WPL 110" document, with `home` (or a zero
-/// placeholder) in row 0.
-pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> String {
+/// placeholder) in row 0. The format requires the home row, so an empty plan
+/// is written as that row alone.
+///
+/// # Errors
+///
+/// [`PlanTooLong`] when the plan has more items than a file can number.
+pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> Result<String, PlanTooLong> {
+    let wire = if items.is_empty() {
+        codec::home_row(home, WPL_LAYOUT, MavMissionType::Mission)
+            .into_iter()
+            .collect()
+    } else {
+        codec::encode(items, home, WPL_LAYOUT, MavMissionType::Mission)?
+    };
+
     let mut out = String::from(HEADER);
     out.push('\n');
 
-    for wire in codec::encode(items, home, WPL_LAYOUT, MavMissionType::Mission) {
+    for wire in wire {
         let frame = export_frame(wire.frame, wire.command);
 
         out.push_str(&format!(
@@ -80,7 +93,7 @@ pub fn write_wpl(items: &[MissionItem], home: Option<&MissionItem>) -> String {
         ));
     }
 
-    out
+    Ok(out)
 }
 
 /// Parse a "QGC WPL 110" document. Blank lines are ignored; the header must be
@@ -279,7 +292,7 @@ mod tests {
             alt_m: 400.0,
         });
 
-        let text = write_wpl(&items, Some(&home));
+        let text = write_wpl(&items, Some(&home)).expect("the plan fits in a file");
         let parsed = parse_wpl(&text).expect("round trip should parse");
 
         assert_eq!(parsed.items, items);
@@ -290,7 +303,7 @@ mod tests {
     fn the_jump_column_is_a_file_row_number() {
         let mut jump = MissionItem::new(MavCmd::DoJump, None);
         jump.params[0] = 0.0; // the first plan item
-        let text = write_wpl(&[waypoint(1.0, 1.0), jump], None);
+        let text = write_wpl(&[waypoint(1.0, 1.0), jump], None).expect("the plan fits in a file");
 
         let jump_row = text.lines().nth(3).unwrap();
         let target: f32 = jump_row.split('\t').nth(4).unwrap().parse().unwrap();
@@ -338,5 +351,16 @@ mod tests {
         let mission = parse_wpl("QGC WPL 110\n").expect("valid header");
         assert!(mission.items.is_empty());
         assert!(mission.home.is_none());
+    }
+
+    #[test]
+    fn an_empty_plan_is_written_with_its_home_row() {
+        let text = write_wpl(&[], None).expect("an empty plan fits in a file");
+
+        assert_eq!(text.lines().count(), 2, "the header and the home row");
+        assert!(
+            parse_wpl(&text).expect("valid file").items.is_empty(),
+            "the placeholder home row is not a plan item"
+        );
     }
 }

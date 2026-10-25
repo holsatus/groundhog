@@ -23,6 +23,12 @@ pub use plan::{ItemId, MissionPlan};
 /// The default altitude of the first waypoint of a plan, above home.
 pub const DEFAULT_WAYPOINT_ALTITUDE_M: f32 = 50.0;
 
+/// A plan has more items than a mission can number with 16-bit wire
+/// sequences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the plan has more items than a mission can number")]
+pub struct PlanTooLong;
+
 /// The mission a vehicle holds, as of the last successful transfer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnboardMission {

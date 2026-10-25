@@ -29,6 +29,8 @@ pub enum Error {
     ParamEncodingUnknown,
     #[error("the value cannot be represented as a MAVLink parameter")]
     ParamEncoding,
+    #[error("the plan has too many items for the vehicle")]
+    PlanTooLong,
     #[error("the vehicle has no flight mode of that kind")]
     NoSuchMode,
     #[error("the vehicle's firmware does not support this calibration")]
