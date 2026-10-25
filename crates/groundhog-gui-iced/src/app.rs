@@ -750,11 +750,11 @@ impl Application {
 
     pub fn view(&self) -> impl Widget<Message> + '_ {
         ui::set_density(self.density());
+        let insets = self.insets.padding(self.scale_factor());
 
         // The full-screen video still shows the notices: an alert must not
         // go unseen for watching the video.
         let base = if self.video.is_full_screen() {
-            let insets = self.insets.padding(self.scale_factor());
             stack![
                 self.video.view_full_screen(insets).map(Message::Video),
                 self.view_toasts(ui::space::XL),
@@ -774,6 +774,7 @@ impl Application {
                 base,
                 self.confirmation.as_ref(),
                 Message::Confirm,
+                insets,
             ))
             .width(Length::Fill)
             .height(Length::Fill),
@@ -783,15 +784,19 @@ impl Application {
     }
 
     /// The toasts, in the bottom-right corner of the space they are given,
-    /// `inset` from its edges.
+    /// `inset` from its edges and clear of the platform's chrome.
     fn view_toasts(&self, inset: f32) -> Element<'_, Message> {
-        container(self.notices.view().map(Message::Notifications))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_right(Length::Fill)
-            .align_bottom(Length::Fill)
-            .padding(inset)
-            .boxed()
+        let chrome = self.insets.padding(self.scale_factor());
+
+        ui::toast::layer(
+            self.notices.view().map(Message::Notifications).boxed(),
+            iced::Padding {
+                top: chrome.top + inset,
+                right: chrome.right + inset,
+                bottom: chrome.bottom + inset,
+                left: chrome.left + inset,
+            },
+        )
     }
 
     /// How the map is placed in the shell on screen.

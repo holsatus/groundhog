@@ -24,11 +24,13 @@
 
 mod button;
 mod container;
+pub mod dialog;
 pub mod icon;
 mod input;
 pub mod style;
 mod text;
 pub mod theme;
+pub mod toast;
 mod tool;
 
 pub use button::{button, button_with, entry, icon_button};

@@ -28,7 +28,7 @@ sections of the issue list.
 | 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Done |
 | 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Done |
 | 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Done |
-| 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Todo |
+| 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Done |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Todo |
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Todo |
 | 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Todo |
@@ -223,7 +223,7 @@ so the quick Land button is hidden; a reported mode outside the class's table
 still decodes.
 
 ### WP7 · Overlays that fit the window
-**Closes:** UI-1, UI-10, UI-13 (dialog and toast) · **Status:** Todo
+**Closes:** UI-1, UI-10, UI-13 (dialog and toast) · **Status:** Done
 
 - Move the confirmation dialog and its backdrop into `ui::dialog`, and the
   toast into `ui::toast`. Both take the platform insets.

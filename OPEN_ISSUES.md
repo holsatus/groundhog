@@ -489,15 +489,6 @@ import the services result as `ServiceResult` to avoid
 
 ## UI & shells
 
-### UI-1 · The confirmation dialog does not fit a phone
-**P1** · Effort S · From REVIEW area 11
-
-`features/confirm.rs:103` fixes the dialog at 420 px; a phone sheet is about
-400, so the accept button can sit off-screen.
-
-**Fix:** use a max width relative to the window (or `ui::space`/`Length::Fill`
-with sensible bounds). Test at 400 px wide.
-
 ### UI-2 · The tiled rail cannot scroll
 **P2** · Effort S · From REVIEW area 9
 
@@ -570,13 +561,6 @@ below >= above`, so a trigger near the bottom can get a clipped menu.
 
 **Fix:** choose the side with room, or clamp the menu's height/scroll.
 
-### UI-10 · Toasts and full-screen video ignore system insets
-**P3** · Effort S · From REVIEW area 9
-
-The tiled panes are inset, but toasts and the maximized-pane fallback use only
-`space::XL` (`app.rs:756-762`, `app/tiled.rs:29-44`), so they can sit under
-system bars.
-
 ### UI-11 · The log panel rebuilds the whole timeline per view
 **P3** · Effort M · From REVIEW area 11
 
@@ -593,13 +577,11 @@ unfocus/cursor-left path. Cancel the preview on unfocus like the map does.
 ### UI-13 · Small toolkit drifts
 **P3** · Effort S · From CODE-F9.1 / REVIEW area 13
 
-The confirmation dialog, backdrop, toast and marked input are still built in
-features (`confirm.rs:86-114`, `notifications.rs:198-205`,
-`parameter_panel.rs:649`); move them into `ui` as `dialog`, `toast` and
-`text_input_marked`. The "More" trigger is permanently `Active`
-(`ui/tool.rs:130`), icons do not scale with density (`ui/style.rs:86,95`), and
-the attitude docs say ±30° while `MAX_ATTITUDE_DEG` is 40
-(`widget/attitude.rs:4,16,27`).
+The marked input is still built in a feature (`parameter_panel.rs:649`); move
+it into `ui` as `text_input_marked`. The "More" trigger is permanently
+`Active` (`ui/tool.rs:130`), icons do not scale with density
+(`ui/style.rs:86,95`), and the attitude docs say ±30° while
+`MAX_ATTITUDE_DEG` is 40 (`widget/attitude.rs:4,16,27`).
 
 ## Map & widgets
 
@@ -808,7 +790,8 @@ Verified at `5389934`; do not re-open without new evidence.
   F11.1 (copy-on-write before change), F11.5 (battery doc); F3.2's regression
   (`Invalid` heartbeat no longer resets firmware, with a test); F4.1's
   parameter Cancel and one `Progress` type; F4.3's delete-link confirmation;
-  F5's `CalibrationFinished` payload; F9.1's mission checkbox.
+  F5's `CalibrationFinished` payload; F9.1's mission checkbox and
+  `ui::dialog`/`ui::toast`.
 - **LOGIC_REVIEW:** 1 (newer enum values: one tolerant decoder for heartbeats,
   ACKs and status messages, and raw mission items), 2 (GCS heartbeat), 3 (mode
   picker confirmation), 5 (parameter echo preference), 9
@@ -817,7 +800,8 @@ Verified at `5389934`; do not re-open without new evidence.
 - **REVIEW.md:** H1 (parameter writes wait for a list download and share the
   channel only with other sets); areas 3, 4, 6 and 8 (C-cast saturation and
   64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
-  model with stale values removed); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
+  model with stale values removed); areas 9 and 11 (an overlay that fits the
+  window and keeps clear of the system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class
   calibration offering, runtime stop, calibration drop guard, empty-upload
   confirmation, Start gate, 0,0 waypoint placement, parameter-load/upload
   identity, back behind confirmation, map drag cancel, pane minimums, adaptive

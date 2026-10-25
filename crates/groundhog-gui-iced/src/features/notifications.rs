@@ -11,15 +11,9 @@ use std::{
 };
 
 use groundhog_logic::SystemId;
-use iced::{
-    Alignment, Element, Length, Widget,
-    widget::{column, container, row},
-};
+use iced::{Element, Widget, widget::column};
 
-use crate::{
-    ui::{self, Icon, Tone, style},
-    widget::surface::surface,
-};
+use crate::ui::{self, Tone};
 
 /// How many notices the history keeps.
 const HISTORY_LEN: usize = 500;
@@ -186,27 +180,12 @@ impl Notifications {
     pub fn view(&self) -> Element<'_, Message> {
         let toasts = self.toasts.iter().map(|toast| {
             let notice = &toast.notice;
-            let body = column![ui::text(&notice.title)]
-                .push(notice.detail.as_ref().map(ui::caption).boxed())
-                .spacing(ui::space::XXS)
-                .width(Length::Fill);
-
-            let dismiss = ui::icon_button(Icon::Close)
-                .on_press(Message::Dismiss(toast.id))
-                .boxed();
-
-            let toast = container(
-                row![body, dismiss]
-                    .spacing(ui::space::M)
-                    .align_y(Alignment::Center),
+            ui::toast::toast(
+                &notice.title,
+                notice.detail.as_deref(),
+                notice.level.tone(),
+                Message::Dismiss(toast.id),
             )
-            .padding([ui::space::S, ui::space::M])
-            .width(Length::Fixed(340.0))
-            .style(style::toast(notice.level.tone()));
-
-            // A toast is opaque to the pointer and to fingers: what lies
-            // beneath (the map) is not hovered, zoomed or dragged through it.
-            surface(toast).boxed()
         });
 
         column(toasts).spacing(ui::space::S).boxed()

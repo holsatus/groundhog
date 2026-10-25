@@ -7,12 +7,9 @@
 //! the application shows it as a modal dialog and dispatches the
 //! confirmation's message only if the operator accepts.
 
-use iced::{
-    Alignment, Element, Length, Widget,
-    widget::{center, column, container, mouse_area, opaque, row, space, stack},
-};
+use iced::{Element, Padding};
 
-use crate::ui::{self, style};
+use crate::ui;
 
 /// A question to put to the operator, and the message to send on "yes".
 #[derive(Debug, Clone)]
@@ -64,52 +61,28 @@ pub enum Answer {
     Dismiss,
 }
 
-/// `base` with the confirmation dialog on top, if one is pending. Clicking
-/// the backdrop dismisses it.
+/// `base` with the confirmation dialog on top, if one is pending. Pressing
+/// the backdrop or Cancel dismisses it.
 pub fn view<'a, M: Clone + 'a>(
     base: Element<'a, M>,
     confirmation: Option<&'a Confirmation<impl Sized>>,
     answer: impl Fn(Answer) -> M + 'a,
+    insets: Padding,
 ) -> Element<'a, M> {
     let Some(confirmation) = confirmation else {
         return base;
     };
 
-    let accept = ui::button(confirmation.accept_label)
-        .kind(if confirmation.danger {
-            style::ButtonKind::Danger
-        } else {
-            style::ButtonKind::Primary
-        })
-        .on_press(answer(Answer::Accept));
-
-    let dialog = container(
-        column![
-            ui::title(&confirmation.title),
-            ui::text(&confirmation.body),
-            row![
-                space::horizontal(),
-                ui::button("Cancel")
-                    .on_press(answer(Answer::Dismiss))
-                    .boxed(),
-                accept.boxed(),
-            ]
-            .spacing(ui::space::M)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(ui::space::L),
+    ui::dialog::view(
+        base,
+        ui::dialog::Dialog {
+            title: &confirmation.title,
+            body: &confirmation.body,
+            accept_label: confirmation.accept_label,
+            danger: confirmation.danger,
+            accept: answer(Answer::Accept),
+            dismiss: answer(Answer::Dismiss),
+        },
+        insets,
     )
-    .padding(ui::space::XL)
-    .width(Length::Fixed(420.0))
-    .style(style::dialog);
-
-    let backdrop = mouse_area(
-        container(space::horizontal())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(style::backdrop),
-    )
-    .on_press(answer(Answer::Dismiss));
-
-    stack![base, opaque(backdrop), center(opaque(dialog))].boxed()
 }
