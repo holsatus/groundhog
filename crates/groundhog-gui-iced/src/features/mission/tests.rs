@@ -509,3 +509,119 @@ async fn clearing_the_vehicle_always_asks() {
     );
     assert!(matches!(effects.as_slice(), [Effect::Confirm(confirmation)] if confirmation.danger));
 }
+
+/// Selection is not an edit: it works during a transfer, while the plan's
+/// content does not change.
+#[tokio::test]
+async fn a_transfer_keeps_selection_enabled_and_edits_disabled() {
+    let mut env = env();
+    let mut editor = MissionEditor::default();
+    editor.sync(&env.fleet.snapshot());
+    let adding = editor.draft_mut(Some(A));
+    let first = adding.plan_mut().push(waypoint(1.0));
+    let second = adding.plan_mut().push(waypoint(2.0));
+
+    step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::Download { confirmed: true },
+    );
+    assert!(editor.transferring(A), "the download is under way");
+
+    step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::Select(Some(second)),
+    );
+    assert_eq!(draft(&editor, Some(A)).selected, Some(second));
+
+    step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::EditField(second, Field::Altitude, "70".into()),
+    );
+    assert_eq!(
+        draft(&editor, Some(A))
+            .plan()
+            .get(second)
+            .unwrap()
+            .position()
+            .unwrap()
+            .alt_m,
+        40.0,
+        "an edit during a transfer changes nothing"
+    );
+
+    let _ = first;
+}
+
+/// Loading over an edited draft asks first; loading during a transfer is
+/// refused with a notice.
+#[tokio::test]
+async fn loading_a_file_asks_over_edits_and_waits_for_a_transfer() {
+    use groundhog_logic::storage::mission::WplMission;
+
+    let mut env = env();
+    let mut editor = MissionEditor::default();
+    editor.sync(&env.fleet.snapshot());
+    editor.draft_mut(Some(A)).plan_mut().push(waypoint(1.0));
+
+    let path = PathBuf::from("mission.waypoints");
+    let loaded = WplMission {
+        home: None,
+        items: vec![waypoint(9.0)],
+    };
+
+    let effects = step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::Loaded(path.clone(), Ok(loaded.clone())),
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::Confirm(_)]),
+        "an edited draft asks before it is replaced"
+    );
+    assert_eq!(draft(&editor, Some(A)).plan().len(), 1);
+
+    step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::LoadedConfirmed(path.clone(), loaded.clone()),
+    );
+    assert_eq!(
+        draft(&editor, Some(A)).plan().items()[0]
+            .item
+            .position()
+            .unwrap()
+            .lat,
+        9.0
+    );
+
+    // A transfer owns the plan until it finishes.
+    step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::Download { confirmed: true },
+    );
+    assert!(editor.transferring(A));
+
+    let before = draft(&editor, Some(A)).plan().mission_items();
+    let effects = step(
+        &mut env,
+        &mut editor,
+        Some(A),
+        MessageKind::Loaded(path, Ok(loaded)),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(draft(&editor, Some(A)).plan().mission_items(), before);
+    assert_eq!(
+        env.notices.history().last().unwrap().level,
+        crate::features::notifications::Level::Warning
+    );
+}

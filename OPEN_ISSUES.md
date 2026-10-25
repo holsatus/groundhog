@@ -70,48 +70,6 @@ return success for a frame never sent.
 
 ## Mission
 
-### MISSION-2 · The editor and selection stay live during a transfer
-**P2** · Effort S · From LOGIC-13 / REVIEW area 10
-
-`edit()` refuses every edit while `transferring` (`features/mission/mod.rs:329-333`),
-but the row click (`view.rs:272-275`), `Deselect` (`:362`) and every editor
-field remain enabled and their messages are silently discarded.
-
-**Fix:** disable selection/Deselect and the editor while transferring, or let
-selection through without treating it as an edit.
-
-**Test:** a transfer in progress; a row click and Deselect produce no state
-change and no lost message.
-
-### MISSION-3 · Loading a file replaces a modified draft without asking
-**P2** · Effort S · From REVIEW area 10
-
-`MessageKind::Loaded` calls `set_items` unconditionally
-(`features/mission/mod.rs:301-311`); it does not check `transferring` or
-whether the draft has edits.
-
-**Fix:** refuse or confirm when the draft is modified or a transfer runs.
-
-### MISSION-4 · The "changed elsewhere" banner contradicts the upload path
-**P3** · Effort S · From LOGIC-13
-
-`view.rs:160-165` says "Download it before uploading", while upload over
-`VehicleChanged` now asks and then proceeds (`draft.rs:217`).
-
-**Fix:** reword the banner to match the confirmation, or make the banner hide
-once the operator has been warned.
-
-### MISSION-8 · `MissionDraft::follow` records `seen` before declining
-**P3** · Effort S · From LOGIC-14.1 / CODE-F11.4
-
-`draft.rs:271-272` stores the onboard mission, then refuses to adopt it when
-the draft has edits. After the operator reverts, the same onboard mission is
-not adopted until it changes again, so the draft reports `Modified` with no
-local edits.
-
-**Fix:** either skip the `seen` update when declining, or document why the
-one-shot behaviour is intended and test it.
-
 ## Parameters
 
 ### PARAM-3 · "Save to a file" writes display values while encoding is unknown
@@ -612,7 +570,8 @@ Verified at `5389934`; do not re-open without new evidence.
 
 - **CODE_REVIEW:** F8.1 (module docs), F8.2 (`ui::either`), F8.4 (dead code),
   F10's shared feature test harness; F11.1 (copy-on-write before change),
-  F11.2 (calibration loss through one ending path), F11.5 (battery doc); F3.2's regression (`Invalid` heartbeat no longer resets
+  F11.2 (calibration loss through one ending path), F11.4 (a declined draft
+  follows once reverted), F11.5 (battery doc); F3.2's regression (`Invalid` heartbeat no longer resets
   firmware, with a test); F4.1's parameter Cancel and one `Progress` type;
   F4.3's delete-link confirmation; F5's `CalibrationFinished` payload; F9.1's
   mission checkbox and `ui::dialog`/`ui::toast`.
@@ -627,7 +586,8 @@ Verified at `5389934`; do not re-open without new evidence.
   64-bit parameter types, repeat `PARAM_VALUE` copies, one parameter-download
   model with stale values removed); area 1 (transaction cancellations reach a
   congested queue); area 5 (a mission's home, frames, validation and jump
-  targets at the boundaries); areas 7 and 8 (a calibration that waits,
+  targets at the boundaries); area 10 (selection, edits and file loads around a
+  transfer); areas 7 and 8 (a calibration that waits,
   times out, reboots and explains cancelling; one way to end a session);
   areas 9 and 11 (an overlay that fits the window and keeps clear of the
   system bars); H4–H16 (parameter idle loop, persist/set-aside/fsync, class

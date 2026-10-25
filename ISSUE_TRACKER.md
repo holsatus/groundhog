@@ -33,7 +33,7 @@ sections of the issue list.
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
 | 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Done |
 | 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Done |
-| 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Todo |
+| 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Done |
 | 13 | [Router link lifecycle](#wp13--router-link-lifecycle) | PROTO-4, PROTO-5 | P2 | — | Todo |
 | 14 | [Duplicate suppression by stream position](#wp14--duplicate-suppression-by-stream-position) | PROTO-2 | P2 | — | Todo |
 | 15 | [Link management by id](#wp15--link-management-by-id) | LINK-1, LINK-7, SVC-8, PARAM-10, API-2 | P2 | 13 | Todo |
@@ -319,7 +319,7 @@ last item, leave valid targets.
 
 ### WP12 · Mission panel during transfers and loads
 **Closes:** MISSION-2, MISSION-3, MISSION-4, MISSION-8 · **After:** 8, 11 ·
-**Status:** Todo
+**Status:** Done
 
 - Selection and Deselect are not edits: they leave `edit()` and always apply.
   The editor's fields and the row actions are disabled (not silently ignored)

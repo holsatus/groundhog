@@ -197,6 +197,8 @@ pub enum MessageKind {
     LoadDialog,
     LoadFrom(PathBuf),
     Loaded(PathBuf, std::result::Result<WplMission, String>),
+    /// The operator agreed to replace an edited plan with a loaded file.
+    LoadedConfirmed(PathBuf, WplMission),
 }
 
 impl MissionEditor {
@@ -269,6 +271,12 @@ impl MissionEditor {
                 self.finished(plan, operation, ticket, result, cx);
                 Task::none()
             }
+            MessageKind::Select(item) => {
+                let draft = self.draft_mut(plan);
+                let item = item.filter(|item| draft.plan().get(*item).is_some());
+                draft.select(item);
+                Task::none()
+            }
             MessageKind::SaveDialog => self.save_dialog(cx).map(wrap),
             MessageKind::SaveTo(path) => self.save_to(plan, path, cx).map(wrap),
             MessageKind::Saved(path, result) => {
@@ -303,21 +311,44 @@ impl MissionEditor {
             MessageKind::Loaded(path, result) => {
                 match result {
                     Ok(mission) => {
-                        let count = mission.items.len();
-                        let home = mission.home.and_then(|home| home.position());
-                        let draft = self.draft_mut(plan);
-                        draft.plan_mut().set_items(mission.items);
-                        draft.plan_mut().set_home(home);
-                        draft.select(None);
-                        cx.notices.push(
-                            Notice::success(format!("Loaded {count} mission items"))
-                                .detail(path.display()),
-                        );
-                        cx.request(Effect::RememberDirectory(path));
+                        if self.loading_refused(plan, cx) {
+                            return Task::none();
+                        }
+
+                        let modified = self
+                            .drafts
+                            .get(&plan)
+                            .is_some_and(|draft| draft.mission.is_modified());
+                        if modified {
+                            cx.confirm(
+                                Confirmation::new(
+                                    "Replace your changes?",
+                                    format!(
+                                        "Loading {} replaces the plan you edited.",
+                                        path.display()
+                                    ),
+                                    Message {
+                                        plan,
+                                        kind: MessageKind::LoadedConfirmed(path, mission),
+                                    },
+                                )
+                                .accept_label("Load")
+                                .danger(),
+                            );
+                            return Task::none();
+                        }
+
+                        self.load(plan, path, mission, cx);
                     }
                     Err(error) => cx.notices.push(
                         Notice::error(format!("Could not load {}", path.display())).detail(error),
                     ),
+                }
+                Task::none()
+            }
+            MessageKind::LoadedConfirmed(path, mission) => {
+                if !self.loading_refused(plan, cx) {
+                    self.load(plan, path, mission, cx);
                 }
                 Task::none()
             }
@@ -370,10 +401,6 @@ impl MissionEditor {
             MessageKind::MoveDown(item) => {
                 draft.plan_mut().move_down(item);
             }
-            MessageKind::Select(item) => {
-                let item = item.filter(|item| draft.plan().get(*item).is_some());
-                draft.select(item);
-            }
             MessageKind::ChangeCommand(item, command) => {
                 // The picker offers only commands this build names.
                 if let Ok(command) = MavCmd::try_from(command) {
@@ -415,6 +442,41 @@ impl MissionEditor {
             }
             _ => {}
         }
+    }
+
+    /// Whether a transfer is running for `plan`, refusing a load with a
+    /// notice if so.
+    fn loading_refused(&self, plan: PlanKey, cx: &mut Context<Message>) -> bool {
+        let Some(system) = plan.filter(|system| self.transferring(*system)) else {
+            return false;
+        };
+
+        cx.notices.push(
+            Notice::warning("A transfer is running")
+                .detail("Load the mission after it finishes, so its result is not lost.")
+                .vehicle(system),
+        );
+        true
+    }
+
+    /// Replace `plan`'s draft with a loaded mission, keeping its home.
+    fn load(
+        &mut self,
+        plan: PlanKey,
+        path: PathBuf,
+        mission: WplMission,
+        cx: &mut Context<Message>,
+    ) {
+        let count = mission.items.len();
+        let home = mission.home.and_then(|home| home.position());
+        let draft = self.draft_mut(plan);
+        draft.plan_mut().set_items(mission.items);
+        draft.plan_mut().set_home(home);
+        draft.select(None);
+
+        cx.notices
+            .push(Notice::success(format!("Loaded {count} mission items")).detail(path.display()));
+        cx.request(Effect::RememberDirectory(path));
     }
 
     /// Whether `action` may run now, by [`MissionDraft::check`]: the vehicle

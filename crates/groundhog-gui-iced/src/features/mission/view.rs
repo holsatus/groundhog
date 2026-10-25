@@ -163,7 +163,8 @@ impl MissionEditor {
 
         let changed_elsewhere = (status == SyncStatus::VehicleChanged).then(|| {
             ui::banner(
-                "The vehicle's mission was changed elsewhere. Download it before uploading.",
+                "The vehicle's mission was changed elsewhere. Uploading replaces that \
+                 change; download it first to keep the vehicle's version.",
                 Tone::Danger,
             )
         });
@@ -313,14 +314,19 @@ fn view_editor<'a>(
     .on_select(move |choice: CommandChoice| message(MessageKind::ChangeCommand(id, choice.0)));
 
     let fields = item.fields().into_iter().map(|view| {
+        // A transfer owns the plan: its fields are shown, not edited, so no
+        // keystroke is silently dropped.
+        let control = if editable {
+            field_widget(view, draft.edits.get(&view.field), id, plan)
+        } else {
+            ui::text(field_display(view)).tone(Tone::Muted).boxed()
+        };
+
         ui::field(
             view.label,
-            row![
-                field_widget(view, draft.edits.get(&view.field), id, plan),
-                ui::caption(view.units).width(Length::Fixed(32.0)),
-            ]
-            .spacing(ui::space::S)
-            .align_y(Alignment::Center),
+            row![control, ui::caption(view.units).width(Length::Fixed(32.0)),]
+                .spacing(ui::space::S)
+                .align_y(Alignment::Center),
         )
     });
 
@@ -367,6 +373,36 @@ fn view_editor<'a>(
     ui::card(
         column![header, Column::with_children(fields).spacing(ui::space::S)].spacing(ui::space::M),
     )
+}
+
+/// A field as read-only text, while a transfer runs.
+fn field_display(view: FieldView) -> String {
+    match view.kind {
+        FieldKind::Bool => {
+            if view.value != 0.0 {
+                "Yes".to_string()
+            } else {
+                "No".to_string()
+            }
+        }
+        FieldKind::Choice(choices) => choices
+            .iter()
+            .find(|(value, _)| f64::from(*value) == view.value)
+            .map_or_else(|| view.value.to_string(), |(_, label)| (*label).to_string()),
+        _ => {
+            let value = if view.value.is_nan() {
+                "–".to_string()
+            } else {
+                view.value.to_string()
+            };
+
+            if view.units.is_empty() {
+                value
+            } else {
+                format!("{value} {}", view.units)
+            }
+        }
+    }
 }
 
 /// The widget for one field: text for numbers, a checkbox for flags, a

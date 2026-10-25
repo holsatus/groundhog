@@ -268,8 +268,15 @@ impl MissionDraft {
             return false;
         }
 
+        // A draft with edits keeps them. Leave `seen` alone: when the
+        // operator reverts, the same onboard mission is adopted then, without
+        // waiting for another change.
+        if self.is_modified() {
+            return false;
+        }
+
         self.seen = Some(onboard.clone());
-        !self.is_modified() && self.sync_to(&onboard.items)
+        self.sync_to(&onboard.items)
     }
 
     /// A download or upload finished: the vehicle holds `mission`, and the
@@ -426,6 +433,26 @@ mod tests {
             draft.plan().mission_items(),
             vec![waypoint(1.0), waypoint(5.0)]
         );
+    }
+
+    /// A draft that declined a mission with edits adopts it once the operator
+    /// reverts, without waiting for the vehicle to change it again.
+    #[test]
+    fn a_reverted_draft_adopts_the_mission_it_declined() {
+        let mut fleet = fleet();
+        let mut draft = MissionDraft::new(Some(SYSTEM));
+        report(&mut fleet, onboard(vec![waypoint(1.0)], 1));
+        draft.follow(&fleet.snapshot());
+        let base = draft.plan().mission_items();
+
+        draft.plan_mut().push(waypoint(5.0));
+        report(&mut fleet, onboard(vec![waypoint(2.0)], 2));
+        assert!(!draft.follow(&fleet.snapshot()), "the edits are kept");
+
+        draft.plan_mut().set_items(base);
+        assert!(!draft.is_modified());
+        assert!(draft.follow(&fleet.snapshot()));
+        assert_eq!(draft.plan().mission_items(), vec![waypoint(2.0)]);
     }
 
     #[test]
