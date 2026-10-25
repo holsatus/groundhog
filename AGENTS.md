@@ -2,19 +2,19 @@
 
 Groundhog is a MAVLink ground control station (GCS) written in Rust with the
 [iced](https://github.com/iced-rs/iced) GUI toolkit. It flies real aircraft, so
-the code favours being correct and obvious over being clever.
+the code favours being correct and easy to read over being clever.
 
 This file is for **people and coding agents alike**. Read the first two
 sections before changing anything; the rest is reference, to be read when you
 touch the area it describes.
 
 1. [Quick start](#quick-start)
-2. [The architecture in one page](#the-architecture-in-one-page)
+2. [The architecture](#the-architecture)
 3. [The layers](#the-layers)
-4. [Design decisions](#design-decisions) and why they were made
+4. [Design decisions](#design-decisions)
 5. [Conventions](#conventions)
 6. [Testing](#testing)
-7. [Recipes](#recipes) for common changes
+7. [Recipes](#recipes)
 8. [Pitfalls](#pitfalls)
 9. [Glossary](#glossary)
 
@@ -61,7 +61,7 @@ Logs then go to `adb logcat -s groundhog`.
 
 ---
 
-## The architecture in one page
+## The architecture
 
 The workspace has three crates, under `crates/`:
 
@@ -76,15 +76,14 @@ Another frontend (a CLI, say) is another crate next to these, depending on
 the crate is named where it is not obvious.
 
 ```
- gui-iced  features/  UI features: panels and map plugins            ┐
-           ui/        the toolkit: tokens, styles, icons, widgets      │
+ gui-iced  features/  UI features: panels and map plugins             ┐
+           ui/        the toolkit: tokens, styles, icons, widgets     │
            map/       map engine: layers, hit-testing, gestures       │
            layout.rs  the tiled shell's workspace                     ├─ UI thread (iced)
            shell.rs   which shell; the floating shell's sheet         │
            app.rs     composition root, message routing, policy       │
            platform/  paths, logging, insets: desktop or Android      ┘
-    │ reads snapshots ▲            │ intents (operations)
-    │                 │            ▼
+
  logic     services/  Backend, fleet runtime, vehicle client, links   ┐
            domain/    vehicle state, missions, parameters, firmware,  │
                       calibration                                     │
@@ -94,8 +93,9 @@ the crate is named where it is not obvious.
            storage/   file formats (missions, parameters)
            persist.rs safe writes of a frontend's own files
            lib.rs     SystemId and MavlinkId, shared by every layer
+
  video     receiver   a GStreamer pipeline per attempt, supervised    ┐
-           frame      the newest frame, for the frontend to draw     ┘ own threads
+           frame      the newest frame, for the frontend to draw      ┘ own threads
 ```
 
 How data moves:

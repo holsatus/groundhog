@@ -125,9 +125,9 @@ pub mod size {
 }
 
 /// The corner radius of a pane, shared with the map's frame.
-pub const PANE_RADIUS: f32 = 8.0;
+pub const PANE_RADIUS: f32 = 12.0;
 /// The corner radius of controls and cards.
-pub const WIDGET_RADIUS: f32 = 4.0;
+pub const WIDGET_RADIUS: f32 = 8.0;
 /// The width of a pane's border, and the height of the header divider.
 pub const PANE_BORDER_WIDTH: f32 = 1.0;
 
