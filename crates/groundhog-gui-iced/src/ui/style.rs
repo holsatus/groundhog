@@ -73,6 +73,12 @@ fn by_density(pointer: f32, touch: f32) -> f32 {
     }
 }
 
+/// The size of body text and the line height it is drawn at: iced's defaults,
+/// set explicitly so the controls' padding (`ui::input`) is derived from the
+/// same numbers the renderer uses.
+pub const TEXT_SIZE: f32 = 16.0;
+pub const LINE_HEIGHT: f32 = 1.375;
+
 /// Text and icon sizes, in logical pixels.
 pub mod size {
     use super::by_density;

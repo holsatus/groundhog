@@ -10,9 +10,9 @@ use iced::{
 
 use super::style::{self, Density, size};
 
-/// The height of a line of body text: iced's default size, 16, at its
-/// default line height of 1.3.
-const LINE: f32 = 16.0 * 1.3;
+/// The height of a line of body text. Inputs are padded from this to the
+/// controls' height; a button sets that height outright.
+const LINE: f32 = style::TEXT_SIZE * style::LINE_HEIGHT;
 
 /// Padding that makes a one-line input as tall as a control, `sides` wide.
 fn input_padding(sides: f32) -> Padding {
@@ -87,4 +87,54 @@ where
             }
             style
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::{Size, Widget, widget::row};
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Message {
+        Press,
+    }
+
+    /// A button, a picker and a text field in one row are the same height;
+    /// the inputs derive their padding from the line height to get there.
+    #[test]
+    fn controls_share_one_height() {
+        let controls = row![
+            super::super::button("Arm").on_press(Message::Press).boxed(),
+            super::pick_list(Some("Position"), ["Position", "Mission"], |name| {
+                name.to_string()
+            }),
+            super::text_input("Search", "Altitude"),
+        ]
+        .spacing(8.0);
+
+        let mut simulator = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(600.0, 200.0),
+            controls.boxed(),
+        );
+
+        let picker = simulator
+            .find("Position")
+            .expect("the picker is rendered")
+            .bounds();
+        let field = simulator
+            .find("Altitude")
+            .expect("the field is rendered")
+            .bounds();
+
+        assert_eq!(
+            picker.height,
+            size::control(),
+            "the picker is as tall as a button"
+        );
+        assert_eq!(
+            field.height, picker.height,
+            "the field is as tall as the picker"
+        );
+    }
 }

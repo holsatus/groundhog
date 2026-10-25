@@ -24,6 +24,11 @@ use app::Application;
 fn application()
 -> iced::Application<impl iced::Program<Message = app::Message, Theme = iced::Theme>> {
     iced::application(Application::boot, Application::update, Application::view)
+        .settings(iced::Settings {
+            text_size: ui::style::TEXT_SIZE.into(),
+            line_height: iced::widget::text::LineHeight::Relative(ui::style::LINE_HEIGHT),
+            ..iced::Settings::default()
+        })
         .subscription(Application::subscription)
         .scale_factor(Application::scale_factor)
         .title(Application::title)
