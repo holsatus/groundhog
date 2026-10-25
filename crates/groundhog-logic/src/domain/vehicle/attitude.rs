@@ -3,6 +3,9 @@
 use mavio::default_dialect::messages;
 use nalgebra::{Quaternion, UnitQuaternion};
 
+/// The norm below which a reported quaternion means "attitude unknown".
+const UNKNOWN_NORM: f32 = 1e-6;
+
 #[derive(Debug, Clone, Default)]
 pub struct AttitudeState {
     pub current: Option<Attitude>,
@@ -25,10 +28,13 @@ impl AttitudeState {
     pub(crate) fn observe_attitude_quaternion(&mut self, message: &messages::AttitudeQuaternion) {
         // MAVLink ATTITUDE_QUATERNION order is (q1..q4) = (w, x, y, z) (Hamilton),
         // matching nalgebra's `Quaternion::new(w, i, j, k)`.
-        self.current = Some(Attitude {
-            attitude: UnitQuaternion::from_quaternion(Quaternion::new(
-                message.q1, message.q2, message.q3, message.q4,
-            )),
+        let quaternion = Quaternion::new(message.q1, message.q2, message.q3, message.q4);
+
+        // All zeros is how a sender says it does not know the attitude; it has
+        // no direction to normalise to.
+        let norm = quaternion.norm();
+        self.current = (norm.is_finite() && norm > UNKNOWN_NORM).then(|| Attitude {
+            attitude: UnitQuaternion::from_quaternion(quaternion),
         });
     }
 }
@@ -63,8 +69,8 @@ mod tests {
 
     #[test]
     fn attitude_quaternion_decodes_yaw_with_wx_yz_order() {
-        // Pure 90 deg yaw about z: (w, x, y, z) = (cos45, 0, 0, sin45). The old code
-        // read w from q4, so this case exposed the component shuffle.
+        // Pure 90 deg yaw about z: (w, x, y, z) = (cos45, 0, 0, sin45). Reading
+        // w from another component would turn it about another axis.
         let message = messages::AttitudeQuaternion {
             q1: FRAC_1_SQRT_2,
             q4: FRAC_1_SQRT_2,
@@ -128,5 +134,17 @@ mod tests {
             state.current.as_ref().expect("attitude recorded"),
             (0.0, 0.0, PI / 2.0),
         );
+    }
+
+    #[test]
+    fn an_all_zero_quaternion_is_an_unknown_attitude() {
+        let mut state = AttitudeState::default();
+        state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
+            q1: 1.0,
+            ..Default::default()
+        });
+        state.observe_attitude_quaternion(&messages::AttitudeQuaternion::default());
+
+        assert!(state.current.is_none(), "unknown, not NaN");
     }
 }
