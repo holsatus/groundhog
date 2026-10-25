@@ -27,7 +27,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [CAL-1](#cal-1--px4-offers-flight-modes-the-vehicle-cannot-fly) — a rover is offered Takeoff and Precision Land |
 | **P1** | [UI-1](#ui-1--the-confirmation-dialog-does-not-fit-a-phone) — the accept button can be off-screen |
 
 ---
@@ -302,16 +301,6 @@ datagram.
 Ask when a live link will be disconnected.
 
 ## Firmware & calibration
-
-### CAL-1 · PX4 offers flight modes the vehicle cannot fly
-**P1** · Effort S/M · From REVIEW area 7
-
-`px4.rs:46-62` has one table for every class, and `modes()` returns it for any
-`is_vehicle()` (`:74-76`). A rover, boat or submarine is offered Takeoff,
-Land, Mission, Precision Land and VTOL Takeoff.
-
-**Fix:** filter the table by `VehicleClass` (or add per-class tables); test
-`modes()` and `mode_of_kind()` per class.
 
 ### CAL-2 · There is no "confirmation sent" state
 **P2** · Effort S · From REVIEW area 7

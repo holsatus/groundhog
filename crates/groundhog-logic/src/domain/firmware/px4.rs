@@ -43,22 +43,89 @@ const fn m(name: &'static str, kind: K, main: u32, sub: u32) -> FlightMode {
     FlightMode::new(name, kind, encode(main, sub))
 }
 
-const MODES: &[FlightMode] = &[
-    m("Manual", K::Manual, MAIN_MANUAL, 0),
-    m("Stabilized", K::Stabilized, MAIN_STABILIZED, 0),
-    m("Acro", K::Other, MAIN_ACRO, 0),
-    m("Altitude", K::AltitudeHold, MAIN_ALTCTL, 0),
-    m("Position", K::PositionHold, MAIN_POSCTL, 0),
-    m("Offboard", K::Guided, MAIN_OFFBOARD, 0),
-    FlightMode::reported("Ready", K::Other, encode(MAIN_AUTO, AUTO_READY)),
-    m("Takeoff", K::Takeoff, MAIN_AUTO, AUTO_TAKEOFF),
-    m("Hold", K::Loiter, MAIN_AUTO, AUTO_LOITER),
-    m("Mission", K::Mission, MAIN_AUTO, AUTO_MISSION),
-    m("Return", K::ReturnToLaunch, MAIN_AUTO, AUTO_RTL),
-    m("Land", K::Land, MAIN_AUTO, AUTO_LAND),
-    m("Follow Me", K::Other, MAIN_AUTO, AUTO_FOLLOW_TARGET),
-    m("Precision Land", K::Land, MAIN_AUTO, AUTO_PRECLAND),
-    m("VTOL Takeoff", K::Takeoff, MAIN_AUTO, AUTO_VTOL_TAKEOFF),
+const MANUAL: FlightMode = m("Manual", K::Manual, MAIN_MANUAL, 0);
+const STABILIZED: FlightMode = m("Stabilized", K::Stabilized, MAIN_STABILIZED, 0);
+const ACRO: FlightMode = m("Acro", K::Other, MAIN_ACRO, 0);
+const ALTITUDE: FlightMode = m("Altitude", K::AltitudeHold, MAIN_ALTCTL, 0);
+const POSITION: FlightMode = m("Position", K::PositionHold, MAIN_POSCTL, 0);
+const OFFBOARD: FlightMode = m("Offboard", K::Guided, MAIN_OFFBOARD, 0);
+
+const READY: FlightMode = FlightMode::reported("Ready", K::Other, encode(MAIN_AUTO, AUTO_READY));
+const TAKEOFF: FlightMode = m("Takeoff", K::Takeoff, MAIN_AUTO, AUTO_TAKEOFF);
+const HOLD: FlightMode = m("Hold", K::Loiter, MAIN_AUTO, AUTO_LOITER);
+const MISSION: FlightMode = m("Mission", K::Mission, MAIN_AUTO, AUTO_MISSION);
+const RETURN: FlightMode = m("Return", K::ReturnToLaunch, MAIN_AUTO, AUTO_RTL);
+const LAND: FlightMode = m("Land", K::Land, MAIN_AUTO, AUTO_LAND);
+const FOLLOW_ME: FlightMode = m("Follow Me", K::Other, MAIN_AUTO, AUTO_FOLLOW_TARGET);
+const PRECISION_LAND: FlightMode = m("Precision Land", K::Land, MAIN_AUTO, AUTO_PRECLAND);
+const VTOL_TAKEOFF: FlightMode = m("VTOL Takeoff", K::Takeoff, MAIN_AUTO, AUTO_VTOL_TAKEOFF);
+
+/// The modes every PX4 vehicle offers: no auto mode assumes a kind of vehicle.
+const BASIC: &[FlightMode] = &[MANUAL, STABILIZED, ACRO, ALTITUDE, POSITION, OFFBOARD];
+
+const COPTER: &[FlightMode] = &[
+    MANUAL,
+    STABILIZED,
+    ACRO,
+    ALTITUDE,
+    POSITION,
+    OFFBOARD,
+    READY,
+    TAKEOFF,
+    HOLD,
+    MISSION,
+    RETURN,
+    LAND,
+    FOLLOW_ME,
+    PRECISION_LAND,
+];
+
+const FIXED_WING: &[FlightMode] = &[
+    MANUAL, STABILIZED, ACRO, ALTITUDE, POSITION, OFFBOARD, READY, TAKEOFF, HOLD, MISSION, RETURN,
+    LAND,
+];
+
+const VTOL: &[FlightMode] = &[
+    MANUAL,
+    STABILIZED,
+    ACRO,
+    ALTITUDE,
+    POSITION,
+    OFFBOARD,
+    READY,
+    TAKEOFF,
+    HOLD,
+    MISSION,
+    RETURN,
+    LAND,
+    PRECISION_LAND,
+    VTOL_TAKEOFF,
+];
+
+const ROVER: &[FlightMode] = &[
+    MANUAL, STABILIZED, ACRO, ALTITUDE, POSITION, OFFBOARD, READY, HOLD, MISSION, RETURN,
+];
+
+const SUBMARINE: &[FlightMode] = &[MANUAL, STABILIZED, ACRO, ALTITUDE, POSITION, OFFBOARD];
+
+/// Every mode of every class, so a mode the vehicle reports outside its own
+/// class's table still gets its name.
+const ALL: &[FlightMode] = &[
+    MANUAL,
+    STABILIZED,
+    ACRO,
+    ALTITUDE,
+    POSITION,
+    OFFBOARD,
+    READY,
+    TAKEOFF,
+    HOLD,
+    MISSION,
+    RETURN,
+    LAND,
+    FOLLOW_ME,
+    PRECISION_LAND,
+    VTOL_TAKEOFF,
 ];
 
 /// The main and sub mode packed into a `custom_mode`.
@@ -72,12 +139,20 @@ impl Firmware for Px4 {
     }
 
     fn modes(&self, class: VehicleClass) -> &'static [FlightMode] {
-        if class.is_vehicle() { MODES } else { &[] }
+        match class {
+            VehicleClass::Copter => COPTER,
+            VehicleClass::FixedWing => FIXED_WING,
+            VehicleClass::Vtol => VTOL,
+            VehicleClass::Rover | VehicleClass::Boat => ROVER,
+            VehicleClass::Submarine => SUBMARINE,
+            VehicleClass::Airship | VehicleClass::Other => BASIC,
+            VehicleClass::AntennaTracker | VehicleClass::NotAVehicle => &[],
+        }
     }
 
     fn decode_mode(
         &self,
-        class: VehicleClass,
+        _class: VehicleClass,
         base_mode: MavModeFlag,
         custom_mode: u32,
     ) -> Option<FlightMode> {
@@ -93,8 +168,7 @@ impl Firmware for Px4 {
             encode(main, 0)
         };
 
-        self.modes(class)
-            .iter()
+        ALL.iter()
             .find(|mode| mode.custom_mode == normalized)
             .copied()
     }
@@ -144,6 +218,88 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mode.name, "Position");
+    }
+
+    fn of_kind(class: VehicleClass, kind: K) -> Option<FlightMode> {
+        Px4.modes(class)
+            .iter()
+            .find(|mode| mode.kind == kind)
+            .copied()
+    }
+
+    #[test]
+    fn each_class_offers_only_what_it_can_fly() {
+        for class in [VehicleClass::Copter, VehicleClass::Vtol] {
+            assert!(of_kind(class, K::Land).is_some(), "{class:?} lands");
+            assert!(of_kind(class, K::Takeoff).is_some(), "{class:?} takes off");
+        }
+
+        assert!(
+            Px4.modes(VehicleClass::Copter)
+                .iter()
+                .any(|mode| mode.name == "Precision Land"),
+            "a multicopter precision-lands"
+        );
+        assert!(
+            Px4.modes(VehicleClass::Vtol)
+                .iter()
+                .any(|mode| mode.name == "Precision Land"),
+            "a VTOL precision-lands"
+        );
+
+        for class in [VehicleClass::Rover, VehicleClass::Boat] {
+            assert!(
+                of_kind(class, K::Takeoff).is_none(),
+                "{class:?} cannot take off"
+            );
+            assert!(of_kind(class, K::Land).is_none(), "{class:?} cannot land");
+            assert!(
+                !Px4.modes(class)
+                    .iter()
+                    .any(|mode| mode.name == "Precision Land"),
+                "{class:?} cannot precision-land"
+            );
+            assert!(
+                of_kind(class, K::Mission).is_some(),
+                "{class:?} flies missions"
+            );
+        }
+
+        // A fixed wing takes off and lands, but has no VTOL-only mode.
+        assert!(of_kind(VehicleClass::FixedWing, K::Land).is_some());
+        assert!(
+            !Px4.modes(VehicleClass::FixedWing)
+                .iter()
+                .any(|mode| mode.name == "VTOL Takeoff")
+        );
+        assert!(
+            Px4.modes(VehicleClass::Vtol)
+                .iter()
+                .any(|mode| mode.name == "VTOL Takeoff")
+        );
+
+        // A submarine has only the modes that do not assume a kind of vehicle.
+        for kind in [K::Takeoff, K::Land, K::Mission, K::ReturnToLaunch] {
+            assert!(
+                of_kind(VehicleClass::Submarine, kind).is_none(),
+                "a submarine has no {kind:?}"
+            );
+        }
+        assert!(of_kind(VehicleClass::Submarine, K::PositionHold).is_some());
+    }
+
+    /// Naming a reported mode does not depend on the class's table.
+    #[test]
+    fn a_reported_mode_outside_the_classs_table_still_decodes() {
+        let mission = Px4
+            .decode_mode(
+                VehicleClass::Rover,
+                MavModeFlag::CUSTOM_MODE_ENABLED,
+                encode(MAIN_AUTO, AUTO_PRECLAND),
+            )
+            .expect("the union of the tables names it");
+
+        assert_eq!(mission.kind, K::Land);
     }
 
     #[test]
