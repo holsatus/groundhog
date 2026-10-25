@@ -22,13 +22,19 @@ impl LinkId {
 }
 
 /// A fully configured link.
+///
+/// Frontends persist it, so its serde shape is a compatibility promise:
+/// variant names are pinned, and a field added later has a default, so a
+/// file written before it existed still loads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LinkConfig {
     pub name: String,
     /// Connect this link automatically on startup.
+    #[serde(default)]
     pub auto_connect: bool,
     /// Use a slower heartbeat for this link, to save bandwidth on expensive
     /// links such as satellite.
+    #[serde(default)]
     pub high_latency: bool,
     /// Reopen the transport when it fails, with backoff, until disconnected.
     #[serde(default = "default_true")]
@@ -43,16 +49,14 @@ fn default_true() -> bool {
 /// The parsed, serialisable description of how to open a link.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LinkBuild {
-    Tcp {
-        sock_addr: SocketAddrV4,
-    },
+    #[serde(rename = "Tcp")]
+    Tcp { sock_addr: SocketAddrV4 },
+    #[serde(rename = "Udp")]
     Udp {
         sock_addr: SocketAddrV4,
         #[serde(default)]
         peer: Option<SocketAddrV4>,
     },
-    Serial {
-        port: String,
-        baud: u32,
-    },
+    #[serde(rename = "Serial")]
+    Serial { port: String, baud: u32 },
 }

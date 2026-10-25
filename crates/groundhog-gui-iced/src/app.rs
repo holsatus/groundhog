@@ -27,7 +27,7 @@ use iced::{
 use mavio::default_dialect::enums::MavSeverity;
 
 use crate::{
-    config::{self, ConfigWriter, Configuration, Settings},
+    config::{self, ConfigWriter, Configuration, Loaded, Settings},
     features::{
         Context, Effect, MapContext,
         calibration::{self, CalibrationPanel},
@@ -159,7 +159,20 @@ impl Application {
         // A file that exists but cannot be read is left alone: this session
         // runs on defaults and saves nothing over it.
         let (configuration, saving) = match Configuration::initialize() {
-            Ok(configuration) => (configuration, Some(config::spawn_writer())),
+            Ok(Loaded {
+                configuration,
+                writable: true,
+            }) => (configuration, Some(config::spawn_writer())),
+            Ok(Loaded {
+                configuration,
+                writable: false,
+            }) => {
+                notices.push(
+                    Notice::warning("The configuration is from a newer Groundhog")
+                        .detail("It is used as it is, and changes in this session are not saved."),
+                );
+                (configuration, None)
+            }
             Err(error) => {
                 notices.push(
                     Notice::error("Could not read the configuration")

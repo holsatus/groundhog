@@ -797,7 +797,12 @@ configurations still load), a message and a control in
 `features/settings_panel.rs`, and apply it in `Application::on_settings`.
 Configuration is persisted only through `ConfigWriter` (a
 `persist::SaveQueue`), which writes one save at a time, newest last, and
-replaces the file atomically.
+replaces the file atomically. The file is the operator's whole setup, so its
+schema stays compatible (see `config.rs`'s module doc): persisted enums pin
+their variant names, new fields have defaults, and every file in
+`crates/groundhog-gui-iced/fixtures/config/` must keep loading; add one when
+the schema changes. A session whose configuration could not be read, or was
+written by a newer build, saves nothing.
 
 ---
 

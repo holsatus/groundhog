@@ -140,15 +140,88 @@ impl Slot {
     const ALL: [Slot; 3] = [Slot::Left, Slot::Middle, Slot::Right];
 }
 
+/// The size a stack is given when nothing says otherwise, in logical pixels.
+const DEFAULT_STACK_SIZE: f32 = 300.0;
+
 /// The panes of one slot, in order, each with its share of the stack.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stack {
     /// The width of a side column, or the height of the row beneath the map,
     /// in logical pixels. Kept while the stack is empty.
+    #[serde(default = "default_stack_size")]
     pub size: f32,
     /// The panes and their shares of the stack's length, relative to each
-    /// other.
+    /// other. A panel this build does not know is dropped on loading.
+    #[serde(default, deserialize_with = "known_panes")]
     pub panes: Vec<(Panel, f32)>,
+}
+
+fn default_stack_size() -> f32 {
+    DEFAULT_STACK_SIZE
+}
+
+/// The panes of a stack as saved, without those whose panel this build does
+/// not know (one removed since the file was written): one unknown panel must
+/// not make the whole configuration unreadable.
+fn known_panes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<(Panel, f32)>, D::Error> {
+    use serde::Deserialize;
+
+    let panes = Vec::<(KnownPanel, f32)>::deserialize(deserializer)?;
+    Ok(panes
+        .into_iter()
+        .filter_map(|(KnownPanel(panel), share)| Some((panel?, share)))
+        .collect())
+}
+
+/// A panel as saved: `None` for a name this build does not know.
+struct KnownPanel(Option<Panel>);
+
+impl<'de> serde::Deserialize<'de> for KnownPanel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{EnumAccess, IntoDeserializer, VariantAccess, Visitor, value};
+
+        /// A variant's name, whatever it is.
+        struct Name(String);
+
+        impl<'de> serde::Deserialize<'de> for Name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct Identifier;
+                impl Visitor<'_> for Identifier {
+                    type Value = Name;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a panel name")
+                    }
+                    fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Name, E> {
+                        Ok(Name(name.to_owned()))
+                    }
+                }
+                deserializer.deserialize_identifier(Identifier)
+            }
+        }
+
+        struct Variant;
+        impl<'de> Visitor<'de> for Variant {
+            type Value = String;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a panel")
+            }
+            fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<String, A::Error> {
+                let (Name(name), variant) = data.variant::<Name>()?;
+                variant.unit_variant()?;
+                Ok(name)
+            }
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<String, E> {
+                Ok(name.to_owned())
+            }
+        }
+
+        let name = deserializer.deserialize_enum("Panel", &[], Variant)?;
+        let deserializer: value::StrDeserializer<'_, value::Error> =
+            name.as_str().into_deserializer();
+        Ok(KnownPanel(Panel::deserialize(deserializer).ok()))
+    }
 }
 
 impl Stack {
@@ -452,7 +525,7 @@ impl Workspace {
                 }
             }
             if !stack.size.is_finite() {
-                stack.size = 300.0;
+                stack.size = DEFAULT_STACK_SIZE;
             }
             stack.size = stack.size.max(MIN_PANE);
         }

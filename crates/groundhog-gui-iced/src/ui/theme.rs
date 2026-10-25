@@ -14,7 +14,9 @@ use iced::theme::palette::Seed;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ThemeMode {
     #[default]
+    #[serde(rename = "Dark")]
     Dark,
+    #[serde(rename = "Light")]
     Light,
 }
 

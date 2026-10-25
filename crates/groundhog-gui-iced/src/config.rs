@@ -5,6 +5,20 @@
 //! beside it without racing its writes. Saves go through one
 //! [`SaveQueue`], which writes them in order and replaces the file
 //! atomically; a file that cannot be parsed is set aside, not overwritten.
+//!
+//! The file is the operator's whole setup, so its schema is kept
+//! compatible:
+//!
+//! - every persisted enum pins its variant names (`#[serde(rename)]`), so
+//!   renaming a Rust item cannot change the file;
+//! - every field that can have a default has one, so a file written before
+//!   the field existed loads; and a panel this build does not know is
+//!   dropped from the workspace rather than failing the file;
+//! - [`CONFIG_VERSION`] changes only with a change that needs a migration,
+//!   which then runs in [`Configuration::initialize_at`]; a file from a newer
+//!   build is loaded, but not written back;
+//! - every file in `fixtures/config/` must still load. Add one when the
+//!   schema changes, and keep the old ones.
 
 use std::path::{Path, PathBuf};
 
@@ -149,6 +163,13 @@ impl Default for Configuration {
     }
 }
 
+/// A configuration as loaded, and whether this build may save over it.
+pub struct Loaded {
+    pub configuration: Configuration,
+    /// `false` for a file written by a newer build.
+    pub writable: bool,
+}
+
 impl Configuration {
     fn config_path() -> anyhow::Result<PathBuf> {
         crate::platform::config_dir()
@@ -156,7 +177,7 @@ impl Configuration {
             .context("Unable to construct path to config.ron")
     }
 
-    pub fn initialize() -> anyhow::Result<Self> {
+    pub fn initialize() -> anyhow::Result<Loaded> {
         Self::initialize_at(&Self::config_path()?)
     }
 
@@ -171,23 +192,42 @@ impl Configuration {
     /// so it survives, before defaults are written. Any other read error is
     /// returned without touching the file, and the caller must not save over
     /// it either.
-    fn initialize_at(path: &Path) -> anyhow::Result<Self> {
-        let Some(config) = read_or_set_aside(path, |text| ron::from_str::<Configuration>(text))?
+    ///
+    /// A file from a newer build is loaded, but is not writable: saving it
+    /// would drop what this build does not know. Any other is brought to
+    /// [`CONFIG_VERSION`], so the version saved is the schema written.
+    fn initialize_at(path: &Path) -> anyhow::Result<Loaded> {
+        let Some(mut configuration) =
+            read_or_set_aside(path, |text| ron::from_str::<Configuration>(text))?
         else {
-            let config = Self::default();
-            config.write_to_file_at(path)?;
-            return Ok(config);
+            let configuration = Self::default();
+            configuration.write_to_file_at(path)?;
+            return Ok(Loaded {
+                configuration,
+                writable: true,
+            });
         };
 
-        if config.version > CONFIG_VERSION {
+        if configuration.version > CONFIG_VERSION {
             log::warn!(
-                "Configuration at {} is version {} from a newer build (current {}); loading anyway",
+                "Configuration at {} is version {} from a newer build (current {}); \
+                 loading it, but not saving over it",
                 path.display(),
-                config.version,
+                configuration.version,
                 CONFIG_VERSION
             );
+            return Ok(Loaded {
+                configuration,
+                writable: false,
+            });
         }
-        Ok(config)
+
+        // Migrations from older versions run here, before the version moves.
+        configuration.version = CONFIG_VERSION;
+        Ok(Loaded {
+            configuration,
+            writable: true,
+        })
     }
 
     fn write_to_file_at(&self, path: &Path) -> anyhow::Result<()> {
@@ -229,11 +269,11 @@ mod tests {
     fn missing_file_writes_default_and_round_trips() {
         let path = temp_config_path("missing");
 
-        let config = Configuration::initialize_at(&path).unwrap();
+        let config = Configuration::initialize_at(&path).unwrap().configuration;
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(path.exists());
 
-        let loaded = Configuration::initialize_at(&path).unwrap();
+        let loaded = Configuration::initialize_at(&path).unwrap().configuration;
         assert_eq!(serialized(&config), serialized(&loaded));
 
         cleanup(&path);
@@ -264,7 +304,7 @@ mod tests {
         let original = "this is not valid ron {{{{";
         std::fs::write(&path, original).unwrap();
 
-        let config = Configuration::initialize_at(&path).unwrap();
+        let config = Configuration::initialize_at(&path).unwrap().configuration;
         assert_eq!(config.version, CONFIG_VERSION);
 
         let backup = path.with_extension("ron.corrupt");
@@ -332,9 +372,79 @@ mod tests {
         // An old config with no `version` field.
         std::fs::write(&path, "(settings: (theme: \"Dark\"))").unwrap();
 
-        let config = Configuration::initialize_at(&path).unwrap();
+        let config = Configuration::initialize_at(&path).unwrap().configuration;
         assert_eq!(config.version, CONFIG_VERSION);
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn an_older_configuration_is_saved_at_the_current_version() {
+        let path = temp_config_path("older");
+        std::fs::write(&path, "(version: 1)").unwrap();
+
+        let loaded = Configuration::initialize_at(&path).unwrap();
+        assert_eq!(loaded.configuration.version, CONFIG_VERSION);
+        assert!(loaded.writable);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_newer_configuration_is_not_written_back() {
+        let path = temp_config_path("newer");
+        std::fs::write(&path, "(version: 99)").unwrap();
+
+        let loaded = Configuration::initialize_at(&path).unwrap();
+        assert!(!loaded.writable);
+        assert_eq!(loaded.configuration.version, 99);
+
+        cleanup(&path);
+    }
+
+    /// Every configuration ever checked in as a fixture still loads, and
+    /// survives saving and loading again unchanged.
+    #[test]
+    fn every_fixture_loads() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/config");
+        let mut fixtures = 0;
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let config: Configuration = ron::from_str(&text)
+                .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+
+            let again: Configuration = ron::from_str(&serialized(&config)).unwrap();
+            assert_eq!(
+                serialized(&config),
+                serialized(&again),
+                "{}",
+                path.display()
+            );
+            fixtures += 1;
+        }
+        assert!(fixtures > 0, "no fixtures in {}", directory.display());
+    }
+
+    #[test]
+    fn a_link_without_the_newer_flags_loads() {
+        let text = r#"(links: [(name: "Old", build: Tcp(sock_addr: "127.0.0.1:5760"))])"#;
+        let loaded: Configuration = ron::from_str(text).unwrap();
+        assert!(!loaded.links[0].auto_connect);
+        assert!(!loaded.links[0].high_latency);
+        assert!(loaded.links[0].auto_reconnect);
+    }
+
+    #[test]
+    fn an_unknown_panel_is_dropped_from_the_workspace() {
+        let text = r#"(workspace: Some((
+            left: (size: 300.0, panes: [(Telescope, 1.0), (Mission, 2.0)]),
+            middle: (size: 200.0, panes: []),
+            right: (panes: [(Parameters, 1.0)]),
+        )))"#;
+        let loaded: Configuration = ron::from_str(text).unwrap();
+        let workspace = loaded.workspace.unwrap();
+        assert_eq!(workspace.left.panes, [(crate::layout::Panel::Mission, 2.0)]);
+        assert_eq!(workspace.right.panes.len(), 1);
     }
 }
