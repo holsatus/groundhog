@@ -12,6 +12,7 @@ use crate::{
     link::LinkConfig,
     mavlink::{self, MavlinkRouter},
 };
+use tokio_util::task::AbortOnDropHandle;
 
 /// How to start a [`Backend`].
 #[derive(Debug, Clone)]
@@ -37,12 +38,15 @@ impl Default for BackendOptions {
 
 /// The running backend: the fleet, the links, and what taps their traffic.
 ///
-/// Dropping it disconnects every link. The fleet runtime keeps running for as
-/// long as a [`FleetHandle`] or the [`BackendEvents`] are alive.
+/// Dropping it disconnects every link and stops the fleet runtime. A
+/// [`FleetHandle`] that outlives it keeps the last snapshot, and the
+/// [`BackendEvents`] end.
 pub struct Backend {
     router: MavlinkRouter,
     fleet: FleetHandle,
     links: LinkManager,
+    /// The fleet runtime, aborted when the backend is dropped.
+    _runtime: AbortOnDropHandle<()>,
 }
 
 /// What the backend reports, for a frontend to drive.
@@ -58,7 +62,7 @@ impl Backend {
     /// marked for auto-connect.
     pub fn start(options: BackendOptions) -> (Self, BackendEvents) {
         let (router, events) = MavlinkRouter::new(options.gcs_id);
-        let (fleet, updates) = runtime::spawn(
+        let (fleet, updates, runtime) = runtime::spawn(
             router.clone(),
             events,
             RuntimeOptions {
@@ -74,6 +78,7 @@ impl Backend {
             router,
             fleet,
             links,
+            _runtime: runtime,
         };
         let events = BackendEvents {
             fleet: updates,

@@ -169,7 +169,8 @@ with the logic crate's own types. A frontend starts the backend with
 fleet runtime and the link supervisors together and returns the
 `BackendEvents` streams to drive. From then on it reads snapshots through
 `backend.fleet()`, manages links through `backend.links_mut()`, and starts
-recordings with `backend.record(directory)`.
+recordings with `backend.record(directory)`. Dropping the `Backend` stops
+all of it: the links and the fleet runtime.
 
 *Why:* a second frontend (a CLI, a headless logger) must get the same
 behaviour without re-implementing any of it, and the compiler, not review,

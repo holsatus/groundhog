@@ -9,7 +9,8 @@ use super::{VehicleClient, runtime::Input};
 use crate::{MavlinkId, SystemId, domain::fleet::FleetSnapshot, mavlink::MavlinkRouter};
 
 /// A handle to the fleet runtime. Cheap to clone; every clone sees the same
-/// fleet.
+/// fleet. The runtime stops with its [`Backend`](super::Backend); a handle
+/// that outlives it keeps the last snapshot, and `wait_for` returns `false`.
 #[derive(Clone)]
 pub struct FleetHandle {
     router: MavlinkRouter,
@@ -59,7 +60,8 @@ impl FleetHandle {
     }
 
     pub(super) fn report(&self, input: Input) {
-        // The runtime only stops with the application.
+        // Once the backend is dropped and its runtime stopped, there is
+        // nothing left to apply this to.
         let _ = self.inputs.send(input);
     }
 }

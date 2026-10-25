@@ -24,6 +24,7 @@ use tokio::{
     sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
+use tokio_util::task::AbortOnDropHandle;
 
 use super::fleet::FleetHandle;
 use crate::{
@@ -96,27 +97,29 @@ impl Default for RuntimeOptions {
 }
 
 /// Start the runtime on the current async runtime, consuming `events` from
-/// `router`. Returns the handle operations go through, and the receiving end
-/// of the update channel for the (single) reader.
+/// `router`. Returns the handle operations go through, the receiving end of
+/// the update channel for the (single) reader, and the task, which runs
+/// until aborted: it holds a handle of its own, to bootstrap vehicles, so no
+/// channel closing ends it.
 pub fn spawn(
     router: MavlinkRouter,
     events: EventReceiver,
     options: RuntimeOptions,
-) -> (FleetHandle, FleetUpdates) {
+) -> (FleetHandle, FleetUpdates, AbortOnDropHandle<()>) {
     let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(FleetSnapshot::default()));
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     let handle = FleetHandle::new(router, input_tx, snapshot_rx.clone());
 
-    tokio::spawn(run(
+    let task = AbortOnDropHandle::new(tokio::spawn(run(
         handle.clone(),
         events,
         input_rx,
         snapshot_tx,
         event_tx,
         options,
-    ));
+    )));
 
     (
         handle,
@@ -124,6 +127,7 @@ pub fn spawn(
             snapshot: snapshot_rx,
             events: event_rx,
         },
+        task,
     )
 }
 
@@ -174,7 +178,8 @@ async fn run(
                     pending.extend(apply(&mut fleet, input));
                     dirty = true;
                 }
-                // Every handle, including our own, is gone.
+                // Not while this task holds its own handle; the task ends by
+                // being aborted.
                 None => break,
             },
 

@@ -12,7 +12,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sy
 
 rust-ini = "0.21.3"
 async-trait = "0.1.89"
-tokio-util = "0.7.18"
+tokio-util = { version = "0.7.18", features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }
 # TCP keepalive tuning on connected transports: silent TCP death is otherwise
 # undetectable on the reader half of a link. `all` unlocks TCP_KEEPCNT

@@ -98,6 +98,7 @@ struct Harness {
     vehicle: MockVehicle,
     _guard: LinkGuard,
     _router: MavlinkRouter,
+    _runtime: tokio_util::task::AbortOnDropHandle<()>,
 }
 
 fn harness() -> Harness {
@@ -106,7 +107,7 @@ fn harness() -> Harness {
 
 fn harness_with(options: RuntimeOptions) -> Harness {
     let (router, events) = MavlinkRouter::new(DEFAULT_GCS_ID);
-    let (fleet, updates) = runtime::spawn(router.clone(), events, options);
+    let (fleet, updates, runtime) = runtime::spawn(router.clone(), events, options);
 
     let (gcs, vehicle) = tokio::io::duplex(1 << 16);
     let (gcs_reader, gcs_writer) = tokio::io::split(gcs);
@@ -123,6 +124,7 @@ fn harness_with(options: RuntimeOptions) -> Harness {
         },
         _guard: guard,
         _router: router,
+        _runtime: runtime,
     }
 }
 
@@ -383,6 +385,22 @@ async fn operations_on_unknown_vehicles_fail_cleanly() {
         client.download_mission(&|_| {}).await,
         Err(Error::UnknownVehicle)
     ));
+}
+
+/// Dropping the backend stops the fleet runtime: no task outlives it, and a
+/// handle kept past it sees the runtime gone rather than hanging.
+#[tokio::test]
+async fn dropping_the_backend_stops_the_runtime() {
+    let (backend, _events) = crate::Backend::start(crate::BackendOptions {
+        bootstrap: false,
+        ..crate::BackendOptions::default()
+    });
+    let fleet = backend.fleet().clone();
+    drop(backend);
+
+    let stopped = fleet.wait_for(SYSTEM, Duration::from_secs(5));
+    let stopped = tokio::time::timeout(Duration::from_secs(1), stopped).await;
+    assert_eq!(stopped, Ok(false), "wait_for returns at once, unanswered");
 }
 
 /// The runtime bootstraps a vehicle as it registers it, before the snapshot

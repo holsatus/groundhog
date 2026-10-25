@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures::{StreamExt, stream};
 use groundhog_logic::{
     Backend, BackendOptions, SystemId,
     domain::{
@@ -101,6 +102,8 @@ pub struct Application {
 pub enum Message {
     /// The fleet runtime published.
     Fleet(FleetUpdate),
+    /// The fleet runtime stopped: vehicle state no longer advances.
+    FleetStopped,
     /// A link's supervisor changed status.
     Link(LinkEvent),
     /// A configuration write finished.
@@ -229,13 +232,21 @@ impl Application {
 
         application.sync_system_bars();
 
-        let saved = futures::stream::unfold(saved, |saved| async move {
+        let saved = stream::unfold(saved, |saved| async move {
             let mut saved = saved?;
             saved.recv().await.map(|outcome| (outcome, Some(saved)))
         });
 
         let tasks = Task::batch([
-            Task::stream(events.fleet.into_stream()).map(Message::Fleet),
+            // The runtime stops only if its task dies: say so, rather than
+            // show the last snapshot as if it were current.
+            Task::stream(
+                events
+                    .fleet
+                    .into_stream()
+                    .map(Message::Fleet)
+                    .chain(stream::once(async { Message::FleetStopped })),
+            ),
             Task::stream(events.links.into_stream()).map(Message::Link),
             Task::stream(saved).map(Message::ConfigurationSaved),
             video_task.map(Message::Video),
@@ -290,6 +301,13 @@ impl Application {
             }
             Message::Fleet(update) => {
                 self.on_fleet(update);
+                Task::none()
+            }
+            Message::FleetStopped => {
+                self.notices.push(
+                    Notice::error("Vehicle state stopped updating")
+                        .detail("What is shown is no longer current. Restart Groundhog."),
+                );
                 Task::none()
             }
             Message::Link(event) => {
