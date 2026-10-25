@@ -144,13 +144,17 @@ pub fn read_or_set_aside<T, E: Display>(
 /// values saved meanwhile is written next. Two saves can therefore never land
 /// out of order and leave an older value on disk.
 pub struct SaveQueue<T> {
-    latest: watch::Sender<Option<T>>,
+    /// The newest value, numbered by the saves so far.
+    latest: watch::Sender<(u64, Option<T>)>,
+    /// The number of the last save written (or failed).
+    written: watch::Receiver<u64>,
 }
 
 impl<T> Clone for SaveQueue<T> {
     fn clone(&self) -> Self {
         Self {
             latest: self.latest.clone(),
+            written: self.written.clone(),
         }
     }
 }
@@ -161,13 +165,15 @@ impl<T: Clone + Send + Sync + 'static> SaveQueue<T> {
     pub fn spawn(
         write: impl Fn(T) -> Result<(), String> + Send + Sync + 'static,
     ) -> (Self, mpsc::UnboundedReceiver<Result<(), String>>) {
-        let (latest, mut requests) = watch::channel(None::<T>);
+        let (latest, mut requests) = watch::channel((0, None::<T>));
+        let (written_tx, written) = watch::channel(0);
         let (outcomes, receiver) = mpsc::unbounded_channel();
         let write = std::sync::Arc::new(write);
 
         tokio::spawn(async move {
             while requests.changed().await.is_ok() {
-                let Some(value) = requests.borrow_and_update().clone() else {
+                let (number, value) = requests.borrow_and_update().clone();
+                let Some(value) = value else {
                     continue;
                 };
 
@@ -176,16 +182,31 @@ impl<T: Clone + Send + Sync + 'static> SaveQueue<T> {
                     .await
                     .unwrap_or_else(|error| Err(error.to_string()));
 
+                written_tx.send_replace(number);
                 let _ = outcomes.send(outcome);
             }
         });
 
-        (Self { latest }, receiver)
+        (Self { latest, written }, receiver)
     }
 
     /// Persist `value`, or a newer one if saved again meanwhile.
     pub fn save(&self, value: T) {
-        self.latest.send_replace(Some(value));
+        self.latest.send_modify(|(number, latest)| {
+            *number += 1;
+            *latest = Some(value);
+        });
+    }
+
+    /// Resolves once the newest value saved so far has been written (or its
+    /// write failed): what to wait for before the process exits.
+    pub fn flushed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let saved = self.latest.borrow().0;
+        let mut written = self.written.clone();
+        async move {
+            // A queue whose task is gone has nothing left to write.
+            let _ = written.wait_for(|written| *written >= saved).await;
+        }
     }
 }
 
@@ -289,6 +310,24 @@ mod tests {
         let pid = std::process::id().to_string();
         assert!(name.to_string_lossy().contains(&pid), "{}", name.display());
         assert_ne!(sidecar(Path::new("config.ron")), name);
+    }
+
+    #[tokio::test]
+    async fn flushed_waits_for_the_newest_save() {
+        let file = TempFile::new();
+        let path = file.0.clone();
+        let (queue, _outcomes) = SaveQueue::spawn(move |value: u32| {
+            std::thread::sleep(Duration::from_millis(20));
+            write_atomic(&path, value.to_string().as_bytes()).map_err(|error| error.to_string())
+        });
+
+        queue.save(1);
+        queue.save(2);
+        tokio::time::timeout(Duration::from_secs(5), queue.flushed())
+            .await
+            .expect("the save is written");
+
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), "2");
     }
 
     #[tokio::test]

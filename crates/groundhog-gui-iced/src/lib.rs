@@ -28,6 +28,8 @@ fn application()
         .scale_factor(Application::scale_factor)
         .title(Application::title)
         .theme(Application::theme)
+        // The application decides when to leave: after saving what is unsaved.
+        .exit_on_close_request(false)
 }
 
 /// Runs the desktop application.

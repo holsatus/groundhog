@@ -145,6 +145,10 @@ pub enum Message {
     Insets(Insets),
     /// Put the whole application in full screen, or take it out (F11).
     ToggleFullScreen,
+    /// The operator asked to close the window.
+    CloseRequested,
+    /// Unsaved changes are saved (or could not be in time): leave.
+    Exit,
     /// The operator went back (see [`back_event`]); `captured` when a widget
     /// took the key, as a text input takes Escape.
     Back {
@@ -154,6 +158,9 @@ pub enum Message {
 
 /// Idle time after the last layout change before the layout is persisted.
 const LAYOUT_SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
+/// The longest closing waits for the last save, so a stuck disk cannot hold
+/// the application open.
+const CLOSE_SAVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl Application {
     pub fn boot() -> (Self, Task<Message>) {
@@ -314,6 +321,22 @@ impl Application {
                 self.on_link(event);
                 Task::none()
             }
+            Message::CloseRequested => {
+                // A layout change still in its debounce would be lost with
+                // the window: save it now, and leave once it is written.
+                if self.layout.is_dirty() {
+                    self.layout.clear_dirty();
+                    self.save_configuration();
+                }
+                match &self.config_writer {
+                    Some(writer) => Task::perform(
+                        tokio::time::timeout(CLOSE_SAVE_TIMEOUT, writer.flushed()),
+                        |_| Message::Exit,
+                    ),
+                    None => iced::exit(),
+                }
+            }
+            Message::Exit => iced::exit(),
             Message::ConfigurationSaved(result) => {
                 if let Err(error) = result {
                     self.notices
@@ -907,6 +930,7 @@ impl Application {
             modifiers,
             back,
             platform::insets_subscription().map(Message::Insets),
+            iced::window::close_requests().map(|_| Message::CloseRequested),
         ])
     }
 }

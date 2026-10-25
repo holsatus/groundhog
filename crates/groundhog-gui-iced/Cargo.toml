@@ -25,7 +25,7 @@ futures.workspace = true
 mav-param.workspace = true
 mavio.workspace = true
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 # Intentionally not rev-pinned: the `slippery` dependency also depends on iced
 # via this same bare git URL, and adding a `rev` here would split iced into two
