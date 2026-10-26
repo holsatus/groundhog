@@ -2,7 +2,7 @@
 
 use iced::{
     Alignment, Element, Length, Padding, Widget,
-    widget::{Space, column, container, row},
+    widget::{column, container, row},
 };
 
 use crate::{
