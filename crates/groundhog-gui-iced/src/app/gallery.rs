@@ -196,10 +196,8 @@ fn fleet() -> Fleet {
 }
 
 /// The video panel as a pane.
-fn video_pane(app: &Application) -> Element<'_, Message> {
-    iced::widget::container(app.pane_body(layout::Panel::Video))
-        .style(style::pane)
-        .boxed()
+fn video_pane(app: &Application) -> impl Widget<Message> + '_ {
+    iced::widget::container(app.pane_body(layout::Panel::Video)).style(style::pane)
 }
 
 /// Every panel but the map, in the order the destinations list them.
@@ -221,7 +219,7 @@ struct Gallery {
 
 impl Gallery {
     /// Render `element` at `size` into `<name>.png`.
-    fn render(&self, name: &str, size: Size, theme: &Theme, element: Element<'_, Message>) {
+    fn render(&self, name: &str, size: Size, theme: &Theme, element: impl Widget<Message>) {
         self.render_hovering(name, size, theme, element, None);
     }
 
@@ -232,7 +230,7 @@ impl Gallery {
         name: &str,
         size: Size,
         theme: &Theme,
-        element: Element<'_, Message>,
+        element: impl Widget<Message>,
         cursor: Option<iced::Point>,
     ) {
         let moves = cursor.map(Pointer::Move);
@@ -246,7 +244,7 @@ impl Gallery {
         name: &str,
         size: Size,
         theme: &Theme,
-        element: Element<'_, Message>,
+        element: impl Widget<Message>,
         steps: impl IntoIterator<Item = Pointer>,
     ) {
         use iced::mouse;
@@ -364,14 +362,14 @@ async fn gallery() {
             &format!("window-{suffix}"),
             Size::new(1600.0, 1000.0),
             &theme,
-            app.view().boxed(),
+            app.view(),
         );
         // The pointer over the first pane's title bar, showing its controls.
         gallery.render_hovering(
             &format!("window-hover-{suffix}"),
             Size::new(1600.0, 1000.0),
             &theme,
-            app.view().boxed(),
+            app.view(),
             Some(iced::Point::new(300.0, 18.0)),
         );
 
@@ -381,9 +379,7 @@ async fn gallery() {
                 &name,
                 Size::new(560.0, 820.0),
                 &theme,
-                iced::widget::container(app.pane_body(panel))
-                    .style(style::pane)
-                    .boxed(),
+                iced::widget::container(app.pane_body(panel)).style(style::pane),
             );
 
             // As a phone's sheet shows it: narrow, with touch-sized controls.
@@ -393,9 +389,7 @@ async fn gallery() {
                 &name,
                 Size::new(380.0, 820.0),
                 &theme,
-                iced::widget::container(app.pane_body(panel))
-                    .style(style::pane)
-                    .boxed(),
+                iced::widget::container(app.pane_body(panel)).style(style::pane),
             );
             ui::set_density(ui::Density::Pointer);
         }
@@ -464,7 +458,7 @@ async fn gallery() {
         "video-full-screen",
         Size::new(1600.0, 1000.0),
         &app.theme(),
-        app.view().boxed(),
+        app.view(),
     );
     let _ = app.update(Message::Video(video::Message::FullScreen(false)));
 
@@ -515,7 +509,7 @@ async fn gallery() {
             name,
             Size::new(1600.0, 1000.0),
             &app.theme(),
-            app.view().boxed(),
+            app.view(),
             [
                 Pointer::Move(origin),
                 Pointer::Press,
@@ -540,7 +534,7 @@ async fn gallery() {
         "drag-rail",
         Size::new(1600.0, 1000.0),
         &app.theme(),
-        app.view().boxed(),
+        app.view(),
         [
             Pointer::Move(button),
             Pointer::Press,
@@ -563,9 +557,7 @@ async fn gallery() {
         "panel-links-overwrite-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        iced::widget::container(app.pane_body(layout::Panel::Links))
-            .style(style::pane)
-            .boxed(),
+        iced::widget::container(app.pane_body(layout::Panel::Links)).style(style::pane),
     );
 
     // The link connected. (Its details are in a tooltip, which shows only
@@ -581,9 +573,7 @@ async fn gallery() {
         "panel-links-connected-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        iced::widget::container(app.pane_body(layout::Panel::Links))
-            .style(style::pane)
-            .boxed(),
+        iced::widget::container(app.pane_body(layout::Panel::Links)).style(style::pane),
     );
 
     // The floating shell on a phone, with the system bars over the map: in
@@ -618,7 +608,7 @@ async fn gallery() {
                 &format!("floating-{name}-{suffix}"),
                 size,
                 &theme,
-                app.view().boxed(),
+                app.view(),
             );
         };
 
@@ -672,6 +662,6 @@ async fn gallery() {
         "window-confirmation",
         Size::new(1600.0, 1000.0),
         &app.theme(),
-        app.view().boxed(),
+        app.view(),
     );
 }

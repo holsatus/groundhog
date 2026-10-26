@@ -9,7 +9,7 @@
 //! or cursor dragging the slider.
 
 use iced::{
-    Alignment, Element, Length, Widget,
+    Alignment, Length, Widget,
     widget::{column, row, scrollable},
 };
 
@@ -45,7 +45,7 @@ pub fn view<'a>(
     settings: &'a Settings,
     scale_preview: Option<f32>,
     recording: Option<&'a std::path::Path>,
-) -> Element<'a, Message> {
+) -> impl Widget<Message> + 'a {
     let scale = scale_preview.unwrap_or(settings.scale_factor);
 
     let appearance = ui::section(
@@ -55,12 +55,14 @@ pub fn view<'a>(
                 "Theme",
                 ui::pick_list(Some(settings.theme), ThemeMode::ALL, ThemeMode::to_string)
                     .on_select(Message::Theme),
-            ),
+            )
+            .boxed(),
             ui::field(
                 "Layout",
                 ui::pick_list(Some(settings.shell), ShellMode::ALL, ShellMode::to_string)
                     .on_select(Message::Shell),
-            ),
+            )
+            .boxed(),
             ui::checkbox("Touch-sized controls", settings.touch_controls)
                 .on_toggle(Message::TouchControls)
                 .boxed(),
@@ -75,7 +77,8 @@ pub fn view<'a>(
                         .step(0.1),
                     format!("{scale:.1}×"),
                 ),
-            ),
+            )
+            .boxed(),
         ],
     );
 
@@ -92,7 +95,8 @@ pub fn view<'a>(
                 .step(5.0),
                 format!("{:.0} m", settings.default_waypoint_altitude_m),
             ),
-        )],
+        )
+        .boxed()],
     );
 
     let recording = ui::section(
@@ -121,9 +125,11 @@ pub fn view<'a>(
 }
 
 /// A slider with its value beside it.
-fn slider_with_value<'a>(slider: impl Widget<Message> + 'a, value: String) -> Element<'a, Message> {
+fn slider_with_value<'a>(
+    slider: impl Widget<Message> + 'a,
+    value: String,
+) -> impl Widget<Message> + 'a {
     row![slider, ui::text(value).width(Length::Fixed(56.0))]
         .spacing(ui::space::M)
         .align_y(Alignment::Center)
-        .boxed()
 }

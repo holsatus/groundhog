@@ -13,7 +13,7 @@
 
 use iced::{
     Alignment, Element, Length, Padding, Widget,
-    widget::{column, container, mouse_area, opaque, responsive, scrollable, space, stack},
+    widget::{Stack, column, container, mouse_area, opaque, responsive, scrollable, space, stack},
 };
 
 use crate::ui::{self, style};
@@ -39,19 +39,19 @@ pub struct Dialog<'a, M> {
 /// `base` with `dialog`, if there is one, on top of a backdrop. Pressing the
 /// backdrop or Cancel dismisses it.
 pub fn view<'a, M: Clone + 'a>(
-    base: Element<'a, M>,
+    base: impl Widget<M> + 'a,
     dialog: Option<Dialog<'a, M>>,
     insets: Padding,
-) -> Element<'a, M> {
+) -> Stack<Element<'a, M>> {
     let layer = match dialog {
-        Some(dialog) => layer(dialog, insets),
+        Some(dialog) => layer(dialog, insets).boxed(),
         None => space().boxed(),
     };
-    stack![base, layer].boxed()
+    stack![base, layer]
 }
 
 /// `dialog` over a backdrop that fills the space it is given.
-fn layer<'a, M: Clone + 'a>(dialog: Dialog<'a, M>, insets: Padding) -> Element<'a, M> {
+fn layer<'a, M: Clone + 'a>(dialog: Dialog<'a, M>, insets: Padding) -> impl Widget<M> + 'a {
     let backdrop = mouse_area(
         container(space::horizontal())
             .width(Length::Fill)
@@ -114,7 +114,7 @@ fn layer<'a, M: Clone + 'a>(dialog: Dialog<'a, M>, insets: Padding) -> Element<'
             .boxed()
     });
 
-    stack![opaque(backdrop), opaque(stage)].boxed()
+    stack![opaque(backdrop), opaque(stage)]
 }
 
 #[cfg(test)]
@@ -134,13 +134,12 @@ mod tests {
         Dismiss,
     }
 
-    fn element() -> Element<'static, Message> {
+    fn element() -> Stack<Element<'static, Message>> {
         // The application's base is its shell, which fills the window; a
         // `stack` sizes its layers by its base layer.
         let base = container(ui::text("the panel behind"))
             .width(Length::Fill)
-            .height(Length::Fill)
-            .boxed();
+            .height(Length::Fill);
 
         view(
             base,

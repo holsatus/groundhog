@@ -196,7 +196,7 @@ impl Application {
                 Space::new().width(Length::Fill),
             ]
             .boxed(),
-            (Some(sheet), None) => sheet,
+            (Some(sheet), None) => sheet.boxed(),
             (None, _) => Space::new().boxed(),
         };
         let chrome = container(chrome)
@@ -218,14 +218,14 @@ impl Application {
         // corner swaps them.
         let (main, corner) = match self.video.slot() {
             Some(slot) if self.floating.is_video_main() => (
-                ui::screen(video(slot)),
-                Some(self.view_map(Placement::Pane)),
+                ui::screen(video(slot)).boxed(),
+                Some(self.view_map(Placement::Pane).boxed()),
             ),
             Some(slot) => (
-                self.view_map(Placement::Window { covered }),
-                Some(ui::screen(video(slot))),
+                self.view_map(Placement::Window { covered }).boxed(),
+                Some(ui::screen(video(slot)).boxed()),
             ),
-            None => (self.view_map(Placement::Window { covered }), None),
+            None => (self.view_map(Placement::Window { covered }).boxed(), None),
         };
         let corner = corner.map(|content| {
             let width = (geometry.screen.width * CORNER_SHARE).min(CORNER_WIDTH);
@@ -264,7 +264,7 @@ impl Application {
         &'a self,
         title: &'a str,
         nested: bool,
-        body: Element<'a, Message>,
+        body: impl Widget<Message> + 'a,
         geometry: &Geometry,
     ) -> Element<'a, Message> {
         let back = nested.then(|| {
@@ -298,7 +298,7 @@ impl Application {
     }
 
     /// The toasts, in the bottom-right corner of what `covered` leaves.
-    fn view_toasts_within(&self, covered: Padding) -> Element<'_, Message> {
+    fn view_toasts_within(&self, covered: Padding) -> impl Widget<Message> + '_ {
         container(self.notices.view().map(Message::Notifications))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -310,7 +310,6 @@ impl Application {
                 bottom: covered.bottom + ui::space::S,
                 left: covered.left + ui::space::S,
             })
-            .boxed()
     }
 
     /// The destinations, each an icon in a pill (filled for the one shown)
@@ -378,7 +377,7 @@ impl Application {
 
     /// `panel` in a sheet: a pane with its title, a button to let it take
     /// the whole window (or give the map its share back) and one to close it.
-    fn view_sheet(&self, panel: Panel) -> Element<'_, Message> {
+    fn view_sheet(&self, panel: Panel) -> impl Widget<Message> + '_ {
         let floating = |message| Message::Floating(message);
         let expand = if self.floating.is_expanded() {
             ui::icon_button(Icon::Minimize).hint("Show the map")
@@ -424,6 +423,5 @@ impl Application {
                 .height(Length::Fill)
                 .style(style::floating),
         )
-        .boxed()
     }
 }

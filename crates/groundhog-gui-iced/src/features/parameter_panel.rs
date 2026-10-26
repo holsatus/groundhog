@@ -405,7 +405,7 @@ impl ParameterPanel {
         selected: Option<SystemId>,
     ) -> Element<'a, Message> {
         let Some(vehicle) = selected.and_then(|system| fleet.vehicle(system)) else {
-            return ui::empty("No vehicle selected.");
+            return ui::empty("No vehicle selected.").boxed();
         };
 
         let system = vehicle.system;
@@ -461,7 +461,7 @@ impl ParameterPanel {
         };
         let header = ui::header(
             picker,
-            [state],
+            [state.boxed()],
             [vec![
                 ui::tool(Icon::Open, "Load values from a file")
                     .on_press(Message::LoadDialog(address)),
@@ -578,6 +578,7 @@ impl ParameterPanel {
             ]
             .spacing(ui::space::M),
         )
+        .boxed()
     }
 
     fn view_param_list<'a>(
@@ -648,7 +649,7 @@ impl ParameterPanel {
             ]
             .boxed(),
             Item::Param(ident, param, edit) => {
-                view_param_row(address, ident, param, *edit, encoding_known, downloading)
+                view_param_row(address, ident, param, *edit, encoding_known, downloading).boxed()
             }
         })
         .item_height(move |item| match item {
@@ -693,7 +694,7 @@ fn view_param_row<'a>(
     edit: Option<&'a ParamEdit>,
     encoding_known: bool,
     downloading: bool,
-) -> Element<'a, Message> {
+) -> impl Widget<Message> + 'a {
     let value_text = edit.map_or_else(|| value_to_string(param.value()), |edit| edit.text.clone());
 
     let input = || {
@@ -754,7 +755,6 @@ fn view_param_row<'a>(
     ]
     .spacing(ui::space::XS)
     .align_y(Alignment::Center)
-    .boxed()
 }
 
 #[cfg(test)]

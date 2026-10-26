@@ -7,7 +7,7 @@
 //! the application shows it as a modal dialog and dispatches the
 //! confirmation's message only if the operator accepts.
 
-use iced::{Element, Padding};
+use iced::{Element, Padding, Widget, widget::Stack};
 
 use crate::ui;
 
@@ -64,11 +64,11 @@ pub enum Answer {
 /// `base` with the confirmation dialog on top, if one is pending. Pressing
 /// the backdrop or Cancel dismisses it.
 pub fn view<'a, M: Clone + 'a>(
-    base: Element<'a, M>,
+    base: impl Widget<M> + 'a,
     confirmation: Option<&'a Confirmation<impl Sized>>,
     answer: impl Fn(Answer) -> M + 'a,
     insets: Padding,
-) -> Element<'a, M> {
+) -> Stack<Element<'a, M>> {
     ui::dialog::view(
         base,
         confirmation.map(|confirmation| ui::dialog::Dialog {

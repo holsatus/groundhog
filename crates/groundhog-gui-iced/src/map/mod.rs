@@ -24,7 +24,7 @@ pub use layer::{
 pub use view::{MapFrame, MapView};
 
 use iced::{
-    Color, Element, Length, Padding, Point, Size, Task, Theme, Widget,
+    Color, Length, Padding, Point, Size, Task, Theme, Widget,
     widget::canvas::{Canvas, Fill, LineJoin, Path, Stroke, Style, fill},
 };
 use slippery::{CacheMessage, MapWidget, Projector, TileCache, Viewpoint, Zoom, location};
@@ -127,13 +127,13 @@ impl Map {
 
     /// The map with `layers` on top, placed as `placement`. `wrap` lifts the
     /// map's own messages into the layers' message type.
-    pub fn view<'a, M: 'static>(
+    pub fn view<'a, M: 'static, F: Fn(Message) -> M + 'a>(
         &'a self,
         mut layers: LayerSet<'a, M>,
-        wrap: impl Fn(Message) -> M + 'a,
+        wrap: F,
         theme: &Theme,
         placement: Placement,
-    ) -> Element<'a, M> {
+    ) -> impl Widget<M> + use<'a, M, F> {
         let palette = theme.palette();
         layers.push(Chrome {
             id: LayerId::new("map.tint"),
@@ -151,10 +151,8 @@ impl Map {
             });
         }
 
-        let tiles: Element<'a, Message> =
-            MapWidget::new(&self.tile_cache, Message::Cache, self.viewpoint)
-                .on_update(Message::Projector)
-                .boxed();
+        let tiles = MapWidget::new(&self.tile_cache, Message::Cache, self.viewpoint)
+            .on_update(Message::Projector);
 
         let overlay = Canvas::new(overlay::Overlay::new(
             layers.into_sorted(),
@@ -166,7 +164,7 @@ impl Map {
 
         // Not a `Stack`: it would hide the pointer from the tiles while a
         // handle is hovered, disabling zoom and pan there (see `layered`).
-        layered::Layered::new(tiles.map(wrap).boxed(), overlay.boxed()).boxed()
+        layered::Layered::new(Widget::<Message>::map(tiles, wrap), overlay)
     }
 }
 

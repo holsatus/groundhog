@@ -196,10 +196,10 @@ impl VideoPanel {
         let Some(receiving) = &self.receiving else {
             let header = ui::header(
                 ui::mono(&self.settings.uri).single_line(),
-                [ui::badge("Off", Tone::Muted)],
+                [ui::badge("Off", Tone::Muted).boxed()],
                 [],
             );
-            return ui::panel_with(header, self.view_form());
+            return ui::panel_with(header, self.view_form()).boxed();
         };
 
         // The picture fills the panel; what the panel would otherwise put
@@ -248,18 +248,17 @@ impl VideoPanel {
             ui::floating(content)
                 .padding(ui::space::M)
                 .width(Length::Shrink.max(FORM_WIDTH))
-                .boxed()
         };
         let overlay = column![
             chip,
             self.details
                 .then(|| card(ui::text(self.details_text(&receiving.state.status)).boxed())),
-            self.form.then(|| card(self.view_form())),
+            self.form.then(|| card(self.view_form().boxed())),
         ]
         .spacing(ui::space::S)
         .padding(ui::space::S);
 
-        ui::picture(stack![picture, overlay])
+        ui::picture(stack![picture, overlay]).boxed()
     }
 
     /// The picture alone, filling the screen, with the stream's state and a
@@ -298,6 +297,7 @@ impl VideoPanel {
             container(self.view_status(&receiving.state.status)).center(Length::Fill),
             corner,
         ])
+        .boxed()
     }
 
     /// The stream's details: where it comes from, what it is, and how it is
@@ -340,7 +340,7 @@ impl VideoPanel {
 
     /// The source's form: its URI, the low-latency switch, and starting or
     /// stopping the stream.
-    fn view_form(&self) -> Element<'_, Message> {
+    fn view_form(&self) -> impl Widget<Message> + '_ {
         let problem = match Source::parse(&self.source) {
             Err(problem) if !self.source.trim().is_empty() => Some(problem),
             _ => None,
@@ -370,7 +370,7 @@ impl VideoPanel {
 
         column![
             ui::field("Source", field),
-            problem.map(|problem| ui::caption(problem).tone(Tone::Danger).boxed()),
+            problem.map(|problem| ui::caption(problem).tone(Tone::Danger)),
             ui::caption("rtsp://, udp://, udp265://, mpegts://, tcp://, or test://")
                 .tone(Tone::Muted),
             ui::checkbox("Low latency", self.settings.low_latency).on_toggle(Message::LowLatency),
@@ -383,7 +383,6 @@ impl VideoPanel {
         ]
         .spacing(ui::space::S)
         .width(Length::Fill)
-        .boxed()
     }
 }
 

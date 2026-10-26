@@ -192,7 +192,7 @@ impl LinkPanel {
     }
 
     /// The configured links with their controls, and the editor.
-    pub fn view<'a>(&'a self, manager: &'a LinkManager) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, manager: &'a LinkManager) -> impl Widget<Message> + 'a {
         let links = if manager.entries().next().is_none() {
             ui::text("No links yet. Add one below.")
                 .tone(Tone::Muted)
@@ -203,6 +203,7 @@ impl LinkPanel {
                     .entries()
                     .map(|(id, config, status)| view_link(manager, id, config, status)),
             )
+            .boxed()
         };
 
         let overwrites = manager
@@ -214,7 +215,7 @@ impl LinkPanel {
                 ui::section("Saved links", [links]),
                 ui::section(
                     if overwrites { "Edit link" } else { "New link" },
-                    [self.view_editor(overwrites)],
+                    [self.view_editor(overwrites).boxed()],
                 ),
             ]
             .spacing(ui::space::L),
@@ -224,7 +225,7 @@ impl LinkPanel {
     /// The link editor: name, kind, the kind's fields, flags, and save.
     /// Saving under the name of a saved link replaces it, which the save
     /// button says, in the warning colour, when it `overwrites`.
-    fn view_editor(&self, overwrites: bool) -> Element<'_, Message> {
+    fn view_editor(&self, overwrites: bool) -> impl Widget<Message> + '_ {
         let link = &self.configurator;
 
         let variant = ui::pick_list(
@@ -282,6 +283,7 @@ impl LinkPanel {
                 ui::text_input(placeholder, value)
                     .on_input(move |value| Message::SetField(which, value)),
             )
+            .boxed()
         }
 
         match &self.configurator.builder {
@@ -317,12 +319,14 @@ impl LinkPanel {
                         .ellipsis(Ellipsis::Start)
                         .on_open(Message::DetectSerialPorts)
                         .on_select(Message::SelectSerialPort),
-                ),
+                )
+                .boxed(),
                 ui::field(
                     "Baud rate",
                     ui::pick_list(Some(baud), BAUDRATES, u32::to_string)
                         .on_select(Message::SelectBaud),
-                ),
+                )
+                .boxed(),
             ],
         }
     }
@@ -345,7 +349,7 @@ fn view_link<'a>(
     id: &LinkId,
     config: &'a LinkConfig,
     status: LinkStatus,
-) -> Element<'a, Message> {
+) -> impl Widget<Message> + 'a {
     // The state is the line under the name; the button only acts.
     let toggle = if status.is_active() {
         ui::button("Disconnect").on_press(Message::Disconnect(id.clone()))
@@ -388,7 +392,6 @@ fn view_link<'a>(
     ]
     .spacing(ui::space::S)
     .align_y(Alignment::Center)
-    .boxed()
 }
 
 /// A link connected for this long without receiving a frame is called

@@ -12,7 +12,7 @@
 //! has one, the tiles' otherwise.
 
 use iced::{
-    Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector,
+    Event, Length, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
         Layout, Renderer as _, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree},
@@ -23,24 +23,31 @@ const BASE: usize = 0;
 const OVERLAY: usize = 1;
 
 /// The map tiles with the overlay on top. Both fill the available space.
-pub(super) struct Layered<'a, Message> {
-    /// `[base, overlay]`.
-    children: Vec<Element<'a, Message>>,
+pub(super) struct Layered<B, O> {
+    base: B,
+    overlay: O,
 }
 
-impl<'a, Message> Layered<'a, Message> {
-    pub fn new(base: Element<'a, Message>, overlay: Element<'a, Message>) -> Self {
-        Self {
-            children: vec![base, overlay],
-        }
+impl<B, O> Layered<B, O> {
+    pub fn new(base: B, overlay: O) -> Self {
+        Self { base, overlay }
     }
 }
 
-impl<Message> Meta for Layered<'_, Message> {}
+impl<B, O> Meta for Layered<B, O> {}
 
-impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
+impl<B, O, Message> Widget<Message, Theme, Renderer> for Layered<B, O>
+where
+    B: Widget<Message, Theme, Renderer>,
+    O: Widget<Message, Theme, Renderer>,
+{
     fn diff(&mut self, tree: &mut Tree) {
-        tree.diff_children(&mut self.children);
+        if tree.children.len() != 2 {
+            tree.children = vec![Tree::new(&self.base), Tree::new(&self.overlay)];
+        }
+
+        tree.children[BASE].diff(&mut self.base);
+        tree.children[OVERLAY].diff(&mut self.overlay);
     }
 
     fn size(&self) -> Size<Length> {
@@ -53,10 +60,11 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         let limits = limits.width(Length::Fill).height(Length::Fill);
 
-        self.children[BASE].layout(&mut tree.children[BASE], renderer, &limits);
+        self.base
+            .layout(&mut tree.children[BASE], renderer, &limits);
         let size = limits.resolve(Length::Fill, Length::Fill, tree.children[BASE].size);
 
-        self.children[OVERLAY].layout(
+        self.overlay.layout(
             &mut tree.children[OVERLAY],
             renderer,
             &layout::Limits::new(Size::ZERO, size),
@@ -75,12 +83,15 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
     ) {
         operation.container(None, layout.bounds(), viewport);
         operation.traverse(&mut |operation| {
-            self.children
-                .iter_mut()
-                .zip(layout.iter_mut(&mut tree.children))
-                .for_each(|(child, (layout, state))| {
-                    child.operate(state, layout, viewport, renderer, operation);
-                });
+            let mut children = layout.iter_mut(&mut tree.children);
+            if let Some((layout, tree)) = children.next() {
+                self.base
+                    .operate(tree, layout, viewport, renderer, operation);
+            }
+            if let Some((layout, tree)) = children.next() {
+                self.overlay
+                    .operate(tree, layout, viewport, renderer, operation);
+            }
         });
     }
 
@@ -94,20 +105,38 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let mut children = layout.iter_mut(&mut tree.children);
+        let (Some((base_layout, base_tree)), Some((overlay_layout, overlay_tree))) =
+            (children.next(), children.next())
+        else {
+            return;
+        };
+
         // Overlay first; the tiles only lose events the overlay captured
         // (a drag), never just because the overlay shows a cursor.
-        for (child, (layout, tree)) in self
-            .children
-            .iter_mut()
-            .zip(layout.iter_mut(&mut tree.children))
-            .rev()
-        {
-            child.update(tree, event, layout, cursor, renderer, shell, viewport);
+        self.overlay.update(
+            overlay_tree,
+            event,
+            overlay_layout,
+            cursor,
+            renderer,
+            shell,
+            viewport,
+        );
 
-            if shell.is_event_captured() {
-                return;
-            }
+        if shell.is_event_captured() {
+            return;
         }
+
+        self.base.update(
+            base_tree,
+            event,
+            base_layout,
+            cursor,
+            renderer,
+            shell,
+            viewport,
+        );
     }
 
     fn mouse_interaction(
@@ -118,15 +147,26 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(layout.iter(&tree.children))
-            .rev()
-            .map(|(child, (layout, tree))| {
-                child.mouse_interaction(tree, layout, cursor, viewport, renderer)
-            })
-            .find(|&interaction| interaction != mouse::Interaction::None)
-            .unwrap_or_default()
+        let mut children = layout.iter(&tree.children);
+        let (Some((base_layout, base_tree)), Some((overlay_layout, overlay_tree))) =
+            (children.next(), children.next())
+        else {
+            return mouse::Interaction::default();
+        };
+
+        match self.overlay.mouse_interaction(
+            overlay_tree,
+            overlay_layout,
+            cursor,
+            viewport,
+            renderer,
+        ) {
+            mouse::Interaction::None => {
+                self.base
+                    .mouse_interaction(base_tree, base_layout, cursor, viewport, renderer)
+            }
+            interaction => interaction,
+        }
     }
 
     fn draw(
@@ -143,15 +183,17 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
             return;
         };
 
-        let mut layers = self.children.iter().zip(layout.iter(&tree.children));
+        let mut children = layout.iter(&tree.children);
 
-        if let Some((base, (layout, tree))) = layers.next() {
-            base.draw(tree, renderer, theme, style, layout, cursor, &viewport);
+        if let Some((layout, tree)) = children.next() {
+            self.base
+                .draw(tree, renderer, theme, style, layout, cursor, &viewport);
         }
 
-        for (overlay, (layout, tree)) in layers {
+        if let Some((layout, tree)) = children.next() {
             renderer.with_layer(viewport, |renderer| {
-                overlay.draw(tree, renderer, theme, style, layout, cursor, &viewport);
+                self.overlay
+                    .draw(tree, renderer, theme, style, layout, cursor, &viewport);
             });
         }
     }
@@ -165,14 +207,30 @@ impl<Message> Widget<Message, Theme, Renderer> for Layered<'_, Message> {
         translation: Vector,
         window: Size,
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
-            window,
-        )
+        let mut children = layout.iter_mut(&mut tree.children);
+        let mut overlays = Vec::new();
+
+        if let Some((layout, tree)) = children.next() {
+            overlays.extend(self.base.overlay(
+                tree,
+                layout,
+                renderer,
+                viewport,
+                translation,
+                window,
+            ));
+        }
+        if let Some((layout, tree)) = children.next() {
+            overlays.extend(self.overlay.overlay(
+                tree,
+                layout,
+                renderer,
+                viewport,
+                translation,
+                window,
+            ));
+        }
+
+        overlays
     }
 }

@@ -13,7 +13,7 @@
 //! map, or the map would keep tracking a finger that has gone.
 
 use iced::{
-    Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector,
+    Event, Length, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
         Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree, tree},
@@ -22,21 +22,20 @@ use iced::{
 };
 
 /// `content`, keeping the presses that land on it from what lies beneath.
-pub fn surface<'a, M: 'a>(content: impl Widget<M, Theme, Renderer> + 'a) -> Surface<'a, M> {
-    use iced::Widget as _;
-
-    Surface {
-        content: content.boxed(),
-    }
+pub fn surface<W>(content: W) -> Surface<W> {
+    Surface { content }
 }
 
-pub struct Surface<'a, Message> {
-    content: Element<'a, Message>,
+pub struct Surface<W> {
+    content: W,
 }
 
-impl<Message> Meta for Surface<'_, Message> {}
+impl<W> Meta for Surface<W> {}
 
-impl<Message> Widget<Message, Theme, Renderer> for Surface<'_, Message> {
+impl<W, Message> Widget<Message, Theme, Renderer> for Surface<W>
+where
+    W: Widget<Message, Theme, Renderer>,
+{
     fn tag(&self) -> tree::Tag {
         self.content.tag()
     }
@@ -149,7 +148,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Surface<'_, Message> {
 mod tests {
     use super::*;
     use iced::{
-        Point, Widget as _,
+        Point,
         widget::{
             canvas::{self, Action, Canvas, Geometry},
             container, space, stack, text,
@@ -223,7 +222,7 @@ mod tests {
             .padding(0);
         let root = stack![map, chrome, space()];
 
-        let mut simulator = iced_test::Simulator::new(root.boxed());
+        let mut simulator = iced_test::Simulator::new(root);
         for event in events {
             if let Event::Touch(
                 touch::Event::FingerPressed { position, .. }

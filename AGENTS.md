@@ -541,6 +541,16 @@ versions:
 - Convert widgets to `Element` with `.boxed()` (from `iced::Widget`, which must
   be in scope); there is no `From` conversion. `Element::map(...)` returns a
   widget, so follow it with `.boxed()` too.
+- Box only where types must be erased: branches that build different
+  widgets, mixed children of one container, or a struct field. A view
+  function that builds one kind of widget returns `impl Widget<M> + 'a`,
+  and takes its content as `impl Widget<M> + 'a`, so the widget is used
+  unboxed. A toolkit function (`ui`) that also takes generic arguments
+  (`impl IntoFragment`, a content type) names its concrete return type
+  instead (`Container<'a, Text<'a>>`): an `impl Widget` return captures
+  every generic argument, so `badge("Off")` and `badge(format!(..))` would
+  be different types. Custom widgets that wrap children are generic over
+  them (`Surface<W>`, `Layered<B, O>`), as iced's `Container<W>` is.
 - `text_input(placeholder, value)` takes an owned `String` for a computed value.
 - **Messages must be `Clone + Debug`, and their `Debug` must be cheap.** When
   iced's `debug` feature is enabled, every message is pretty-printed on the UI

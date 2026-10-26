@@ -12,7 +12,7 @@
 use std::{collections::HashMap, hash::Hash};
 
 use iced::{
-    Element, Event, Length, Rectangle, Size, Vector,
+    Event, Length, Rectangle, Size, Vector,
     advanced::{
         Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree, tree},
@@ -29,13 +29,10 @@ const OVERSCAN: f32 = 200.0;
 const DEFAULT_ESTIMATE: f32 = 32.0;
 
 /// Creates a [`VirtualList`] which calls `view` only for the visible items.
-pub fn virtual_list<'a, T, Message, Theme, Renderer>(
+pub fn virtual_list<'a, T, W>(
     items: impl IntoIterator<Item = T>,
-    view: impl Fn(&T) -> Element<'a, Message, Theme, Renderer> + 'a,
-) -> VirtualList<'a, T, Message, usize, Theme, Renderer>
-where
-    Renderer: iced::advanced::Renderer,
-{
+    view: impl Fn(&T) -> W + 'a,
+) -> VirtualList<'a, T, W> {
     VirtualList {
         items: items.into_iter().collect(),
         view: Box::new(view),
@@ -54,32 +51,25 @@ enum Height<'a, T> {
     Measured { estimate: f32 },
 }
 
-/// Builds the element for a single item.
-type View<'a, T, Message, Theme, Renderer> =
-    Box<dyn Fn(&T) -> Element<'a, Message, Theme, Renderer> + 'a>;
+/// Builds the widget for a single item.
+type View<'a, T, W> = Box<dyn Fn(&T) -> W + 'a>;
 
 /// Builds the stable key identifying a single item.
 type KeyFn<'a, T, K> = Box<dyn Fn(usize, &T) -> K + 'a>;
 
-pub struct VirtualList<'a, T, Message, K = usize, Theme = iced::Theme, Renderer = iced::Renderer>
-where
-    Renderer: iced::advanced::Renderer,
-{
+pub struct VirtualList<'a, T, W, K = usize> {
     items: Vec<T>,
-    view: View<'a, T, Message, Theme, Renderer>,
+    view: View<'a, T, W>,
     key: KeyFn<'a, T, K>,
     height: Height<'a, T>,
     spacing: f32,
 
     // Built during layout, since only then is the visible region known
     keys: Vec<K>,
-    children: Vec<Element<'a, Message, Theme, Renderer>>,
+    children: Vec<W>,
 }
 
-impl<'a, T, Message, K, Theme, Renderer> VirtualList<'a, T, Message, K, Theme, Renderer>
-where
-    Renderer: iced::advanced::Renderer,
-{
+impl<'a, T, W, K> VirtualList<'a, T, W, K> {
     /// Use exact item heights.
     ///
     /// Each item is laid out within its height and **centered vertically**: the
@@ -95,10 +85,7 @@ where
     /// Identify items by key rather than by index, so widget state (such as
     /// text input focus) and measured heights follow the item when the list
     /// changes.
-    pub fn key<K2>(
-        self,
-        key: impl Fn(&T) -> K2 + 'a,
-    ) -> VirtualList<'a, T, Message, K2, Theme, Renderer> {
+    pub fn key<K2>(self, key: impl Fn(&T) -> K2 + 'a) -> VirtualList<'a, T, W, K2> {
         VirtualList {
             items: self.items,
             view: self.view,
@@ -129,14 +116,12 @@ struct State<K> {
     width: f32,
 }
 
-impl<T, Message, K, Theme, Renderer> Meta for VirtualList<'_, T, Message, K, Theme, Renderer> where
-    Renderer: iced::advanced::Renderer
-{
-}
+impl<T, W, K> Meta for VirtualList<'_, T, W, K> {}
 
-impl<'a, T, Message, K, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for VirtualList<'a, T, Message, K, Theme, Renderer>
+impl<T, W, K, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for VirtualList<'_, T, W, K>
 where
+    W: Widget<Message, Theme, Renderer>,
     K: Hash + Eq + Clone + 'static,
     Renderer: iced::advanced::Renderer,
 {

@@ -16,16 +16,15 @@ use std::{collections::HashMap, sync::Arc};
 
 use groundhog_video::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Range};
 use iced::{
-    Element, Length, Rectangle, Widget, mouse, wgpu,
+    Length, Rectangle, Widget, mouse, wgpu,
     widget::shader::{self, Viewport},
 };
 
 /// The newest frame of `slot`, filling the space it is given.
-pub fn video<'a, M: 'a>(slot: &FrameSlot) -> Element<'a, M> {
+pub fn video<M>(slot: &FrameSlot) -> impl Widget<M> + use<M> {
     iced::widget::Shader::new(Video { slot: slot.clone() })
         .width(Length::Fill)
         .height(Length::Fill)
-        .boxed()
 }
 
 struct Video {

@@ -204,6 +204,7 @@ impl MissionEditor {
             ]
             .spacing(ui::space::M),
         )
+        .boxed()
     }
 
     /// The running transfer's progress and a cancel button.
@@ -211,7 +212,7 @@ impl MissionEditor {
         &'a self,
         system: SystemId,
         message: impl Fn(MessageKind) -> Message + 'a,
-    ) -> Option<Element<'a, Message>> {
+    ) -> Option<impl Widget<Message> + 'a> {
         let operation = [Operation::Download, Operation::Upload, Operation::Clear]
             .into_iter()
             .find(|operation| self.operations.is_running(&(system, *operation)))?;
@@ -297,7 +298,7 @@ fn view_editor<'a>(
     item: &'a MissionItem,
     status: SyncStatus,
     editable: bool,
-) -> Element<'a, Message> {
+) -> impl Widget<Message> + 'a {
     let message = move |kind| Message { plan, kind };
     let index = draft.plan().index_of(id).unwrap_or_default();
 
@@ -438,13 +439,13 @@ fn field_widget<'a>(
                     .boxed(),
                 // A value outside the known choices (from another planner):
                 // edit it as a number rather than hide it.
-                None => number_input(view, buffer, edit),
+                None => number_input(view, buffer, edit).boxed(),
             }
         }
         FieldKind::Number
         | FieldKind::Integer
         | FieldKind::OptionalNumber
-        | FieldKind::ItemNumber => number_input(view, buffer, edit),
+        | FieldKind::ItemNumber => number_input(view, buffer, edit).boxed(),
     }
 }
 
@@ -452,7 +453,7 @@ fn number_input<'a>(
     view: FieldView,
     buffer: Option<&'a String>,
     edit: impl Fn(String) -> Message + 'a,
-) -> Element<'a, Message> {
+) -> impl Widget<Message> + 'a {
     let value = match buffer {
         Some(buffer) => buffer.clone(),
         None => format_value(view),
@@ -464,7 +465,7 @@ fn number_input<'a>(
         ""
     };
 
-    ui::text_input(placeholder, value).on_input(edit).boxed()
+    ui::text_input(placeholder, value).on_input(edit)
 }
 
 fn format_value(view: FieldView) -> String {

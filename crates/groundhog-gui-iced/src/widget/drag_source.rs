@@ -10,7 +10,7 @@
 
 use super::drag_preview::{self, LIFT, TOUCH_LIFT};
 use iced::{
-    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
+    Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
         Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree, tree},
@@ -43,24 +43,23 @@ enum TouchGesture {
 /// `preview` follows the cursor, centred [`LIFT`] above it (or
 /// [`TOUCH_LIFT`] above a finger), so it hides neither the pointer nor what
 /// is under it, and no finger hides it.
-pub fn drag_source<'a, M: Clone + 'a>(
-    content: impl Widget<M, Theme, Renderer> + 'a,
-    preview: impl Widget<M, Theme, Renderer> + 'a,
+pub fn drag_source<C, P, M: Clone>(
+    content: C,
+    preview: P,
     on_drag: M,
     on_end: M,
-) -> DragSource<'a, M> {
-    use iced::Widget as _;
-
+) -> DragSource<C, P, M> {
     DragSource {
-        children: vec![content.boxed(), preview.boxed()],
+        content,
+        preview,
         on_drag,
         on_end,
     }
 }
 
-pub struct DragSource<'a, Message> {
-    /// `[content, preview]`.
-    children: Vec<Element<'a, Message>>,
+pub struct DragSource<C, P, Message> {
+    content: C,
+    preview: P,
     on_drag: Message,
     on_end: Message,
 }
@@ -80,9 +79,14 @@ enum State {
     Cancelled,
 }
 
-impl<Message> Meta for DragSource<'_, Message> {}
+impl<C, P, Message> Meta for DragSource<C, P, Message> {}
 
-impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message> {
+impl<C, P, Message> Widget<Message, Theme, Renderer> for DragSource<C, P, Message>
+where
+    C: Widget<Message, Theme, Renderer>,
+    P: Widget<Message, Theme, Renderer>,
+    Message: Clone,
+{
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -92,18 +96,24 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
     }
 
     fn diff(&mut self, tree: &mut Tree) {
-        tree.diff_children(&mut self.children);
+        if tree.children.len() != 2 {
+            tree.children = vec![Tree::new(&self.content), Tree::new(&self.preview)];
+        }
+
+        tree.children[CONTENT].diff(&mut self.content);
+        tree.children[PREVIEW].diff(&mut self.preview);
     }
 
     fn size(&self) -> Size<Length> {
-        self.children[CONTENT].size()
+        self.content.size()
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        self.children[CONTENT].layout(&mut tree.children[CONTENT], renderer, limits);
+        self.content
+            .layout(&mut tree.children[CONTENT], renderer, limits);
         tree.size = tree.children[CONTENT].size;
         // The preview's size, as it would be alone; it is placed when drawn.
-        self.children[PREVIEW].layout(
+        self.preview.layout(
             &mut tree.children[PREVIEW],
             renderer,
             &layout::Limits::new(Size::ZERO, Size::INFINITE),
@@ -118,7 +128,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.children[CONTENT].operate(
+        self.content.operate(
             &mut tree.children[CONTENT],
             layout,
             viewport,
@@ -245,7 +255,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
             }
         }
 
-        self.children[CONTENT].update(
+        self.content.update(
             &mut tree.children[CONTENT],
             event,
             layout,
@@ -267,13 +277,8 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         if let State::Dragging { .. } = tree.state.downcast_ref::<State>() {
             return mouse::Interaction::Grabbing;
         }
-        self.children[CONTENT].mouse_interaction(
-            &tree.children[CONTENT],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
+        self.content
+            .mouse_interaction(&tree.children[CONTENT], layout, cursor, viewport, renderer)
     }
 
     fn draw(
@@ -286,7 +291,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.children[CONTENT].draw(
+        self.content.draw(
             &tree.children[CONTENT],
             renderer,
             theme,
@@ -308,13 +313,13 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         match *tree.state.downcast_ref::<State>() {
             State::Dragging { lift } => vec![overlay::Element::new(Box::new(Preview {
-                preview: &self.children[PREVIEW],
+                preview: &self.preview,
                 tree: &tree.children[PREVIEW],
                 lift,
                 window,
             }))],
             // Not while dragging: a tooltip would follow the press.
-            _ => self.children[CONTENT].overlay(
+            _ => self.content.overlay(
                 &mut tree.children[CONTENT],
                 layout,
                 renderer,
@@ -330,14 +335,17 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragSource<'_, Message
 /// `window`. It reports no mouse interaction: an overlay that does hides the
 /// cursor from the widgets beneath, and the one under the cursor decides the
 /// drop. (The drag source itself shows the grabbing pointer.)
-struct Preview<'a, 'b, Message> {
-    preview: &'a Element<'b, Message>,
+struct Preview<'a, P> {
+    preview: &'a P,
     tree: &'a Tree,
     lift: f32,
     window: Size,
 }
 
-impl<Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, '_, Message> {
+impl<P, Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, P>
+where
+    P: Widget<Message, Theme, Renderer>,
+{
     fn draw(
         &self,
         renderer: &mut Renderer,

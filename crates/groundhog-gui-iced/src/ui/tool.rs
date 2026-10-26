@@ -8,7 +8,7 @@
 
 use iced::{
     Alignment, Element, Length, Widget,
-    widget::{button, column, container, row, text::IntoFragment},
+    widget::{Button, Container, Row, button, column, container, row, text::IntoFragment},
 };
 
 use super::{
@@ -17,7 +17,10 @@ use super::{
     style::{self, ButtonKind, size, space},
     text::{TextExt, text},
 };
-use crate::widget::{adaptive, menu::menu_button};
+use crate::widget::{
+    adaptive::{self, Adaptive},
+    menu::menu_button,
+};
 
 /// The narrowest a header's subject gets before its tools fold into a menu.
 const MIN_SUBJECT: f32 = 140.0;
@@ -78,7 +81,7 @@ impl<'a, M: Clone + 'a> Tool<'a, M> {
     }
 
     /// The tool as an entry of a menu: its icon and its label.
-    fn entry(&self) -> Element<'a, M> {
+    fn entry(&self) -> Button<'a, M, Container<'a, Row<Element<'a, M>>>> {
         let enabled = self.on_press.is_some();
         let kind = self.kind();
         let content = row![
@@ -94,7 +97,6 @@ impl<'a, M: Clone + 'a> Tool<'a, M> {
             .height(size::control())
             .style(style::button(kind))
             .on_press_maybe(self.on_press.clone())
-            .boxed()
     }
 }
 
@@ -106,18 +108,16 @@ pub fn header<'a, M: Clone + 'a>(
     subject: impl Widget<M> + 'a,
     status: impl IntoIterator<Item = Element<'a, M>>,
     tools: impl IntoIterator<Item = Vec<Tool<'a, M>>>,
-) -> Element<'a, M> {
+) -> Adaptive<'a, M> {
     let groups: Vec<Vec<Tool<'a, M>>> = tools
         .into_iter()
         .filter(|group| !group.is_empty())
         .collect();
 
     let status = row(status).spacing(space::S).align_y(Alignment::Center);
-    let buttons = row(groups.iter().map(|group| {
-        row(group.iter().map(Tool::button))
-            .spacing(space::XS)
-            .boxed()
-    }))
+    let buttons = row(groups
+        .iter()
+        .map(|group| row(group.iter().map(Tool::button)).spacing(space::XS)))
     .spacing(space::L)
     .align_y(Alignment::Center);
 
@@ -144,5 +144,4 @@ pub fn header<'a, M: Clone + 'a>(
         size::control(),
         space::M,
     )
-    .boxed()
 }

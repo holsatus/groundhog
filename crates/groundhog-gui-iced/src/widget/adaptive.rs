@@ -498,7 +498,7 @@ mod tests {
 
     /// A header whose tools fold into a menu below some width, its subject a
     /// button.
-    fn folding_header() -> Element<'static, Message> {
+    fn folding_header() -> Adaptive<'static, Message> {
         crate::ui::header(
             button(text("Subject")).on_press(Message::Pressed),
             [],

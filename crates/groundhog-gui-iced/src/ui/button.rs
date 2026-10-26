@@ -16,7 +16,7 @@
 
 use iced::{
     Alignment, Element, Length, Widget,
-    widget::{container, row, text::IntoFragment, tooltip::Position},
+    widget::{Button, Row, container, row, text::IntoFragment, tooltip::Position},
 };
 
 use super::{
@@ -70,7 +70,7 @@ pub fn entry<'a, M: Clone + 'a>(
     title: impl IntoFragment<'a>,
     detail: impl IntoFragment<'a>,
     on_press: M,
-) -> Element<'a, M> {
+) -> Button<'a, M, Row<Element<'a, M>>> {
     use super::text::caption;
 
     let content = row![
@@ -91,7 +91,6 @@ pub fn entry<'a, M: Clone + 'a>(
         .width(Length::Fill)
         .style(style::button(ButtonKind::Subtle))
         .on_press(on_press)
-        .boxed()
 }
 
 /// A button around arbitrary `content`, such as a list row.

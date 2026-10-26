@@ -788,11 +788,11 @@ impl Application {
 
     /// The toasts, in the bottom-right corner of the space they are given,
     /// `inset` from its edges and clear of the platform's chrome.
-    fn view_toasts(&self, inset: f32) -> Element<'_, Message> {
+    fn view_toasts(&self, inset: f32) -> impl Widget<Message> + '_ {
         let chrome = self.insets.padding(self.scale_factor());
 
         ui::toast::layer(
-            self.notices.view().map(Message::Notifications).boxed(),
+            self.notices.view().map(Message::Notifications),
             iced::Padding {
                 top: chrome.top + inset,
                 right: chrome.right + inset,
@@ -820,7 +820,7 @@ impl Application {
     }
 
     /// The map with the features' layers, placed as `placement`.
-    fn view_map(&self, placement: Placement) -> Element<'_, Message> {
+    fn view_map(&self, placement: Placement) -> impl Widget<Message> + '_ {
         let theme = self.theme();
         let context = MapContext {
             fleet: &self.fleet,

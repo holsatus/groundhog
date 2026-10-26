@@ -61,8 +61,8 @@ where
     /// the pane itself: a label for it, say. The pane then stays drawn where
     /// it is until it is dropped.
     #[must_use]
-    pub fn preview(mut self, preview: Element<'a, Message, Theme, Renderer>) -> Self {
-        self.preview = Some(preview);
+    pub fn preview(mut self, preview: impl Widget<Message, Theme, Renderer> + 'a) -> Self {
+        self.preview = Some(iced::Widget::boxed(preview));
         self
     }
 

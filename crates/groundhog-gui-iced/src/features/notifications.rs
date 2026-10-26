@@ -11,7 +11,7 @@ use std::{
 };
 
 use groundhog_logic::SystemId;
-use iced::{Element, Widget, widget::column};
+use iced::{Widget, widget::column};
 
 use crate::ui::{self, Tone};
 
@@ -177,7 +177,7 @@ impl Notifications {
     }
 
     /// The toast stack, newest at the bottom.
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> impl Widget<Message> + '_ {
         let toasts = self.toasts.iter().map(|toast| {
             let notice = &toast.notice;
             ui::toast::toast(
@@ -188,7 +188,7 @@ impl Notifications {
             )
         });
 
-        column(toasts).spacing(ui::space::S).boxed()
+        column(toasts).spacing(ui::space::S)
     }
 }
 

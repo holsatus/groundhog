@@ -3,7 +3,7 @@
 //! the same place, so both drags look alike.
 
 use iced::{
-    Element, Point, Rectangle, Size,
+    Point, Rectangle, Size,
     advanced::{Layout, Renderer, Widget, mouse, renderer, widget::Tree},
 };
 
@@ -22,7 +22,7 @@ pub const TOUCH_LIFT: f32 = 44.0;
     reason = "a widget's draw arguments, plus where to put it"
 )]
 pub fn draw<Message, Theme, R: Renderer>(
-    preview: &Element<'_, Message, Theme, R>,
+    preview: &impl Widget<Message, Theme, R>,
     tree: &Tree,
     renderer: &mut R,
     theme: &Theme,

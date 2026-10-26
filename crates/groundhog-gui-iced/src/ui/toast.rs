@@ -1,8 +1,8 @@
 //! Toast cards and the layer that places them.
 
 use iced::{
-    Alignment, Element, Length, Padding, Widget,
-    widget::{column, container, row},
+    Alignment, Length, Padding, Widget,
+    widget::{Container, column, container, row},
 };
 
 use crate::{
@@ -21,7 +21,7 @@ pub fn toast<'a, M: Clone + 'a>(
     detail: Option<&'a str>,
     tone: Tone,
     dismiss: M,
-) -> Element<'a, M> {
+) -> impl Widget<M> + 'a {
     let body = column![ui::text(title)]
         .push(detail.map(ui::caption).boxed())
         .spacing(ui::space::XXS)
@@ -43,17 +43,16 @@ pub fn toast<'a, M: Clone + 'a>(
 
     // A toast is opaque to the pointer and to fingers: what lies beneath (the
     // map) is not hovered, zoomed or dragged through it.
-    surface(card).boxed()
+    surface(card)
 }
 
 /// `content` in the bottom-right corner of the window, `insets` clear of the
 /// platform's chrome.
-pub fn layer<'a, M: 'a>(content: Element<'a, M>, insets: Padding) -> Element<'a, M> {
+pub fn layer<'a, W>(content: W, insets: Padding) -> Container<'a, W> {
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_right(Length::Fill)
         .align_bottom(Length::Fill)
         .padding(insets)
-        .boxed()
 }

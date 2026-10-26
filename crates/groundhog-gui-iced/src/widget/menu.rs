@@ -8,7 +8,7 @@
 //! Escape.
 
 use iced::{
-    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
+    Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
         Layout, Shell, Widget, layout, mouse, overlay, renderer,
         widget::{Meta, Operation, Tree, tree},
@@ -21,20 +21,13 @@ const GAP: f32 = 4.0;
 
 /// `trigger`, which opens `menu` when pressed. `trigger` is drawn as given
 /// and does not see the press; `menu`'s entries publish their own messages.
-pub fn menu_button<'a, M: 'a>(
-    trigger: impl Widget<M, Theme, Renderer> + 'a,
-    menu: impl Widget<M, Theme, Renderer> + 'a,
-) -> MenuButton<'a, M> {
-    use iced::Widget as _;
-
-    MenuButton {
-        children: vec![trigger.boxed(), menu.boxed()],
-    }
+pub fn menu_button<T, W>(trigger: T, menu: W) -> MenuButton<T, W> {
+    MenuButton { trigger, menu }
 }
 
-pub struct MenuButton<'a, Message> {
-    /// `[trigger, menu]`.
-    children: Vec<Element<'a, Message>>,
+pub struct MenuButton<T, W> {
+    trigger: T,
+    menu: W,
 }
 
 const TRIGGER: usize = 0;
@@ -64,9 +57,13 @@ fn release(event: &Event, cursor: mouse::Cursor) -> Option<Point> {
     }
 }
 
-impl<Message> Meta for MenuButton<'_, Message> {}
+impl<T, W> Meta for MenuButton<T, W> {}
 
-impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
+impl<T, W, Message> Widget<Message, Theme, Renderer> for MenuButton<T, W>
+where
+    T: Widget<Message, Theme, Renderer>,
+    W: Widget<Message, Theme, Renderer>,
+{
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -76,15 +73,21 @@ impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
     }
 
     fn diff(&mut self, tree: &mut Tree) {
-        tree.diff_children(&mut self.children);
+        if tree.children.len() != 2 {
+            tree.children = vec![Tree::new(&self.trigger), Tree::new(&self.menu)];
+        }
+
+        tree.children[TRIGGER].diff(&mut self.trigger);
+        tree.children[MENU].diff(&mut self.menu);
     }
 
     fn size(&self) -> Size<Length> {
-        self.children[TRIGGER].size()
+        self.trigger.size()
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        self.children[TRIGGER].layout(&mut tree.children[TRIGGER], renderer, limits);
+        self.trigger
+            .layout(&mut tree.children[TRIGGER], renderer, limits);
         tree.size = tree.children[TRIGGER].size;
     }
 
@@ -96,7 +99,7 @@ impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.children[TRIGGER].operate(
+        self.trigger.operate(
             &mut tree.children[TRIGGER],
             layout,
             viewport,
@@ -151,7 +154,7 @@ impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.children[TRIGGER].draw(
+        self.trigger.draw(
             &tree.children[TRIGGER],
             renderer,
             theme,
@@ -179,7 +182,7 @@ impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
             return Vec::new();
         }
 
-        let menu = &mut self.children[MENU];
+        let menu = &mut self.menu;
         let menu_tree = &mut children[MENU];
         let trigger = layout.bounds() + translation;
 
@@ -210,14 +213,17 @@ impl<Message> Widget<Message, Theme, Renderer> for MenuButton<'_, Message> {
 }
 
 /// The open menu.
-struct Menu<'a, 'b, Message> {
-    menu: &'a mut Element<'b, Message>,
+struct Menu<'a, W> {
+    menu: &'a mut W,
     tree: &'a mut Tree,
     layout: Layout,
     open: &'a mut bool,
 }
 
-impl<Message> overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_, Message> {
+impl<W, Message> overlay::Overlay<Message, Theme, Renderer> for Menu<'_, W>
+where
+    W: Widget<Message, Theme, Renderer>,
+{
     fn update(
         &mut self,
         event: &Event,
@@ -310,10 +316,7 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_, Messag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::{
-        Widget as _,
-        widget::{button, column, container, text},
-    };
+    use iced::widget::{button, column, container, text};
 
     #[derive(Debug, Clone, PartialEq)]
     enum Message {
@@ -334,7 +337,7 @@ mod tests {
         let beneath = button(container(menu).width(Length::Fill).height(Length::Fill))
             .on_press(Message::Beneath);
 
-        let mut simulator = iced_test::Simulator::new(beneath.boxed());
+        let mut simulator = iced_test::Simulator::new(beneath);
         for at in taps {
             simulator.point_at(*at);
             for event in [

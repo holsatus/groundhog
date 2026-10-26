@@ -16,7 +16,7 @@ use groundhog_logic::{
     },
 };
 use iced::{
-    Alignment, Element, Length, Widget,
+    Alignment, Length, Widget,
     widget::{container, row, scrollable},
 };
 use mavio::default_dialect::enums::MavSeverity;
@@ -105,7 +105,7 @@ fn timeline_row<'a, M: 'a>(
     source: String,
     severity: MavSeverity,
     message: String,
-) -> Element<'a, M> {
+) -> impl Widget<M> + 'a {
     ui::list_row(
         index,
         row![
@@ -146,7 +146,7 @@ impl LogPanel {
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,
         notices: &'a Notifications,
-    ) -> Element<'a, Message> {
+    ) -> impl Widget<Message> + 'a {
         let mut entries = self.entries(fleet, selected, notices);
 
         if entries.len() > MAX_ENTRIES {

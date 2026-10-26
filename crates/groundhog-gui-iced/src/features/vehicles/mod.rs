@@ -218,7 +218,7 @@ impl VehiclePanel {
             [
                 vehicle.map(|vehicle| {
                     let (label, tone) = liveness(vehicle.liveness);
-                    ui::badge(label, tone)
+                    ui::badge(label, tone).boxed()
                 }),
                 Some(
                     ui::checkbox("Follow", follow)
@@ -235,23 +235,24 @@ impl VehiclePanel {
             return ui::panel_with(
                 header,
                 ui::text("No vehicle. Connect a link to begin.").tone(Tone::Muted),
-            );
+            )
+            .boxed();
         };
 
         let contents = column![
             view_status(vehicle),
             view_alert(vehicle),
             self.view_controls(vehicle),
-            ui::section("Flight", [view_telemetry(vehicle)]),
-            ui::section("Health", [view_health(vehicle)]),
+            ui::section("Flight", [view_telemetry(vehicle).boxed()]),
+            ui::section("Health", [view_health(vehicle).boxed()]),
             ui::section("Navigation", [view_navigation(vehicle)]),
         ]
         .spacing(ui::space::L);
 
-        ui::panel_with(header, scrollable(contents).height(Length::Fill))
+        ui::panel_with(header, scrollable(contents).height(Length::Fill)).boxed()
     }
 
-    fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> Element<'a, Message> {
+    fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> impl Widget<Message> + 'a {
         let system = vehicle.system;
         let busy = |command| self.commands.is_running(&(system, command));
 
@@ -308,13 +309,15 @@ fn mode_change_asks(vehicle: Option<&Vehicle>) -> bool {
 }
 
 /// Values in columns that line up: three to a row where they fit.
-fn stats<'a>(cells: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+fn stats<'a>(
+    cells: impl IntoIterator<Item = impl Widget<Message> + 'a>,
+) -> impl Widget<Message> + 'a {
     ui::stats(cells, 3)
 }
 
 /// What the vehicle is doing, at a glance: its mode, large, whether it
 /// is armed, and what it is.
-fn view_status(vehicle: &Vehicle) -> Element<'_, Message> {
+fn view_status(vehicle: &Vehicle) -> impl Widget<Message> + '_ {
     let armed = match vehicle.armed() {
         Some(true) => ui::badge("Armed", Tone::Danger),
         Some(false) => ui::badge("Disarmed", Tone::Muted),
@@ -338,10 +341,9 @@ fn view_status(vehicle: &Vehicle) -> Element<'_, Message> {
         ui::caption(identity.join(" · ")).tone(Tone::Muted),
     ]
     .spacing(ui::space::XXS)
-    .boxed()
 }
 
-fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
+fn view_telemetry(vehicle: &Vehicle) -> impl Widget<Message> + '_ {
     let unknown = || "–".to_string();
 
     let (roll, pitch, yaw) = vehicle
@@ -374,7 +376,7 @@ fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
         .ground_speed()
         .map_or_else(unknown, |speed| format!("{speed:.1} m/s"));
 
-    stats(vec![
+    stats([
         ui::stat("Roll", ui::text(roll)),
         ui::stat("Pitch", ui::text(pitch)),
         ui::stat("Heading", ui::text(yaw)),
@@ -385,7 +387,7 @@ fn view_telemetry(vehicle: &Vehicle) -> Element<'_, Message> {
 }
 
 /// The battery, GPS, link and pre-arm checks, and the sensors as badges.
-fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
+fn view_health(vehicle: &Vehicle) -> impl Widget<Message> + '_ {
     let health = &vehicle.health;
 
     // The battery: a gauge, with what is known beside it.
@@ -463,7 +465,7 @@ fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
         None => ui::text("–").tone(Tone::Muted),
     };
 
-    let checks = stats(vec![
+    let checks = stats([
         ui::stat("GPS", gps),
         ui::stat("Last heard", heard),
         ui::stat("Pre-arm", prearm),
@@ -496,7 +498,6 @@ fn view_health(vehicle: &Vehicle) -> Element<'_, Message> {
         sensors,
     ]
     .spacing(ui::space::S)
-    .boxed()
 }
 
 /// Home, and how far the mission has come.
@@ -513,10 +514,7 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
     );
 
     let Some(mission) = vehicle.mission_status() else {
-        return stats(vec![
-            ui::stat("Home", home),
-            ui::stat("Mission", ui::text("–")),
-        ]);
+        return stats([ui::stat("Home", home), ui::stat("Mission", ui::text("–"))]).boxed();
     };
 
     let (state, tone) = match mission.state {
@@ -535,7 +533,7 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
         .map_or_else(|| "–".to_string(), |offset| distance(offset.distance_m));
 
     column![
-        stats(vec![
+        stats([
             ui::stat("Home", home),
             ui::stat("Mission", ui::text(item)),
             ui::stat("To item", ui::text(to_item)),
@@ -558,7 +556,7 @@ fn view_navigation(vehicle: &Vehicle) -> Element<'_, Message> {
 const ALERT_SHOWN_FOR: Duration = Duration::from_secs(60);
 
 /// The latest warning or worse the vehicle sent, while it is recent.
-fn view_alert(vehicle: &Vehicle) -> Option<Element<'_, Message>> {
+fn view_alert(vehicle: &Vehicle) -> Option<impl Widget<Message> + '_> {
     let alert = vehicle
         .status
         .latest_alert()

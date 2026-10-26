@@ -42,7 +42,7 @@ impl Application {
         let toasts = if self.map_is_shown() {
             Space::new().boxed()
         } else {
-            self.view_toasts(ui::space::XL)
+            self.view_toasts(ui::space::XL).boxed()
         };
         stack![base, toasts].boxed()
     }
@@ -60,7 +60,7 @@ impl Application {
     /// middle or right column by the mouse button pressed (or a plain,
     /// Ctrl/Cmd or Shift click), or where its button is dragged onto the
     /// grid.
-    fn view_rail(&self) -> Element<'_, Message> {
+    fn view_rail(&self) -> impl Widget<Message> + '_ {
         let button_of = |panel: layout::Panel| {
             let open = self.layout.is_open(panel);
             let icon = ui::icon::icon(panel.icon(), ui::size::RAIL_ICON, ButtonKind::Subtle, true);
@@ -91,7 +91,7 @@ impl Application {
             .into_iter()
             .flat_map(|destination| destination.panels().iter().copied())
             .map(button_of);
-        column(buttons).spacing(ui::space::S).boxed()
+        column(buttons).spacing(ui::space::S)
     }
 
     /// The centre of `panel`'s button on the rail, from the rail's top.

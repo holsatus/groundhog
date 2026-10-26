@@ -113,7 +113,7 @@ impl CalibrationPanel {
         selected: Option<SystemId>,
     ) -> Element<'a, Message> {
         let Some(vehicle) = selected.and_then(|id| fleet.vehicle(id)) else {
-            return ui::empty("No vehicle. Connect a link to begin.");
+            return ui::empty("No vehicle. Connect a link to begin.").boxed();
         };
 
         let firmware = vehicle.firmware();
@@ -122,7 +122,8 @@ impl CalibrationPanel {
             return ui::empty(format!(
                 "Calibration is not available for {} vehicles.",
                 firmware.name()
-            ));
+            ))
+            .boxed();
         }
 
         let blocker = if vehicle.armed() == Some(true) {
@@ -176,14 +177,18 @@ impl CalibrationPanel {
                 .calibration
                 .as_ref()
                 .map(|session| self.view_session(vehicle, session)),
-            ui::section("Sensors", [ui::card_list(calibrations)]),
+            ui::section("Sensors", [ui::card_list(calibrations).boxed()]),
         ]
         .spacing(ui::space::L);
 
-        ui::panel_with(header, scrollable(contents).height(Length::Fill))
+        ui::panel_with(header, scrollable(contents).height(Length::Fill)).boxed()
     }
 
-    fn view_session<'a>(&self, vehicle: &'a Vehicle, session: &'a Session) -> Element<'a, Message> {
+    fn view_session<'a>(
+        &self,
+        vehicle: &'a Vehicle,
+        session: &'a Session,
+    ) -> impl Widget<Message> + 'a {
         let system = vehicle.system;
         let controls = vehicle.calibration_controls();
         let running = session.is_running();
@@ -232,7 +237,7 @@ impl CalibrationPanel {
         if matches!(session.kind, CalibrationKind::Accelerometer)
             || (session.kind == CalibrationKind::Compass && session.sides.count() > 0)
         {
-            card = card.push(view_sides(session));
+            card = card.push(view_sides(session).boxed());
         }
 
         for compass in &session.compasses {
@@ -292,7 +297,7 @@ impl CalibrationPanel {
 }
 
 /// The six orientations: done, current, or still to do.
-fn view_sides(session: &Session) -> Element<'_, Message> {
+fn view_sides(session: &Session) -> impl Widget<Message> + '_ {
     let current = match session.instruction {
         Instruction::Place(side) | Instruction::Confirming(side) | Instruction::Measuring(side) => {
             Some(side)
@@ -312,7 +317,7 @@ fn view_sides(session: &Session) -> Element<'_, Message> {
         ui::badge(side.label(), tone)
     });
 
-    row(sides).spacing(ui::space::XS).wrap().boxed()
+    row(sides).spacing(ui::space::XS).wrap()
 }
 
 fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
