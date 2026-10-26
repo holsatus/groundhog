@@ -179,11 +179,13 @@ impl CommandRequest<'_> {
 
     async fn run(mut self) -> Result<CommandAck> {
         let kind: MavCmd = self.command.kind();
-        let key = LockKey::command(self.target, kind);
 
         let _lock = match self.lock.take() {
             Some(lock) => lock,
-            None => &mut self.router.lock_key(key).await,
+            None => {
+                let key = LockKey::Command(self.target, kind as u16);
+                &mut self.router.lock_key(key).await
+            }
         };
 
         let mut pending = Pending::register(self.router.clone(), self.target, kind);

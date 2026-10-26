@@ -2,7 +2,7 @@
 
 use iced::{
     Alignment, Element, Length, Padding, Widget,
-    widget::{column, container, row},
+    widget::{Space, column, container, row},
 };
 
 use crate::{
@@ -28,11 +28,16 @@ pub fn toast<'a, M: Clone + 'a>(
         .width(Length::Fill);
 
     let card = container(
-        row![body, ui::icon_button(Icon::Close).on_press(dismiss).boxed()]
-            .spacing(ui::space::M)
-            .align_y(Alignment::Center),
+        row![
+            body,
+            ui::button::transparent_icon_button(Icon::Close)
+                .on_press(dismiss)
+                .boxed()
+        ]
+        .spacing(ui::space::M)
+        .align_y(Alignment::Center),
     )
-    .padding([ui::space::S, ui::space::M])
+    .padding(Padding::new(ui::space::S).left(ui::space::L))
     .width(Length::Fixed(WIDTH))
     .style(style::toast(tone));
 

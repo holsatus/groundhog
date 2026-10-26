@@ -23,7 +23,11 @@
 //     or by a lifted finger
 //   - a lost finger (`FingerLost`) cancels a pane drag instead of dropping it
 //   - `State::rearrange` replaces the arrangement, keeping the `Pane` of every
-//     kept state (so pane widget state survives a rearrangement)
+//     kept state (so pane widget state survives a rearrangement) and the
+//     `Split` of every split between the same two panes along the same axis
+//     (so a resize in progress survives one)
+//   - `State::neighbours` names a split by the panes on either side of it
+//     (`Node::neighbours`, `Node::seams`)
 //   - `Axis::split` never gives a side a negative length, nor overflows: where
 //     the region cannot hold both minimum sizes, it splits at the ratio
 //

@@ -37,12 +37,14 @@ impl Application {
             .style(style::workspace);
 
         // Toasts pop up in the map's corner, unless a maximized pane hides
-        // the map.
-        if self.map_is_shown() {
-            base.boxed()
+        // the map. The layer is there either way, so maximizing a pane does
+        // not change the shape of the tree and rebuild every pane's state.
+        let toasts = if self.map_is_shown() {
+            Space::new().boxed()
         } else {
-            stack![base, self.view_toasts(ui::space::XL)].boxed()
-        }
+            self.view_toasts(ui::space::XL)
+        };
+        stack![base, toasts].boxed()
     }
 
     /// Whether the map is on screen: no other pane is maximized.

@@ -127,7 +127,7 @@ pub mod size {
 /// The corner radius of a pane, shared with the map's frame.
 pub const PANE_RADIUS: f32 = 12.0;
 /// The corner radius of controls and cards.
-pub const WIDGET_RADIUS: f32 = 8.0;
+pub const WIDGET_RADIUS: f32 = 6.0;
 /// The width of a pane's border, and the height of the header divider.
 pub const PANE_BORDER_WIDTH: f32 = 1.0;
 
@@ -500,6 +500,8 @@ pub enum ButtonKind {
     /// Most actions: a quiet surface that lights up on hover.
     #[default]
     Subtle,
+    /// The action should fade into the background.
+    Transparent,
     /// The action a view is for, or a chosen option.
     Primary,
     /// An action that replaces something stored.
@@ -515,6 +517,7 @@ pub fn button(
     move |theme, status| {
         let mut style = match kind {
             ButtonKind::Subtle => subtle_button(theme, status),
+            ButtonKind::Transparent => transparent_button(theme, status),
             ButtonKind::Primary => widget::button::primary(theme, status),
             ButtonKind::Warning => widget::button::warning(theme, status),
             ButtonKind::Danger => widget::button::danger(theme, status),
@@ -538,6 +541,36 @@ fn subtle_button(theme: &Theme, status: widget::button::Status) -> widget::butto
     let fill = match status {
         Status::Hovered => palette.background.weak.color,
         Status::Active | Status::Pressed | Status::Disabled => palette.background.weaker.color,
+    };
+    let border = match status {
+        Status::Hovered => palette.background.neutral.color,
+        _ => fill,
+    };
+    let text_color = match status {
+        Status::Disabled => palette.background.weaker.text.scale_alpha(0.5),
+        _ => palette.background.weaker.text,
+    };
+
+    widget::button::Style {
+        background: Some(fill.into()),
+        text_color,
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: WIDGET_RADIUS.into(),
+        },
+        ..widget::button::Style::default()
+    }
+}
+
+fn transparent_button(theme: &Theme, status: widget::button::Status) -> widget::button::Style {
+    use widget::button::Status;
+
+    let palette = theme.palette();
+    let fill = match status {
+        Status::Hovered => palette.background.base.text.scale_alpha(0.2),
+        Status::Pressed => palette.background.base.text.scale_alpha(0.1),
+        Status::Active | Status::Disabled => Color::TRANSPARENT,
     };
     let border = match status {
         Status::Hovered => palette.background.neutral.color,
@@ -675,6 +708,7 @@ pub fn icon(kind: ButtonKind, enabled: bool) -> impl Fn(&Theme, svg::Status) -> 
         let color = match (enabled, kind) {
             (false, _) => palette.background.strongest.color,
             (true, ButtonKind::Subtle) => palette.background.base.text,
+            (true, ButtonKind::Transparent) => palette.background.base.text,
             (true, ButtonKind::Primary) => palette.primary.base.text,
             (true, ButtonKind::Warning) => palette.warning.base.text,
             (true, ButtonKind::Danger) => palette.danger.base.text,

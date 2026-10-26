@@ -36,6 +36,7 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 # Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
 # dependency first.
 iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image"] }
+
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
 slippery = { git = "https://github.com/peterkrull/slippery" }

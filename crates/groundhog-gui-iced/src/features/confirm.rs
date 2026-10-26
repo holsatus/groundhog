@@ -69,20 +69,16 @@ pub fn view<'a, M: Clone + 'a>(
     answer: impl Fn(Answer) -> M + 'a,
     insets: Padding,
 ) -> Element<'a, M> {
-    let Some(confirmation) = confirmation else {
-        return base;
-    };
-
     ui::dialog::view(
         base,
-        ui::dialog::Dialog {
+        confirmation.map(|confirmation| ui::dialog::Dialog {
             title: &confirmation.title,
             body: &confirmation.body,
             accept_label: confirmation.accept_label,
             danger: confirmation.danger,
             accept: answer(Answer::Accept),
             dismiss: answer(Answer::Dismiss),
-        },
+        }),
         insets,
     )
 }

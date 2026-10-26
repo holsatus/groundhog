@@ -321,21 +321,34 @@ impl<T> State<T> {
     pub fn maximized(&self) -> Option<Pane> {
         self.internal.maximized
     }
+
+    /// The states of the panes on either side of `split`: the last pane
+    /// before it and the first after it. This names a split by what it
+    /// divides.
+    pub fn neighbours(&self, split: Split) -> Option<(&T, &T)> {
+        let (before, after) = self.internal.layout.neighbours(split)?;
+        Some((self.panes.get(&before)?, self.panes.get(&after)?))
+    }
 }
 
 impl<T: PartialEq> State<T> {
     /// Rearranges the panes into `config`, keeping the [`Pane`] of every
-    /// state that appears both before and after (compared with `==`).
+    /// state that appears both before and after (compared with `==`), and
+    /// the [`Split`] of every split that still divides the same two panes
+    /// along the same axis.
     ///
     /// A pane's identity keys its widget state in the [`PaneGrid`], so
     /// keeping it keeps what the pane's content holds (scroll positions,
-    /// focus), and the maximized pane stays maximized. States new to the
-    /// arrangement get new panes; panes whose state is gone are removed.
+    /// focus), and the maximized pane stays maximized. A split's identity is
+    /// what a resize in progress holds, so keeping it lets the application
+    /// rearrange the grid while the operator drags a divider. States new to
+    /// the arrangement get new panes; panes whose state is gone are removed.
     ///
     /// [`PaneGrid`]: super::PaneGrid
     pub fn rearrange(&mut self, config: Configuration<T>) {
         let mut previous: Vec<(Pane, T)> = std::mem::take(&mut self.panes).into_iter().collect();
-        self.internal.layout = self.rebuild(config, &mut previous);
+        let seams = self.internal.layout.seams();
+        self.internal.layout = self.rebuild(config, &mut previous, &seams);
 
         if let Some(pane) = self.internal.maximized
             && !self.panes.contains_key(&pane)
@@ -344,14 +357,30 @@ impl<T: PartialEq> State<T> {
         }
     }
 
-    fn rebuild(&mut self, config: Configuration<T>, previous: &mut Vec<(Pane, T)>) -> Node {
+    fn rebuild(
+        &mut self,
+        config: Configuration<T>,
+        previous: &mut Vec<(Pane, T)>,
+        seams: &[(Axis, Pane, Pane, Split)],
+    ) -> Node {
         match config {
             Configuration::Split { axis, ratio, a, b } => {
-                let a = self.rebuild(*a, previous);
-                let b = self.rebuild(*b, previous);
-                self.internal.last_id += 1;
+                let a = self.rebuild(*a, previous, seams);
+                let b = self.rebuild(*b, previous, seams);
+                // Kept panes keep their ids, so a split between the same two
+                // (along the same axis) is the same split.
+                let neighbours = (a.last_pane(), b.first_pane());
+                let id = match seams.iter().find(|(kept, before, after, _)| {
+                    *kept == axis && (*before, *after) == neighbours
+                }) {
+                    Some((_, _, _, id)) => *id,
+                    None => {
+                        self.internal.last_id += 1;
+                        Split(self.internal.last_id)
+                    }
+                };
                 Node::Split {
-                    id: Split(self.internal.last_id),
+                    id,
                     axis,
                     ratio,
                     a: Box::new(a),
@@ -599,5 +628,49 @@ mod tests {
         assert_eq!(state.len(), 1);
         assert_eq!(pane_of(&state, 1), Some(one));
         assert_eq!(state.maximized(), None, "the maximized pane is gone");
+    }
+
+    #[test]
+    fn rearranging_keeps_the_splits_between_kept_neighbours() {
+        let three = |ratio: f32| Configuration::Split {
+            axis: Axis::Vertical,
+            ratio,
+            a: Box::new(Configuration::Pane(1)),
+            b: Box::new(split(
+                Axis::Vertical,
+                Configuration::Pane(2),
+                Configuration::Pane(3),
+            )),
+        };
+        let mut state = State::with_configuration(three(0.5));
+        let split_between = |state: &State<u8>, values: (u8, u8)| {
+            state
+                .layout()
+                .splits()
+                .copied()
+                .find(|split| state.neighbours(*split) == Some((&values.0, &values.1)))
+        };
+        let first = split_between(&state, (1, 2)).unwrap();
+        let second = split_between(&state, (2, 3)).unwrap();
+
+        // The same neighbours at another ratio: a resize in progress holds
+        // these splits, and must still find them.
+        state.rearrange(three(0.3));
+        assert_eq!(split_between(&state, (1, 2)), Some(first));
+        assert_eq!(split_between(&state, (2, 3)), Some(second));
+        state.resize(first, 0.4);
+        assert!(
+            matches!(state.layout(), Node::Split { ratio, .. } if *ratio == 0.4),
+            "a resize of a kept split applies"
+        );
+
+        // Other neighbours, or another axis, make another split.
+        state.rearrange(split(
+            Axis::Horizontal,
+            Configuration::Pane(1),
+            Configuration::Pane(2),
+        ));
+        let across = split_between(&state, (1, 2)).unwrap();
+        assert!(across != first && across != second);
     }
 }

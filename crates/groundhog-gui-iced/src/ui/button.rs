@@ -55,6 +55,14 @@ pub fn icon_button<'a, M>(icon: Icon) -> Action<'a, M> {
     Action::new(Content::Icon(icon))
 }
 
+/// A square button showing `icon`. Give it a [`hint`](Action::hint): an icon
+/// alone rarely says enough.
+pub fn transparent_icon_button<'a, M>(icon: Icon) -> Action<'a, M> {
+    let mut action = Action::new(Content::Icon(icon));
+    action.kind = ButtonKind::Transparent;
+    action
+}
+
 /// A row that opens what it names: `icon`, `title` and a line about it,
 /// and a chevron. Two lines high, so a finger finds it at any density.
 pub fn entry<'a, M: Clone + 'a>(

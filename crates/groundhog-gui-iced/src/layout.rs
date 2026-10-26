@@ -16,8 +16,10 @@
 //! persisted. The pane grid's state is derived from it, by
 //! [`pane_grid::State::rearrange`], whenever its structure or the grid's
 //! size changes; that keeps every pane's identity, and so its widget state.
-//! When the operator drags a divider, the grid moves first and the
-//! workspace measures the result.
+//! A dragged divider changes only what it bounds in the workspace (a
+//! column's width, the row's height, or the shares of the two panes beside
+//! it), clamped to what the arrangement draws, and the grid is laid out
+//! again from that while the drag goes on.
 
 use std::collections::BTreeMap;
 
@@ -604,58 +606,84 @@ impl Workspace {
         )
     }
 
-    /// Take the sizes and shares the grid gave the panes in a grid of
-    /// `size`, after the operator moved a divider.
+    /// Apply the operator's drag of `seam`, given where the grid draws each
+    /// panel with that divider where it was dragged, in a grid of `size`.
     ///
-    /// Only what the operator chose is kept: a size [`arrange`] shrank to
-    /// keep the map (the columns in a narrow window, the row in a short one)
-    /// stays as it was, and so do the shares of a stack too crowded for its
-    /// panes to get [`MIN_PANE`], which the grid squeezed rather than chose.
-    fn measure(&mut self, regions: &BTreeMap<Panel, Rectangle>, size: Size) {
-        let scaled = self.widths(size).scaled;
-        let row_capped = self.middle.size > max_row(size);
+    /// Only what the divider bounds changes, so a size [`arrange`] squeezed
+    /// to keep the map (the columns in a narrow window, the row in a short
+    /// one) stays as the operator chose it unless its own divider is
+    /// dragged. What is stored is what [`arrange`] will draw: the map keeps
+    /// [`MIN_MAP`], so the divider stops where the map would get less.
+    fn resize(&mut self, seam: Seam, regions: &BTreeMap<Panel, Rectangle>, size: Size) {
+        let first = |stack: &Stack| regions.get(&stack.panes.first()?.0).copied();
 
-        for slot in Slot::ALL {
-            let stack = self.stack_mut(slot);
-            let Some(stack_regions) = stack
-                .panes
-                .iter()
-                .map(|(panel, _)| regions.get(panel).copied())
-                .collect::<Option<Vec<Rectangle>>>()
-            else {
-                continue;
-            };
-            let Some(first) = stack_regions.first() else {
-                continue;
-            };
-
-            let size_chosen = match slot {
-                Slot::Middle => !row_capped,
-                Slot::Left | Slot::Right => !scaled,
-            };
-            if size_chosen {
-                stack.size = match slot {
-                    Slot::Middle => first.height,
-                    Slot::Left | Slot::Right => first.width,
-                };
-            }
-
-            let along = |region: &Rectangle| match slot {
-                Slot::Middle => region.width,
-                Slot::Left | Slot::Right => region.height,
-            };
-            // A pane the grid held at its minimum was dragged there; one
-            // below it was squeezed.
-            if stack_regions
-                .iter()
-                .all(|region| along(region) >= MIN_PANE - 1.0)
-            {
-                for ((_, share), region) in stack.panes.iter_mut().zip(&stack_regions) {
-                    *share = along(region);
+        match seam {
+            Seam::Row => {
+                if let Some(row) = first(&self.middle) {
+                    self.middle.size = row.height.min(max_row(size)).max(MIN_PANE);
                 }
+            }
+            Seam::Column(slot) => {
+                let other = match slot {
+                    Slot::Left => Slot::Right,
+                    Slot::Middle | Slot::Right => Slot::Left,
+                };
+                let Some(column) = first(self.stack(slot)) else {
+                    return;
+                };
+                let other_width = first(self.stack(other)).map_or(0.0, |region| region.width);
+                // Columns drawn narrower than their sizes shrink together.
+                // The other column is kept at the width it is drawn, so only
+                // the dragged divider moves on screen.
+                if self.widths(size).scaled && !self.stack(other).panes.is_empty() {
+                    self.stack_mut(other).size = other_width;
+                }
+                let gaps = [slot, other]
+                    .into_iter()
+                    .filter(|slot| !self.stack(*slot).panes.is_empty())
+                    .count() as f32
+                    * SPACING;
+                let room = size.width - MIN_MAP - gaps - other_width;
+                self.stack_mut(slot).size = column.width.min(room).max(MIN_PANE);
+            }
+            Seam::Divider { slot, index } => {
+                let along = |region: &Rectangle| match slot {
+                    Slot::Middle => region.width,
+                    Slot::Left | Slot::Right => region.height,
+                };
+                let stack = self.stack_mut(slot);
+                let length = |index: usize| {
+                    let (panel, _) = stack.panes.get(index)?;
+                    regions.get(panel).map(along)
+                };
+                let (Some(before), Some(after)) = (length(index), length(index + 1)) else {
+                    return;
+                };
+                if before + after <= 0.0 {
+                    return;
+                }
+                // The two trade what they hold between them; every other
+                // divider stays where it is.
+                let total = stack.panes[index].1 + stack.panes[index + 1].1;
+                let share = total * before / (before + after);
+                stack.panes[index].1 = share;
+                stack.panes[index + 1].1 = total - share;
             }
         }
     }
+}
+
+/// A divider of the arrangement, named by what it bounds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Seam {
+    /// The inner edge of a side column: dragging it sets the column's width.
+    Column(Slot),
+    /// The top of the row beneath the map: dragging it sets the row's
+    /// height.
+    Row,
+    /// Between the pane at `index` of a stack and the next: dragging it
+    /// trades their shares.
+    Divider { slot: Slot, index: usize },
 }
 
 /// Where a dragged panel goes, named by its neighbour rather than an index,
@@ -814,18 +842,22 @@ impl Layout {
                 }
             }
             Message::Resized(event) => {
-                // The grid moves first; the workspace measures the result.
-                // Rearranging here would replace the split being dragged.
-                self.panes.resize(event.split, event.ratio);
+                // The workspace takes what the drag asks of the divider's
+                // seam, and the grid is laid out from the workspace. The
+                // rearrangement keeps the split, so the drag goes on.
+                let Some(seam) = self.seam(event.split) else {
+                    return;
+                };
                 let size = self.size.unwrap_or(ASSUMED_SIZE);
-                let regions = self
-                    .panes
-                    .layout()
+                let mut dragged = self.panes.layout().clone();
+                dragged.resize(event.split, event.ratio);
+                let regions = dragged
                     .pane_regions(SPACING, MIN_PANE, size)
                     .into_iter()
                     .filter_map(|(pane, region)| Some((*self.panes.get(pane)?, region)))
                     .collect();
-                self.workspace.measure(&regions, size);
+                self.workspace.resize(seam, &regions, size);
+                self.arrange();
             }
             Message::Toggle(panel, slot) => {
                 if self.is_open(panel) {
@@ -848,6 +880,26 @@ impl Layout {
                 }
             }
         }
+    }
+
+    /// What `split` bounds, by the panels on either side of it: the last
+    /// before it and the first after it.
+    fn seam(&self, split: pane_grid::Split) -> Option<Seam> {
+        let (before, after) = self.panes.neighbours(split)?;
+        // `None` for the map, the one panel in no stack.
+        let (before, after) = (self.workspace.find(*before), self.workspace.find(*after));
+        let slot = |place: Option<(Slot, usize)>| place.map(|(slot, _)| slot);
+
+        Some(match (slot(before), slot(after)) {
+            (Some(Slot::Left), after) if after != Some(Slot::Left) => Seam::Column(Slot::Left),
+            (before, Some(Slot::Right)) if before != Some(Slot::Right) => Seam::Column(Slot::Right),
+            (None, Some(Slot::Middle)) => Seam::Row,
+            (Some(slot), Some(next)) if slot == next => Seam::Divider {
+                slot,
+                index: before?.1,
+            },
+            _ => return None,
+        })
     }
 
     /// Lay the grid out from the workspace, at the grid's size.
@@ -1257,6 +1309,26 @@ mod tests {
             .collect()
     }
 
+    /// Drag the divider at `seam` so the side before it is `first` long:
+    /// wide across a vertical divider, tall across a horizontal one.
+    fn drag(layout: &mut Layout, seam: Seam, first: f32) {
+        let (split, (axis, region, _)) = layout
+            .panes
+            .layout()
+            .split_regions(SPACING, MIN_PANE, layout.size.unwrap())
+            .into_iter()
+            .find(|(split, _)| layout.seam(*split) == Some(seam))
+            .expect("the seam is in the grid");
+        let length = match axis {
+            Axis::Horizontal => region.height,
+            Axis::Vertical => region.width,
+        };
+        layout.update(Message::Resized(pane_grid::ResizeEvent {
+            split,
+            ratio: ratio(first, length),
+        }));
+    }
+
     fn panels(stack: &Stack) -> Vec<Panel> {
         stack.panes.iter().map(|(panel, _)| *panel).collect()
     }
@@ -1365,22 +1437,140 @@ mod tests {
     }
 
     #[test]
-    fn measuring_keeps_the_column_widths_a_narrow_window_scaled() {
+    fn a_column_dragged_in_a_narrow_window_leaves_the_other_where_it_is() {
+        let size = Size::new(700.0, 900.0);
         let mut layout = layout_at(
             Workspace {
                 left: stack_of(&[Panel::Vehicles]),
                 right: stack_of(&[Panel::Settings]),
                 ..Workspace::default()
             },
-            Size::new(700.0, 900.0),
+            size,
         );
-        let size = layout.size.unwrap();
         assert!(layout.workspace.widths(size).scaled);
+        let right = regions(&layout)[&Panel::Settings];
 
-        layout.workspace.measure(&regions(&layout), size);
+        drag(&mut layout, Seam::Column(Slot::Left), 200.0);
 
-        assert_eq!(layout.workspace.left.size, 300.0);
-        assert_eq!(layout.workspace.right.size, 300.0);
+        let regions = regions(&layout);
+        assert!(close_to(regions[&Panel::Vehicles].width, 200.0));
+        assert!(
+            close_to(regions[&Panel::Settings].x, right.x)
+                && close_to(regions[&Panel::Settings].width, right.width),
+            "the other column stays put: {right:?} became {:?}",
+            regions[&Panel::Settings]
+        );
+        assert!(close_to(layout.workspace.left.size, 200.0));
+        assert!(close_to(layout.workspace.right.size, right.width));
+    }
+
+    #[test]
+    fn the_row_keeps_the_height_it_was_last_dragged_to() {
+        let mut layout = layout_at(
+            Workspace {
+                middle: stack_of(&[Panel::Logs]),
+                ..Workspace::default()
+            },
+            SIZE,
+        );
+
+        // Up until the map would be shorter than it gets: the row stops
+        // where the map keeps its least.
+        drag(&mut layout, Seam::Row, MIN_PANE);
+        assert!(close_to(layout.workspace.middle.size, max_row(SIZE)));
+        assert!(close_to(regions(&layout)[&Panel::Map].height, MIN_MAP));
+
+        // Then down again: the row is what was dragged last.
+        drag(&mut layout, Seam::Row, SIZE.height - 300.0 - SPACING);
+        assert!(close_to(layout.workspace.middle.size, 300.0));
+
+        // Rearranging, or emptying the row and filling it again, keeps it.
+        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
+        assert!(close_to(regions(&layout)[&Panel::Logs].height, 300.0));
+        layout.update(Message::Toggle(Panel::Logs, Slot::Middle));
+        layout.update(Message::Toggle(Panel::Links, Slot::Middle));
+        assert!(close_to(regions(&layout)[&Panel::Links].height, 300.0));
+    }
+
+    #[test]
+    fn a_column_keeps_the_width_it_was_last_dragged_to() {
+        let mut layout = layout_at(Workspace::default(), SIZE);
+
+        // Over the map, which keeps its least.
+        drag(&mut layout, Seam::Column(Slot::Left), SIZE.width - MIN_PANE);
+        assert!(close_to(regions(&layout)[&Panel::Map].width, MIN_MAP));
+
+        drag(&mut layout, Seam::Column(Slot::Left), 500.0);
+        assert!(close_to(layout.workspace.left.size, 500.0));
+        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
+        assert!(close_to(regions(&layout)[&Panel::Vehicles].width, 500.0));
+    }
+
+    #[test]
+    fn a_drag_keeps_what_a_short_window_squeezes_elsewhere() {
+        let short = Size::new(1600.0, 600.0);
+        let mut layout = layout_at(
+            Workspace {
+                left: stack_of(&[Panel::Vehicles, Panel::Mission]),
+                middle: Stack {
+                    size: 500.0,
+                    panes: vec![(Panel::Logs, 1.0)],
+                },
+                ..Workspace::default()
+            },
+            short,
+        );
+        assert!(
+            regions(&layout)[&Panel::Logs].height < 500.0,
+            "the row is squeezed"
+        );
+
+        drag(
+            &mut layout,
+            Seam::Divider {
+                slot: Slot::Left,
+                index: 0,
+            },
+            200.0,
+        );
+        drag(&mut layout, Seam::Column(Slot::Left), 400.0);
+
+        assert_eq!(layout.workspace.middle.size, 500.0, "not the row's divider");
+        layout.update(Message::Sized(SIZE));
+        assert!(close_to(regions(&layout)[&Panel::Logs].height, 500.0));
+    }
+
+    #[test]
+    fn a_divider_in_a_stack_trades_between_its_two_panes() {
+        let mut layout = layout_at(
+            Workspace {
+                left: stack_of(&[Panel::Vehicles, Panel::Mission, Panel::Parameters]),
+                ..Workspace::default()
+            },
+            SIZE,
+        );
+        let before = regions(&layout);
+        let height = |regions: &BTreeMap<Panel, Rectangle>, panel| regions[&panel].height;
+
+        drag(
+            &mut layout,
+            Seam::Divider {
+                slot: Slot::Left,
+                index: 1,
+            },
+            200.0,
+        );
+
+        let after = regions(&layout);
+        assert!(close_to(height(&after, Panel::Mission), 200.0));
+        assert!(close_to(
+            height(&after, Panel::Vehicles),
+            height(&before, Panel::Vehicles)
+        ));
+        assert!(close_to(
+            after[&Panel::Parameters].y + height(&after, Panel::Parameters),
+            before[&Panel::Parameters].y + height(&before, Panel::Parameters)
+        ));
     }
 
     #[test]
@@ -1463,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dragged_divider_is_measured_and_kept_in_pixels() {
+    fn a_dragged_divider_is_kept_in_pixels() {
         let mut layout = layout_at(Workspace::default(), SIZE);
         let (split, _) = layout
             .panes

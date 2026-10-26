@@ -4,6 +4,12 @@
 //! [`MAX_WIDTH`], keeps clear of the platform's chrome (`insets`), and
 //! scrolls its body when the window is too short for it, so its buttons stay
 //! on screen. On a narrow window the buttons stack.
+//!
+//! The dialog is a layer over `base`, present whether or not there is a
+//! dialog: iced keys widget state on the shape of the tree, so wrapping
+//! `base` only while a dialog shows would rebuild everything beneath it on
+//! opening and closing (the map would drop its draw cache, lists their
+//! scroll).
 
 use iced::{
     Alignment, Element, Length, Padding, Widget,
@@ -30,13 +36,22 @@ pub struct Dialog<'a, M> {
     pub dismiss: M,
 }
 
-/// `base` with `dialog` on top of a backdrop. Pressing the backdrop or Cancel
-/// dismisses it.
+/// `base` with `dialog`, if there is one, on top of a backdrop. Pressing the
+/// backdrop or Cancel dismisses it.
 pub fn view<'a, M: Clone + 'a>(
     base: Element<'a, M>,
-    dialog: Dialog<'a, M>,
+    dialog: Option<Dialog<'a, M>>,
     insets: Padding,
 ) -> Element<'a, M> {
+    let layer = match dialog {
+        Some(dialog) => layer(dialog, insets),
+        None => space().boxed(),
+    };
+    stack![base, layer].boxed()
+}
+
+/// `dialog` over a backdrop that fills the space it is given.
+fn layer<'a, M: Clone + 'a>(dialog: Dialog<'a, M>, insets: Padding) -> Element<'a, M> {
     let backdrop = mouse_area(
         container(space::horizontal())
             .width(Length::Fill)
@@ -76,7 +91,7 @@ pub fn view<'a, M: Clone + 'a>(
 
         let panel =
             container(column![ui::title(dialog.title), body, buttons].spacing(ui::space::L))
-                .padding(ui::space::L)
+                .padding(ui::space::XL)
                 .width(Length::Fixed(width))
                 .style(style::dialog);
         let panel = if short {
@@ -99,13 +114,19 @@ pub fn view<'a, M: Clone + 'a>(
             .boxed()
     });
 
-    stack![base, opaque(backdrop), opaque(stage)].boxed()
+    stack![opaque(backdrop), opaque(stage)].boxed()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::Size;
+    use iced::{
+        Size,
+        advanced::{
+            Layout, layout, mouse, renderer,
+            widget::{Tree, tree},
+        },
+    };
 
     #[derive(Debug, Clone, PartialEq)]
     enum Message {
@@ -123,7 +144,7 @@ mod tests {
 
         view(
             base,
-            Dialog {
+            Some(Dialog {
                 title: "Clear the mission?",
                 body: "This deletes the mission stored on the vehicle. It cannot be undone \
                        once the vehicle has accepted the clear.",
@@ -131,7 +152,7 @@ mod tests {
                 danger: true,
                 accept: Message::Accept,
                 dismiss: Message::Dismiss,
-            },
+            }),
             Padding::ZERO,
         )
     }
@@ -170,5 +191,74 @@ mod tests {
     #[test]
     fn the_dialog_fits_a_short_landscape_window() {
         assert_fits(Size::new(700.0, 320.0));
+    }
+
+    /// A widget whose state is numbered when it is created, so a test can
+    /// tell kept state from rebuilt state.
+    struct Probe;
+
+    /// The probe's state: which creation it was.
+    struct Generation(u64);
+
+    static CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    impl iced::advanced::widget::Meta for Probe {}
+
+    impl iced::advanced::Widget<Message, iced::Theme, iced::Renderer> for Probe {
+        fn tag(&self) -> tree::Tag {
+            tree::Tag::of::<Generation>()
+        }
+
+        fn state(&self) -> tree::State {
+            let generation = CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tree::State::new(Generation(generation))
+        }
+
+        fn size(&self) -> Size<Length> {
+            Size::new(Length::Fill, Length::Fill)
+        }
+
+        fn layout(&mut self, _: &mut Tree, _: &iced::Renderer, _: &layout::Limits) {}
+
+        fn draw(
+            &self,
+            _: &Tree,
+            _: &mut iced::Renderer,
+            _: &iced::Theme,
+            _: &renderer::Style,
+            _: Layout,
+            _: mouse::Cursor,
+            _: &iced::Rectangle,
+        ) {
+        }
+    }
+
+    /// The generation of the probe's state in `tree`.
+    fn generation(tree: &Tree) -> Option<u64> {
+        if tree.tag == tree::Tag::of::<Generation>() {
+            return Some(tree.state.downcast_ref::<Generation>().0);
+        }
+        tree.children.iter().find_map(generation)
+    }
+
+    #[test]
+    fn opening_and_closing_a_dialog_keeps_the_state_beneath() {
+        let dialog = || Dialog {
+            title: "Arm?",
+            body: "The motors will spin.",
+            accept_label: "Arm",
+            danger: false,
+            accept: Message::Accept,
+            dismiss: Message::Dismiss,
+        };
+        let mut tree = Tree::empty();
+        let mut diff = |dialog: Option<Dialog<'static, Message>>| {
+            tree.diff(&mut view(Probe.boxed(), dialog, Padding::ZERO));
+            generation(&tree).expect("the base is in the tree")
+        };
+
+        let before = diff(None);
+        assert_eq!(diff(Some(dialog())), before, "kept on opening");
+        assert_eq!(diff(None), before, "kept on closing");
     }
 }

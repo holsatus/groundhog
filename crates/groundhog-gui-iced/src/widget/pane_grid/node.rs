@@ -262,10 +262,46 @@ impl Node {
         }
     }
 
-    fn first_pane(&self) -> Pane {
+    pub(crate) fn first_pane(&self) -> Pane {
         match self {
             Node::Split { a, .. } => a.first_pane(),
             Node::Pane(pane) => *pane,
+        }
+    }
+
+    pub(crate) fn last_pane(&self) -> Pane {
+        match self {
+            Node::Split { b, .. } => b.last_pane(),
+            Node::Pane(pane) => *pane,
+        }
+    }
+
+    /// The panes on either side of `split`: the last pane before it and the
+    /// first after it.
+    ///
+    /// Every split lies between exactly one such pair, so the pair (with the
+    /// split's axis) identifies the split by what it divides rather than by
+    /// its id.
+    pub(crate) fn neighbours(&self, split: Split) -> Option<(Pane, Pane)> {
+        match self {
+            Node::Split { id, a, b, .. } if *id == split => Some((a.last_pane(), b.first_pane())),
+            Node::Split { a, b, .. } => a.neighbours(split).or_else(|| b.neighbours(split)),
+            Node::Pane(_) => None,
+        }
+    }
+
+    /// Every split with its axis and [`neighbours`](Self::neighbours).
+    pub(crate) fn seams(&self) -> Vec<(Axis, Pane, Pane, Split)> {
+        let mut seams = Vec::new();
+        self.collect_seams(&mut seams);
+        seams
+    }
+
+    fn collect_seams(&self, seams: &mut Vec<(Axis, Pane, Pane, Split)>) {
+        if let Node::Split { id, axis, a, b, .. } = self {
+            seams.push((*axis, a.last_pane(), b.first_pane(), *id));
+            a.collect_seams(seams);
+            b.collect_seams(seams);
         }
     }
 

@@ -230,7 +230,12 @@ fn draw_rounded_frame(
 ) {
     // Rectangle minus rounded rectangle, even-odd: exactly the four corners.
     let corners = Path::new(|builder| {
-        builder.rectangle(Point::ORIGIN, size);
+        const EXPAND: f32 = 1.0;
+
+        builder.rectangle(
+            Point::new(-EXPAND, -EXPAND),
+            size.expand(Size::new(EXPAND * 2.0, EXPAND * 2.0)),
+        );
 
         let half_width = width / 2.0;
         builder.rounded_rectangle(

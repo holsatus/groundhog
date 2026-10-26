@@ -372,7 +372,12 @@ resizes the map. The `Workspace` is the persisted truth: the pane grid's
 state is rebuilt from it (`State::rearrange`, in the vendored grid, keeps
 each surviving pane's identity and so its widget state) on every structural
 change and every change of the grid's size, which a `sensor` reports. A
-dragged divider moves the grid first; the workspace then measures it.
+dragged divider changes only what it bounds in the workspace (a column's
+width, the row's height, or the shares of the two panes beside it), clamped
+so the map keeps its least, and the grid is rebuilt from that during the
+drag (`State::rearrange` also keeps each split between the same two panes,
+which the drag holds). So the grid never shows a size the workspace does
+not hold.
 
 *Why:* free splitting made every new pane take half of whatever it split,
 and a layout that tracks fractions makes the side panels grow and shrink
@@ -893,6 +898,13 @@ written by a newer build, saves nothing.
   and the toasts do, is fine, as long as each piece over it is a
   `widget::surface`: a finger reaches the map by its position whatever the
   `Stack` does with the cursor.
+- **Keep the tree's shape when something comes and goes.** iced keys widget
+  state on the tree's shape: a widget whose position or parent changes gets
+  fresh state. Wrapping content in a `stack` only while an overlay shows
+  rebuilds everything beneath it on opening and closing; the map then
+  loses its draw cache (a flicker) and lists lose their scroll. Keep the
+  layer and leave it empty (`Space`) when there is nothing in it, as
+  `ui::dialog::view` and the shells' toasts do.
 - **A finger is not the mouse.** iced reports fingers as `Event::Touch`, with
   an id each; the mouse cursor follows the last finger only loosely. Widgets
   that handle presses themselves (the map overlay, `drag_source`) must
