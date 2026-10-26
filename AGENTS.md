@@ -146,7 +146,7 @@ are shared by all.
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
-| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source`, `surface`, `video`, attitude) | iced | depend on the domain |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
@@ -346,7 +346,9 @@ room (the right column, the left, the row), and a full stack is no drop
 target. A window that shrinks keeps the panes it has, squeezed, and the
 sizes it squeezes are not saved.
 
-Dragging a pane moves it within this shape, and the highlight shows only
+Dragging a pane by its title bar leaves it in place, faded, and moves a label
+for it (`ui::drag_label`, the one a rail button shows; see below) with the
+cursor. The pane moves within this shape, and the highlight shows only
 what the shape allows, where the pane would be laid out if it were added
 to the layout on screen (which still holds it in its old place)
 (`Layout::drop_hint`, plugged into the vendored grid with

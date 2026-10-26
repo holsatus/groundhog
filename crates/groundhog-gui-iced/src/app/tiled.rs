@@ -75,20 +75,10 @@ impl Application {
                 .on_middle_press(toggle(layout::Slot::Middle))
                 .on_right_press(toggle(layout::Slot::Right));
 
-            // Dragged, the button becomes a label for the panel, styled as a tooltip.
-            let preview = container(
-                row![
-                    ui::icon::icon(panel.icon(), ui::size::ICON, ButtonKind::Subtle, true),
-                    ui::text(panel.title())
-                ]
-                .spacing(ui::space::S)
-                .align_y(Alignment::Center),
-            )
-            .padding([ui::space::S, ui::space::M])
-            .style(style::tooltip);
+            // Dragged, the button becomes a label for the panel, as its pane does.
             let button = drag_source(
                 button,
-                preview,
+                ui::drag_label(panel.icon(), panel.title()),
                 Message::RailDragged(panel),
                 Message::RailDropped,
             );
@@ -172,9 +162,12 @@ impl Application {
                 })
                 .style(style::title_bar(self.layout.is_focused(pane)));
 
+            // Dragged by its title bar, the pane stays put and a label for
+            // it follows the cursor, as when its rail button is dragged.
             pane_grid::Content::new(body.boxed())
                 .style(style::pane)
                 .title_bar(title_bar)
+                .preview(ui::drag_label(panel.icon(), panel.title()))
         })
         .width(Length::Fill)
         .height(Length::Fill)

@@ -288,6 +288,9 @@ pub fn title_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {
 pub fn pane_grid(theme: &Theme) -> crate::widget::pane_grid::Style {
     let mut style = crate::widget::pane_grid::default(theme);
     style.hovered_region.border.radius = PANE_RADIUS.into();
+    // The panes float on the workspace's backdrop, so this veil fades a
+    // dragged pane into it.
+    style.picked_pane = theme.palette().background.base.color.scale_alpha(0.6);
     style
 }
 

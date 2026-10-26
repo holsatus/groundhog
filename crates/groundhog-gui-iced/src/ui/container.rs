@@ -16,7 +16,8 @@ use iced::{
 use super::{
     super::widget::adaptive::{form_row, grid},
     button::button,
-    style::{self, Tone, size, space},
+    icon::{self, Icon},
+    style::{self, ButtonKind, Tone, size, space},
     text::{TextExt, caption, text},
 };
 
@@ -243,6 +244,23 @@ pub fn tooltip<'a, M: 'a>(
         side,
     )
     .delay(std::time::Duration::from_millis(250))
+    .boxed()
+}
+
+/// A label for something being dragged, its `icon` and `name`, styled as a
+/// tooltip: what follows the pointer when a panel's rail button or its pane
+/// is dragged.
+pub fn drag_label<'a, M: 'a>(icon: Icon, name: impl IntoFragment<'a>) -> Element<'a, M> {
+    container(
+        row![
+            icon::icon(icon, size::ICON, ButtonKind::Subtle, true),
+            text(name)
+        ]
+        .spacing(space::S)
+        .align_y(Alignment::Center),
+    )
+    .padding([space::M, space::L])
+    .style(style::tooltip)
     .boxed()
 }
 

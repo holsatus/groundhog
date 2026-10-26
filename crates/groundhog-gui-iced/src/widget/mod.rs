@@ -3,6 +3,7 @@
 
 pub mod adaptive;
 pub mod attitude;
+pub mod drag_preview;
 pub mod drag_source;
 pub mod menu;
 pub mod pane_grid;

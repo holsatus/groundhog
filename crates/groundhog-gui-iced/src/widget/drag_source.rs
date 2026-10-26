@@ -4,10 +4,11 @@
 //! The source only reports that a drag started and that it ended; where it
 //! ends is for the widget it is dropped on to decide (see
 //! `PaneGrid::incoming`). While the drag lasts, a preview (a label for what
-//! is dragged) follows the cursor in an overlay. The content keeps working
+//! is dragged) follows the cursor in an overlay (see [`super::drag_preview`]). The content keeps working
 //! as before when it is only clicked: a press becomes a drag once the
 //! cursor moves [`DEADBAND`] away.
 
+use super::drag_preview::{self, LIFT, TOUCH_LIFT};
 use iced::{
     Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
@@ -23,13 +24,6 @@ const DEADBAND: f32 = 10.0;
 
 /// The same for a finger, which rolls and wobbles as it presses.
 const TOUCH_DEADBAND: f32 = 16.0;
-
-/// The gap between the cursor and the preview above it.
-const LIFT: f32 = 0.0;
-
-/// The same under a finger, which covers what is right above the point it
-/// touches: about a touch target's height.
-const TOUCH_LIFT: f32 = 44.0;
 
 const CONTENT: usize = 0;
 const PREVIEW: usize = 1;
@@ -351,38 +345,19 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Preview<'_, '_, Mes
         style: &renderer::Style,
         cursor: mouse::Cursor,
     ) {
-        use iced::advanced::Renderer as _;
-
-        let Some(position) = cursor.position() else {
-            return;
-        };
-        let size = self.tree.size;
-        let layout = Layout::new(size).move_to(placement(position, size, self.lift, self.window));
-
-        renderer.with_layer(layout.bounds(), |renderer| {
-            self.preview.draw(
+        if let Some(pointer) = cursor.position() {
+            drag_preview::draw(
+                self.preview,
                 self.tree,
                 renderer,
                 theme,
                 style,
-                layout,
-                mouse::Cursor::Unavailable,
-                &Rectangle::INFINITE,
+                pointer,
+                self.lift,
+                self.window,
             );
-        });
+        }
     }
-}
-
-/// Where a preview of `size` goes: centred `lift` above `pointer`, moved
-/// back inside `window` where that would leave it.
-fn placement(pointer: Point, size: Size, lift: f32, window: Size) -> Point {
-    let x = pointer.x - size.width / 2.0;
-    let y = pointer.y - size.height - lift;
-
-    Point::new(
-        x.min(window.width - size.width).max(0.0),
-        y.min(window.height - size.height).max(0.0),
-    )
 }
 
 #[cfg(test)]
@@ -488,23 +463,6 @@ mod tests {
     fn a_press_elsewhere_starts_nothing() {
         use Step::*;
         assert!(run([Move(AWAY), Press, Move(ON), Release]).is_empty());
-    }
-
-    #[test]
-    fn a_preview_clears_the_finger_and_stays_in_the_window() {
-        let window = Size::new(400.0, 800.0);
-        let size = Size::new(100.0, 30.0);
-        let finger = Point::new(200.0, 400.0);
-
-        let at = placement(finger, size, TOUCH_LIFT, window);
-        assert_eq!(at.x + size.width / 2.0, finger.x, "centred on the finger");
-        assert_eq!(finger.y - (at.y + size.height), TOUCH_LIFT);
-
-        // Dragged from the rail at the window's top-left corner.
-        let corner = placement(Point::new(10.0, 10.0), size, TOUCH_LIFT, window);
-        assert_eq!(corner, Point::ORIGIN);
-        let edge = placement(Point::new(395.0, 400.0), size, TOUCH_LIFT, window);
-        assert_eq!(edge.x, window.width - size.width);
     }
 
     #[test]

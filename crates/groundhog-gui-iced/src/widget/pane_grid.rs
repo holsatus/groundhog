@@ -18,6 +18,11 @@
 //     pane lands and what is highlighted (`DropHint`, `Target::Between`); the
 //     hint is drawn over the dragged pane, whose preview shrinks to its title
 //     bar (`Content::draw_title_bar`)
+//   - `Content::preview` gives a pane a label to drag instead: the pane stays
+//     in its place and the label follows the cursor over the drop hint, as a
+//     `drag_source`'s does (`widget::drag_preview`), clear of a finger
+//     (`Memory::by_finger`); the pane fades (`Style::picked_pane`) and its
+//     body keeps every event but the pointer's
 //   - `PaneGrid::incoming` takes a drag that started outside the grid: the
 //     grid draws its drop hint and reports where it was dropped, by the mouse
 //     or by a lifted finger
@@ -152,6 +157,7 @@ use iced::widget::container;
 use iced::window;
 use iced::{Background, Border, Color, Event, Length, Pixels, Point, Rectangle, Size, Vector};
 
+use super::drag_preview;
 use std::collections::BTreeMap;
 
 /// Where a dragged pane would land, and the area to highlight for it.
@@ -539,6 +545,9 @@ where
 struct Memory {
     action: state::Action,
     order: Vec<Pane>,
+    /// Whether the last press was a finger's, so a pane it drags shows its
+    /// preview clear of the finger.
+    by_finger: bool,
 }
 
 impl<Message, T, W, Theme, Renderer> widget::Meta for PaneGrid<'_, Message, T, W, Theme, Renderer>
@@ -705,8 +714,16 @@ where
             }
         }
 
-        let Memory { action, .. } = tree.state.downcast_mut();
+        let Memory {
+            action, by_finger, ..
+        } = tree.state.downcast_mut();
         let picked_pane = action.picked_pane().map(|(pane, _)| pane);
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => *by_finger = false,
+            Event::Touch(touch::Event::FingerPressed { .. }) => *by_finger = true,
+            _ => {}
+        }
 
         // A left-press on a split starts a resize, and while a resize is in
         // progress the grid owns the pointer. In both cases the panes underneath
@@ -1071,8 +1088,10 @@ where
             })
         {
             match picked_pane {
-                Some((dragging, _)) if id == dragging => {}
-                Some(_) => {
+                // A picked pane with a preview stays in its place; one
+                // without is drawn as it moves (see `PickedPane`).
+                Some((dragging, _)) if id == dragging && !content.has_preview() => {}
+                Some((dragging, _)) => {
                     content.draw(
                         tree,
                         renderer,
@@ -1083,6 +1102,22 @@ where
                         viewport,
                         resizing,
                     );
+
+                    // Once its preview is dragged away, the pane fades, so
+                    // it reads as the place the drag left. In a layer of
+                    // its own, to cover the layers its body pushes.
+                    if id == dragging && dragged_pane.is_some() {
+                        let bounds = pane_layout.bounds();
+                        renderer.with_layer(bounds, |renderer| {
+                            renderer.fill_quad(
+                                renderer::Quad {
+                                    bounds,
+                                    ..renderer::Quad::default()
+                                },
+                                style.picked_pane,
+                            );
+                        });
+                    }
 
                     if let Some(cursor_position) = cursor.position()
                         && dragged_pane.is_some()
@@ -1212,6 +1247,11 @@ where
     ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         let state = tree.state.downcast_ref::<Memory>();
         let picked_pane = state.action.picked_pane();
+        let lift = if state.by_finger {
+            drag_preview::TOUCH_LIFT
+        } else {
+            drag_preview::LIFT
+        };
         // Only a picked pane draws a hint.
         let regions = picked_pane.map(|_| self.regions(layout.bounds()));
         let mut hint = regions.and_then(|regions| {
@@ -1246,6 +1286,8 @@ where
                         layout,
                         hint: hint.take(),
                         dragged: pane,
+                        lift,
+                        window,
                     }))];
                 }
 
@@ -1266,6 +1308,9 @@ where
     layout: Layout,
     hint: Option<DropHintSource<'a, 'b, Theme>>,
     dragged: Pane,
+    /// How far above the cursor a preview is drawn.
+    lift: f32,
+    window: Size,
 }
 
 /// What a picked pane needs to draw the custom drop hint over itself.
@@ -1291,8 +1336,27 @@ where
         cursor: mouse::Cursor,
     ) {
         let cursor_position = cursor.position().unwrap_or_default();
+        let dragging = is_dragging(self.origin, cursor_position);
 
-        let translation = if is_dragging(self.origin, cursor_position) {
+        // A pane with a preview stays in its place, drawn with the others;
+        // only the drop hint and, over it, the preview follow the cursor.
+        if self.content.has_preview() {
+            if dragging {
+                self.draw_hint(renderer, theme, cursor_position);
+                self.content.draw_preview(
+                    self.tree,
+                    renderer,
+                    theme,
+                    style,
+                    cursor_position,
+                    self.lift,
+                    self.window,
+                );
+            }
+            return;
+        }
+
+        let translation = if dragging {
             cursor_position - self.origin
         } else {
             Vector::ZERO
@@ -1335,8 +1399,20 @@ where
         });
 
         // The drop hint, over the preview.
+        if dragging {
+            self.draw_hint(renderer, theme, cursor_position);
+        }
+    }
+}
+
+impl<Message, T, W, Theme, Renderer> PickedPane<'_, '_, Message, T, W, Theme, Renderer>
+where
+    Theme: container::Catalog + Catalog,
+    Renderer: core::Renderer,
+{
+    /// The custom drop hint for the cursor, if there is one.
+    fn draw_hint(&self, renderer: &mut Renderer, theme: &Theme, cursor_position: Point) {
         if let Some(source) = &self.hint
-            && is_dragging(self.origin, cursor_position)
             && let Some(hint) = (source.target)(self.dragged, cursor_position, &source.regions)
         {
             let style = <Theme as Catalog>::style(theme, source.class);
@@ -1511,17 +1587,24 @@ mod tests {
         assert_eq!(corner.horizontal, Some(Split(1)));
     }
 
-    /// A grid of two panes side by side, each with a title bar, after a
-    /// finger presses the left one's title bar, moves onto the right pane and
-    /// ends with `end`; the drag events it published.
-    fn pane_drag(end: fn(touch::Finger, Point) -> touch::Event) -> Vec<String> {
+    /// A grid of two panes side by side, each with a title bar (and a
+    /// drag preview, if `preview`), after a finger presses the left one's
+    /// title bar, moves onto the right pane and ends with `end`; the drag
+    /// events it published.
+    fn pane_drag(preview: bool, end: fn(touch::Finger, Point) -> touch::Event) -> Vec<String> {
         use iced::widget::text;
 
         let (mut state, left) = State::new(());
         state.split(Axis::Vertical, left, ());
 
         let grid: PaneGrid<'_, String, _, _> = PaneGrid::new(&state, |_, _, _| {
-            Content::new(text("Body")).title_bar(TitleBar::new(text("Title")).padding(10))
+            let content =
+                Content::new(text("Body")).title_bar(TitleBar::new(text("Title")).padding(10));
+            if preview {
+                content.preview(iced::Widget::boxed(text("Label")))
+            } else {
+                content
+            }
         })
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1557,12 +1640,29 @@ mod tests {
     #[test]
     fn a_lost_finger_cancels_a_pane_drag() {
         assert_eq!(
-            pane_drag(|id, position| touch::Event::FingerLifted { id, position }),
+            pane_drag(false, |id, position| touch::Event::FingerLifted {
+                id,
+                position
+            }),
             ["picked", "dropped"]
         );
         assert_eq!(
-            pane_drag(|id, position| touch::Event::FingerLost { id, position }),
+            pane_drag(false, |id, position| touch::Event::FingerLost {
+                id,
+                position
+            }),
             ["picked", "canceled"]
+        );
+    }
+
+    #[test]
+    fn a_pane_with_a_preview_is_dragged_by_its_title_bar() {
+        assert_eq!(
+            pane_drag(true, |id, position| touch::Event::FingerLifted {
+                id,
+                position
+            }),
+            ["picked", "dropped"]
         );
     }
 
@@ -1880,6 +1980,10 @@ pub struct Style {
     pub picked_split: Line,
     /// The appearance of a hovered split.
     pub hovered_split: Line,
+    /// Drawn over a pane while its preview is dragged (see
+    /// [`Content::preview`]): the grid's backdrop, partly transparent,
+    /// fades the pane into it.
+    pub picked_pane: Color,
 }
 
 /// The appearance of a highlight of the [`PaneGrid`].
@@ -1956,5 +2060,6 @@ pub fn default(theme: &Theme) -> Style {
             color: palette.primary.strong.color,
             width: 2.0,
         },
+        picked_pane: palette.background.base.color.scale_alpha(0.6),
     }
 }

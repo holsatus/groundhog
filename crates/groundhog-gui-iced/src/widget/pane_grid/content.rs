@@ -6,7 +6,7 @@ use iced::advanced::renderer;
 use iced::advanced::widget::{self, Tree, Void};
 use iced::advanced::{self as core, Layout, Shell, Widget};
 use iced::widget::container;
-use iced::{Background, Color, Event, Point, Rectangle, Size, Vector};
+use iced::{Background, Color, Element, Event, Point, Rectangle, Size, Vector};
 
 /// The content of a [`Pane`].
 ///
@@ -18,6 +18,8 @@ where
 {
     title_bar: Option<TitleBar<'a, Message, T, Theme, Renderer>>,
     body: W,
+    /// Drawn at the cursor while the pane is dragged (see [`Content::preview`]).
+    preview: Option<Element<'a, Message, Theme, Renderer>>,
     class: Theme::Class<'a>,
 }
 
@@ -31,6 +33,7 @@ where
         Self {
             title_bar: None,
             body,
+            preview: None,
             class: Theme::default(),
         }
     }
@@ -49,8 +52,18 @@ where
         Content {
             title_bar: Some(title_bar),
             body: self.body,
+            preview: self.preview,
             class: self.class,
         }
+    }
+
+    /// Sets what follows the cursor while the pane is dragged, in place of
+    /// the pane itself: a label for it, say. The pane then stays drawn where
+    /// it is until it is dropped.
+    #[must_use]
+    pub fn preview(mut self, preview: Element<'a, Message, Theme, Renderer>) -> Self {
+        self.preview = Some(preview);
+        self
     }
 
     /// Sets the style of the [`Content`].
@@ -78,12 +91,15 @@ where
     T: Widget<Message, Theme, Renderer>,
     W: Widget<Message, Theme, Renderer>,
 {
+    /// `[body, title bar, preview]`, an empty tree standing in for what is
+    /// not there.
     pub(super) fn state(&self) -> Tree {
-        let children = if let Some(title_bar) = self.title_bar.as_ref() {
-            vec![Tree::new(&self.body), title_bar.state()]
-        } else {
-            vec![Tree::new(&self.body), Tree::empty()]
-        };
+        let title_bar = self
+            .title_bar
+            .as_ref()
+            .map_or_else(Tree::empty, TitleBar::state);
+        let preview = self.preview.as_ref().map_or_else(Tree::empty, Tree::new);
+        let children = vec![Tree::new(&self.body), title_bar, preview];
 
         Tree {
             children,
@@ -92,12 +108,17 @@ where
     }
 
     pub(super) fn diff(&mut self, tree: &mut Tree) {
-        if tree.children.len() == 2 {
+        if tree.children.len() == 3 {
             if let Some(title_bar) = &mut self.title_bar {
                 title_bar.diff(&mut tree.children[1]);
             }
 
             tree.children[0].diff(&mut self.body);
+
+            match &mut self.preview {
+                Some(preview) => tree.children[2].diff(preview),
+                None => tree.children[2] = Tree::empty(),
+            }
         } else {
             *tree = self.state();
         }
@@ -133,6 +154,44 @@ where
             mouse::Cursor::Unavailable,
             viewport,
             false,
+        );
+        true
+    }
+
+    /// Whether the pane has a [`Content::preview`].
+    pub(super) fn has_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// Draw the [`Content::preview`] `lift` above `pointer`, inside the
+    /// `window`. Returns `false`, drawing nothing, for a pane without one.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a widget's draw arguments, plus where to put it"
+    )]
+    pub(super) fn draw_preview(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        pointer: Point,
+        lift: f32,
+        window: Size,
+    ) -> bool {
+        let Some(preview) = &self.preview else {
+            return false;
+        };
+
+        crate::widget::drag_preview::draw(
+            preview,
+            &tree.children[2],
+            renderer,
+            theme,
+            style,
+            pointer,
+            lift,
+            window,
         );
         true
     }
@@ -221,6 +280,15 @@ where
     }
 
     pub(crate) fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+        // The preview's size, as it would be alone; it is placed when drawn.
+        if let Some(preview) = &mut self.preview {
+            preview.layout(
+                &mut tree.children[2],
+                renderer,
+                &layout::Limits::new(Size::ZERO, Size::INFINITE),
+            );
+        }
+
         if let Some(title_bar) = &mut self.title_bar {
             let max_size = limits.max;
 
@@ -317,7 +385,16 @@ where
             layout.iter_mut(&mut tree.children).next().unwrap()
         };
 
-        if !is_picked {
+        // A picked pane's body is not pointed at, but it keeps the rest
+        // (redraws, in particular): it stays on screen, live, while a
+        // preview is dragged in its stead.
+        let pointer = matches!(event, Event::Mouse(_) | Event::Touch(_));
+        if !(is_picked && pointer) {
+            let cursor = if is_picked {
+                mouse::Cursor::Unavailable
+            } else {
+                cursor
+            };
             self.body.update(
                 body_tree,
                 event,
@@ -457,5 +534,29 @@ where
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::text;
+
+    type Pane<'a> = Content<'a, (), Void, iced::widget::Text<'a>>;
+
+    #[test]
+    fn a_preview_keeps_its_own_tree_through_a_diff() {
+        let with = || Pane::new(text("Body")).preview(iced::Widget::boxed(text("Label")));
+        let empty = Tree::empty().tag;
+
+        let mut tree = with().state();
+        assert_eq!(tree.children.len(), 3);
+        assert_ne!(tree.children[2].tag, empty, "the preview has its tree");
+
+        Pane::new(text("Body")).diff(&mut tree);
+        assert_eq!(tree.children[2].tag, empty, "a preview taken away");
+
+        with().diff(&mut tree);
+        assert_ne!(tree.children[2].tag, empty, "a preview given back");
     }
 }
