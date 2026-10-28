@@ -14,8 +14,11 @@
 //! attempt failed is in the stream's details.
 //!
 //! The source and the low-latency switch are persisted by the application
-//! (see [`Event`]), and so is whether the stream was on, so it comes back
-//! on at the next start.
+//! (see [`Event`]), and so is whether the stream is on. On is the
+//! operator's choice; whether it is received is also the application's:
+//! a stream nothing can show is paused ([`VideoPanel::show`]), so it never
+//! decodes, holds its port and wakes the interface unseen. It resumes when
+//! it shows again, at the next start too.
 
 use groundhog_video::{Config, FrameSlot, Receiver, Source, State, Status};
 use iced::{
@@ -101,6 +104,9 @@ pub struct VideoPanel {
     details: bool,
     /// Whether the picture fills the screen, alone.
     full_screen: bool,
+    /// Whether anything can show the picture; a stream on is received
+    /// only while it can.
+    shown: bool,
     /// The identity the next receiver gets.
     next: u64,
 }
@@ -114,23 +120,36 @@ struct Receiving {
 }
 
 impl VideoPanel {
-    /// The panel for `settings`, receiving already if the stream was on.
-    pub fn new(settings: VideoSettings) -> (Self, Task<Message>) {
-        let mut panel = Self {
+    /// The panel for `settings`, receiving nothing until it is shown.
+    pub fn new(settings: VideoSettings) -> Self {
+        Self {
             source: settings.uri.clone(),
             settings,
             receiving: None,
             form: false,
             details: false,
             full_screen: false,
+            shown: false,
             next: 0,
-        };
-        let task = if panel.settings.enabled {
-            panel.start()
+        }
+    }
+
+    /// Whether anything can show the picture. Hidden, a stream that is on
+    /// is paused: its receiver goes (and the full screen with it), but it
+    /// stays on, and is received again once shown.
+    pub fn show(&mut self, shown: bool) -> Task<Message> {
+        if shown == self.shown {
+            return Task::none();
+        }
+        self.shown = shown;
+
+        if shown && self.settings.enabled {
+            self.start()
         } else {
+            self.receiving = None;
+            self.full_screen = false;
             Task::none()
-        };
-        (panel, task)
+        }
     }
 
     /// Whether the picture fills the screen, alone. Never without a
@@ -169,7 +188,12 @@ impl VideoPanel {
                 self.settings.uri = self.source.trim().to_string();
                 self.settings.enabled = true;
                 self.form = false;
-                (self.start(), Some(Event::Changed(self.settings.clone())))
+                let task = if self.shown {
+                    self.start()
+                } else {
+                    Task::none()
+                };
+                (task, Some(Event::Changed(self.settings.clone())))
             }
             Message::Stop => {
                 self.receiving = None;
@@ -434,8 +458,60 @@ mod tests {
 
     use super::*;
 
+    /// The panel for `settings`, shown.
     fn panel(settings: VideoSettings) -> VideoPanel {
-        VideoPanel::new(settings).0
+        let mut panel = VideoPanel::new(settings);
+        drop(panel.show(true));
+        panel
+    }
+
+    fn on(uri: &str) -> VideoSettings {
+        VideoSettings {
+            uri: uri.to_string(),
+            enabled: true,
+            ..VideoSettings::default()
+        }
+    }
+
+    /// A stream that was on is received once something can show it, not
+    /// before.
+    #[test]
+    fn a_stream_on_waits_to_be_shown() {
+        let mut panel = VideoPanel::new(on("test://"));
+        assert!(panel.slot().is_none(), "nothing shows it yet");
+
+        drop(panel.show(true));
+        assert!(panel.slot().is_some());
+    }
+
+    /// Hidden, the stream pauses: no receiver, no full screen, and nothing
+    /// to persist, as it is still on. Shown again, it resumes.
+    #[test]
+    fn hiding_pauses_the_stream_and_showing_resumes_it() {
+        let mut panel = panel(on("test://"));
+        drop(panel.update(Message::FullScreen(true)));
+
+        drop(panel.show(false));
+        assert!(panel.slot().is_none());
+        assert!(!panel.is_full_screen());
+        assert!(panel.settings.enabled, "still on");
+
+        drop(panel.show(true));
+        assert!(panel.slot().is_some());
+    }
+
+    /// Started while nothing shows it, the stream is on but not received.
+    #[test]
+    fn a_stream_started_while_hidden_waits() {
+        let mut panel = VideoPanel::new(VideoSettings::default());
+        drop(panel.update(Message::EditSource("test://".to_string())));
+
+        let settings = changed(panel.update(Message::Start).1);
+
+        assert!(settings.enabled);
+        assert!(panel.slot().is_none());
+        drop(panel.show(true));
+        assert!(panel.slot().is_some());
     }
 
     fn changed(event: Option<Event>) -> VideoSettings {

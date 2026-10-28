@@ -205,8 +205,9 @@ impl Application {
             .clone()
             .map_or_else(Layout::new, Layout::from_workspace);
 
-        // The video comes back on if it was on when the application closed.
-        let (video, video_task) = VideoPanel::new(configuration.video.clone());
+        // The video comes back on if it was on when the application closed,
+        // once something shows it (see `sync_video`, below).
+        let video = VideoPanel::new(configuration.video.clone());
 
         let mut application = Application {
             layout,
@@ -238,6 +239,7 @@ impl Application {
         }
 
         application.sync_system_bars();
+        let video_task = application.sync_video();
 
         let saved = stream::unfold(saved, |saved| async move {
             let mut saved = saved?;
@@ -256,7 +258,7 @@ impl Application {
             ),
             Task::stream(events.links.into_stream()).map(Message::Link),
             Task::stream(saved).map(Message::ConfigurationSaved),
-            video_task.map(Message::Video),
+            video_task,
         ]);
 
         (application, tasks)
@@ -345,8 +347,10 @@ impl Application {
                 Task::none()
             }
             Message::Window(size) => {
+                // The size can change the shell, and with it whether the
+                // video shows.
                 self.window = Some(size);
-                Task::none()
+                self.sync_video()
             }
             Message::Back { captured } => {
                 let target = back_target(
@@ -386,7 +390,7 @@ impl Application {
                 if self.layout.update(message) {
                     self.configuration.workspace = Some(self.layout.workspace().clone());
                 }
-                Task::none()
+                self.sync_video()
             }
             Message::Rail(panel) => {
                 // A plain click opens on the left; the modifiers stand in
@@ -456,7 +460,7 @@ impl Application {
             }
             Message::Settings(message) => {
                 self.on_settings(message);
-                Task::none()
+                self.sync_video()
             }
             Message::Notifications(message) => {
                 self.notices.update(message);
@@ -709,6 +713,16 @@ impl Application {
         } else if !record && let Some(recorder) = self.recorder.take() {
             recorder.stop();
         }
+    }
+
+    /// Tells the video whether anything can show it (see [`video_shown`]),
+    /// so a stream nothing shows pauses instead of decoding unseen.
+    fn sync_video(&mut self) -> Task<Message> {
+        let shown = video_shown(self.shell(), &self.layout);
+        Task::batch([
+            self.video.show(shown).map(Message::Video),
+            self.sync_full_screen(),
+        ])
     }
 
     /// Puts the window in the mode the application and the video ask for,
@@ -1035,6 +1049,13 @@ fn back_target(
     }
 }
 
+/// Whether anything can show the video: the floating shell always can
+/// (the map's corner, or the whole screen, with a tap), the tiled shell
+/// while the Video pane is open.
+fn video_shown(shell: Shell, layout: &Layout) -> bool {
+    shell == Shell::Floating || layout.is_open(layout::Panel::Video)
+}
+
 mod floating;
 #[cfg(test)]
 mod gallery;
@@ -1042,8 +1063,29 @@ mod tiled;
 
 #[cfg(test)]
 mod tests {
-    use super::{BackTarget, FullScreen, back_target};
+    use super::{BackTarget, FullScreen, Layout, Shell, back_target, layout, video_shown};
     use iced::window::Mode;
+
+    /// The tiled shell shows the video only in its pane; the floating shell
+    /// shows it with the map, the pane or not.
+    #[test]
+    fn the_video_shows_in_its_pane_or_the_floating_shell() {
+        let mut layout = Layout::new();
+        assert!(!video_shown(Shell::Tiled, &layout));
+        assert!(video_shown(Shell::Floating, &layout), "in the map's corner");
+
+        layout.update(layout::Message::Toggle(
+            layout::Panel::Video,
+            layout::Slot::Left,
+        ));
+        assert!(video_shown(Shell::Tiled, &layout));
+
+        layout.update(layout::Message::Toggle(
+            layout::Panel::Video,
+            layout::Slot::Left,
+        ));
+        assert!(!video_shown(Shell::Tiled, &layout), "closed again");
+    }
 
     #[test]
     fn back_dismisses_a_confirmation_before_anything_else() {

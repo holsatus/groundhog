@@ -395,9 +395,13 @@ async fn gallery() {
         }
     }
 
-    // The video panel receiving the test pattern. Its state comes as
-    // messages the gallery does not run; it is handed the first
-    // receiver's once the first frame is in.
+    // The video panel receiving the test pattern, open so that the stream
+    // is received. Its state comes as messages the gallery does not run; it
+    // is handed the first receiver's once the first frame is in.
+    let _ = app.update(Message::Layout(layout::Message::Toggle(
+        layout::Panel::Video,
+        layout::Slot::Right,
+    )));
     let _ = app.update(Message::Video(video::Message::EditSource(
         "test://".to_string(),
     )));
