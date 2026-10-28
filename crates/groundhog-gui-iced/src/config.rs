@@ -51,6 +51,9 @@ pub struct Settings {
     pub scale_factor: f32,
     /// Record every received frame to a `.tlog` file per session.
     pub record_telemetry: bool,
+    /// Record the video while a vehicle is armed, and for a few seconds
+    /// after the last disarms.
+    pub record_video_while_armed: bool,
     /// The altitude above home of the first waypoint of a plan. Later ones
     /// take the altitude of the waypoint before them.
     pub default_waypoint_altitude_m: f32,
@@ -64,6 +67,7 @@ impl Default for Settings {
             touch_controls: false,
             scale_factor: 1.0,
             record_telemetry: true,
+            record_video_while_armed: false,
             default_waypoint_altitude_m:
                 groundhog_logic::domain::mission::DEFAULT_WAYPOINT_ALTITUDE_M,
         }

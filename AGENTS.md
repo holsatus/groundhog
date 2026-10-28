@@ -95,7 +95,8 @@ the crate is named where it is not obvious.
            lib.rs     SystemId and MavlinkId, shared by every layer
 
  video     receiver   a GStreamer pipeline per attempt, supervised    ┐
-           frame      the newest frame, for the frontend to draw      ┘ own threads
+           record     the branch that writes the stream to a file     │ own threads
+           frame      the newest frame, for the frontend to draw      ┘
 ```
 
 How data moves:
@@ -147,7 +148,7 @@ are shared by all.
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
-| video | `Receiver` (URI to frames, its `State`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
+| video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and

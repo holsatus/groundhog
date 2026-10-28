@@ -17,12 +17,22 @@
 //!
 //! The receiver reconnects by itself, a second after the stream fails or
 //! stalls.
+//!
+//! It also records the stream, as it arrives, into Matroska files
+//! ([`Receiver::record`]): the compressed stream is written as it is, never
+//! decoded and encoded again, a file per stretch of video between
+//! reconnections. Each file starts at a keyframe, at time zero, and carries
+//! the wall-clock time that keyframe arrived (Matroska's `DateUTC`), so a
+//! frame's arrival is the file's date plus its timestamp: the same clock a
+//! telemetry log stamps its frames with.
 
 // Public items in private modules are invisible to the dead-code and
 // visibility checks the seam relies on; this makes them visible.
 #![warn(unreachable_pub)]
 
 mod frame;
+#[cfg(not(target_os = "android"))]
+mod record;
 mod source;
 
 #[cfg(not(target_os = "android"))]
@@ -34,6 +44,8 @@ mod receiver;
 pub use frame::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range};
 pub use receiver::Receiver;
 pub use source::{Codec, Source};
+
+use std::path::PathBuf;
 
 /// How a stream is received.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,4 +109,19 @@ pub enum Status {
 pub struct State {
     pub status: Status,
     pub frames: u64,
+    pub recording: Recording,
+}
+
+/// Whether the stream is being recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Recording {
+    Off,
+    /// Asked to record: a file opens at the next keyframe, once there is
+    /// video.
+    Waiting,
+    /// Writing into this file.
+    Writing(PathBuf),
+    /// The stream cannot be recorded, and why. It is tried again once the
+    /// stream is opened again.
+    Failed(String),
 }

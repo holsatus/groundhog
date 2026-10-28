@@ -26,7 +26,7 @@ use crate::{
         self, Icon,
         style::{self, ButtonKind},
     },
-    widget::{surface::surface, video::video},
+    widget::surface::surface,
 };
 
 /// The window's size before it is first measured: a phone in portrait.
@@ -215,17 +215,26 @@ impl Application {
 
         // While there is video, it and the map share the screen: one fills
         // it, the other sits in the corner of what shows, and a tap on the
-        // corner swaps them.
-        let (main, corner) = match self.video.slot() {
-            Some(slot) if self.floating.is_video_main() => (
-                ui::screen(video(slot)).boxed(),
-                Some(self.view_map(Placement::Pane).boxed()),
-            ),
-            Some(slot) => (
+        // corner swaps them. The video says when it stopped, either way.
+        let picture = |clear| {
+            self.video
+                .view_inset(clear)
+                .map(|picture| picture.boxed().map(Message::Video).boxed())
+        };
+        let filling = Padding {
+            top: covered.top + ui::space::S,
+            right: covered.right + ui::space::S,
+            bottom: covered.bottom + ui::space::S,
+            left: covered.left + ui::space::S,
+        };
+        let (main, corner) = match picture(filling) {
+            Some(picture) if self.floating.is_video_main() => {
+                (picture, Some(self.view_map(Placement::Pane).boxed()))
+            }
+            _ => (
                 self.view_map(Placement::Window { covered }).boxed(),
-                Some(ui::screen(video(slot)).boxed()),
+                picture(Padding::new(ui::space::XS)),
             ),
-            None => (self.view_map(Placement::Window { covered }).boxed(), None),
         };
         let corner = corner.map(|content| {
             let width = (geometry.screen.width * CORNER_SHARE).min(CORNER_WIDTH);

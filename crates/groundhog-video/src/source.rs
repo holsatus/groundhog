@@ -135,6 +135,19 @@ pub(crate) const SINK: &str = "sink";
 #[cfg(not(target_os = "android"))]
 pub(crate) const RTSP_SOURCE: &str = "source";
 
+/// Where the stream is still compressed, between the parser and the
+/// decoder: a `tee`, which a recording branches off. Every pipeline but the
+/// test pattern's has one.
+#[cfg(not(target_os = "android"))]
+pub(crate) const ENCODED: &str = "encoded";
+
+/// The `parsebin` that finds a stream's video (unpacking RTP, splitting
+/// MPEG-TS) where the pipeline cannot name the elements in advance. Its
+/// pads appear once it knows the stream; the receiver links the video one
+/// to [`ENCODED`].
+#[cfg(not(target_os = "android"))]
+pub(crate) const PARSE: &str = "parse";
+
 /// The GStreamer pipeline (in `gst-launch` syntax) receiving `source` as
 /// `config` asks.
 #[cfg(not(target_os = "android"))]
@@ -155,7 +168,10 @@ pub(crate) fn pipeline_description(source: &Source, config: &crate::Config) -> S
          caps=\"video/x-raw,format={{NV12,I420}}\"",
         !config.low_latency
     );
-    let decode = format!("decodebin3 ! {sink}");
+    // The decoder hangs straight off the tee, so the picture waits for
+    // nothing; a recording's branch has its own queue.
+    let decode = format!("tee name={ENCODED} ! decodebin3 ! {sink}");
+    let parse = format!("parsebin name={PARSE}  {decode}");
 
     match source {
         Source::Rtsp { location } => {
@@ -164,7 +180,7 @@ pub(crate) fn pipeline_description(source: &Source, config: &crate::Config) -> S
                 "rtspsrc name={RTSP_SOURCE} location=\"{location}\" latency={latency_ms} \
                  drop-on-latency=true do-rtcp=true do-retransmission={retransmission} \
                  tcp-timeout={RTSP_TCP_TIMEOUT_US} udp-reconnect=true retry=3 \
-                 protocols=udp+tcp ! {decode}"
+                 protocols=udp+tcp ! {parse}"
             )
         }
         Source::Rtp {
@@ -189,10 +205,10 @@ pub(crate) fn pipeline_description(source: &Source, config: &crate::Config) -> S
         }
         Source::MpegTsUdp { address, port } => format!(
             "udpsrc address={address} port={port} buffer-size={UDP_BUFFER_BYTES} \
-             caps=\"video/mpegts,systemstream=true\" ! {decode}"
+             caps=\"video/mpegts,systemstream=true\" ! {parse}"
         ),
         Source::MpegTsTcp { host, port } => {
-            format!("tcpclientsrc host={host} port={port} ! {decode}")
+            format!("tcpclientsrc host={host} port={port} ! {parse}")
         }
         Source::TestPattern => format!(
             "videotestsrc is-live=true pattern=smpte horizontal-speed=4 \

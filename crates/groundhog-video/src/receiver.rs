@@ -2,6 +2,7 @@
 //! restarted by a supervisor thread of its own.
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -16,7 +17,8 @@ use gstreamer_video::{self as gst_video, prelude::*};
 use tokio::sync::watch;
 
 use crate::{
-    Colour, Config, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range, State, Status,
+    Colour, Config, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range, Recording, State, Status,
+    record::Branch,
     source::{self, Source},
 };
 
@@ -37,6 +39,7 @@ pub struct Receiver {
     slot: FrameSlot,
     state: watch::Receiver<State>,
     stop: Arc<AtomicBool>,
+    record: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Receiver {
@@ -48,14 +51,17 @@ impl Receiver {
         let (state, watcher) = watch::channel(State {
             status: Status::Connecting,
             frames: 0,
+            recording: Recording::Off,
         });
         let stop = Arc::new(AtomicBool::new(false));
+        let record = Arc::new(Mutex::new(None));
 
         let supervisor = Supervisor {
             config,
             slot: slot.clone(),
             state,
             stop: stop.clone(),
+            record: record.clone(),
         };
         let spawned = thread::Builder::new()
             .name("video".to_string())
@@ -68,7 +74,16 @@ impl Receiver {
             slot,
             state: watcher,
             stop,
+            record,
         }
+    }
+
+    /// Record the stream into `directory`, or stop recording (`None`). A
+    /// file is written per stretch of video: from a keyframe, until the
+    /// stream is lost or recording stops. Files are named after the time
+    /// they start (see [`Recording`] for how it stands).
+    pub fn record(&self, directory: Option<PathBuf>) {
+        *self.record.lock().unwrap_or_else(PoisonError::into_inner) = directory;
     }
 
     /// Where the decoded frames arrive.
@@ -95,6 +110,17 @@ struct Supervisor {
     slot: FrameSlot,
     state: watch::Sender<State>,
     stop: Arc<AtomicBool>,
+    /// Where to record, if anywhere.
+    record: Arc<Mutex<Option<PathBuf>>>,
+}
+
+/// One attempt's recording.
+#[derive(Default)]
+struct Recorder {
+    branch: Option<Branch>,
+    /// The stream could not be recorded; not tried again until the next
+    /// attempt, or until recording is asked for anew.
+    refused: bool,
 }
 
 /// What ended an attempt.
@@ -160,6 +186,57 @@ impl Supervisor {
         });
     }
 
+    fn set_recording(&self, recording: Recording) {
+        set_recording(&self.state, recording);
+    }
+
+    /// Where to record, if anywhere.
+    fn record_into(&self) -> Option<PathBuf> {
+        self.record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Bring the recording in line with what is asked: start a branch where
+    /// a stream has come, finish one no longer wanted.
+    fn sync_recording(&self, pipeline: &gst::Pipeline, recorder: &mut Recorder) {
+        let wanted = self.record_into();
+        if let Some(branch) = recorder
+            .branch
+            .take_if(|branch| wanted.as_deref() != Some(branch.directory()))
+        {
+            branch.finish(pipeline);
+        }
+
+        let Some(directory) = wanted else {
+            recorder.refused = false;
+            self.set_recording(Recording::Off);
+            return;
+        };
+        if recorder.branch.is_some() || recorder.refused {
+            return;
+        }
+
+        let state = self.state.clone();
+        let started = move |path: &std::path::Path| {
+            log::info!("Video: recording into {}", path.display());
+            set_recording(&state, Recording::Writing(path.to_path_buf()));
+        };
+        match Branch::attach(pipeline, &directory, started) {
+            Ok(Some(branch)) => {
+                recorder.branch = Some(branch);
+                self.set_recording(Recording::Waiting);
+            }
+            Ok(None) => self.set_recording(Recording::Waiting),
+            Err(reason) => {
+                log::warn!("Video: {reason}");
+                recorder.refused = true;
+                self.set_recording(Recording::Failed(reason));
+            }
+        }
+    }
+
     /// One run of the pipeline, from opening the stream until it fails,
     /// stalls or is stopped.
     fn attempt(&self, source: &Source) -> Ended {
@@ -185,11 +262,27 @@ impl Supervisor {
             return Ended::Failed(reason);
         }
 
+        let mut recorder = Recorder::default();
         let ended = if pipeline.set_state(gst::State::Playing).is_err() {
             Ended::Retry("The stream could not be opened".to_string())
         } else {
-            self.watch(&pipeline, &running)
+            self.watch(&pipeline, &running, &mut recorder)
         };
+
+        // The file is finished before the pipeline stops, so it keeps its
+        // index. Until the next stretch of video, a recording waits; one
+        // that failed says so until it is tried again.
+        if let Some(branch) = recorder.branch.take() {
+            branch.finish(&pipeline);
+        }
+        self.state.send_if_modified(|state| {
+            let waiting = match state.recording {
+                Recording::Writing(_) => Recording::Waiting,
+                _ => return false,
+            };
+            state.recording = waiting;
+            true
+        });
 
         let _ = pipeline.set_state(gst::State::Null);
         ended
@@ -216,6 +309,28 @@ impl Supervisor {
                     })
                     .unwrap_or(false);
                 Some(video.to_value())
+            });
+        }
+
+        // Where a parsebin finds the stream, its video goes on to the tee;
+        // anything else (an MPEG-TS's audio) is left unlinked, which the
+        // demuxer tolerates while one stream is linked.
+        if let Some(parse) = pipeline.by_name(source::PARSE) {
+            let tee = pipeline
+                .by_name(source::ENCODED)
+                .and_then(|tee| tee.static_pad("sink"))
+                .ok_or_else(|| "The video pipeline has no tee".to_string())?;
+            parse.connect_pad_added(move |_, pad| {
+                let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+                let video = caps
+                    .structure(0)
+                    .is_some_and(|structure| structure.name().starts_with("video/"));
+                if video
+                    && !tee.is_linked()
+                    && let Err(error) = pad.link(&tee)
+                {
+                    log::warn!("Video: cannot link the stream ({error:?})");
+                }
             });
         }
 
@@ -272,8 +387,9 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Run the pipeline until it fails, stalls or is stopped.
-    fn watch(&self, pipeline: &gst::Pipeline, running: &Running) -> Ended {
+    /// Run the pipeline until it fails, stalls or is stopped, recording
+    /// into `recorder` as asked.
+    fn watch(&self, pipeline: &gst::Pipeline, running: &Running, recorder: &mut Recorder) -> Ended {
         let Some(bus) = pipeline.bus() else {
             return Ended::Failed("The video pipeline has no bus".to_string());
         };
@@ -298,6 +414,8 @@ impl Supervisor {
                 _ => {}
             }
 
+            self.sync_recording(pipeline, recorder);
+
             let Some(message) =
                 bus.timed_pop(gst::ClockTime::from_nseconds(POLL.as_nanos() as u64))
             else {
@@ -307,28 +425,26 @@ impl Supervisor {
                 gst::MessageView::Error(error) => {
                     let detail = error.debug().map(|debug| debug.to_string());
                     log::warn!("Video: {} ({detail:?})", error.error());
+
+                    // A recording that fails (a full disk) ends; the
+                    // stream does not.
+                    let source = message.src();
+                    if let Some(branch) = recorder
+                        .branch
+                        .take_if(|branch| source.is_some_and(|source| branch.owns(source)))
+                    {
+                        branch.finish(pipeline);
+                        recorder.refused = true;
+                        self.set_recording(Recording::Failed(format!(
+                            "Recording stopped: {}",
+                            error.error()
+                        )));
+                        continue;
+                    }
                     return Ended::Retry(error.error().to_string());
                 }
                 gst::MessageView::Eos(_) => {
                     return Ended::Retry("The stream ended".to_string());
-                }
-                // Decode only the video of a stream that carries more (an
-                // MPEG-TS with audio).
-                gst::MessageView::StreamCollection(collection) => {
-                    let video: Vec<String> = collection
-                        .stream_collection()
-                        .iter()
-                        .filter(|stream| stream.stream_type().contains(gst::StreamType::VIDEO))
-                        .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
-                        .collect();
-                    if let Some(decodebin) = message
-                        .src()
-                        .and_then(|src| src.downcast_ref::<gst::Element>())
-                        && !video.is_empty()
-                    {
-                        let ids: Vec<&str> = video.iter().map(String::as_str).collect();
-                        decodebin.send_event(gst::event::SelectStreams::new(ids));
-                    }
                 }
                 gst::MessageView::Latency(_) => {
                     drop(pipeline.recalculate_latency());
@@ -337,6 +453,15 @@ impl Supervisor {
             }
         }
     }
+}
+
+/// Set the recording's state, waking the viewer only on a change.
+fn set_recording(state: &watch::Sender<State>, recording: Recording) {
+    state.send_if_modified(|state| {
+        let changed = state.recording != recording;
+        state.recording = recording;
+        changed
+    });
 }
 
 /// What one attempt's callbacks share with its supervisor.
@@ -563,5 +688,308 @@ mod tests {
             ),
             "{state:?}"
         );
+    }
+
+    /// An H.264 encoder GStreamer has, if any, with what keeps it from
+    /// buffering.
+    fn h264_encoder() -> Option<&'static str> {
+        if gstreamer_has(&["x264enc"]) {
+            Some("x264enc tune=zerolatency key-int-max=15")
+        } else if gstreamer_has(&["openh264enc"]) {
+            Some("openh264enc gop-size=15")
+        } else {
+            None
+        }
+    }
+
+    /// A free UDP port on loopback.
+    fn free_port() -> u16 {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .and_then(|socket| socket.local_addr())
+            .expect("a free port")
+            .port()
+    }
+
+    /// A playing sender of colour bars, encoded in H.264, then `tail`.
+    fn sender(encoder: &str, tail: &str) -> gst::Element {
+        let sender = gst::parse::launch(&format!(
+            "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=30/1 \
+             ! {encoder} ! {tail}"
+        ))
+        .expect("the sender pipeline");
+        sender
+            .set_state(gst::State::Playing)
+            .expect("the sender plays");
+        sender
+    }
+
+    /// A directory of its own for a test's recordings, empty.
+    fn recordings(test: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("groundhog-video-{test}-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&directory));
+        directory
+    }
+
+    /// What a recorded file holds: its first frame's flags and timestamp,
+    /// how many frames, and the date it says it starts at.
+    struct Recorded {
+        first_is_keyframe: bool,
+        first_pts: Option<gst::ClockTime>,
+        frames: usize,
+        date: Option<gst::DateTime>,
+    }
+
+    fn read_recording(path: &std::path::Path) -> Recorded {
+        let reader = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! matroskademux ! appsink name=out sync=false",
+            path.display()
+        ))
+        .expect("the reader pipeline")
+        .downcast::<gst::Pipeline>()
+        .expect("a pipeline");
+        let out = reader
+            .by_name("out")
+            .and_then(|out| out.downcast::<gst_app::AppSink>().ok())
+            .expect("the reader's sink");
+        reader
+            .set_state(gst::State::Playing)
+            .expect("the reader plays");
+
+        let mut recorded = Recorded {
+            first_is_keyframe: false,
+            first_pts: None,
+            frames: 0,
+            date: None,
+        };
+        while let Some(sample) = out.try_pull_sample(gst::ClockTime::from_seconds(2)) {
+            let buffer = sample.buffer().expect("a buffer");
+            if recorded.frames == 0 {
+                recorded.first_is_keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+                recorded.first_pts = buffer.pts();
+            }
+            recorded.frames += 1;
+        }
+        let bus = reader.bus().expect("a bus");
+        while let Some(message) = bus.pop() {
+            if let gst::MessageView::Tag(tag) = message.view()
+                && let Some(date) = tag.tags().get::<gst::tags::DateTime>()
+            {
+                recorded.date = Some(date.get().clone());
+            }
+        }
+        let _ = reader.set_state(gst::State::Null);
+        recorded
+    }
+
+    /// Record `uri` (fed by a running sender) for a while, stop, and
+    /// return the one file written, checked to start on a keyframe at zero
+    /// and to say when it began.
+    fn record_a_while(uri: &str, test: &str) -> Recorded {
+        let directory = recordings(test);
+        let receiver = Receiver::start(Config::new(uri));
+        receiver.record(Some(directory.clone()));
+
+        let state = until(&receiver, Duration::from_secs(10), |state| {
+            matches!(state.recording, Recording::Writing(_))
+        });
+        let Recording::Writing(path) = state.recording.clone() else {
+            panic!("not recording: {state:?}");
+        };
+        assert_eq!(path.parent(), Some(directory.as_path()));
+        // A second of video into the file, counted from when it opened.
+        let opened = state.frames;
+        until(&receiver, Duration::from_secs(5), |state| {
+            state.frames >= opened + 30
+        });
+
+        let before_stop = std::time::SystemTime::now();
+        receiver.record(None);
+        let state = until(&receiver, Duration::from_secs(5), |state| {
+            state.recording == Recording::Off
+        });
+        assert_eq!(state.recording, Recording::Off, "{state:?}");
+
+        let recorded = read_recording(&path);
+        assert!(recorded.first_is_keyframe, "the file starts on a keyframe");
+        assert!(
+            recorded
+                .first_pts
+                .is_some_and(|pts| pts < gst::ClockTime::from_mseconds(100)),
+            "the file starts at zero: {:?}",
+            recorded.first_pts
+        );
+        assert!(recorded.frames >= 10, "{} frames", recorded.frames);
+
+        // Its date is when its first frame arrived: within the recording.
+        let date = recorded.date.as_ref().expect("the file has a date");
+        let started = date.to_g_date_time().expect("a full date").to_unix();
+        let stopped = before_stop
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs() as i64;
+        assert!(
+            (stopped - 20..=stopped).contains(&started),
+            "started {started}, stopped {stopped}"
+        );
+
+        drop(receiver);
+        drop(std::fs::remove_dir_all(&directory));
+        recorded
+    }
+
+    /// An RTP stream is recorded as it comes, without encoding it again.
+    #[test]
+    fn h264_over_udp_is_recorded() {
+        let Some(encoder) = h264_encoder().filter(|_| {
+            gstreamer_has(&[
+                "rtph264pay",
+                "rtph264depay",
+                "h264parse",
+                "matroskamux",
+                "matroskademux",
+            ])
+        }) else {
+            eprintln!(
+                "skipped: no H.264 encoder, or GStreamer's RTP or Matroska plugins are missing"
+            );
+            return;
+        };
+        let port = free_port();
+        let sender = sender(
+            encoder,
+            &format!("rtph264pay config-interval=1 ! udpsink host=127.0.0.1 port={port}"),
+        );
+
+        record_a_while(&format!("udp://127.0.0.1:{port}"), "rtp");
+
+        let _ = sender.set_state(gst::State::Null);
+    }
+
+    /// An MPEG-TS stream, found by the parsebin, is shown and recorded.
+    #[test]
+    fn mpegts_over_udp_is_recorded() {
+        let Some(encoder) = h264_encoder().filter(|_| {
+            gstreamer_has(&[
+                "mpegtsmux",
+                "tsdemux",
+                "h264parse",
+                "matroskamux",
+                "matroskademux",
+            ])
+        }) else {
+            eprintln!(
+                "skipped: no H.264 encoder, or GStreamer's MPEG-TS or Matroska plugins are missing"
+            );
+            return;
+        };
+        let port = free_port();
+        let sender = sender(
+            encoder,
+            &format!("h264parse ! mpegtsmux ! udpsink host=127.0.0.1 port={port}"),
+        );
+
+        record_a_while(&format!("mpegts://127.0.0.1:{port}"), "mpegts");
+
+        let _ = sender.set_state(gst::State::Null);
+    }
+
+    /// A stream that is lost ends its file; when video comes back, the next
+    /// stretch goes into a file of its own, and both play.
+    #[test]
+    fn each_stretch_of_video_is_a_file() {
+        let Some(encoder) = h264_encoder().filter(|_| {
+            gstreamer_has(&[
+                "rtph264pay",
+                "rtph264depay",
+                "h264parse",
+                "matroskamux",
+                "matroskademux",
+            ])
+        }) else {
+            eprintln!(
+                "skipped: no H.264 encoder, or GStreamer's RTP or Matroska plugins are missing"
+            );
+            return;
+        };
+        let directory = recordings("stretches");
+        let port = free_port();
+        let tail = format!("rtph264pay config-interval=1 ! udpsink host=127.0.0.1 port={port}");
+        let receiver = Receiver::start(Config::new(format!("udp://127.0.0.1:{port}")));
+        receiver.record(Some(directory.clone()));
+
+        let mut files = Vec::new();
+        for _ in 0..2 {
+            let sending = sender(encoder, &tail);
+            let state = until(
+                &receiver,
+                Duration::from_secs(10),
+                |state| matches!(&state.recording, Recording::Writing(path) if !files.contains(path)),
+            );
+            let Recording::Writing(path) = state.recording else {
+                panic!("not recording a new file: {state:?}");
+            };
+            files.push(path);
+            thread::sleep(Duration::from_millis(500));
+
+            // The camera goes away: the receiver notices the stall.
+            let _ = sending.set_state(gst::State::Null);
+            let state = until(&receiver, STALL * 2, |state| {
+                state.recording == Recording::Waiting
+            });
+            assert_eq!(state.recording, Recording::Waiting, "{state:?}");
+        }
+
+        assert_ne!(files[0], files[1]);
+        for file in &files {
+            let recorded = read_recording(file);
+            assert!(recorded.frames > 0, "{} is empty", file.display());
+        }
+        drop(receiver);
+        drop(std::fs::remove_dir_all(&directory));
+    }
+
+    /// Asked to record before any video, then stopped: no file is left.
+    #[test]
+    fn a_recording_without_video_leaves_nothing() {
+        if !gstreamer_has(&["udpsrc", "rtph264depay", "h264parse"]) {
+            eprintln!("skipped: GStreamer's RTP plugins are missing");
+            return;
+        }
+        let directory = recordings("silent");
+        let receiver = Receiver::start(Config::new(format!("udp://127.0.0.1:{}", free_port())));
+        receiver.record(Some(directory.clone()));
+
+        let state = until(&receiver, Duration::from_secs(2), |state| {
+            state.recording == Recording::Waiting
+        });
+        assert_eq!(state.recording, Recording::Waiting, "{state:?}");
+        receiver.record(None);
+        let state = until(&receiver, Duration::from_secs(2), |state| {
+            state.recording == Recording::Off
+        });
+        assert_eq!(state.recording, Recording::Off, "{state:?}");
+
+        let files = std::fs::read_dir(&directory)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(files, 0, "nothing in {}", directory.display());
+        drop(std::fs::remove_dir_all(&directory));
+    }
+
+    /// The test pattern is no stream: it says it cannot be recorded.
+    #[test]
+    fn the_test_pattern_is_not_recorded() {
+        if !gstreamer_has(&["videotestsrc", "videoconvert", "appsink"]) {
+            eprintln!("skipped: GStreamer's base plugins are not installed");
+            return;
+        }
+        let receiver = Receiver::start(Config::new("test://"));
+        receiver.record(Some(recordings("pattern")));
+
+        let state = until(&receiver, Duration::from_secs(5), |state| {
+            matches!(state.recording, Recording::Failed(_))
+        });
+        assert!(matches!(state.recording, Recording::Failed(_)), "{state:?}");
     }
 }

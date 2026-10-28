@@ -16,11 +16,23 @@
 //! The source and the low-latency switch are persisted by the application
 //! (see [`Event`]), and so is whether the stream is on. On is the
 //! operator's choice; whether it is received is also the application's:
-//! a stream nothing can show is paused ([`VideoPanel::show`]), so it never
-//! decodes, holds its port and wakes the interface unseen. It resumes when
-//! it shows again, at the next start too.
+//! a stream nothing can show is paused ([`VideoPanel::set_shown`]), so it
+//! never decodes, holds its port and wakes the interface unseen. It
+//! resumes when it shows again, at the next start too.
+//!
+//! The stream is recorded while the operator asks, and, when the setting
+//! is on, while a vehicle is armed and for [`AFTER_DISARM`] after (see
+//! [`WhileArmed`]). A stream being recorded is received even where nothing
+//! shows it. The application tells the panel what it cannot know (whether
+//! it shows, whether a vehicle is armed, the setting) and then has it
+//! [`VideoPanel::sync`] its receiver with all of it.
 
-use groundhog_video::{Config, FrameSlot, Receiver, Source, State, Status};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use groundhog_video::{Config, FrameSlot, Receiver, Recording, Source, State, Status};
 use iced::{
     Alignment, Element, Length, Padding, Task, Widget, mouse,
     widget::{column, container, mouse_area, row, stack},
@@ -45,6 +57,8 @@ pub enum Message {
     ToggleDetails,
     /// Show the picture alone, filling the screen, or leave it.
     FullScreen(bool),
+    /// Start or stop recording the stream.
+    Record(bool),
     /// Receiver `id`'s state changed: a frame arrived, or its status.
     Updated(u64, State),
 }
@@ -53,6 +67,59 @@ pub enum Message {
 pub enum Event {
     /// The settings to persist.
     Changed(VideoSettings),
+    /// The stream cannot be recorded, and why.
+    RecordingFailed(String),
+}
+
+/// How long recording while armed goes on after the last vehicle disarms,
+/// so a landing and what follows it are kept.
+pub const AFTER_DISARM: Duration = Duration::from_secs(5);
+
+/// Recording while a vehicle is armed: from arming until [`AFTER_DISARM`]
+/// after the last vehicle disarms.
+#[derive(Debug, Default)]
+struct WhileArmed {
+    /// The setting.
+    enabled: bool,
+    /// Whether a vehicle is armed.
+    armed: bool,
+    /// When the last vehicle disarmed, until [`AFTER_DISARM`] has passed.
+    disarmed_at: Option<Instant>,
+    /// The operator stopped this recording; the next arming starts another.
+    dismissed: bool,
+}
+
+impl WhileArmed {
+    fn observe(&mut self, armed: bool, now: Instant) {
+        if armed && !self.armed {
+            self.disarmed_at = None;
+            self.dismissed = false;
+        } else if !armed && self.armed {
+            self.disarmed_at = Some(now);
+        }
+        self.armed = armed;
+    }
+
+    fn wants(&self, now: Instant) -> bool {
+        self.enabled
+            && !self.dismissed
+            && (self.armed
+                || self
+                    .disarmed_at
+                    .is_some_and(|at| now.duration_since(at) < AFTER_DISARM))
+    }
+
+    /// Whether a recording after disarming has yet to end: something must
+    /// [`VideoPanel::sync`] the panel again once it has.
+    fn lingers(&self) -> bool {
+        self.disarmed_at.is_some()
+    }
+
+    fn expire(&mut self, now: Instant) {
+        self.disarmed_at = self
+            .disarmed_at
+            .filter(|at| now.duration_since(*at) < AFTER_DISARM);
+    }
 }
 
 /// What the operator is shown of a receiver's state. Opening the stream
@@ -90,6 +157,11 @@ impl Showing {
     }
 }
 
+/// "Recording", while a file is written.
+fn recording_badge<'a>(state: &State) -> Option<impl Widget<Message> + 'a> {
+    matches!(state.recording, Recording::Writing(_)).then(|| ui::badge("Recording", Tone::Danger))
+}
+
 /// The widest the floating cards over the picture get.
 const FORM_WIDTH: f32 = 420.0;
 
@@ -105,8 +177,13 @@ pub struct VideoPanel {
     /// Whether the picture fills the screen, alone.
     full_screen: bool,
     /// Whether anything can show the picture; a stream on is received
-    /// only while it can.
+    /// only while it can, or while it is recorded.
     shown: bool,
+    /// Where recordings go; nowhere without a data directory.
+    recordings: Option<PathBuf>,
+    /// The operator asked to record.
+    record: bool,
+    while_armed: WhileArmed,
     /// The identity the next receiver gets.
     next: u64,
 }
@@ -117,11 +194,14 @@ struct Receiving {
     state: State,
     /// Why the last attempt failed, until video comes.
     problem: Option<String>,
+    /// Where the receiver was told to record, if anywhere.
+    recording_into: Option<PathBuf>,
 }
 
 impl VideoPanel {
-    /// The panel for `settings`, receiving nothing until it is shown.
-    pub fn new(settings: VideoSettings) -> Self {
+    /// The panel for `settings`, receiving nothing until it is shown,
+    /// recording into `recordings`.
+    pub fn new(settings: VideoSettings, recordings: Option<PathBuf>) -> Self {
         Self {
             source: settings.uri.clone(),
             settings,
@@ -130,26 +210,79 @@ impl VideoPanel {
             details: false,
             full_screen: false,
             shown: false,
+            recordings,
+            record: false,
+            while_armed: WhileArmed::default(),
             next: 0,
         }
     }
 
     /// Whether anything can show the picture. Hidden, a stream that is on
-    /// is paused: its receiver goes (and the full screen with it), but it
-    /// stays on, and is received again once shown.
-    pub fn show(&mut self, shown: bool) -> Task<Message> {
-        if shown == self.shown {
-            return Task::none();
-        }
+    /// is paused (and leaves the full screen), unless it is recorded.
+    pub fn set_shown(&mut self, shown: bool) {
         self.shown = shown;
+    }
 
-        if shown && self.settings.enabled {
-            self.start()
-        } else {
-            self.receiving = None;
+    /// Whether to record while a vehicle is armed (the setting).
+    pub fn set_record_while_armed(&mut self, enabled: bool) {
+        self.while_armed.enabled = enabled;
+    }
+
+    /// Whether a vehicle is armed, as of `now`.
+    pub fn observe_armed(&mut self, armed: bool, now: Instant) {
+        self.while_armed.observe(armed, now);
+    }
+
+    /// Whether the panel must be synced again later, without anything else
+    /// changing: a recording after disarming ends on its own.
+    pub fn needs_ticks(&self) -> bool {
+        self.while_armed.lingers()
+    }
+
+    /// Bring the receiver in line with what is asked, as of `now`: receive
+    /// a stream that is on while it shows or is recorded, and record while
+    /// the operator or the setting asks.
+    pub fn sync(&mut self, now: Instant) -> Task<Message> {
+        self.while_armed.expire(now);
+        let record = self.wants_recording(now);
+        let receive = self.settings.enabled && (self.shown || record);
+        if !self.shown {
             self.full_screen = false;
-            Task::none()
         }
+
+        let task = match (receive, self.receiving.is_some()) {
+            (true, false) => self.start(),
+            (false, true) => {
+                self.receiving = None;
+                Task::none()
+            }
+            _ => Task::none(),
+        };
+
+        let into = self.recordings.clone().filter(|_| record);
+        if let Some(receiving) = &mut self.receiving
+            && receiving.recording_into != into
+        {
+            receiving.receiver.record(into.clone());
+            receiving.recording_into = into;
+        }
+        task
+    }
+
+    /// Whether the stream is being recorded, or waits for video to record.
+    pub fn is_recording(&self) -> bool {
+        self.receiving
+            .as_ref()
+            .is_some_and(|receiving| receiving.recording_into.is_some())
+    }
+
+    /// Where recordings go, if anywhere.
+    pub fn recordings(&self) -> Option<&Path> {
+        self.recordings.as_deref()
+    }
+
+    fn wants_recording(&self, now: Instant) -> bool {
+        self.recordings.is_some() && (self.record || self.while_armed.wants(now))
     }
 
     /// Whether the picture fills the screen, alone. Never without a
@@ -174,11 +307,8 @@ impl VideoPanel {
             Message::LowLatency(low_latency) => {
                 self.settings.low_latency = low_latency;
                 // A running stream takes the new setting at once.
-                let task = if self.receiving.is_some() {
-                    self.start()
-                } else {
-                    Task::none()
-                };
+                self.receiving = None;
+                let task = self.sync(Instant::now());
                 (task, Some(Event::Changed(self.settings.clone())))
             }
             Message::Start => {
@@ -188,18 +318,26 @@ impl VideoPanel {
                 self.settings.uri = self.source.trim().to_string();
                 self.settings.enabled = true;
                 self.form = false;
-                let task = if self.shown {
-                    self.start()
-                } else {
-                    Task::none()
-                };
+                // A new source is a new receiver.
+                self.receiving = None;
+                let task = self.sync(Instant::now());
                 (task, Some(Event::Changed(self.settings.clone())))
             }
             Message::Stop => {
-                self.receiving = None;
                 self.full_screen = false;
                 self.settings.enabled = false;
-                (Task::none(), Some(Event::Changed(self.settings.clone())))
+                self.record = false;
+                let task = self.sync(Instant::now());
+                (task, Some(Event::Changed(self.settings.clone())))
+            }
+            Message::Record(record) => {
+                self.record = record;
+                // Stopped, a recording while armed waits for the next
+                // arming.
+                if !record {
+                    self.while_armed.dismissed = true;
+                }
+                (self.sync(Instant::now()), None)
             }
             Message::ToggleForm => {
                 self.form = !self.form;
@@ -214,15 +352,22 @@ impl VideoPanel {
                 (Task::none(), None)
             }
             Message::Updated(id, state) => {
-                if let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) {
-                    match &state.status {
-                        Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
-                        Status::Streaming { .. } => receiving.problem = None,
-                        Status::Connecting | Status::Failed(_) => {}
-                    }
-                    receiving.state = state;
+                let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) else {
+                    return (Task::none(), None);
+                };
+                match &state.status {
+                    Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
+                    Status::Streaming { .. } => receiving.problem = None,
+                    Status::Connecting | Status::Failed(_) => {}
                 }
-                (Task::none(), None)
+                let failed = match &state.recording {
+                    Recording::Failed(reason) if receiving.state.recording != state.recording => {
+                        Some(Event::RecordingFailed(reason.clone()))
+                    }
+                    _ => None,
+                };
+                receiving.state = state;
+                (Task::none(), failed)
             }
         }
     }
@@ -244,6 +389,7 @@ impl VideoPanel {
             receiver,
             state,
             problem: None,
+            recording_into: None,
         });
 
         // Ends when the receiver is dropped and its supervisor finishes.
@@ -279,9 +425,24 @@ impl VideoPanel {
             self.details_text(receiving),
             iced::widget::tooltip::Position::Bottom,
         );
+        let recording = self.is_recording();
+        let record = ui::icon_button(Icon::Record)
+            .chosen(recording)
+            .hint(match (recording, self.recordings.is_some()) {
+                (true, _) => "Stop recording",
+                (false, true) => "Record the video",
+                (false, false) => "Nowhere to record to",
+            })
+            .on_press_maybe(
+                self.recordings
+                    .is_some()
+                    .then_some(Message::Record(!recording)),
+            );
         let chip = ui::floating(
             row![
                 indicator,
+                recording_badge(&receiving.state),
+                record.boxed(),
                 ui::icon_button(Icon::Edit)
                     .chosen(self.form)
                     .hint("Change the source")
@@ -333,6 +494,7 @@ impl VideoPanel {
         let chip = ui::floating(
             row![
                 ui::badge(label, tone),
+                recording_badge(&receiving.state),
                 ui::icon_button(Icon::Minimize)
                     .hint("Leave full screen (Esc)")
                     .on_press(Message::FullScreen(false))
@@ -353,6 +515,33 @@ impl VideoPanel {
         });
 
         ui::screen(stack![self.view_picture(receiving), corner]).boxed()
+    }
+
+    /// The picture for elsewhere than the panel (the floating shell's map
+    /// corner, or the screen the map makes way for): dimmed when it
+    /// stopped, as in the panel, and, unless it is live, its state in a
+    /// corner kept `clear` of what covers it. A frozen frame must not pass
+    /// for live where the operator flies by it. Nothing while nothing is
+    /// received.
+    pub fn view_inset(&self, clear: Padding) -> Option<impl Widget<Message> + '_> {
+        let receiving = self.receiving.as_ref()?;
+        let showing = Showing::of(&receiving.state);
+        // The mark's layer stays, empty, while the picture is live, so the
+        // tree keeps its shape as the stream comes and goes.
+        let mark = if showing == Showing::Live {
+            iced::widget::Space::new().boxed()
+        } else {
+            let (label, tone) = showing.badge();
+            ui::floating::<Message, _>(ui::badge(label, tone))
+                .padding(ui::space::XS)
+                .boxed()
+        };
+
+        Some(ui::screen(stack![
+            video(receiving.receiver.slot()),
+            ui::veil::<Message, _>(iced::widget::Space::new(), showing == Showing::Lost),
+            container(mark).padding(clear),
+        ]))
     }
 
     /// The stream's details: where it comes from, what it is, and how it is
@@ -378,6 +567,12 @@ impl VideoPanel {
         });
         if let Some(problem) = &receiving.problem {
             lines.push(format!("Last attempt: {problem}"));
+        }
+        match &receiving.state.recording {
+            Recording::Writing(path) => lines.push(format!("Recording to {}", path.display())),
+            Recording::Waiting => lines.push("Recording once video comes".to_string()),
+            Recording::Failed(reason) => lines.push(format!("Not recording: {reason}")),
+            Recording::Off => {}
         }
         lines.join("\n")
     }
@@ -458,10 +653,16 @@ mod tests {
 
     use super::*;
 
+    /// Tell `panel` whether it shows, and sync it.
+    fn show(panel: &mut VideoPanel, shown: bool) {
+        panel.set_shown(shown);
+        drop(panel.sync(Instant::now()));
+    }
+
     /// The panel for `settings`, shown.
     fn panel(settings: VideoSettings) -> VideoPanel {
-        let mut panel = VideoPanel::new(settings);
-        drop(panel.show(true));
+        let mut panel = VideoPanel::new(settings, None);
+        show(&mut panel, true);
         panel
     }
 
@@ -477,10 +678,10 @@ mod tests {
     /// before.
     #[test]
     fn a_stream_on_waits_to_be_shown() {
-        let mut panel = VideoPanel::new(on("test://"));
+        let mut panel = VideoPanel::new(on("test://"), None);
         assert!(panel.slot().is_none(), "nothing shows it yet");
 
-        drop(panel.show(true));
+        show(&mut panel, true);
         assert!(panel.slot().is_some());
     }
 
@@ -491,33 +692,176 @@ mod tests {
         let mut panel = panel(on("test://"));
         drop(panel.update(Message::FullScreen(true)));
 
-        drop(panel.show(false));
+        show(&mut panel, false);
         assert!(panel.slot().is_none());
         assert!(!panel.is_full_screen());
         assert!(panel.settings.enabled, "still on");
 
-        drop(panel.show(true));
+        show(&mut panel, true);
         assert!(panel.slot().is_some());
     }
 
     /// Started while nothing shows it, the stream is on but not received.
     #[test]
     fn a_stream_started_while_hidden_waits() {
-        let mut panel = VideoPanel::new(VideoSettings::default());
+        let mut panel = VideoPanel::new(VideoSettings::default(), None);
         drop(panel.update(Message::EditSource("test://".to_string())));
 
         let settings = changed(panel.update(Message::Start).1);
 
         assert!(settings.enabled);
         assert!(panel.slot().is_none());
-        drop(panel.show(true));
+        show(&mut panel, true);
         assert!(panel.slot().is_some());
+    }
+
+    /// Where a test's recordings would go. Nothing is written there: the
+    /// test pattern is not recorded.
+    fn recordings() -> Option<PathBuf> {
+        Some(std::env::temp_dir().join("groundhog-video-panel-tests"))
+    }
+
+    /// Recording while armed starts at arming and ends `AFTER_DISARM`
+    /// after the last vehicle disarms.
+    #[test]
+    fn recording_while_armed_outlasts_the_disarm() {
+        let start = Instant::now();
+        let mut armed = WhileArmed {
+            enabled: true,
+            ..WhileArmed::default()
+        };
+        assert!(!armed.wants(start));
+
+        armed.observe(true, start);
+        assert!(armed.wants(start));
+
+        let disarmed = start + Duration::from_secs(60);
+        armed.observe(false, disarmed);
+        assert!(armed.wants(disarmed + AFTER_DISARM - Duration::from_millis(1)));
+        assert!(armed.lingers());
+        assert!(!armed.wants(disarmed + AFTER_DISARM));
+
+        armed.expire(disarmed + AFTER_DISARM);
+        assert!(!armed.lingers(), "nothing left to wait for");
+    }
+
+    /// Without the setting, arming records nothing.
+    #[test]
+    fn arming_records_only_with_the_setting() {
+        let now = Instant::now();
+        let mut armed = WhileArmed::default();
+        armed.observe(true, now);
+        assert!(!armed.wants(now));
+    }
+
+    /// Stopped by the operator, a recording while armed waits for the next
+    /// arming.
+    #[test]
+    fn a_stopped_recording_waits_for_the_next_arming() {
+        let mut panel = panel(on("test://"));
+        panel.recordings = recordings();
+        panel.set_record_while_armed(true);
+        let now = Instant::now();
+        panel.observe_armed(true, now);
+        drop(panel.sync(now));
+        assert!(panel.is_recording());
+
+        drop(panel.update(Message::Record(false)));
+        assert!(!panel.is_recording(), "stopped while still armed");
+
+        panel.observe_armed(false, now);
+        panel.observe_armed(true, now);
+        drop(panel.sync(now));
+        assert!(panel.is_recording(), "armed again");
+    }
+
+    /// A stream being recorded is received though nothing shows it, and
+    /// paused once the recording ends.
+    #[test]
+    fn a_recorded_stream_is_received_while_hidden() {
+        let mut panel = panel(on("test://"));
+        panel.recordings = recordings();
+        drop(panel.update(Message::Record(true)));
+        show(&mut panel, false);
+        assert!(panel.slot().is_some(), "received for the recording");
+        assert!(panel.is_recording());
+
+        drop(panel.update(Message::Record(false)));
+        assert!(panel.slot().is_none(), "paused: nothing shows it");
+    }
+
+    /// Without a directory to record into, nothing is recorded.
+    #[test]
+    fn nothing_is_recorded_without_a_directory() {
+        let mut panel = panel(on("test://"));
+        drop(panel.update(Message::Record(true)));
+        assert!(!panel.is_recording());
+    }
+
+    /// Stopping the video stops its recording, and the next stream is not
+    /// recorded unasked.
+    #[test]
+    fn stopping_the_video_stops_recording() {
+        let mut panel = panel(on("test://"));
+        panel.recordings = recordings();
+        drop(panel.update(Message::Record(true)));
+
+        drop(panel.update(Message::Stop));
+        assert!(!panel.is_recording());
+        drop(panel.update(Message::Start));
+        assert!(panel.slot().is_some());
+        assert!(!panel.is_recording());
+    }
+
+    /// A recording that fails says so once, not with every frame.
+    #[test]
+    fn a_failed_recording_is_announced_once() {
+        let mut panel = panel(on("test://"));
+        let failed = State {
+            recording: Recording::Failed("The test pattern is not recorded".to_string()),
+            ..state(Status::Connecting, 0)
+        };
+
+        let (_, event) = panel.update(Message::Updated(0, failed.clone()));
+        assert!(matches!(event, Some(Event::RecordingFailed(_))));
+        let (_, event) = panel.update(Message::Updated(0, failed));
+        assert!(event.is_none());
+    }
+
+    /// Whether `panel`'s picture outside the panel shows `text`.
+    fn inset_shows(panel: &VideoPanel, text: &str) -> bool {
+        let Some(inset) = panel.view_inset(Padding::ZERO) else {
+            return false;
+        };
+        iced_test::Simulator::new(inset).find(text).is_ok()
+    }
+
+    /// Outside the panel, a picture that stopped says so, and a live one
+    /// shows alone.
+    #[test]
+    fn the_inset_marks_a_lost_picture() {
+        let mut panel = panel(on("test://"));
+        let live = Status::Streaming {
+            width: 1,
+            height: 1,
+            decoder: None,
+        };
+
+        drop(panel.update(Message::Updated(0, state(live, 30))));
+        assert!(!inset_shows(&panel, "Video lost"));
+        assert!(!inset_shows(&panel, "Live"), "a live picture is unmarked");
+
+        drop(panel.update(Message::Updated(
+            0,
+            state(retrying("The video stopped"), 30),
+        )));
+        assert!(inset_shows(&panel, "Video lost"));
     }
 
     fn changed(event: Option<Event>) -> VideoSettings {
         match event {
             Some(Event::Changed(settings)) => settings,
-            None => panic!("the settings did not change"),
+            _ => panic!("the settings did not change"),
         }
     }
 
@@ -567,6 +911,7 @@ mod tests {
                 decoder: None,
             },
             frames: 1,
+            recording: Recording::Off,
         };
 
         // Changing the latency starts a new receiver, the second.
@@ -586,7 +931,11 @@ mod tests {
     }
 
     fn state(status: Status, frames: u64) -> State {
-        State { status, frames }
+        State {
+            status,
+            frames,
+            recording: Recording::Off,
+        }
     }
 
     fn retrying(reason: &str) -> Status {

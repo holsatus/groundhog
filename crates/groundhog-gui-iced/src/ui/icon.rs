@@ -77,6 +77,8 @@ icons! {
     Play => "play.svg",
     /// Pause.
     Pause => "pause.svg",
+    /// Record.
+    Record => "circle-dot.svg",
     /// Continue from here.
     Skip => "skip-forward.svg",
     /// Erase something stored on the vehicle.

@@ -207,7 +207,10 @@ impl Application {
 
         // The video comes back on if it was on when the application closed,
         // once something shows it (see `sync_video`, below).
-        let video = VideoPanel::new(configuration.video.clone());
+        let video = VideoPanel::new(
+            configuration.video.clone(),
+            config::data_dir().map(|directory| directory.join("videos")),
+        );
 
         let mut application = Application {
             layout,
@@ -310,7 +313,8 @@ impl Application {
             }
             Message::Fleet(update) => {
                 self.on_fleet(update);
-                Task::none()
+                // Whether a vehicle is armed decides recording while armed.
+                self.sync_video()
             }
             Message::FleetStopped => {
                 self.notices.push(
@@ -448,9 +452,16 @@ impl Application {
             }
             Message::Video(message) => {
                 let (task, event) = self.video.update(message);
-                if let Some(video::Event::Changed(settings)) = event {
-                    self.configuration.video = settings;
-                    self.save_configuration();
+                match event {
+                    Some(video::Event::Changed(settings)) => {
+                        self.configuration.video = settings;
+                        self.save_configuration();
+                    }
+                    Some(video::Event::RecordingFailed(reason)) => {
+                        self.notices
+                            .push(Notice::error("Could not record the video").detail(reason));
+                    }
+                    None => {}
                 }
                 Task::batch([task.map(Message::Video), self.sync_full_screen()])
             }
@@ -479,7 +490,8 @@ impl Application {
             }
             Message::Tick(now) => {
                 self.notices.update(notifications::Message::Tick(now));
-                Task::none()
+                // A recording after disarming ends with time.
+                self.sync_video()
             }
         }
     }
@@ -679,6 +691,9 @@ impl Application {
                 settings.default_waypoint_altitude_m = altitude;
             }
             settings_panel::Message::RecordTelemetry(record) => settings.record_telemetry = record,
+            settings_panel::Message::RecordVideoWhileArmed(record) => {
+                settings.record_video_while_armed = record;
+            }
             settings_panel::Message::RestoreDefaults => {
                 self.confirmation = Some(
                     Confirmation::new(
@@ -715,14 +730,41 @@ impl Application {
         }
     }
 
-    /// Tells the video whether anything can show it (see [`video_shown`]),
-    /// so a stream nothing shows pauses instead of decoding unseen.
+    /// Tells the video what decides whether it is received and recorded:
+    /// whether anything can show it (see [`video_shown`]), so a stream
+    /// nothing shows pauses instead of decoding unseen; whether a vehicle
+    /// is armed; and the setting to record while one is. A recording that
+    /// starts or stops on its own is announced.
     fn sync_video(&mut self) -> Task<Message> {
-        let shown = video_shown(self.shell(), &self.layout);
-        Task::batch([
-            self.video.show(shown).map(Message::Video),
-            self.sync_full_screen(),
-        ])
+        let was_recording = self.video.is_recording();
+        let armed = self
+            .fleet
+            .vehicles()
+            .any(|vehicle| vehicle.armed() == Some(true));
+        let now = Instant::now();
+
+        self.video
+            .set_shown(video_shown(self.shell(), &self.layout));
+        self.video
+            .set_record_while_armed(self.configuration.settings.record_video_while_armed);
+        self.video.observe_armed(armed, now);
+        let task = self.video.sync(now);
+
+        match (was_recording, self.video.is_recording()) {
+            (false, true) => {
+                let mut notice = Notice::info("Recording the video");
+                if let Some(directory) = self.video.recordings() {
+                    notice = notice.detail(format!("Into {}", directory.display()));
+                }
+                self.notices.push(notice);
+            }
+            (true, false) => self
+                .notices
+                .push(Notice::info("Stopped recording the video")),
+            _ => {}
+        }
+
+        Task::batch([task.map(Message::Video), self.sync_full_screen()])
     }
 
     /// Puts the window in the mode the application and the video ask for,
@@ -901,6 +943,7 @@ impl Application {
                 &self.configuration.settings,
                 self.scale_preview,
                 self.recorder.as_ref().map(TlogRecorder::path),
+                self.video.recordings(),
             )
             .map(Message::Settings)
             .boxed(),
@@ -926,7 +969,7 @@ impl Application {
             .links()
             .entries()
             .any(|(_, _, status)| status.is_active());
-        let refresh = if self.notices.has_toasts() || active_links {
+        let refresh = if self.notices.has_toasts() || active_links || self.video.needs_ticks() {
             iced::time::every(Duration::from_secs(1)).map(Message::Tick)
         } else {
             Subscription::none()

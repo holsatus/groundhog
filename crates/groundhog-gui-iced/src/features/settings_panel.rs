@@ -15,6 +15,7 @@ use iced::{
 
 use crate::{
     config::Settings,
+    features::video,
     shell::ShellMode,
     ui::{self, TextExt, Tone, theme::ThemeMode},
 };
@@ -32,6 +33,7 @@ pub enum Message {
     /// The scale slider was released: apply the previewed scale.
     CommitScaleFactor,
     RecordTelemetry(bool),
+    RecordVideoWhileArmed(bool),
     DefaultAltitude(f32),
     /// Ask whether to put every setting back to its default.
     RestoreDefaults,
@@ -39,12 +41,14 @@ pub enum Message {
     DefaultsConfirmed,
 }
 
-/// `recording` is the file telemetry is being recorded to, if any, and
-/// `scale_preview` the scale the slider is being dragged to.
+/// `recording` is the file telemetry is being recorded to, if any,
+/// `videos` where videos are recorded to, and `scale_preview` the scale the
+/// slider is being dragged to.
 pub fn view<'a>(
     settings: &'a Settings,
     scale_preview: Option<f32>,
     recording: Option<&'a std::path::Path>,
+    videos: Option<&'a std::path::Path>,
 ) -> impl Widget<Message> + 'a {
     let scale = scale_preview.unwrap_or(settings.scale_factor);
 
@@ -108,6 +112,23 @@ pub fn view<'a>(
             ui::caption(match recording {
                 Some(path) => format!("Recording to {}", path.display()),
                 None => "Not recording".to_string(),
+            })
+            .tone(Tone::Muted)
+            .boxed(),
+            ui::checkbox(
+                "Record video while armed",
+                settings.record_video_while_armed,
+            )
+            .on_toggle(Message::RecordVideoWhileArmed)
+            .boxed(),
+            ui::caption(match videos {
+                Some(directory) => format!(
+                    "While the video is on, from arming until {} s after the last vehicle \
+                     disarms. Videos go to {}.",
+                    video::AFTER_DISARM.as_secs(),
+                    directory.display()
+                ),
+                None => "There is no data directory to record videos into.".to_string(),
             })
             .tone(Tone::Muted)
             .boxed(),

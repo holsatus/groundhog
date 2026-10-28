@@ -2,9 +2,10 @@
 
 How Groundhog shows a drone's video stream, with latency low enough to fly
 by: what QGroundControl does, where latency comes from, and how a stream
-reaches an iced view on the desktop and on Android. Steps 1 to 3 of the
-[order of work](#order-of-work) are built: video on the desktop, in the
-Video panel and, in the floating shell, in Fly's corner.
+reaches an iced view on the desktop and on Android. Steps 1 to 3 and 5
+of the [order of work](#order-of-work) are built: video on the desktop, in
+the Video panel and, in the floating shell, in Fly's corner, and its
+recording.
 
 ## What QGroundControl does
 
@@ -180,8 +181,9 @@ until the desktop video works.
 ## Where it lives
 
 - **A `groundhog-video` crate**: the receiver, which turns a URI and
-  settings into decoded frames in a slot, and reports its state (connecting,
-  streaming, stalled, failed) and statistics. It depends on GStreamer (or,
+  settings into decoded frames in a slot, records the stream on request,
+  and reports its state (connecting, streaming, stalled, failed;
+  recording) and statistics. It depends on GStreamer (or,
   on Android, `ndk`), which `groundhog-logic` should not carry. Another
   frontend can use it the same way.
 - **The frontend**: `widget/video.rs` (the shader widget and its WGSL),
@@ -218,7 +220,23 @@ until the desktop video works.
    shows it in the map's corner, a tap swapping the two. The source, the
    switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.
-5. **Recording and camera discovery** (`VIDEO_STREAM_INFORMATION`).
+5. **Recording** (done). Every pipeline but the test pattern's is split
+   where the stream is still compressed: `parsebin` (or, for RTP, the
+   depayloader and parser) into a `tee`, then `decodebin3`. A recording
+   is a branch added to the tee while the stream plays (`record.rs`): a
+   leaky queue, the codec's parser, `matroskamux offset-to-zero=true` and
+   a `filesink`, passing nothing before a keyframe. Nothing is decoded or
+   encoded again. Matroska because a file cut off by a crash still plays,
+   where an MP4 does not. A file per stretch of video: a lost stream
+   finishes its file, and the next keyframe after reconnecting starts
+   another (a camera may come back at another resolution, which no file
+   can change to). Each file's `DateUTC` is the wall-clock arrival of its
+   first keyframe, so it lines up with a `.tlog`. The panel records on
+   the operator's word, or while a vehicle is armed and for five seconds
+   after (a setting); a stream being recorded is received even where
+   nothing shows it. Files go to `videos/` in the data directory, named
+   as telemetry logs are.
+6. **Camera discovery** (`VIDEO_STREAM_INFORMATION`).
 
 ## Sources
 

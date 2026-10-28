@@ -5,7 +5,9 @@
 
 use tokio::sync::watch;
 
-use crate::{Config, FrameSlot, State, Status, source::Source};
+use std::path::PathBuf;
+
+use crate::{Config, FrameSlot, Recording, State, Status, source::Source};
 
 /// Receives one stream into a [`FrameSlot`] until dropped.
 pub struct Receiver {
@@ -23,6 +25,7 @@ impl Receiver {
         let (_, state) = watch::channel(State {
             status: Status::Failed(reason),
             frames: 0,
+            recording: Recording::Off,
         });
 
         Self {
@@ -40,4 +43,7 @@ impl Receiver {
     pub fn state(&self) -> watch::Receiver<State> {
         self.state.clone()
     }
+
+    /// Nothing to record: there is no stream.
+    pub fn record(&self, _directory: Option<PathBuf>) {}
 }

@@ -421,6 +421,7 @@ async fn gallery() {
                 decoder: None,
             },
             frames: 1,
+            recording: groundhog_video::Recording::Off,
         },
     )));
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
@@ -455,6 +456,29 @@ async fn gallery() {
         );
         let _ = app.update(Message::Video(video::Message::ToggleForm));
     }
+
+    // Recording: the button chosen, and the badge a file being written
+    // shows. The receiver's own state is not run, so it is handed one.
+    let _ = app.update(Message::Video(video::Message::Record(true)));
+    let _ = app.update(Message::Video(video::Message::Updated(
+        0,
+        groundhog_video::State {
+            status: groundhog_video::Status::Streaming {
+                width: 1280,
+                height: 720,
+                decoder: None,
+            },
+            frames: 2,
+            recording: groundhog_video::Recording::Writing("videos/2026-10-28_12-00-00.mkv".into()),
+        },
+    )));
+    gallery.render(
+        "panel-video-recording",
+        Size::new(560.0, 820.0),
+        &app.theme(),
+        video_pane(&app),
+    );
+    let _ = app.update(Message::Video(video::Message::Record(false)));
 
     // The video alone, filling the screen.
     let _ = app.update(Message::Video(video::Message::FullScreen(true)));
@@ -620,6 +644,27 @@ async fn gallery() {
         let _ = app.update(Message::Floating(shell::Message::SwapVideo));
         render(&app, "video", portrait);
         let _ = app.update(Message::Floating(shell::Message::SwapVideo));
+
+        // The feed drops out: the corner dims its last frame and says so.
+        let video_state = |status| {
+            Message::Video(video::Message::Updated(
+                0,
+                groundhog_video::State {
+                    status,
+                    frames: 2,
+                    recording: groundhog_video::Recording::Off,
+                },
+            ))
+        };
+        let _ = app.update(video_state(groundhog_video::Status::Retrying {
+            reason: "The video stopped".to_string(),
+        }));
+        render(&app, "map-video-lost", portrait);
+        let _ = app.update(video_state(groundhog_video::Status::Streaming {
+            width: 1280,
+            height: 720,
+            decoder: None,
+        }));
         let _ = app.update(go(Destination::Fly));
         render(&app, "fly", portrait);
         let _ = app.update(Message::Floating(shell::Message::ToggleExpanded));
