@@ -20,6 +20,14 @@ const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
+/// How long data we sent may go unacknowledged before the connection is
+/// given up (`TCP_USER_TIMEOUT`). Keepalive probes only go out while
+/// nothing is unacknowledged, and the heartbeat sends every second, so
+/// without this a peer that vanished (out of Wi-Fi range) is detected only
+/// once the retransmissions give up, around fifteen minutes on Linux.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Erase an error into the shared error type.
 fn arc<E: std::error::Error + Send + Sync + 'static>(error: E) -> ArcError {
     Arc::new(error)
@@ -52,13 +60,10 @@ pub(crate) async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter),
             let socket = tokio::net::UdpSocket::bind(sock_addr).await.map_err(arc)?;
 
             let shared = match peer {
-                // GCS-initiated: connect to the fixed peer at open, so
-                // outbound frames are delivered before the peer has spoken. A
-                // failed connect fails the open, like a failed TCP connect.
-                Some(peer) => {
-                    socket.connect(peer).await.map_err(arc)?;
-                    super::udp::UdpShared::connected(socket)
-                }
+                // GCS-initiated: send to the fixed peer from the start, so
+                // outbound frames are delivered before the peer has spoken.
+                // Not `connect`ed; see the `udp` module for why.
+                Some(peer) => super::udp::UdpShared::peer(socket, peer.into()),
                 // Listen mode: serve every peer that sends to this port.
                 None => super::udp::UdpShared::listening(socket),
             };
@@ -84,9 +89,10 @@ pub(crate) async fn open(build: LinkBuild) -> Result<(BoxedReader, BoxedWriter),
     }
 }
 
-/// Tune an established TCP transport for robustness: TCP keepalive (so a
-/// silently dead network becomes detectable on the reader) and `TCP_NODELAY`
-/// (so control exchanges stay fresh).
+/// Tune an established TCP transport for robustness: TCP keepalive and,
+/// where the system has it, [`TCP_USER_TIMEOUT`] (so a silently dead
+/// network becomes detectable on the reader) and `TCP_NODELAY` (so control
+/// exchanges stay fresh).
 ///
 /// Tuning is best effort: an option the socket refuses is logged and ignored
 /// and the open still succeeds, returning the — possibly untuned — halves in
@@ -98,6 +104,11 @@ fn tune_tcp(stream: tokio::net::TcpStream) -> Result<tokio::net::TcpStream, ArcE
 
     if let Err(error) = socket.set_tcp_keepalive(&tcp_keepalive()) {
         log::warn!("Could not set TCP keepalive on transport: {error}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(error) = socket.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT)) {
+        log::warn!("Could not set TCP_USER_TIMEOUT on transport: {error}");
     }
 
     if let Err(error) = socket.set_tcp_nodelay(true) {
@@ -238,21 +249,37 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::time::Duration;
 
+    /// A TCP transport gives up on a peer that stops acknowledging within
+    /// [`TCP_USER_TIMEOUT`], not after the system's retransmissions.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn tcp_bounds_how_long_data_may_go_unacknowledged() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let stream = tune_tcp(stream).expect("tuning keeps the stream");
+
+        let timeout = socket2::SockRef::from(&stream).tcp_user_timeout().unwrap();
+        assert_eq!(timeout, Some(TCP_USER_TIMEOUT));
+    }
+
     /// A peer-addressed UDP link transmits at open: the first frame reaches
     /// its peer while the peer has never spoken.
     #[tokio::test]
-    async fn peer_connected_udp_transmits_before_the_peer_speaks() {
+    async fn peer_udp_transmits_before_the_peer_speaks() {
         // The peer listens but says nothing.
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, peer.local_addr().unwrap().port());
 
-        // The link binds its own ephemeral local port and connects at open.
+        // The link binds its own ephemeral local port.
         let (_reader, writer) = open(LinkBuild::Udp {
             sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             peer: Some(peer_addr),
         })
         .await
-        .expect("connecting to a live peer succeeds the open");
+        .expect("a peer-addressed link opens");
 
         let frame = FrameBuilder::new()
             .system_id(1)
@@ -268,7 +295,7 @@ mod tests {
         sender
             .send(&frame)
             .await
-            .expect("the connected socket delivers outbound frames");
+            .expect("the socket delivers outbound frames");
 
         // The silent peer receives the heartbeat bytes.
         let mut buffer = [0u8; 64];

@@ -15,8 +15,8 @@
 //! the clock nor holds more than one frame. Frames keep the decoder's YUV
 //! layout ([`PixelLayout`]), for the frontend to convert on the GPU.
 //!
-//! The receiver reconnects by itself, with backoff, after the stream
-//! fails or stalls.
+//! The receiver reconnects by itself, a second after the stream fails or
+//! stalls.
 
 // Public items in private modules are invisible to the dead-code and
 // visibility checks the seam relies on; this makes them visible.
@@ -34,8 +34,6 @@ mod receiver;
 pub use frame::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range};
 pub use receiver::Receiver;
 pub use source::{Codec, Source};
-
-use std::time::Duration;
 
 /// How a stream is received.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,9 +82,9 @@ pub enum Status {
         /// The decoder GStreamer chose, if it said.
         decoder: Option<String>,
     },
-    /// The stream failed, ended or stalled; it is opened again in
-    /// `retry_in`.
-    Retrying { reason: String, retry_in: Duration },
+    /// The stream failed, ended or stalled; it is opened again in a
+    /// second.
+    Retrying { reason: String },
     /// The stream cannot be received (an unknown URI, a missing GStreamer
     /// plugin): trying again would not help.
     Failed(String),

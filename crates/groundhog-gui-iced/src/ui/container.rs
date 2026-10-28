@@ -194,6 +194,19 @@ pub fn picture<'a, W>(content: W) -> Container<'a, Container<'a, W>> {
     })
 }
 
+/// What lies over a picture: `content` centred, over a dark wash while
+/// `dim` (see [`style::veil`]). The layer stays while not dimmed, so the
+/// tree keeps its shape when the picture stops and starts again.
+pub fn veil<'a, M: 'a, W: Widget<M> + 'a>(content: W, dim: bool) -> Container<'a, W> {
+    container(content).center(Length::Fill).style(move |theme| {
+        if dim {
+            style::veil(theme)
+        } else {
+            container::Style::default()
+        }
+    })
+}
+
 /// Read-outs (each usually a [`stat`]) in columns that line up: as many as
 /// fit, up to `max_columns`, so a narrow panel shows fewer to a row instead
 /// of squeezing them.

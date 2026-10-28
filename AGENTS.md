@@ -464,6 +464,14 @@ opens the transport, waits for it to fail, and reconnects with backoff, unless
 the link is configured not to. The status the UI shows is the supervisor's own
 (read through a `watch`), never a copy that needs reconciling.
 
+The supervisor learns of a dead link only from its transport, so a
+transport must fail when the link is dead rather than go quiet. TCP sets
+`TCP_USER_TIMEOUT`: keepalive never probes while the heartbeat leaves data
+unacknowledged, and the retransmissions take about fifteen minutes to
+give up. A UDP link with a peer is not `connect`ed: that would pin its
+local address to the network it opened on, and after a change of
+network it would hear nothing and report nothing.
+
 ---
 
 ## Conventions
@@ -608,7 +616,7 @@ so the look is decided in one place:
   cover the shared arrangements. A panel whose body is a picture (the
   video) uses `ui::picture`, edge to edge inside the pane's border, with
   what it needs floating over it in `ui::floating` cards rather than
-  around it. Inputs come from `ui` too (`text_input`,
+  around it, and `ui::veil` dimming a picture that stopped. Inputs come from `ui` too (`text_input`,
   `pick_list`, `checkbox` and `unlabelled_checkbox`, `slider`), so they
   take the density's size.
 

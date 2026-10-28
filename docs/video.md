@@ -201,8 +201,8 @@ until the desktop video works.
    an `appsink`. This settles the iced side: textures, letterboxing, colour,
    wake-ups, and the cost per frame in the gallery and on the device.
 2. **The receiver** (done). `groundhog-video` with the sources above, the
-   low-latency and default jitter settings, QoS off, reconnecting with
-   backoff after a stall, and state for the panel. Tested against a
+   low-latency and default jitter settings, QoS off, reconnecting a
+   second after a stall, and state for the panel. Tested against a
    `videotestsrc ! x264enc tune=zerolatency ! rtph264pay ! udpsink`
    sender on loopback, as QGC's tests do.
 3. **The panel** (done), in both shells, and the settings: the Video

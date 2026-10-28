@@ -1,9 +1,15 @@
 //! UDP transport as a byte stream for the MAVLink parser.
 //!
 //! Two modes:
-//! - **Peer mode**: the socket is connected to one fixed peer at open, so it
+//! - **Peer mode**: the socket sends to one fixed peer from the start, so it
 //!   transmits before the peer has spoken (typical for a GCS dialing out to a
-//!   companion computer or mavlink-router).
+//!   companion computer or mavlink-router), and hears only that peer. The
+//!   socket is deliberately not `connect`ed: connecting pins its local
+//!   address to the interface the route used at that moment, so a link
+//!   opened before joining the vehicle's network, or kept across an address
+//!   change, would send from an address no longer reachable and never hear
+//!   back, without any error to reconnect on. Unconnected, the kernel picks
+//!   the source address per datagram.
 //! - **Listen mode**: the socket accepts datagrams from anyone and keeps a
 //!   table of the peers it has heard recently. Outbound frames go to every
 //!   live peer, exactly like QGroundControl and mavlink-router do, so several
@@ -41,20 +47,26 @@ struct Peer {
     last_heard: Instant,
 }
 
+/// Whom a socket talks to.
+enum Mode {
+    /// One fixed peer.
+    Peer(SocketAddr),
+    /// Every peer heard recently.
+    Listen(Mutex<Vec<Peer>>),
+}
+
 /// The socket shared by the reader and writer halves, and its mode.
 pub(crate) struct UdpShared {
     socket: UdpSocket,
-    /// `None` in peer mode (the socket is connected); the heard peers in
-    /// listen mode.
-    peers: Option<Mutex<Vec<Peer>>>,
+    mode: Mode,
 }
 
 impl UdpShared {
-    /// A socket already connected to its one fixed peer.
-    pub(crate) fn connected(socket: UdpSocket) -> Arc<Self> {
+    /// A socket that talks to one fixed peer.
+    pub(crate) fn peer(socket: UdpSocket, peer: SocketAddr) -> Arc<Self> {
         Arc::new(Self {
             socket,
-            peers: None,
+            mode: Mode::Peer(peer),
         })
     }
 
@@ -62,13 +74,16 @@ impl UdpShared {
     pub(crate) fn listening(socket: UdpSocket) -> Arc<Self> {
         Arc::new(Self {
             socket,
-            peers: Some(Mutex::default()),
+            mode: Mode::Listen(Mutex::default()),
         })
     }
 
-    fn note_peer(&self, addr: SocketAddr) {
-        let Some(peers) = &self.peers else {
-            return;
+    /// Whether a datagram from `addr` is for this link, noting a listen-mode
+    /// peer as heard.
+    fn accept(&self, addr: SocketAddr) -> bool {
+        let peers = match &self.mode {
+            Mode::Peer(peer) => return addr == *peer,
+            Mode::Listen(peers) => peers,
         };
 
         let mut peers = peers.lock().unwrap_or_else(PoisonError::into_inner);
@@ -94,11 +109,12 @@ impl UdpShared {
                 });
             }
         }
+        true
     }
 
     /// The listen-mode peers heard within [`PEER_TIMEOUT`], forgetting the
     /// rest.
-    fn live_peers(&self, peers: &Mutex<Vec<Peer>>) -> Vec<SocketAddr> {
+    fn live_peers(peers: &Mutex<Vec<Peer>>) -> Vec<SocketAddr> {
         let mut peers = peers.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
 
@@ -152,37 +168,44 @@ impl AsyncRead for UdpReader {
 
         let shared = self.shared.clone();
         let this = &mut *self;
-        let mut read_buf = ReadBuf::new(this.buffer.as_mut());
 
-        let polled = if shared.peers.is_some() {
-            shared
-                .socket
-                .poll_recv_from(cx, &mut read_buf)
-                .map_ok(|from| {
-                    shared.note_peer(from);
-                })
-        } else {
-            shared.socket.poll_recv(cx, &mut read_buf)
-        };
-
-        match polled {
-            Poll::Ready(Ok(())) => {
-                this.head = read_buf.filled().len();
-                this.tail = 0;
-                this.drain_into(buf);
-                Poll::Ready(Ok(()))
+        loop {
+            let mut read_buf = ReadBuf::new(this.buffer.as_mut());
+            match shared.socket.poll_recv_from(cx, &mut read_buf) {
+                Poll::Ready(Ok(from)) => {
+                    // A peer-mode link hears only its peer; anything else
+                    // is dropped, and the next datagram awaited.
+                    if !shared.accept(from) {
+                        log::trace!("UDP datagram from {from} ignored");
+                        continue;
+                    }
+                    this.head = read_buf.filled().len();
+                    this.tail = 0;
+                    this.drain_into(buf);
+                    return Poll::Ready(Ok(()));
+                }
+                // Some systems (Windows, for one) report an ICMP "port
+                // unreachable" from an earlier send as a read error. The peer
+                // may simply not be up yet; treat it as an empty read rather
+                // than a failing transport.
+                Poll::Ready(Err(error)) if is_unreachable_peer(&error) => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
             }
-            // A connected UDP socket reports an ICMP "port unreachable" from an
-            // earlier send as a read error. The peer may simply not be up yet;
-            // treat it as an empty read rather than a failing transport.
-            Poll::Ready(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// Whether a read error only reports that an earlier datagram found nobody
+/// listening.
+fn is_unreachable_peer(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 #[derive(Clone)]
@@ -202,22 +225,27 @@ impl AsyncWrite for UdpWriter {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        let Some(peers) = &self.shared.peers else {
-            return match self.shared.socket.poll_send(cx, buf) {
-                Poll::Ready(Err(error))
-                    if error.kind() == std::io::ErrorKind::ConnectionRefused =>
-                {
-                    // See the reader: the peer is not listening (yet).
-                    Poll::Ready(Ok(buf.len()))
-                }
-                other => other,
-            };
+        let peers = match &self.shared.mode {
+            Mode::Peer(peer) => {
+                return match self.shared.socket.poll_send_to(cx, buf, *peer) {
+                    // A datagram that cannot leave (no route to the peer yet,
+                    // or the peer not listening) is lost, as on a radio out of
+                    // range. Nothing is wrong with the socket, so the link
+                    // stays: the next frame goes out once there is a way.
+                    Poll::Ready(Err(error)) => {
+                        log::debug!("UDP send to {peer} failed: {error}");
+                        Poll::Ready(Ok(buf.len()))
+                    }
+                    other => other,
+                };
+            }
+            Mode::Listen(peers) => peers,
         };
 
         // Listen mode: one datagram per live peer. A peer whose send would
         // block loses this frame, as an overflowing radio would; it must not
         // stall the others.
-        for addr in self.shared.live_peers(peers) {
+        for addr in UdpShared::live_peers(peers) {
             match self.shared.socket.try_send_to(buf, addr) {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -316,6 +344,59 @@ mod tests {
         for sender in evicted {
             assert!(sender.try_recv(&mut received).is_err(), "evicted");
         }
+    }
+
+    /// A peer-mode link hears its peer at any of its own addresses: the
+    /// address a reply comes to is not pinned to the interface the route
+    /// used at open, so the link survives a change of network. On Linux,
+    /// every 127.0.0.0/8 address is local, which stands in for a second
+    /// interface.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn peer_mode_hears_its_peer_at_another_local_address() {
+        let (vehicle, vehicle_addr) = bound().await;
+        let gcs = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let port = gcs.local_addr().unwrap().port();
+        let shared = UdpShared::peer(gcs, vehicle_addr);
+        let mut reader = UdpReader::new(shared.clone());
+        let mut writer = UdpWriter::new(shared);
+
+        // The link speaks first, over the loopback route, as at open.
+        writer.write_all(b"hello").await.unwrap();
+        let mut received = [0u8; 16];
+        let n = vehicle.recv(&mut received).await.unwrap();
+        assert_eq!(&received[..n], b"hello");
+
+        // The vehicle answers at another of the GCS's addresses.
+        vehicle
+            .send_to(b"answer", ("127.0.0.2", port))
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 6];
+        tokio::time::timeout(Duration::from_secs(1), reader.read_exact(&mut buffer))
+            .await
+            .expect("the answer arrives")
+            .unwrap();
+        assert_eq!(&buffer, b"answer");
+    }
+
+    /// A peer-mode link hears only its peer.
+    #[tokio::test]
+    async fn peer_mode_ignores_other_senders() {
+        let (vehicle, vehicle_addr) = bound().await;
+        let (gcs, gcs_addr) = bound().await;
+        let mut reader = UdpReader::new(UdpShared::peer(gcs, vehicle_addr));
+
+        let (stranger, _) = bound().await;
+        stranger.send_to(b"stranger", gcs_addr).await.unwrap();
+        vehicle.send_to(b"vehicle", gcs_addr).await.unwrap();
+
+        let mut buffer = [0u8; 7];
+        tokio::time::timeout(Duration::from_secs(1), reader.read_exact(&mut buffer))
+            .await
+            .expect("the peer's datagram arrives")
+            .unwrap();
+        assert_eq!(&buffer, b"vehicle");
     }
 
     /// Before anyone has spoken, listen mode has nobody to send to: frames are

@@ -7,6 +7,12 @@
 //! video widget reads the newest frame from the receiver's slot whenever
 //! the view is built. A message of a receiver since replaced is ignored.
 //!
+//! The receiver retries on its own, every second, until video comes. The
+//! panel does not show the attempts, which would flicker: only whether
+//! video has yet to come, comes, or stopped ([`Showing`]). A picture that
+//! stopped stays, dimmed, so it never passes for live; why the last
+//! attempt failed is in the stream's details.
+//!
 //! The source and the low-latency switch are persisted by the application
 //! (see [`Event`]), and so is whether the stream was on, so it comes back
 //! on at the next start.
@@ -46,13 +52,38 @@ pub enum Event {
     Changed(VideoSettings),
 }
 
-/// How a receiver's status reads, in a badge.
-fn status_badge(status: &Status) -> (&'static str, Tone) {
-    match status {
-        Status::Connecting => ("Connecting", Tone::Muted),
-        Status::Streaming { .. } => ("Live", Tone::Success),
-        Status::Retrying { .. } => ("No video", Tone::Warning),
-        Status::Failed(_) => ("Failed", Tone::Danger),
+/// What the operator is shown of a receiver's state. Opening the stream
+/// and waiting to open it again are one state: the operator cannot act on
+/// the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Showing {
+    /// No video yet.
+    Waiting,
+    Live,
+    /// Video came, and stopped; the receiver is trying to get it back.
+    Lost,
+    /// The stream cannot be received.
+    Failed,
+}
+
+impl Showing {
+    fn of(state: &State) -> Self {
+        match state.status {
+            Status::Streaming { .. } => Showing::Live,
+            Status::Failed(_) => Showing::Failed,
+            Status::Connecting | Status::Retrying { .. } if state.frames == 0 => Showing::Waiting,
+            Status::Connecting | Status::Retrying { .. } => Showing::Lost,
+        }
+    }
+
+    /// How it reads, in a badge.
+    fn badge(self) -> (&'static str, Tone) {
+        match self {
+            Showing::Waiting => ("Connecting", Tone::Muted),
+            Showing::Live => ("Live", Tone::Success),
+            Showing::Lost => ("Video lost", Tone::Warning),
+            Showing::Failed => ("Failed", Tone::Danger),
+        }
     }
 }
 
@@ -78,6 +109,8 @@ struct Receiving {
     id: u64,
     receiver: Receiver,
     state: State,
+    /// Why the last attempt failed, until video comes.
+    problem: Option<String>,
 }
 
 impl VideoPanel {
@@ -158,6 +191,11 @@ impl VideoPanel {
             }
             Message::Updated(id, state) => {
                 if let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) {
+                    match &state.status {
+                        Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
+                        Status::Streaming { .. } => receiving.problem = None,
+                        Status::Connecting | Status::Failed(_) => {}
+                    }
                     receiving.state = state;
                 }
                 (Task::none(), None)
@@ -181,6 +219,7 @@ impl VideoPanel {
             id,
             receiver,
             state,
+            problem: None,
         });
 
         // Ends when the receiver is dropped and its supervisor finishes.
@@ -204,19 +243,16 @@ impl VideoPanel {
 
         // The picture fills the panel; what the panel would otherwise put
         // around it floats over its corner, the details on demand.
-        let picture = stack![
-            video(receiving.receiver.slot()),
-            container(self.view_status(&receiving.state.status)).center(Length::Fill),
-        ];
+        let picture = self.view_picture(receiving);
 
-        let (label, tone) = status_badge(&receiving.state.status);
+        let (label, tone) = Showing::of(&receiving.state).badge();
         // Hovered, the indicator explains itself; pressed (as a finger
         // must, having no hover), it keeps the details open.
         let indicator = ui::tooltip(
             mouse_area(ui::badge(label, tone))
                 .on_press(Message::ToggleDetails)
                 .interaction(mouse::Interaction::Pointer),
-            self.details_text(&receiving.state.status),
+            self.details_text(receiving),
             iced::widget::tooltip::Position::Bottom,
         );
         let chip = ui::floating(
@@ -252,7 +288,7 @@ impl VideoPanel {
         let overlay = column![
             chip,
             self.details
-                .then(|| card(ui::text(self.details_text(&receiving.state.status)).boxed())),
+                .then(|| card(ui::text(self.details_text(receiving)).boxed())),
             self.form.then(|| card(self.view_form().boxed())),
         ]
         .spacing(ui::space::S)
@@ -269,7 +305,7 @@ impl VideoPanel {
             return iced::widget::Space::new().boxed();
         };
 
-        let (label, tone) = status_badge(&receiving.state.status);
+        let (label, tone) = Showing::of(&receiving.state).badge();
         let chip = ui::floating(
             row![
                 ui::badge(label, tone),
@@ -292,23 +328,18 @@ impl VideoPanel {
             left: insets.left + ui::space::S,
         });
 
-        ui::screen(stack![
-            video(receiving.receiver.slot()),
-            container(self.view_status(&receiving.state.status)).center(Length::Fill),
-            corner,
-        ])
-        .boxed()
+        ui::screen(stack![self.view_picture(receiving), corner]).boxed()
     }
 
     /// The stream's details: where it comes from, what it is, and how it is
     /// received.
-    fn details_text(&self, status: &Status) -> String {
+    fn details_text(&self, receiving: &Receiving) -> String {
         let mut lines = vec![self.settings.uri.clone()];
         if let Status::Streaming {
             width,
             height,
             decoder,
-        } = status
+        } = &receiving.state.status
         {
             let mut line = format!("{width} × {height}");
             if let Some(decoder) = decoder {
@@ -321,19 +352,30 @@ impl VideoPanel {
         } else {
             format!("Jitter buffer of {} ms", self.settings.jitter_buffer_ms)
         });
+        if let Some(problem) = &receiving.problem {
+            lines.push(format!("Last attempt: {problem}"));
+        }
         lines.join("\n")
     }
 
-    /// What shows over the picture while there is none: why. White on the
-    /// picture's black, in either theme.
-    fn view_status(&self, status: &Status) -> Element<'_, Message> {
-        let text = match status {
-            Status::Streaming { .. } => return iced::widget::Space::new().boxed(),
-            Status::Connecting => format!("Waiting for video from {}…", self.settings.uri),
-            Status::Retrying { reason, retry_in } => {
-                format!("{reason}. Trying again in {} s.", retry_in.as_secs())
-            }
-            Status::Failed(reason) => reason.clone(),
+    /// The picture, and over it what it cannot show: dimmed when it
+    /// stopped, and why there is none before the first frame.
+    fn view_picture<'a>(&'a self, receiving: &'a Receiving) -> impl Widget<Message> + 'a {
+        let showing = Showing::of(&receiving.state);
+        stack![
+            video(receiving.receiver.slot()),
+            ui::veil(self.view_status(&receiving.state), showing == Showing::Lost),
+        ]
+    }
+
+    /// What shows over the picture while there is none yet: why. White on
+    /// the picture's black, in either theme. Nothing over a picture, live
+    /// or stopped: its badge says which.
+    fn view_status(&self, state: &State) -> Element<'_, Message> {
+        let text = match (&state.status, Showing::of(state)) {
+            (Status::Failed(reason), _) => reason.clone(),
+            (_, Showing::Waiting) => format!("Waiting for video from: {}", self.settings.uri),
+            _ => return iced::widget::Space::new().boxed(),
         };
         ui::text(text).boxed()
     }
@@ -464,6 +506,81 @@ mod tests {
         assert_eq!(
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming)
+        );
+    }
+
+    fn state(status: Status, frames: u64) -> State {
+        State { status, frames }
+    }
+
+    fn retrying(reason: &str) -> Status {
+        Status::Retrying {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// The receiver's attempts do not show: before the first frame and
+    /// after the last one, opening and waiting to open again read the same.
+    #[test]
+    fn retrying_reads_as_one_steady_state() {
+        assert_eq!(Showing::of(&state(Status::Connecting, 0)), Showing::Waiting);
+        assert_eq!(
+            Showing::of(&state(retrying("No video arrives"), 0)),
+            Showing::Waiting
+        );
+
+        assert_eq!(Showing::of(&state(Status::Connecting, 40)), Showing::Lost);
+        assert_eq!(
+            Showing::of(&state(retrying("The video stopped"), 40)),
+            Showing::Lost
+        );
+
+        let live = Status::Streaming {
+            width: 1,
+            height: 1,
+            decoder: None,
+        };
+        assert_eq!(Showing::of(&state(live, 41)), Showing::Live);
+    }
+
+    /// Why the last attempt failed stays in the details while the receiver
+    /// tries again, and goes once video comes.
+    #[test]
+    fn the_last_problem_is_in_the_details_until_video_comes() {
+        let mut panel = panel(VideoSettings {
+            uri: "test://".to_string(),
+            enabled: true,
+            ..VideoSettings::default()
+        });
+        let details = |panel: &VideoPanel| {
+            panel
+                .receiving
+                .as_ref()
+                .map(|receiving| panel.details_text(receiving))
+                .unwrap_or_default()
+        };
+
+        drop(panel.update(Message::Updated(
+            0,
+            state(retrying("Connection refused"), 0),
+        )));
+        drop(panel.update(Message::Updated(0, state(Status::Connecting, 0))));
+        assert!(
+            details(&panel).contains("Last attempt: Connection refused"),
+            "{}",
+            details(&panel)
+        );
+
+        let live = Status::Streaming {
+            width: 1,
+            height: 1,
+            decoder: None,
+        };
+        drop(panel.update(Message::Updated(0, state(live, 1))));
+        assert!(
+            !details(&panel).contains("Last attempt"),
+            "{}",
+            details(&panel)
         );
     }
 

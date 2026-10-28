@@ -610,6 +610,15 @@ pub fn screen(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Over a picture that stopped: a dark wash the last frame shows through,
+/// so it reads as not live, and text over it stays legible.
+pub fn veil(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::BLACK.scale_alpha(0.6).into()),
+        ..container::Style::default()
+    }
+}
+
 /// A pane's body that is a picture: [`screen`], its lower corners rounded
 /// as the pane's are inside its border.
 pub fn picture(theme: &Theme) -> container::Style {

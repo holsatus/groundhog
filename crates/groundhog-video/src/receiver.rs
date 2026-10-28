@@ -25,10 +25,10 @@ use crate::{
 const STALL: Duration = Duration::from_secs(3);
 /// How long a stream may take to show its first frame.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-/// The wait before the first retry, doubled after each failure up to
-/// [`MAX_BACKOFF`], and reset once a stream has shown frames.
-const MIN_BACKOFF: Duration = Duration::from_secs(1);
-const MAX_BACKOFF: Duration = Duration::from_secs(10);
+/// The wait before the stream is opened again. Short and fixed: while no
+/// pipeline runs, a UDP stream's packets are lost, so a longer wait only
+/// delays the picture, and one attempt a second costs a server nothing.
+const RETRY: Duration = Duration::from_secs(1);
 /// How often the supervisor looks at the bus, the clock and the stop flag.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -100,11 +100,8 @@ struct Supervisor {
 /// What ended an attempt.
 enum Ended {
     Stopped,
-    /// Worth trying again, after the backoff; `streamed` if frames came.
-    Retry {
-        reason: String,
-        streamed: bool,
-    },
+    /// Worth trying again, after [`RETRY`].
+    Retry(String),
     /// Not worth trying again.
     Failed(String),
 }
@@ -119,7 +116,6 @@ impl Supervisor {
             return self.set_status(Status::Failed(error));
         }
 
-        let mut backoff = MIN_BACKOFF;
         loop {
             self.set_status(Status::Connecting);
             match self.attempt(&source) {
@@ -128,19 +124,12 @@ impl Supervisor {
                     self.set_status(Status::Failed(reason));
                     break;
                 }
-                Ended::Retry { reason, streamed } => {
-                    if streamed {
-                        backoff = MIN_BACKOFF;
-                    }
-                    log::info!("Video: {reason}; retrying in {} s", backoff.as_secs());
-                    self.set_status(Status::Retrying {
-                        reason,
-                        retry_in: backoff,
-                    });
-                    if self.wait(backoff) {
+                Ended::Retry(reason) => {
+                    log::info!("Video: {reason}; retrying in {} s", RETRY.as_secs());
+                    self.set_status(Status::Retrying { reason });
+                    if self.wait(RETRY) {
                         break;
                     }
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
         }
@@ -197,10 +186,7 @@ impl Supervisor {
         }
 
         let ended = if pipeline.set_state(gst::State::Playing).is_err() {
-            Ended::Retry {
-                reason: "The stream could not be opened".to_string(),
-                streamed: false,
-            }
+            Ended::Retry("The stream could not be opened".to_string())
         } else {
             self.watch(&pipeline, &running)
         };
@@ -304,20 +290,13 @@ impl Supervisor {
                 .unwrap_or_else(PoisonError::into_inner);
             match last_frame {
                 Some(at) if at.elapsed() > STALL => {
-                    return Ended::Retry {
-                        reason: "The video stopped".to_string(),
-                        streamed: true,
-                    };
+                    return Ended::Retry("The video stopped".to_string());
                 }
                 None if opened.elapsed() > OPEN_TIMEOUT => {
-                    return Ended::Retry {
-                        reason: "No video arrives".to_string(),
-                        streamed: false,
-                    };
+                    return Ended::Retry("No video arrives".to_string());
                 }
                 _ => {}
             }
-            let streamed = last_frame.is_some();
 
             let Some(message) =
                 bus.timed_pop(gst::ClockTime::from_nseconds(POLL.as_nanos() as u64))
@@ -328,16 +307,10 @@ impl Supervisor {
                 gst::MessageView::Error(error) => {
                     let detail = error.debug().map(|debug| debug.to_string());
                     log::warn!("Video: {} ({detail:?})", error.error());
-                    return Ended::Retry {
-                        reason: error.error().to_string(),
-                        streamed,
-                    };
+                    return Ended::Retry(error.error().to_string());
                 }
                 gst::MessageView::Eos(_) => {
-                    return Ended::Retry {
-                        reason: "The stream ended".to_string(),
-                        streamed,
-                    };
+                    return Ended::Retry("The stream ended".to_string());
                 }
                 // Decode only the video of a stream that carries more (an
                 // MPEG-TS with audio).
@@ -460,6 +433,41 @@ mod tests {
             matches!(state.status, Status::Failed(_))
         });
         assert!(matches!(state.status, Status::Failed(_)), "{state:?}");
+    }
+
+    /// A source that refuses is tried again every [`RETRY`], however often
+    /// it has refused: the wait does not grow while the camera is away.
+    #[test]
+    fn a_refusing_source_is_retried_at_a_steady_pace() {
+        if !gstreamer_has(&["tcpclientsrc", "decodebin3", "appsink"]) {
+            eprintln!("skipped: GStreamer's base plugins are not installed");
+            return;
+        }
+
+        // A port nobody listens on: every open is refused at once.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        let receiver = Receiver::start(Config::new(format!("tcp://127.0.0.1:{port}")));
+
+        // Count the times the receiver is seen waiting to retry. A change
+        // seen while waiting is a new wait, even if the attempt between the
+        // two came and went unseen.
+        let mut state = receiver.state();
+        let mut retries = 0;
+        let until = Instant::now() + Duration::from_millis(5500);
+        while Instant::now() < until {
+            if state.has_changed().unwrap_or(false)
+                && matches!(state.borrow_and_update().status, Status::Retrying { .. })
+            {
+                retries += 1;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // A doubling wait (1, 2, 4 s) would have retried three times by now.
+        assert!(retries >= 5, "{retries} retries in 5.5 s");
     }
 
     #[test]
