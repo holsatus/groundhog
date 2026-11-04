@@ -263,4 +263,41 @@ mod tests {
             assert!(mode.name.contains('Q'), "{}", mode.name);
         }
     }
+
+    /// Every mode the tables offer is encoded and named back as itself: the
+    /// base flag and custom mode are what the vehicle decodes, and a wrong one
+    /// would command another mode (or none).
+    #[test]
+    fn every_selectable_mode_encodes_and_decodes_back() {
+        for class in [
+            VehicleClass::Copter,
+            VehicleClass::FixedWing,
+            VehicleClass::Vtol,
+            VehicleClass::Rover,
+            VehicleClass::Boat,
+            VehicleClass::Submarine,
+            VehicleClass::AntennaTracker,
+        ] {
+            for mode in ArduPilot.modes(class).iter().filter(|mode| mode.selectable) {
+                let set = ArduPilot.set_mode(mode);
+                assert!(
+                    MavModeFlag::from_bits_truncate(set.base_mode as u8)
+                        .contains(MavModeFlag::CUSTOM_MODE_ENABLED),
+                    "{class:?} {} loses the custom mode flag",
+                    mode.name
+                );
+                assert_eq!(set.custom_mode, mode.custom_mode as f32, "{}", mode.name);
+                assert_eq!(set.custom_sub_mode, 0.0, "{}", mode.name);
+
+                let decoded = ArduPilot
+                    .decode_mode(class, MavModeFlag::CUSTOM_MODE_ENABLED, mode.custom_mode)
+                    .expect("the class names the mode it offers");
+                assert_eq!(
+                    (decoded.name, decoded.kind),
+                    (mode.name, mode.kind),
+                    "{class:?}"
+                );
+            }
+        }
+    }
 }

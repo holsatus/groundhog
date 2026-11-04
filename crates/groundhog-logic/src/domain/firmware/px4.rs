@@ -313,4 +313,40 @@ mod tests {
         assert_eq!(command.custom_mode, MAIN_AUTO as f32);
         assert_eq!(command.custom_sub_mode, AUTO_MISSION as f32);
     }
+
+    /// Every mode the tables offer is split into main/sub, reassembled into the
+    /// custom mode the heartbeat carries, and decoded back as itself.
+    #[test]
+    fn every_selectable_mode_encodes_and_decodes_back() {
+        for class in [
+            VehicleClass::Copter,
+            VehicleClass::FixedWing,
+            VehicleClass::Vtol,
+            VehicleClass::Rover,
+            VehicleClass::Boat,
+            VehicleClass::Submarine,
+        ] {
+            for mode in Px4.modes(class).iter().filter(|mode| mode.selectable) {
+                let set = Px4.set_mode(mode);
+                let encoded =
+                    ((set.custom_mode as u32) << 16) | ((set.custom_sub_mode as u32) << 24);
+                assert_eq!(encoded, mode.custom_mode, "{class:?} {}", mode.name);
+                assert_eq!(
+                    set.base_mode,
+                    MavModeFlag::CUSTOM_MODE_ENABLED.bits() as f32,
+                    "{class:?} {} loses the custom mode flag",
+                    mode.name
+                );
+
+                let decoded = Px4
+                    .decode_mode(class, MavModeFlag::CUSTOM_MODE_ENABLED, encoded)
+                    .expect("the class names the mode it offers");
+                assert_eq!(
+                    (decoded.name, decoded.kind),
+                    (mode.name, mode.kind),
+                    "{class:?}"
+                );
+            }
+        }
+    }
 }
