@@ -82,7 +82,7 @@ the crate is named where it is not obvious.
            layout.rs  the tiled shell's workspace                     ├─ UI thread (iced)
            shell.rs   which shell; the floating shell's sheet         │
            app.rs     composition root, message routing, policy       │
-           platform/  paths, logging, insets: desktop or Android      ┘
+           platform/  paths, logging, insets, staying awake           ┘
 
  logic     services/  Backend, fleet runtime, vehicle client, links   ┐
            domain/    vehicle state, missions, parameters, firmware,  │
@@ -146,7 +146,7 @@ are shared by all.
 | gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
-| gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
+| gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
 
@@ -486,6 +486,34 @@ vehicle is armed (or may be), when the plan is empty (it deletes the
 vehicle's mission), and when the vehicle's mission was changed elsewhere;
 pausing, a safety stop, never asks.
 
+### The screen stays on while the application runs
+
+An operator watches telemetry and video for long stretches without
+touching anything, and a screen that blanks or a computer that suspends
+mid-flight hides the vehicle. So the application keeps the session awake
+for as long as it runs, not only while video plays (`platform::keep_awake`,
+called once from the main thread by each entry point). Each platform asks
+its own way (`platform/awake.rs`, and `platform/android.rs`):
+
+- **Linux**, over the session bus: the XDG desktop portal
+  (`org.freedesktop.portal.Inhibit`: idle and suspend; GNOME, KDE,
+  Flatpak), else GNOME's session manager, else
+  `org.freedesktop.ScreenSaver` (KDE, Xfce, Cinnamon). The D-Bus
+  connection is kept for the life of the process: each releases an
+  inhibition when its caller leaves the bus, so quitting or crashing needs
+  no cleanup.
+- **Windows**: `SetThreadExecutionState` on the main thread, which holds
+  until the thread ends.
+- **macOS**: an `NSProcessInfo` activity disabling idle display and system
+  sleep, held by the main thread.
+- **Android**: the window carries `FLAG_KEEP_SCREEN_ON`, which holds only
+  while it is shown.
+
+Failing to inhibit is logged and nothing more. CI builds only Linux, so
+`awake.rs` uses nothing else of the frontend: it can be linted for Windows
+and macOS on its own (a crate whose `lib.rs` includes it with `#[path]`,
+checked with `cargo clippy --target`).
+
 ### Links are supervised
 
 `services::LinkManager` spawns a supervisor per connected link. The supervisor
@@ -517,7 +545,7 @@ network it would hear nothing and report nothing.
   nothing. What is enabled is what the code already satisfies and should
   never stop satisfying: no `unwrap`/`panic!` outside tests (a panic in the
   fleet runtime freezes every vehicle's state silently), no `unsafe` outside
-  the JNI module, no `let _ =` on something with a destructor (say
+  the JNI module and the one Win32 call (`platform/awake.rs`), no `let _ =` on something with a destructor (say
   `drop(..)` instead), no `process::exit` (it skips the log flush), no
   `print!` (Android discards stderr), no byte-slicing of strings.
 - **Silencing a lint:** fix the cause. If the lint is genuinely wrong for
@@ -912,7 +940,7 @@ written by a newer build, saves nothing.
 
 - **Desktop clippy never sees the Android code.** `platform/android.rs` and
   the `android_main` export are `#[cfg(target_os = "android")]`, so
-  `cargo clippy --workspace` skips them entirely — including the crate's only
+  `cargo clippy --workspace` skips them entirely — including most of the crate's
   `unsafe`. `android/lint.sh` (a CI job) is what lints them; a change to that
   module is unverified until it passes.
 - **mavio rejects untruncated MAVLink 2 frames with trailing zero bytes.**

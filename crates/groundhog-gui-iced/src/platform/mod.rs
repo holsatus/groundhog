@@ -1,6 +1,7 @@
 //! What differs between the desktop and Android builds: where the
-//! application's own files live, how logging is initialised, and how much of
-//! the window the platform's own chrome takes.
+//! application's own files live, how logging is initialised, how much of
+//! the window the platform's own chrome takes, and how the screen is kept
+//! on while the application runs.
 //!
 //! Everything else in the frontend is platform-neutral. Android has no
 //! `$HOME`, no usable `stderr`, and draws its status and navigation bars over
@@ -8,7 +9,11 @@
 //! `directories`, `env_logger` and nothing at all.
 
 #[cfg(not(target_os = "android"))]
+mod awake;
+#[cfg(not(target_os = "android"))]
 mod desktop;
+#[cfg(not(target_os = "android"))]
+pub use awake::keep_awake;
 #[cfg(not(target_os = "android"))]
 pub use desktop::{
     config_dir, data_dir, init_logging, insets, insets_subscription, leave, set_system_bars,
@@ -17,7 +22,9 @@ pub use desktop::{
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
-pub use android::{config_dir, data_dir, insets, insets_subscription, leave, set_system_bars};
+pub use android::{
+    config_dir, data_dir, insets, insets_subscription, keep_awake, leave, set_system_bars,
+};
 
 /// Whether the platform is a touch screen: no hover, and fingers rather
 /// than a pointer, so the interface floats over the map by default and

@@ -46,6 +46,7 @@ fn application()
 #[cfg(not(target_os = "android"))]
 pub fn run() -> iced::Result {
     platform::init_logging();
+    platform::keep_awake();
     application().run()
 }
 
@@ -65,6 +66,7 @@ pub fn run() -> iced::Result {
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     platform::android::init(app.clone());
+    platform::keep_awake();
     if let Err(error) = application().run_android(app) {
         log::error!("The application stopped: {error}");
     }

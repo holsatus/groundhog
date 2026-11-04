@@ -51,6 +51,19 @@ rfd = "0.17.2"
 env_logger = "0.11.10"
 directories = "6.0.0"
 
+# Keeping the screen on (`platform/awake.rs`) asks each desktop its own way.
+# All three crates are ones iced already builds there (zbus for its theme
+# detection, the others for the window), so they add none.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Power"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 # `native-activity` is what turns on winit's Android backend: winit's own
 # feature is only `android-activity/native-activity`, and Cargo unifies it.
@@ -71,3 +84,8 @@ iced_test = { git = "https://github.com/iced-rs/iced" }
 # Reads back a rendered snapshot's pixels; the version `iced_test` writes them
 # with.
 png = "0.18"
+
+# The keep-awake tests talk to mock desktop services over a socket pair
+# rather than the user's session bus.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api", "p2p"] }

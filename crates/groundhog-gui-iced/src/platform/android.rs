@@ -84,6 +84,21 @@ pub fn init(app: AndroidApp) {
     }));
 }
 
+/// Keeps the screen on while the application is in the foreground.
+///
+/// An operator watches telemetry and video for long stretches without
+/// touching the screen, and a screen that goes dark mid-flight hides the
+/// vehicle. `FLAG_KEEP_SCREEN_ON` holds only while the window is shown, so
+/// leaving the application gives the phone its power settings back.
+pub fn keep_awake() {
+    if let Some(app) = APP.get() {
+        app.set_window_flags(
+            android_activity::WindowManagerFlags::KEEP_SCREEN_ON,
+            android_activity::WindowManagerFlags::empty(),
+        );
+    }
+}
+
 /// Where the configuration is written: a private directory inside the app's
 /// internal storage.
 pub fn config_dir() -> Option<PathBuf> {

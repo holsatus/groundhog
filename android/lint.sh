@@ -6,7 +6,7 @@
 # `platform/android.rs` and the `android_main` export only exist for
 # `target_os = "android"`, so the desktop lint run never sees them: this is
 # what keeps them to the same rules (and to the crate's `unsafe_code` deny,
-# whose only two exceptions are documented in place).
+# whose exceptions here are documented in place).
 #
 # Lints the library only. The `groundhog` binary is a desktop entry point
 # (`main.rs` calls `run`, which is not compiled for Android); `build.sh` builds
