@@ -40,11 +40,10 @@ impl PendingAckMap {
     ///
     /// Some systems leave the target fields empty, so those are accepted too.
     ///
-    /// The lookup falls back to an entry registered for component 0, "the
-    /// system as a whole": a vehicle may answer a command sent to its system
-    /// from one of its components. Lock keys are exact `MavlinkId`s, so a
-    /// command to component 0 and one to a specific component of the same kind
-    /// would not be serialised; no caller sends a command to component 0.
+    /// The ACK must come from the component the command was sent to: every
+    /// command addresses one component (`CommandRequest` asserts it). A
+    /// command to a whole system (component 0) would need its ACK matched
+    /// from any component, and system-wide locking, since lock keys are exact.
     pub(super) fn route_ack(&self, gcs_id: MavlinkId, source: MavlinkId, ack: &CommandAck) {
         // Some systems leave the target fields empty, so accept those as well
         let for_us = (ack.target_system == 0 || ack.target_system == gcs_id.system)
@@ -53,18 +52,8 @@ impl PendingAckMap {
             return;
         }
 
-        let command = ack.command as u16;
-        let system_wide = MavlinkId {
-            system: source.system,
-            component: 0,
-        };
-
         let pending = lock(&self.map);
-        let sender = pending
-            .get(&(source, command))
-            .or_else(|| pending.get(&(system_wide, command)));
-
-        match sender {
+        match pending.get(&(source, ack.command as u16)) {
             Some(sender) => _ = sender.send(ack.clone()),
             None => log::debug!("Unsolicited ACK from {source:?}: {ack:?}"),
         }

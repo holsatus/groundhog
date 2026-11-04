@@ -358,8 +358,13 @@ impl MissionItem {
         let before = self.clone();
 
         match field {
-            Field::Latitude => self.x = degrees_e7(value),
-            Field::Longitude => self.y = degrees_e7(value),
+            // A coordinate outside the globe, or NaN, has no place on the
+            // wire: `degrees_e7` would saturate it, or turn NaN into 0.
+            Field::Latitude if (-90.0..=90.0).contains(&value) => self.x = degrees_e7(value),
+            Field::Longitude if (-180.0..=180.0).contains(&value) => {
+                self.y = degrees_e7(value);
+            }
+            Field::Latitude | Field::Longitude => return false,
             Field::Altitude | Field::Z => {
                 let narrowed = value as f32;
                 if !narrowed.is_finite() {
@@ -443,13 +448,7 @@ impl MissionItem {
         if value.is_nan() {
             return optional && self.set_field(field, value);
         }
-        if field == Field::Latitude && !(-90.0..=90.0).contains(&value) {
-            return false;
-        }
-        if field == Field::Longitude && !(-180.0..=180.0).contains(&value) {
-            return false;
-        }
-
+        // `set_field` refuses coordinates outside ±90/±180.
         self.set_field(field, value)
     }
 
@@ -741,6 +740,21 @@ mod tests {
 
         assert!(!waypoint.set_field(Field::X, 3e9), "outside i32");
         assert_eq!(waypoint.x, 470_000_000);
+
+        for (field, value) in [
+            (Field::Latitude, 1e30),
+            (Field::Latitude, 90.5),
+            (Field::Latitude, f64::NAN),
+            (Field::Longitude, -180.5),
+            (Field::Longitude, f64::NAN),
+        ] {
+            assert!(
+                !waypoint.set_field(field, value),
+                "{field:?} = {value} is not on the globe"
+            );
+        }
+        assert_eq!((waypoint.x, waypoint.y), (470_000_000, 80_000_000));
+        assert!(waypoint.set_field(Field::Latitude, -90.0));
 
         let mut yaw = MissionItem::new(MavCmd::ConditionYaw, None);
         assert!(

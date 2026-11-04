@@ -66,6 +66,8 @@ pub enum DownloadOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParamDownload {
     generation: u64,
+    /// The download that started last, whose finish alone counts.
+    run: Option<DownloadId>,
     running: bool,
     expected: u16,
     received: HashSet<u16>,
@@ -104,8 +106,9 @@ impl ParamDownload {
         self.generation
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, run: DownloadId) {
         self.generation += 1;
+        self.run = Some(run);
         self.running = true;
         self.expected = 0;
         self.received.clear();
@@ -137,13 +140,22 @@ impl ParamDownload {
     }
 }
 
+/// One parameter download, as the service running it names it.
+///
+/// A download reports its start once it holds the component's reply channel,
+/// and its end after it released it. Between the two, a download queued behind
+/// it can take the channel and report its own start; the id keeps the earlier
+/// download's end from finishing the later one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DownloadId(pub(crate) u64);
+
 /// A change to a component's download, reported by the service running it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadUpdate {
+pub(crate) enum DownloadUpdate {
     /// A download started: a new generation begins.
-    Start,
-    /// A download ended.
-    Finish(DownloadOutcome),
+    Start(DownloadId),
+    /// A download ended. Ignored unless it is the download that started last.
+    Finish(DownloadId, DownloadOutcome),
 }
 
 /// The parameters of one component.
@@ -266,8 +278,12 @@ impl Parameters {
     /// values it did not report: the component no longer has them.
     pub(crate) fn set_download(&mut self, update: DownloadUpdate) {
         match update {
-            DownloadUpdate::Start => self.download.start(),
-            DownloadUpdate::Finish(outcome) => {
+            DownloadUpdate::Start(run) => self.download.start(run),
+            DownloadUpdate::Finish(run, outcome) => {
+                if self.download.run != Some(run) {
+                    log::debug!("Ignoring the end of a superseded parameter download");
+                    return;
+                }
                 let generation = self.download.generation;
                 let complete = outcome == DownloadOutcome::Complete;
 
@@ -645,6 +661,9 @@ pub fn group_of(ident: &Ident) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The download the tests start and finish.
+    const RUN: DownloadId = DownloadId(1);
+
     fn ident() -> Ident {
         Ident::from_str_truncated("PARAM_ONE")
     }
@@ -687,7 +706,7 @@ mod tests {
     #[test]
     fn a_download_tracks_what_arrived() {
         let mut parameters = Parameters::default();
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
 
         for index in 0..3 {
             let name = Ident::from_str_truncated(&format!("P{index}"));
@@ -709,7 +728,7 @@ mod tests {
         assert_eq!(download.expected(), 3);
         assert_eq!(download.refused(), 0);
 
-        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+        parameters.set_download(DownloadUpdate::Finish(RUN, DownloadOutcome::Complete));
         assert!(!parameters.download().is_running());
         assert_eq!(
             parameters.download().outcome(),
@@ -728,11 +747,11 @@ mod tests {
             .observe(gone.clone(), 2.0, MavParamType::Real32, 1, 2, None)
             .unwrap();
 
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
         parameters
             .observe(ident(), 3.0, MavParamType::Real32, 0, 1, None)
             .unwrap();
-        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+        parameters.set_download(DownloadUpdate::Finish(RUN, DownloadOutcome::Complete));
 
         assert_eq!(parameters.len(), 1);
         assert_eq!(parameters.value(&ident()), Some(Value::F32(3.0)));
@@ -747,13 +766,14 @@ mod tests {
             .observe(kept.clone(), 2.0, MavParamType::Real32, 0, 2, None)
             .unwrap();
 
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
         parameters
             .observe(ident(), 3.0, MavParamType::Real32, 0, 2, None)
             .unwrap();
-        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Incomplete(
-            crate::Progress { done: 1, total: 2 },
-        )));
+        parameters.set_download(DownloadUpdate::Finish(
+            RUN,
+            DownloadOutcome::Incomplete(crate::Progress { done: 1, total: 2 }),
+        ));
 
         assert_eq!(parameters.len(), 2);
         assert!(parameters.value(&kept).is_some());
@@ -762,7 +782,7 @@ mod tests {
     #[test]
     fn a_refused_value_still_counts_as_arrived() {
         let mut parameters = Parameters::default();
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
 
         let error = parameters
             .observe(ident(), 1.0, MavParamType::Uint64, 0, 1, None)
@@ -773,7 +793,7 @@ mod tests {
         assert_eq!(download.received(), 1);
         assert_eq!(download.refused(), 1);
 
-        parameters.set_download(DownloadUpdate::Finish(DownloadOutcome::Complete));
+        parameters.set_download(DownloadUpdate::Finish(RUN, DownloadOutcome::Complete));
         assert!(parameters.is_empty(), "the refused value is not stored");
     }
 
@@ -784,7 +804,7 @@ mod tests {
     #[test]
     fn a_value_refused_under_the_learned_encoding_is_dropped() {
         let mut parameters = Parameters::default();
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
         parameters
             .observe(ident(), -1.0, MavParamType::Uint8, 0, 1, None)
             .unwrap();
@@ -805,17 +825,57 @@ mod tests {
         assert_eq!(parameters.download().refused(), 1);
     }
 
+    /// A download reports its end after releasing the reply channel, so a
+    /// download queued behind it can take the channel and report its start
+    /// first. The earlier end must not finish the later download: it would
+    /// mark it complete and drop every value the earlier one received.
+    #[test]
+    fn the_end_of_a_superseded_download_is_ignored() {
+        let (first, second) = (DownloadId(1), DownloadId(2));
+        let mut parameters = Parameters::default();
+
+        parameters.set_download(DownloadUpdate::Start(first));
+        parameters
+            .observe(
+                ident(),
+                1.0,
+                MavParamType::Real32,
+                0,
+                1,
+                Some(ParamEncoding::CCast),
+            )
+            .unwrap();
+
+        parameters.set_download(DownloadUpdate::Start(second));
+        parameters.set_download(DownloadUpdate::Finish(first, DownloadOutcome::Complete));
+
+        assert_eq!(
+            parameters.value(&ident()),
+            Some(Value::F32(1.0)),
+            "the first download's value survives its own late end"
+        );
+        assert!(parameters.download().is_running(), "the second still runs");
+        assert_eq!(parameters.download().outcome(), None);
+
+        parameters.set_download(DownloadUpdate::Finish(second, DownloadOutcome::Cancelled));
+        assert_eq!(parameters.value(&ident()), Some(Value::F32(1.0)));
+        assert_eq!(
+            parameters.download().outcome(),
+            Some(&DownloadOutcome::Cancelled)
+        );
+    }
+
     /// Only a value from the current download counts as refused by it; an
     /// older generation's value is removed without touching the count.
     #[test]
     fn a_refusal_counts_only_in_the_download_that_reported_the_value() {
         let mut parameters = Parameters::default();
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
         parameters
             .observe(ident(), -1.0, MavParamType::Uint8, 0, 1, None)
             .unwrap();
 
-        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_download(DownloadUpdate::Start(RUN));
         parameters.set_encoding(Some(ParamEncoding::CCast));
 
         assert_eq!(parameters.value(&ident()), None);

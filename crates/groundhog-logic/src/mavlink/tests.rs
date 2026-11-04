@@ -282,8 +282,11 @@ async fn giving_up_on_progress_waits_the_progress_timeout_and_cancels() {
         started.elapsed()
     );
 
-    let DefaultDialect::CommandCancel(cancel) = vehicle.recv().await else {
-        panic!("expected COMMAND_CANCEL")
+    let sent = tokio::time::timeout(Duration::from_secs(1), vehicle.recv())
+        .await
+        .expect("the vehicle is told to cancel");
+    let DefaultDialect::CommandCancel(cancel) = sent else {
+        panic!("expected COMMAND_CANCEL, got {sent:?}")
     };
     assert_eq!(cancel.command, long.command);
 }

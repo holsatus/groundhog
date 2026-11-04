@@ -173,15 +173,22 @@ fn observe_position(session: &mut Session, position: f32) -> bool {
         }
         session.instruction = Instruction::Place(side);
         session.progress = Some((session.sides.count() * 100 / Side::ALL.len()) as u8);
+        true
     } else if session.observed && position == POSITION_SUCCESS {
         for side in Side::ALL {
             session.sides.mark(side);
         }
         session.succeed();
+        true
     } else if session.observed && position == POSITION_FAILED {
         session.fail("the vehicle rejected the measurements; try again, holding it still");
+        true
+    } else {
+        // A result before this run showed itself is the previous run's,
+        // which ArduPilot keeps repeating; an unknown position is no request
+        // at all. Neither is this run's, so neither keeps it from timing out.
+        false
     }
-    true
 }
 
 fn observe_compass_progress(session: &mut Session, progress: &MagCalProgress) {

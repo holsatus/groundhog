@@ -141,11 +141,24 @@ fn ardupilot_accelerometer_ignores_an_earlier_result() {
     let mut session = session(&protocol, CalibrationKind::Accelerometer);
     session.acknowledged(Ok(()));
 
-    message(&protocol, &mut session, accelcal_position(16_777_215.0));
+    // Not this run's, so it does not keep the run alive either.
+    assert!(!message(
+        &protocol,
+        &mut session,
+        accelcal_position(16_777_215.0)
+    ));
     assert_eq!(session.phase, Phase::Running);
+    assert!(
+        !message(&protocol, &mut session, accelcal_position(42.0)),
+        "an unknown position is no feedback"
+    );
 
-    message(&protocol, &mut session, accelcal_position(1.0));
-    message(&protocol, &mut session, accelcal_position(16_777_216.0));
+    assert!(message(&protocol, &mut session, accelcal_position(1.0)));
+    assert!(message(
+        &protocol,
+        &mut session,
+        accelcal_position(16_777_216.0)
+    ));
     assert!(matches!(session.phase, Phase::Failed(_)));
 }
 

@@ -137,6 +137,30 @@ there, but the domain model leaves the rule to each frontend. Either document
 on `transferred` that the frontend must block edits while a transfer runs, or
 after an upload only rebase (`base = items`) and keep the plan.
 
+### MISSION-20 · A jump to home is shown but cannot be entered, and reaches PX4 as `-1`
+**P2** · Effort M · From the 2026-11-05 review of WP29
+
+Since WP29 a plan stores ArduPilot's jump to home (wire 0) as `-1`. The editor
+shows it as "Home" (`features/mission/view.rs` `format_value`), but
+`set_field` refuses the display value 0, so the editor cannot round-trip what
+it shows. A plan holding `-1` (from an ArduPilot download or any WPL file) that
+is uploaded to PX4, which has no home slot, sends `param1 = -1`. PX4 rejects
+that rather than jumping to the first item, which is safer than before but
+not what MAVLink calls a sequence number. Opaque targets (`1e30`) also go to
+any vehicle as they are. A wire target that was already `-1` comes back as `0`
+after a round trip, since both decode to the home slot.
+
+**Fix:**
+- `MissionDraft::check(Upload)` refuses a plan whose jump target names no item
+  that will exist on the wire. That covers home on a layout without a home
+  slot, a target past the plan's end, and opaque values. The refusal names
+  the item.
+- Under a home-slot layout the editor accepts 0 as "Home".
+- The codec shifts every whole number by the offset, negatives included
+  (wire `-1` is plan `-2`), so values stay distinct.
+- Files and downloads stay lossless.
+
+
 ## Parameters
 
 ### PARAM-3 · "Save to a file" writes display values while encoding is unknown
@@ -388,6 +412,15 @@ Structured errors, `String` and `anyhow` coexist; `storage/parameter.rs` uses
 in `AGENTS.md`, and give parameter files a typed line error. In features,
 import the services result as `ServiceResult` to avoid
 `std::result::Result` noise.
+
+### SVC-22 · Groundhog's own calibration cancels fail silently
+**P3** · Effort S · From the 2026-11-05 review of WP32
+
+When `Fleet::tick` ends a run, the runtime sends the firmware's cancel with a
+detached `tokio::spawn` and only logs a failure (`services/runtime.rs`, the
+liveness branch). The vehicle may then go on calibrating after the operator
+was told the run failed, with nothing on screen, against `AGENTS.md`'s
+"failures reach the operator". Owned by WP36's task set.
 
 ### SVC-18 · Background tasks outlive the `Backend`
 **P3** · Effort S · From R-1104

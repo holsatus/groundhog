@@ -50,10 +50,11 @@ Phase 1 of the first review (packages 1–7) is done and removed; packages
 | 24 | [Map engine](#wp24--map-engine) | MAP-1 … MAP-7 | P2 | — | Todo |
 | 25 | [Video receiver](#wp25--video-receiver) | VIDEO-1 … VIDEO-5 | P2 | — | Todo |
 | 35 | [Decoding coverage](#wp35--decoding-coverage) | PROTO-10, CAL-14 | P2 | — | Todo |
-| 36 | [Bootstrap lifecycle and readiness](#wp36--bootstrap-lifecycle-and-readiness) | SVC-18, SVC-19, API-16 | P2 | — | Todo |
+| 36 | [Bootstrap lifecycle and readiness](#wp36--bootstrap-lifecycle-and-readiness) | SVC-18, SVC-19, SVC-22, API-16 | P2 | — | Todo |
 | 37 | [Clients that match their target](#wp37--clients-that-match-their-target) | API-14, API-20 (flags) | P2 | 36 | Todo |
 | 38 | [Observing the fleet](#wp38--observing-the-fleet) | API-15, API-18, SVC-16 | P2 | 36 | Todo |
 | 39 | [Safety rules in the backend](#wp39--safety-rules-in-the-backend) | API-17 | P2 | — | Todo |
+| 41 | [Jump targets every firmware accepts](#wp41--jump-targets-every-firmware-accepts) | MISSION-20 | P2 | 29 | Todo |
 | 26 | [Log panel timeline](#wp26--log-panel-timeline) | UI-11 | P3 | — | Todo |
 | 27 | [Feature tests for command features](#wp27--feature-tests-for-command-features) | API-11, API-6 | P3 | 8 | Todo |
 | 28 | [Docs and policy](#wp28--docs-and-policy) | API-1, API-4, API-7, API-8, API-9, API-12, API-13, SVC-15, SVC-17 (policy) | P3 | — | Todo |
@@ -804,8 +805,15 @@ fallbacks; POSCTL/1 decodes "Orbit" and POSCTL/0 "Position"; POSCTL/9 is
 `None`; a change between Position and Orbit emits `ModeChanged`.
 
 ### WP36 · Bootstrap lifecycle and readiness
-**Closes:** SVC-18, SVC-19, API-16 · **Status:** Todo · **Decision:** 36
+**Closes:** SVC-18, SVC-19, SVC-22, API-16 · **Status:** Todo · **Decision:** 36
 (above)
+
+- **Calibration cancels are owned and visible** (SVC-22): the cancels
+  `Fleet::tick` returns go through the task set below, not a bare
+  `tokio::spawn`. A cancel that fails produces a lasting fleet event,
+  `FleetEvent::CalibrationCancelFailed { system, kind, error }`, which the
+  frontend turns into a warning notice ("The vehicle may still be
+  calibrating"). Test it with a mock that refuses the cancel.
 
 - **Owned tasks** (SVC-18): the runtime keeps a `tokio::task::JoinSet<()>` (a
   local in `run`) for every task it starts: bootstraps, `describe_camera`,
@@ -928,6 +936,34 @@ and refuses alike.
 goes when disarmed; `StartCalibration` is refused when armed and when lost;
 `heading_rad` falls back to the course and is `None` when slow. In
 `services/tests.rs`, `start_calibration` on an armed vehicle sends nothing.
+
+
+### WP41 · Jump targets every firmware accepts
+**Closes:** MISSION-20 · **After:** 29 · **Status:** Todo
+
+- `domain::mission::Refusal` gains `InvalidJumpTarget { item: ItemId }`.
+  `MissionDraft::check(MissionAction::Upload)` refuses when any item's
+  `ItemIndex` parameter is not, after encoding under the vehicle's
+  `MissionLayout`, a whole number naming a wire item that is not home.
+  This covers `-1` on a layout without a home slot, a target past the end,
+  and opaque values. Home (`-1`) on a home-slot layout stays allowed, since
+  that round-trips what the vehicle holds. The mission panel shows the
+  refusal and selects the item.
+- Under a home-slot layout the editor accepts an item number of 0 as "Home"
+  (`MissionItem::set_field` needs the layout, or a `set_home_target`), and
+  `format_value` keeps showing it.
+- `codec::shift_targets` shifts every whole, finite value by the offset,
+  negatives included, and `item_ref` governs plan edits only. The `-1`
+  special case goes. Update the `shift_targets` doc, and state in
+  `MissionLayout`'s doc that a plan's `-1` means home only under a home-slot
+  layout.
+
+**Tests:**
+- An ArduPilot-decoded jump to home, uploaded to a PX4 draft, is refused and
+  names the item.
+- A target of `1e30` is refused on both layouts.
+- The editor sets 0 as Home under ArduPilot, and refuses it under PX4.
+- Wire `-1` and wire `0` stay distinct through decode and encode.
 
 ---
 

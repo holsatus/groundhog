@@ -28,7 +28,7 @@ use crate::{
         },
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
-        parameter::{DownloadOutcome, DownloadUpdate},
+        parameter::{DownloadId, DownloadOutcome, DownloadUpdate},
         vehicle::{
             Vehicle,
             camera::{CameraId, ImagePoint, ImageRect, TrackingSupport},
@@ -57,9 +57,14 @@ const CALIBRATION_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 /// A download that is still queued for the channel has not started: reporting
 /// it would begin a new generation, and the running download's completion
 /// would then drop every value it received before this one was requested.
+/// Its end, reported after the channel is released, names its own id, so it
+/// cannot finish a download that took the channel in the meantime.
 struct DownloadReport<'a> {
     fleet: &'a FleetHandle,
     address: MavlinkId,
+    run: DownloadId,
+    /// Atomic because `started` runs inside the router's download future,
+    /// which must be `Send`, through a shared borrow: a `Cell` is not `Sync`.
     started: AtomicBool,
     finished: bool,
 }
@@ -69,6 +74,7 @@ impl<'a> DownloadReport<'a> {
         Self {
             fleet,
             address,
+            run: DownloadId(LAST_DOWNLOAD.fetch_add(1, Ordering::Relaxed) + 1),
             started: AtomicBool::new(false),
             finished: false,
         }
@@ -80,7 +86,7 @@ impl<'a> DownloadReport<'a> {
         if !self.started.swap(true, Ordering::Relaxed) {
             self.fleet.report(Input::ParamDownload {
                 address: self.address,
-                update: DownloadUpdate::Start,
+                update: DownloadUpdate::Start(self.run),
             });
         }
     }
@@ -93,7 +99,7 @@ impl<'a> DownloadReport<'a> {
         self.finished = true;
         self.fleet.report(Input::ParamDownload {
             address: self.address,
-            update: DownloadUpdate::Finish(outcome),
+            update: DownloadUpdate::Finish(self.run, outcome),
         });
     }
 }
@@ -103,11 +109,15 @@ impl Drop for DownloadReport<'_> {
         if !self.finished && self.started.load(Ordering::Relaxed) {
             self.fleet.report(Input::ParamDownload {
                 address: self.address,
-                update: DownloadUpdate::Finish(DownloadOutcome::Cancelled),
+                update: DownloadUpdate::Finish(self.run, DownloadOutcome::Cancelled),
             });
         }
     }
 }
+
+/// The last parameter download handed out; download ids only need to be
+/// unique within the process.
+static LAST_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 
 /// The last calibration run handed out; run ids only need to be unique
 /// within the process.

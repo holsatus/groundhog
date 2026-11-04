@@ -187,7 +187,7 @@ fn is_corrupt(frame: &Frame<Versionless>) -> bool {
 }
 
 /// A frame whose checksum does not match its message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 struct Corrupt;
 
 /// Traffic counters of one link attachment.

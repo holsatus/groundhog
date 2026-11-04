@@ -125,8 +125,8 @@ pub struct Fleet {
     vehicles: BTreeMap<SystemId, Arc<Vehicle>>,
 }
 
-/// What one aging step produced: the events to report and the cancels that
-/// the vehicle must be sent because Groundhog ended a run itself.
+/// What one aging step produced: the events to report, and the cancels to
+/// send to vehicles whose run Groundhog ended itself.
 pub(crate) struct Tick {
     pub(crate) events: Vec<FleetEvent>,
     pub(crate) cancels: Vec<CalibrationCancel>,
