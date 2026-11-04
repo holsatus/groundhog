@@ -1469,6 +1469,209 @@ mod tests {
         assert!(!vehicle.calibration_controls().confirm);
     }
 
+    /// A quaternion report reaches the attitude, not just the observer.
+    #[test]
+    fn a_quaternion_folds_into_attitude() {
+        let mut vehicle = vehicle();
+        vehicle.handle_message(
+            Instant::now(),
+            1,
+            &DefaultDialect::AttitudeQuaternion(messages::AttitudeQuaternion {
+                q1: 1.0,
+                ..Default::default()
+            }),
+        );
+
+        let attitude = vehicle
+            .attitude
+            .current
+            .as_ref()
+            .expect("attitude recorded");
+        let (roll, pitch, yaw) = attitude.attitude.euler_angles();
+        assert!(roll.abs() < 1e-6 && pitch.abs() < 1e-6 && yaw.abs() < 1e-6);
+    }
+
+    /// A battery report reaches the summary, not just the observer.
+    #[test]
+    fn a_battery_status_folds_into_the_summary() {
+        let mut vehicle = vehicle();
+        let mut voltages = [u16::MAX; 10];
+        voltages[..3].copy_from_slice(&[4_000, 4_000, 4_000]);
+        vehicle.handle_message(
+            Instant::now(),
+            1,
+            &DefaultDialect::BatteryStatus(messages::BatteryStatus {
+                id: 0,
+                voltages,
+                current_battery: 250,
+                battery_remaining: 80,
+                ..Default::default()
+            }),
+        );
+
+        let state = vehicle.battery.primary().expect("battery recorded");
+        assert_eq!(state.current, Some(2.5));
+        assert_eq!(state.remaining, Some(80.0));
+    }
+
+    /// A covariance position carries the velocity, which the UI shows as
+    /// climb and ground speed.
+    #[test]
+    fn a_cov_position_records_its_velocity() {
+        let mut vehicle = vehicle();
+        vehicle.handle_message(
+            Instant::now(),
+            1,
+            &DefaultDialect::GlobalPositionIntCov(messages::GlobalPositionIntCov {
+                lat: 474_000_000,
+                lon: 85_000_000,
+                relative_alt: 30_000,
+                vx: 3.0,
+                vy: 4.0,
+                vz: -2.0,
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(vehicle.location(), Some(GeoPosition::new(47.4, 8.5)));
+        assert_eq!(
+            vehicle.position.climb_rate(),
+            Some(2.0),
+            "negative z climbs"
+        );
+        assert_eq!(vehicle.position.ground_speed(), Some(5.0));
+        assert_eq!(
+            vehicle
+                .position
+                .current
+                .as_ref()
+                .expect("position recorded")
+                .alt_agl,
+            30.0
+        );
+    }
+
+    /// The component information names the vehicle for the operator.
+    #[test]
+    fn component_information_names_the_vehicle() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+
+        let mut vendor = [0u8; 32];
+        vendor[..4].copy_from_slice(b"Acme");
+        let mut model = [0u8; 32];
+        model[..5].copy_from_slice(b"Plane");
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::ComponentInformationBasic(messages::ComponentInformationBasic {
+                vendor_name: vendor,
+                model_name: model,
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(vehicle.display_name(), "Acme Plane (1)");
+    }
+
+    /// A finished run can be forgotten; a running one must not be.
+    #[test]
+    fn only_a_finished_calibration_can_be_dismissed() {
+        let t = Instant::now();
+        let mut vehicle = vehicle();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let run = calibration::RunId(1);
+
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Gyroscope,
+                run,
+            },
+        );
+        assert!(!vehicle.update_calibration(t, CalibrationUpdate::Dismiss));
+        assert!(vehicle.calibration.is_some(), "a running run stays");
+
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
+        assert!(vehicle.calibration.is_some(), "a finished run is kept");
+        assert!(vehicle.update_calibration(t, CalibrationUpdate::Dismiss));
+        assert!(vehicle.calibration.is_none());
+    }
+
+    /// A failed confirmation puts the operator back on the step; the vehicle
+    /// is not waiting for a confirmation it never received.
+    #[test]
+    fn a_failed_confirmation_asks_again() {
+        let t = Instant::now();
+        let mut vehicle = vehicle();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let run = calibration::RunId(1);
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Accelerometer,
+                run,
+            },
+        );
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::CommandLong(messages::CommandLong {
+                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
+                param1: 1.0,
+                ..Default::default()
+            }),
+        );
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Confirmed {
+                run,
+                side: calibration::Side::Level,
+            },
+        );
+
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::ConfirmFailed {
+                side: calibration::Side::Level,
+            },
+        );
+        assert_eq!(
+            vehicle.calibration.as_ref().unwrap().instruction,
+            calibration::Instruction::Place(calibration::Side::Level)
+        );
+    }
+
+    /// A firmware with no calibration protocol cannot start a run.
+    #[test]
+    fn a_firmware_without_calibration_cannot_begin_one() {
+        let mut vehicle = vehicle();
+        vehicle.handle_message(Instant::now(), 1, &heartbeat(MavAutopilot::Generic));
+
+        assert!(!vehicle.update_calibration(
+            Instant::now(),
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Gyroscope,
+                run: calibration::RunId(1),
+            },
+        ));
+        assert!(vehicle.calibration.is_none());
+    }
+
     /// What a run reports lands on that run only: a start abandoned after a
     /// newer one began leaves the newer one alone.
     #[test]
