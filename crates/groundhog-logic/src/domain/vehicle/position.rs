@@ -127,7 +127,12 @@ impl PositionTrack {
             );
 
             // Never bridge a long gap: those points mark where the track broke.
-            if eval.at.saturating_duration_since(prev.at) > Duration::from_secs(20) {
+            // Either side counts: removing the point before a gap connects the
+            // track across it just as removing the point after one does.
+            let bridged = |a: &GlobalPosition, b: &GlobalPosition| {
+                b.at.saturating_duration_since(a.at) > Duration::from_secs(20)
+            };
+            if bridged(prev, eval) || bridged(eval, next) {
                 continue;
             }
 
@@ -217,5 +222,93 @@ mod tests {
         assert_eq!(track.trail.len(), 2);
         assert_eq!(track.trail[0].pos, GeoPosition::new(0.0, 0.0));
         assert_eq!(track.trail[1].pos, GeoPosition::new(2.0, 2.0));
+    }
+
+    #[test]
+    fn a_new_fix_bumps_the_revision() {
+        let mut track = PositionTrack::default();
+        let before = track.revision();
+
+        track.register(position(Instant::now(), 47.0, 8.0));
+
+        assert_ne!(track.revision(), before, "caches keyed on the trail expire");
+    }
+
+    #[test]
+    fn velocity_gives_climb_rate_and_ground_speed() {
+        let track = PositionTrack {
+            velocity_ned: Some(Vector3::new(3.0, 4.0, -2.0)),
+            ..Default::default()
+        };
+
+        assert_eq!(track.climb_rate(), Some(2.0), "negative z is a climb");
+        assert_eq!(track.ground_speed(), Some(5.0));
+    }
+
+    /// The forward gap must be kept too: pruning the point before it draws a
+    /// straight line across the break.
+    #[test]
+    fn a_forward_long_gap_is_not_bridged() {
+        let mut track = PositionTrack::default();
+        let start = Instant::now();
+        let second = start + Duration::from_secs(1);
+        let before_gap = start + Duration::from_secs(2);
+        let after_gap = start + Duration::from_secs(40);
+
+        // A is off the line; B, C and D are collinear, so C is the cheapest
+        // interior point to remove — unless its forward gap protects it.
+        track.register(position(start, 0.010, 0.0));
+        track.register(position(second, 0.0, 0.0));
+        track.register(position(before_gap, 0.0, 0.001));
+        track.register(position(after_gap, 0.0, 0.002));
+
+        track.prune_one();
+
+        assert!(
+            track.trail.iter().any(|point| point.at == before_gap),
+            "the point before the gap stays: {:?}",
+            track.trail.iter().map(|point| point.at).collect::<Vec<_>>()
+        );
+    }
+
+    /// A backward gap marks a break as well.
+    #[test]
+    fn a_backward_long_gap_is_not_bridged() {
+        let mut track = PositionTrack::default();
+        let start = Instant::now();
+        let after_gap = start + Duration::from_secs(40);
+
+        track.register(position(start, 0.0, 0.0));
+        track.register(position(after_gap, 0.0, 0.001));
+        track.register(position(after_gap + Duration::from_secs(1), 0.0, 0.002));
+        track.register(position(after_gap + Duration::from_secs(2), 0.0, 0.003));
+
+        // The old point is pruned; the one the gap follows stays.
+        track.prune_one();
+
+        assert!(
+            track.trail.iter().any(|point| point.at == after_gap),
+            "the point after the gap stays"
+        );
+    }
+
+    /// When every interior point sits beside a gap, the oldest is dropped:
+    /// the trail must still shrink.
+    #[test]
+    fn a_track_of_gaps_drops_its_oldest_point() {
+        let mut track = PositionTrack::default();
+        let start = Instant::now();
+
+        track.register(position(start, 0.0, 0.0));
+        track.register(position(start + Duration::from_secs(25), 0.0, 0.001));
+        track.register(position(start + Duration::from_secs(50), 0.0, 0.002));
+
+        track.prune_one();
+
+        assert_eq!(track.trail.len(), 2);
+        assert_eq!(
+            track.trail.front().unwrap().at,
+            start + Duration::from_secs(25)
+        );
     }
 }

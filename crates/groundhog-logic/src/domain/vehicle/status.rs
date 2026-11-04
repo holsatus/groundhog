@@ -228,4 +228,67 @@ mod tests {
         let done = log.observe_statustext(1, &message, Instant::now()).unwrap();
         assert!(done.text.starts_with("ok"));
     }
+
+    /// A chunk that never arrived leaves a visible gap; the text is not spliced
+    /// and then presented as a single message.
+    #[test]
+    fn a_missing_chunk_is_marked() {
+        let mut log = StatusLog::default();
+        let now = Instant::now();
+        let head = "x".repeat(CHUNK_LEN);
+
+        log.observe_statustext(1, &chunk(&head, 7, 0), now);
+        let done = log
+            .observe_statustext(1, &chunk("tail", 7, 2), now + CHUNK_TIMEOUT / 2)
+            .expect("the last chunk completes the text");
+
+        assert!(done.text.starts_with(&head));
+        assert!(done.text.contains('…'), "the gap is visible: {done:?}");
+        assert!(done.text.ends_with("tail"));
+    }
+
+    /// The alert shown is the most severe, so every severity must rank in the
+    /// documented order.
+    #[test]
+    fn every_severity_ranks_from_emergency_to_debug() {
+        let severities = [
+            MavSeverity::Emergency,
+            MavSeverity::Alert,
+            MavSeverity::Critical,
+            MavSeverity::Error,
+            MavSeverity::Warning,
+            MavSeverity::Notice,
+            MavSeverity::Info,
+            MavSeverity::Debug,
+        ];
+
+        for pair in severities.windows(2) {
+            assert!(
+                rank(pair[0]) < rank(pair[1]),
+                "{:?} must outrank {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// The log keeps the newest texts and drops the oldest, so a noisy vehicle
+    /// cannot grow it without bound.
+    #[test]
+    fn status_texts_are_bounded() {
+        let mut log = StatusLog::default();
+        let now = Instant::now();
+
+        for index in 0..=MAX_STATUS_TEXTS {
+            let text = format!("text {index}");
+            log.observe_statustext(1, &chunk(&text, 0, 0), now);
+        }
+
+        assert_eq!(log.texts.len(), MAX_STATUS_TEXTS);
+        assert_eq!(log.texts.front().unwrap().text, "text 1");
+        assert_eq!(
+            log.texts.back().unwrap().text,
+            format!("text {MAX_STATUS_TEXTS}")
+        );
+    }
 }
