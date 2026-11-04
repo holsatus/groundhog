@@ -47,6 +47,7 @@ fn window() -> iced::window::Settings {
             application_id: platform::APP_ID.to_owned(),
             ..Default::default()
         },
+        size: (1440.0, 900.0).into(),
         ..Default::default()
     }
 }
