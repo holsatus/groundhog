@@ -37,6 +37,8 @@ pub enum Error {
     CalibrationUnsupported,
     #[error("no calibration is waiting for that")]
     NotCalibrating,
+    #[error("the camera has not said it can track that")]
+    TrackingUnsupported,
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("failed to encode message: {0}")]

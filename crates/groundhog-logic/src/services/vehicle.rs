@@ -16,7 +16,7 @@ use std::{
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
     enums::{MavMissionType, MavResult},
-    messages::{AutopilotVersion, HomePosition},
+    messages::{AutopilotVersion, CameraInformation, CameraTrackingImageStatus, HomePosition},
 };
 
 use super::{Error, FleetHandle, Result, runtime::Input};
@@ -29,12 +29,18 @@ use crate::{
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
         parameter::{DownloadOutcome, DownloadUpdate},
-        vehicle::Vehicle,
+        vehicle::{
+            Vehicle,
+            camera::{CameraId, ImagePoint, ImageRect, TrackingSupport},
+        },
     },
     mavlink::{MavError, ParamListResult, commands},
 };
 
 use crate::Progress;
+
+/// How often a camera is asked to report what it tracks, once it tracks.
+const TRACKING_REPORT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long a calibration command may take to be acknowledged. Firmwares run
 /// some calibrations (ArduPilot's gyroscope and level) before acknowledging.
@@ -203,6 +209,10 @@ impl VehicleClient {
         if let Err(error) = self.download_mission(&|_| {}).await {
             log::warn!("Mission download from {target:?} failed: {error}");
         }
+
+        // Last: most autopilots have no camera to describe, and the request
+        // waits out its retries before it gives up.
+        self.describe_camera(target.component).await;
     }
 
     /// Download the component's parameter list. Progress and the outcome are
@@ -415,6 +425,121 @@ impl VehicleClient {
             .await
             .map(|_| ())
             .map_err(Error::from)
+    }
+
+    /// Ask `component` to describe its cameras (`CAMERA_INFORMATION`):
+    /// the camera itself, or, from an autopilot, the cameras attached to
+    /// it. Best effort, as during the bootstrap: a component with no camera
+    /// does not answer.
+    pub(crate) async fn describe_camera(&self, component: u8) {
+        let target = MavlinkId {
+            system: self.system.0,
+            component,
+        };
+        if let Err(error) = self
+            .fleet
+            .router()
+            .request_message::<CameraInformation>(target)
+            .await
+        {
+            log::info!("No CAMERA_INFORMATION from {target:?}: {error}");
+        }
+    }
+
+    /// Have `camera` track the point `at` in its picture, `radius` across
+    /// (a share of the picture's width). What it then tracks is in the
+    /// snapshot, as the camera reports it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TrackingUnsupported`] if the camera has not said it tracks
+    /// points, [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if the camera refuses, or [`Error::Timeout`] /
+    /// [`Error::NoLink`].
+    pub async fn track_point(&self, camera: CameraId, at: ImagePoint, radius: f32) -> Result<()> {
+        self.check_tracking(camera, |support| support.point)?;
+        let command =
+            commands::camera_track_point(at.x, at.y, radius.clamp(0.0, 1.0), camera.device);
+        self.run_on_camera(camera, command).await?;
+        self.request_tracking_reports(camera).await;
+        Ok(())
+    }
+
+    /// Have `camera` track what lies within `rect` in its picture.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::track_point`], [`Error::TrackingUnsupported`] if the
+    /// camera has not said it tracks rectangles.
+    pub async fn track_rectangle(&self, camera: CameraId, rect: ImageRect) -> Result<()> {
+        self.check_tracking(camera, |support| support.rectangle)?;
+        let command = commands::camera_track_rectangle(
+            (rect.top_left.x, rect.top_left.y),
+            (rect.bottom_right.x, rect.bottom_right.y),
+            camera.device,
+        );
+        self.run_on_camera(camera, command).await?;
+        self.request_tracking_reports(camera).await;
+        Ok(())
+    }
+
+    /// Have `camera` stop tracking.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::track_point`], [`Error::TrackingUnsupported`] if the
+    /// camera has not said it tracks at all.
+    pub async fn stop_tracking(&self, camera: CameraId) -> Result<()> {
+        self.check_tracking(camera, TrackingSupport::any)?;
+        self.run_on_camera(camera, commands::camera_stop_tracking(camera.device))
+            .await
+    }
+
+    /// Refuse to command tracking `camera` has not said it can do: what it
+    /// would do with the command is not known.
+    fn check_tracking(
+        &self,
+        camera: CameraId,
+        can: impl Fn(TrackingSupport) -> bool,
+    ) -> Result<()> {
+        let supported = self.with_vehicle(|vehicle| {
+            vehicle
+                .cameras
+                .get(camera)
+                .is_some_and(|it| can(it.tracking))
+        })?;
+        if supported {
+            Ok(())
+        } else {
+            Err(Error::TrackingUnsupported)
+        }
+    }
+
+    async fn run_on_camera(
+        &self,
+        camera: CameraId,
+        command: crate::mavlink::Command,
+    ) -> Result<()> {
+        let target = self.with_vehicle(|vehicle| vehicle.target_for(camera.component))?;
+        self.fleet
+            .router()
+            .command(target, command)
+            .await
+            .map(drop)
+            .map_err(Error::from)
+    }
+
+    /// Ask `camera` to report what it tracks, which it sends only at the
+    /// rate it is asked for. Best effort: tracking goes on without reports,
+    /// only unseen.
+    async fn request_tracking_reports(&self, camera: CameraId) {
+        let command = commands::set_message_interval(
+            CameraTrackingImageStatus::message_id(),
+            TRACKING_REPORT_INTERVAL,
+        );
+        if let Err(error) = self.run_on_camera(camera, command).await {
+            log::info!("{camera:?} will not report its tracking: {error}");
+        }
     }
 
     /// Start executing the stored mission.

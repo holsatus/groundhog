@@ -11,7 +11,10 @@
 
 use mavio::{
     DefaultDialect,
-    default_dialect::enums::{MagCalStatus, MavAutopilot, MavMissionResult, MavResult, MavType},
+    default_dialect::enums::{
+        CameraTrackingMode, CameraTrackingStatusFlags, MagCalStatus, MavAutopilot,
+        MavMissionResult, MavResult, MavType,
+    },
     error::SpecError,
     mavspec::rust::spec::{Dialect, MessageSpecStatic},
     prelude::Versionless,
@@ -85,6 +88,24 @@ const TOLERANT: &[TolerantMessage] = &[
             offset: 42,
             value: MagCalStatus::MagCalFailed as u8,
         }],
+    },
+    // Seven f32 fields, then `tracking_status`, `tracking_mode`,
+    // `target_data`. A status not known is not known to be tracking; a mode
+    // not known says nothing of where the target is.
+    TolerantMessage {
+        message_id: 275,
+        fields: &[
+            Fallback {
+                enum_name: "CAMERA_TRACKING_STATUS_FLAGS",
+                offset: 28,
+                value: CameraTrackingStatusFlags::Error as u8,
+            },
+            Fallback {
+                enum_name: "CAMERA_TRACKING_MODE",
+                offset: 29,
+                value: CameraTrackingMode::None as u8,
+            },
+        ],
     },
 ];
 
@@ -164,7 +185,9 @@ mod tests {
     use mavio::{
         default_dialect::{
             enums::{MavCmd, MavMissionResult, MavResult, MavType},
-            messages::{CommandAck, Heartbeat, MagCalReport, MissionAck},
+            messages::{
+                CameraTrackingImageStatus, CommandAck, Heartbeat, MagCalReport, MissionAck,
+            },
         },
         mavspec::rust::spec::MessageSpecStatic,
         prelude::V2,
@@ -288,6 +311,28 @@ mod tests {
             panic!("wrong message")
         };
         assert_eq!(decoded.cal_status, MagCalStatus::MagCalFailed);
+    }
+
+    #[test]
+    fn a_tracking_report_with_a_newer_status_or_mode_still_decodes() {
+        let report = CameraTrackingImageStatus {
+            tracking_status: CameraTrackingStatusFlags::Active,
+            tracking_mode: CameraTrackingMode::Rectangle,
+            ..Default::default()
+        };
+
+        let decoded = decode(&tampered(&report, 28, 200)).expect("patched");
+        let DefaultDialect::CameraTrackingImageStatus(decoded) = decoded else {
+            panic!("wrong message")
+        };
+        assert_eq!(decoded.tracking_status, CameraTrackingStatusFlags::Error);
+        assert_eq!(decoded.tracking_mode, CameraTrackingMode::Rectangle);
+
+        let decoded = decode(&tampered(&report, 29, 200)).expect("patched");
+        let DefaultDialect::CameraTrackingImageStatus(decoded) = decoded else {
+            panic!("wrong message")
+        };
+        assert_eq!(decoded.tracking_mode, CameraTrackingMode::None);
     }
 
     #[test]

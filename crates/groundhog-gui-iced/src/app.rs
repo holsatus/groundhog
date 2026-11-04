@@ -51,12 +51,12 @@ use crate::{
 
 /// The features that take a [`Context`], grouped so their state can be
 /// borrowed apart from the context's.
-#[derive(Default)]
 struct Features {
     vehicles: VehiclePanel,
     mission: MissionEditor,
     parameters: ParameterPanel,
     calibration: CalibrationPanel,
+    video: VideoPanel,
 }
 
 pub struct Application {
@@ -80,7 +80,6 @@ pub struct Application {
     confirmation: Option<Confirmation<Message>>,
     features: Features,
     link_panel: LinkPanel,
-    video: VideoPanel,
     log_panel: LogPanel,
     /// How much of the window the platform's own chrome covers.
     insets: Insets,
@@ -225,9 +224,14 @@ impl Application {
             recorder: None,
             notices,
             confirmation: None,
-            features: Features::default(),
+            features: Features {
+                vehicles: VehiclePanel::default(),
+                mission: MissionEditor::default(),
+                parameters: ParameterPanel::default(),
+                calibration: CalibrationPanel::default(),
+                video,
+            },
             link_panel: LinkPanel::new(),
-            video,
             log_panel: LogPanel::new(),
             insets: platform::insets(),
             system_bars: None,
@@ -360,7 +364,7 @@ impl Application {
                 let target = back_target(
                     captured,
                     self.confirmation.is_some(),
-                    self.video.is_full_screen(),
+                    self.features.video.is_full_screen(),
                     self.shell() == Shell::Floating,
                 );
                 match target {
@@ -451,7 +455,12 @@ impl Application {
                 task.map(Message::Links)
             }
             Message::Video(message) => {
-                let (task, event) = self.video.update(message);
+                let mut event = None;
+                let task = self.dispatch(Message::Video, |features, cx| {
+                    let (task, emitted) = features.video.update(message, cx);
+                    event = emitted;
+                    task
+                });
                 match event {
                     Some(video::Event::Changed(settings)) => {
                         self.configuration.video = settings;
@@ -463,7 +472,7 @@ impl Application {
                     }
                     None => {}
                 }
-                Task::batch([task.map(Message::Video), self.sync_full_screen()])
+                Task::batch([task, self.sync_full_screen()])
             }
             Message::Logs(message) => {
                 self.log_panel.update(message);
@@ -648,6 +657,9 @@ impl Application {
                 }
                 .vehicle(system)
             }
+            // The backend asks the camera to describe itself; the cameras
+            // it describes show where they are used.
+            FleetEvent::CameraAppeared(_) => return,
         };
 
         self.notices.push(notice);
@@ -736,24 +748,26 @@ impl Application {
     /// is armed; and the setting to record while one is. A recording that
     /// starts or stops on its own is announced.
     fn sync_video(&mut self) -> Task<Message> {
-        let was_recording = self.video.is_recording();
+        let was_recording = self.features.video.is_recording();
         let armed = self
             .fleet
             .vehicles()
             .any(|vehicle| vehicle.armed() == Some(true));
         let now = Instant::now();
 
-        self.video
+        self.features
+            .video
             .set_shown(video_shown(self.shell(), &self.layout));
-        self.video
+        self.features
+            .video
             .set_record_while_armed(self.configuration.settings.record_video_while_armed);
-        self.video.observe_armed(armed, now);
-        let task = self.video.sync(now);
+        self.features.video.observe_armed(armed, now);
+        let task = self.features.video.sync(now);
 
-        match (was_recording, self.video.is_recording()) {
+        match (was_recording, self.features.video.is_recording()) {
             (false, true) => {
                 let mut notice = Notice::info("Recording the video");
-                if let Some(directory) = self.video.recordings() {
+                if let Some(directory) = self.features.video.recordings() {
                     notice = notice.detail(format!("Into {}", directory.display()));
                 }
                 self.notices.push(notice);
@@ -770,7 +784,7 @@ impl Application {
     /// Puts the window in the mode the application and the video ask for,
     /// if it is not in it already.
     fn sync_full_screen(&mut self) -> Task<Message> {
-        match self.full_screen.sync(self.video.is_full_screen()) {
+        match self.full_screen.sync(self.features.video.is_full_screen()) {
             Some(mode) => {
                 iced::window::latest().and_then(move |window| iced::window::set_mode(window, mode))
             }
@@ -813,9 +827,12 @@ impl Application {
 
         // The full-screen video still shows the notices: an alert must not
         // go unseen for watching the video.
-        let base = if self.video.is_full_screen() {
+        let base = if self.features.video.is_full_screen() {
             stack![
-                self.video.view_full_screen(insets).map(Message::Video),
+                self.features
+                    .video
+                    .view_full_screen(insets, &self.fleet, self.selected)
+                    .map(Message::Video),
                 self.view_toasts(ui::space::XL),
             ]
             .boxed()
@@ -872,7 +889,7 @@ impl Application {
 
     /// Whether the floating shell's video fills the map's screen.
     fn video_is_main(&self) -> bool {
-        self.video.slot().is_some() && self.floating.is_video_main()
+        self.features.video.slot().is_some() && self.floating.is_video_main()
     }
 
     /// The map with the features' layers, placed as `placement`.
@@ -933,7 +950,12 @@ impl Application {
                 .view(self.backend.links())
                 .map(Message::Links)
                 .boxed(),
-            layout::Panel::Video => self.video.view().map(Message::Video).boxed(),
+            layout::Panel::Video => self
+                .features
+                .video
+                .view(fleet, self.selected)
+                .map(Message::Video)
+                .boxed(),
             layout::Panel::Logs => self
                 .log_panel
                 .view(fleet, self.selected, &self.notices)
@@ -943,7 +965,7 @@ impl Application {
                 &self.configuration.settings,
                 self.scale_preview,
                 self.recorder.as_ref().map(TlogRecorder::path),
-                self.video.recordings(),
+                self.features.video.recordings(),
             )
             .map(Message::Settings)
             .boxed(),
@@ -969,11 +991,12 @@ impl Application {
             .links()
             .entries()
             .any(|(_, _, status)| status.is_active());
-        let refresh = if self.notices.has_toasts() || active_links || self.video.needs_ticks() {
-            iced::time::every(Duration::from_secs(1)).map(Message::Tick)
-        } else {
-            Subscription::none()
-        };
+        let refresh =
+            if self.notices.has_toasts() || active_links || self.features.video.needs_ticks() {
+                iced::time::every(Duration::from_secs(1)).map(Message::Tick)
+            } else {
+                Subscription::none()
+            };
 
         let modifiers = iced::event::listen_with(|event, _, _| match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {

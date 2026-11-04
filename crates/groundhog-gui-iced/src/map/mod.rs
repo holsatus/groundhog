@@ -23,10 +23,7 @@ pub use layer::{
 };
 pub use view::{MapFrame, MapView};
 
-use iced::{
-    Color, Length, Padding, Point, Size, Task, Theme, Widget,
-    widget::canvas::{Canvas, Fill, LineJoin, Path, Stroke, Style, fill},
-};
+use iced::{Color, Length, Padding, Point, Task, Theme, Widget, widget::canvas::Canvas};
 use slippery::{CacheMessage, MapWidget, Projector, TileCache, Viewpoint, Zoom, location};
 
 use groundhog_logic::domain::geo::GeoPosition;
@@ -141,13 +138,11 @@ impl Map {
             kind: ChromeKind::Tint(palette.background.base.color.scale_alpha(0.3)),
         });
         if placement == Placement::Pane {
+            let (background, border) = crate::ui::frame::colours(theme);
             layers.push(Chrome {
                 id: LayerId::new("map.frame"),
                 z_index: i32::MAX,
-                kind: ChromeKind::Frame {
-                    background: palette.background.base.color,
-                    border: palette.background.strongest.color,
-                },
+                kind: ChromeKind::Frame { background, border },
             });
         }
 
@@ -205,70 +200,16 @@ impl<M> MapLayer<M> for Chrome {
         match self.kind {
             ChromeKind::Tint(color) => frame.fill_rectangle(Point::ORIGIN, size, color),
             ChromeKind::Frame { background, border } => {
-                draw_rounded_frame(
+                crate::ui::frame::draw(
                     frame,
                     size,
-                    crate::ui::style::PANE_RADIUS,
-                    crate::ui::style::PANE_BORDER_WIDTH,
+                    crate::ui::frame::Edges::All,
                     background,
                     border,
                 );
             }
         }
     }
-}
-
-fn draw_rounded_frame(
-    frame: &mut iced::widget::canvas::Frame,
-    size: Size,
-    radius: f32,
-    width: f32,
-    background: Color,
-    border: Color,
-) {
-    // Rectangle minus rounded rectangle, even-odd: exactly the four corners.
-    let corners = Path::new(|builder| {
-        const EXPAND: f32 = 1.0;
-
-        builder.rectangle(
-            Point::new(-EXPAND, -EXPAND),
-            size.expand(Size::new(EXPAND * 2.0, EXPAND * 2.0)),
-        );
-
-        let half_width = width / 2.0;
-        builder.rounded_rectangle(
-            Point::new(half_width, half_width),
-            Size::new(size.width - width, size.height - width),
-            (radius - half_width).into(),
-        );
-    });
-
-    frame.fill(
-        &corners,
-        Fill {
-            style: Style::Solid(background),
-            rule: fill::Rule::EvenOdd,
-        },
-    );
-
-    // Inset by half the stroke so the border stays inside the bounds; the
-    // overlay canvas is not clipped to them.
-    let inset = width / 2.0;
-    let outline = Path::rounded_rectangle(
-        Point::new(inset, inset),
-        Size::new(size.width - width, size.height - width),
-        (radius - inset).max(0.0).into(),
-    );
-
-    frame.stroke(
-        &outline,
-        Stroke {
-            style: Style::Solid(border),
-            width,
-            line_join: LineJoin::Round,
-            ..Stroke::default()
-        },
-    );
 }
 
 #[cfg(test)]

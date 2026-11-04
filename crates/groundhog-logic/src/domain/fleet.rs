@@ -70,6 +70,9 @@ pub enum FleetEvent {
     Rebooted(SystemId),
     /// A calibration ended: succeeded, failed or cancelled.
     CalibrationFinished(SystemId, CalibrationKind, Outcome),
+    /// A component's heartbeat said for the first time that it is a camera.
+    /// It describes itself only when asked.
+    CameraAppeared(MavlinkId),
 }
 
 /// An immutable view of the fleet at one moment. Cheap to clone and to keep:
@@ -243,9 +246,19 @@ impl Fleet {
         let boots_before = vehicle.boot_count();
         let had_heartbeat = vehicle.identity.base_mode.is_some();
         let stale_before = vehicle.mission.onboard_is_stale();
+        let is_camera = |vehicle: &Vehicle| {
+            vehicle
+                .component_state(source.component)
+                .is_some_and(|state| state.is_camera())
+        };
+        let camera_before = is_camera(vehicle);
 
         if let Some(text) = vehicle.handle_message(received_at, source.component, message) {
             events.push(FleetEvent::StatusText(id, text));
+        }
+
+        if !camera_before && is_camera(vehicle) {
+            events.push(FleetEvent::CameraAppeared(source));
         }
 
         if vehicle.boot_count() != boots_before {
@@ -585,6 +598,36 @@ mod tests {
         assert_eq!(vehicle.identity.mav_state, Some(MavState::Active));
         // The peripheral still registers as a component of the system.
         assert!(vehicle.component_ids().contains(&154));
+    }
+
+    #[test]
+    fn a_camera_component_is_announced_once() {
+        let mut fleet = Fleet::default();
+        let t0 = Instant::now();
+        register(&mut fleet, A, t0);
+
+        let camera = MavlinkId {
+            system: 1,
+            component: 100,
+        };
+        let heartbeat = DefaultDialect::Heartbeat(Heartbeat {
+            type_: MavType::Camera,
+            autopilot: MavAutopilot::Invalid,
+            ..Default::default()
+        });
+        let first = fleet.observe(camera, t0, Some(&heartbeat));
+        let second = fleet.observe(camera, t0, Some(&heartbeat));
+
+        assert!(
+            first.contains(&FleetEvent::CameraAppeared(camera)),
+            "{first:?}"
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, FleetEvent::CameraAppeared(_))),
+            "{second:?}"
+        );
     }
 
     #[test]

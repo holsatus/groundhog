@@ -21,6 +21,7 @@
 
 pub mod attitude;
 pub mod battery;
+pub mod camera;
 pub mod class;
 pub mod health;
 pub mod home;
@@ -32,8 +33,9 @@ pub mod status;
 pub use self::status::StatusText;
 
 use self::{
-    attitude::AttitudeState, battery::Battery, class::VehicleClass, health::Health, home::Home,
-    identity::Identity, mission::VehicleMission, position::PositionTrack, status::StatusLog,
+    attitude::AttitudeState, battery::Battery, camera::Cameras, class::VehicleClass,
+    health::Health, home::Home, identity::Identity, mission::VehicleMission,
+    position::PositionTrack, status::StatusLog,
 };
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -42,7 +44,7 @@ use mav_param::Ident;
 use mavio::{
     DefaultDialect,
     default_dialect::{
-        enums::{MavAutopilot, MavProtocolCapability, MissionState},
+        enums::{MavAutopilot, MavProtocolCapability, MavType, MissionState},
         messages,
     },
 };
@@ -84,6 +86,8 @@ pub enum Liveness {
 pub struct ComponentState {
     capabilities: Option<MavProtocolCapability>,
     autopilot: Option<MavAutopilot>,
+    /// What the component's heartbeat says it is.
+    kind: Option<MavType>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
     parameters: Parameters,
@@ -94,10 +98,18 @@ impl ComponentState {
         &self.parameters
     }
 
+    /// Whether the component's heartbeat says it is a camera.
+    pub fn is_camera(&self) -> bool {
+        self.kind == Some(MavType::Camera)
+    }
+
     /// How this component encodes parameter values: as advertised in its
     /// capabilities, else as its firmware is known to. `None` when neither
     /// is known, in which case parameter writes must not be attempted.
     pub fn param_encoding(&self) -> Option<ParamEncoding> {
+        // TODO: Until certain unnamed implementation gets its act together
+        return Some(ParamEncoding::CCast);
+
         self.capabilities
             .and_then(ParamEncoding::advertised)
             .or_else(|| {
@@ -161,6 +173,8 @@ pub struct Vehicle {
     /// Per-component state (parameters, capabilities, names), keyed by the
     /// MAVLink component id.
     components: BTreeMap<u8, Arc<ComponentState>>,
+    /// The cameras its components have described.
+    pub cameras: Cameras,
     /// The latest calibration run, until dismissed.
     pub calibration: Option<calibration::Session>,
     /// When the calibration last advanced, for its no-progress timeout.
@@ -593,11 +607,15 @@ impl Vehicle {
         match message {
             DefaultDialect::Heartbeat(message) => {
                 let autopilot = Some(message.autopilot);
-                if let Some(state) =
-                    self.component_mut_if(component, |state| state.autopilot != autopilot)
-                {
-                    state.autopilot = autopilot;
-                    state.refresh_encoding();
+                let kind = Some(message.type_);
+                if let Some(state) = self.component_mut_if(component, |state| {
+                    state.autopilot != autopilot || state.kind != kind
+                }) {
+                    state.kind = kind;
+                    if state.autopilot != autopilot {
+                        state.autopilot = autopilot;
+                        state.refresh_encoding();
+                    }
                 }
 
                 if message.autopilot != MavAutopilot::Invalid {
@@ -655,6 +673,12 @@ impl Vehicle {
             }
             DefaultDialect::ParamValue(message) => {
                 self.on_param_value(component, message);
+            }
+            DefaultDialect::CameraInformation(message) => {
+                self.cameras.observe_information(component, message);
+            }
+            DefaultDialect::CameraTrackingImageStatus(message) => {
+                self.cameras.observe_tracking(time, component, message);
             }
             DefaultDialect::SysStatus(message) if self.is_authoritative(component) => {
                 self.battery.observe_sys_status(message);
@@ -719,7 +743,7 @@ impl Vehicle {
 
 /// Decode a fixed-size, NUL-terminated MAVLink string, if it is valid,
 /// non-empty UTF-8.
-fn string_from_cstring(cstring: &[u8]) -> Option<String> {
+pub(super) fn string_from_cstring(cstring: &[u8]) -> Option<String> {
     let null = cstring
         .iter()
         .position(|c| *c == 0)

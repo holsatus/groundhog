@@ -285,6 +285,21 @@ it as feedback arrives, and the UI (`features/calibration.rs`) only starts,
 confirms and cancels through `VehicleClient` and renders what the session and
 `Vehicle::calibration_controls` say. Finished runs are announced as `FleetEvent::CalibrationFinished`.
 
+### Cameras describe themselves when asked
+
+A camera is a component of its own, or one of up to six the autopilot
+answers for (`domain::vehicle::camera::CameraId`), and it sends
+`CAMERA_INFORMATION` only on request. The backend asks the autopilot at
+the end of its bootstrap, and a component when its first heartbeat says
+it is a camera (`FleetEvent::CameraAppeared`). What a camera can do comes
+from that message alone: `VehicleClient::track_point`, `track_rectangle`
+and `stop_tracking` refuse (`Error::TrackingUnsupported`) what the camera
+has not said it can do, since what it would do with the command is not
+known. Tracking reports are believed for `TRACKING_STALE`, as a camera may
+fall silent when it stops. The video panel tracks with the first camera
+of the selected vehicle that can (`Cameras::tracker`), without asking
+first: the gesture on the picture is the deliberate act.
+
 ### Missions are stored as they travel on the wire
 
 `domain::mission::MissionItem` holds the wire fields verbatim, so every item
@@ -615,7 +630,8 @@ so the look is decided in one place:
   edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`
   and `ui::stats` (read-outs in columns), and `ui::list_row` (striped)
   cover the shared arrangements. A panel whose body is a picture (the
-  video) uses `ui::picture`, edge to edge inside the pane's border, with
+  video) uses `ui::picture`, edge to edge, the pane's lower corners and
+  border drawn over it (`ui::frame`, which the map's frame uses too), with
   what it needs floating over it in `ui::floating` cards rather than
   around it, and `ui::veil` dimming a picture that stopped. Inputs come from `ui` too (`text_input`,
   `pick_list`, `checkbox` and `unlabelled_checkbox`, `slider`), so they
@@ -905,7 +921,10 @@ written by a newer build, saves nothing.
   autopilot sends by default: `SYS_STATUS` (battery, sensor health),
   `GPS_RAW_INT`, positions, attitude. A value that stays "–" may simply not
   be streamed; on ArduPilot the `SR*_` parameters set the rates. Do not
-  assume a message arrives because the dialect has it.
+  assume a message arrives because the dialect has it. The exceptions ask
+  for what the operator just started: a camera that begins tracking is
+  asked for `CAMERA_TRACKING_IMAGE_STATUS`, which it sends only at a rate
+  it is given.
 - **Never resend calibration commands.** Firmwares do not deduplicate them: a
   resent start restarts or repeats the calibration, and a resent ArduPilot
   orientation confirmation is refused once measuring has begun.

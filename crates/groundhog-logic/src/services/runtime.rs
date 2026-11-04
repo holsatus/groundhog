@@ -182,12 +182,18 @@ async fn run(
                     let decoded = decode(&inbound.frame);
                     let events = fleet.observe(inbound.source_mav, inbound.received_at, decoded.as_ref());
 
-                    for event in &events {
-                        if let FleetEvent::Registered(system) = event
-                            && options.bootstrap
-                        {
-                            let client = handle.vehicle(*system);
-                            tokio::spawn(async move { client.bootstrap().await });
+                    for event in events.iter().filter(|_| options.bootstrap) {
+                        match event {
+                            FleetEvent::Registered(system) => {
+                                let client = handle.vehicle(*system);
+                                tokio::spawn(async move { client.bootstrap().await });
+                            }
+                            FleetEvent::CameraAppeared(camera) => {
+                                let client = handle.vehicle(camera.system_id());
+                                let component = camera.component;
+                                tokio::spawn(async move { client.describe_camera(component).await });
+                            }
+                            _ => {}
                         }
                     }
 

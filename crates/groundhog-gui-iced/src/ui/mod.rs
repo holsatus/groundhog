@@ -25,6 +25,7 @@
 mod button;
 mod container;
 pub mod dialog;
+pub mod frame;
 pub mod icon;
 mod input;
 pub mod style;

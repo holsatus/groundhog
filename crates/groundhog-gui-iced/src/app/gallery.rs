@@ -409,7 +409,12 @@ async fn gallery() {
     )));
     let _ = app.update(Message::Video(video::Message::Start));
     for _ in 0..250 {
-        if app.video.slot().is_some_and(|slot| slot.latest().is_some()) {
+        if app
+            .features
+            .video
+            .slot()
+            .is_some_and(|slot| slot.latest().is_some())
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

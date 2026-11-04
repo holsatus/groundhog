@@ -9,11 +9,11 @@ use mavio::{
     default_dialect::{
         enums::{
             MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
-            MavParamType, MavType,
+            MavParamType, MavResult, MavType,
         },
         messages::{
-            Heartbeat, HomePosition, MissionAck, MissionCount, MissionItemInt, MissionRequestInt,
-            ParamValue,
+            CommandAck, CommandLong, Heartbeat, HomePosition, MissionAck, MissionCount,
+            MissionItemInt, MissionRequestInt, ParamValue,
         },
     },
     prelude::V2,
@@ -52,9 +52,14 @@ struct MockVehicle {
 
 impl MockVehicle {
     async fn send(&mut self, message: &dyn mavio::Message) {
+        self.send_as(VEHICLE.component, message).await;
+    }
+
+    /// Send `message` from another component of the vehicle.
+    async fn send_as(&mut self, component: u8, message: &dyn mavio::Message) {
         let frame = FrameBuilder::new()
             .system_id(VEHICLE.system)
-            .component_id(VEHICLE.component)
+            .component_id(component)
             .version(V2)
             .sequence(self.sequence)
             .message(message)
@@ -101,6 +106,25 @@ impl MockVehicle {
                 Ok(message) => return message,
             }
         }
+    }
+
+    /// The next command from the GCS.
+    async fn command(&mut self) -> CommandLong {
+        match self.recv().await {
+            DefaultDialect::CommandLong(command) => command,
+            other => panic!("expected a command, got {other:?}"),
+        }
+    }
+
+    async fn ack(&mut self, command: MavCmd, result: MavResult) {
+        self.send(&CommandAck {
+            command,
+            result,
+            target_system: DEFAULT_GCS_ID.system,
+            target_component: DEFAULT_GCS_ID.component,
+            ..Default::default()
+        })
+        .await;
     }
 
     async fn heartbeat(&mut self, autopilot: MavAutopilot) {
@@ -724,10 +748,176 @@ async fn a_registered_vehicle_is_bootstrapped() {
     assert_eq!(request.param1, 148.0, "AUTOPILOT_VERSION");
 }
 
+mod camera {
+    use mavio::default_dialect::{
+        enums::{CameraCapFlags, CameraTrackingMode, CameraTrackingStatusFlags},
+        messages::{CameraInformation, CameraTrackingImageStatus},
+    };
+
+    use super::*;
+    use crate::domain::vehicle::camera::{CameraId, ImagePoint, ImageRect, Target, Tracking};
+
+    /// The camera ArduPilot answers for as its first, attached to it.
+    const ATTACHED: CameraId = CameraId {
+        component: VEHICLE.component,
+        device: 1,
+    };
+
+    fn rect() -> ImageRect {
+        ImageRect {
+            top_left: ImagePoint { x: 0.25, y: 0.5 },
+            bottom_right: ImagePoint { x: 0.75, y: 0.875 },
+        }
+    }
+
+    /// A registered vehicle whose autopilot described `ATTACHED`, able to
+    /// track rectangles only.
+    async fn with_camera() -> Harness {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        harness
+            .vehicle
+            .send(&CameraInformation {
+                flags: CameraCapFlags::HAS_TRACKING_RECTANGLE,
+                camera_device_id: ATTACHED.device,
+                ..Default::default()
+            })
+            .await;
+        until(&mut harness.updates, |fleet| {
+            fleet
+                .vehicle(SYSTEM)
+                .is_some_and(|vehicle| vehicle.cameras.get(ATTACHED).is_some())
+        })
+        .await;
+        harness
+    }
+
+    #[tokio::test]
+    async fn a_rectangle_is_tracked_and_then_reported() {
+        let mut harness = with_camera().await;
+        let client = harness.fleet.vehicle(SYSTEM);
+        let tracking = tokio::spawn(async move { client.track_rectangle(ATTACHED, rect()).await });
+
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, MavCmd::CameraTrackRectangle);
+        assert_eq!(
+            (
+                command.param1,
+                command.param2,
+                command.param3,
+                command.param4
+            ),
+            (0.25, 0.5, 0.75, 0.875)
+        );
+        assert_eq!(command.param5, 1.0, "the attached camera");
+        assert_eq!(command.target_component, VEHICLE.component);
+        harness
+            .vehicle
+            .ack(MavCmd::CameraTrackRectangle, MavResult::Accepted)
+            .await;
+
+        // The camera reports only at the rate it is asked to.
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, MavCmd::SetMessageInterval);
+        assert_eq!(command.param1, 275.0, "CAMERA_TRACKING_IMAGE_STATUS");
+        assert_eq!(command.param2, 100_000.0, "every 100 ms");
+        harness
+            .vehicle
+            .ack(MavCmd::SetMessageInterval, MavResult::Accepted)
+            .await;
+        assert_eq!(tracking.await.expect("joined"), Ok(()));
+
+        harness
+            .vehicle
+            .send(&CameraTrackingImageStatus {
+                tracking_status: CameraTrackingStatusFlags::Active,
+                tracking_mode: CameraTrackingMode::Rectangle,
+                rec_top_x: 0.25,
+                rec_top_y: 0.5,
+                rec_bottom_x: 0.75,
+                rec_bottom_y: 0.875,
+                camera_device_id: ATTACHED.device,
+                ..Default::default()
+            })
+            .await;
+        let fleet = until(&mut harness.updates, |fleet| {
+            fleet
+                .vehicle(SYSTEM)
+                .and_then(|vehicle| vehicle.cameras.get(ATTACHED))
+                .is_some_and(|camera| camera.tracking(std::time::Instant::now()).is_some())
+        })
+        .await;
+        let camera = fleet
+            .vehicle(SYSTEM)
+            .and_then(|vehicle| vehicle.cameras.get(ATTACHED));
+        assert_eq!(
+            camera.and_then(|camera| camera.tracking(std::time::Instant::now())),
+            Some(Tracking::Active(Some(Target::Rectangle(rect()))))
+        );
+    }
+
+    #[tokio::test]
+    async fn tracking_a_camera_cannot_do_is_refused_unsent() {
+        let mut harness = with_camera().await;
+        let client = harness.fleet.vehicle(SYSTEM);
+
+        let point = ImagePoint { x: 0.5, y: 0.5 };
+        assert_eq!(
+            client.track_point(ATTACHED, point, 0.05).await,
+            Err(Error::TrackingUnsupported)
+        );
+        let unknown = CameraId {
+            component: 100,
+            device: 0,
+        };
+        assert_eq!(
+            client.track_rectangle(unknown, rect()).await,
+            Err(Error::TrackingUnsupported)
+        );
+
+        // Nothing went out: the next command is one sent now.
+        let client = harness.fleet.vehicle(SYSTEM);
+        tokio::spawn(async move { client.stop_tracking(ATTACHED).await });
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, MavCmd::CameraStopTracking);
+        assert_eq!(command.param1, 1.0);
+    }
+
+    /// A camera with a component of its own describes itself only when
+    /// asked, which its first heartbeat prompts.
+    #[tokio::test]
+    async fn a_camera_component_is_asked_to_describe_itself() {
+        let mut harness = harness_with(RuntimeOptions { bootstrap: true });
+        harness.vehicle.heartbeat(MavAutopilot::Ardupilotmega).await;
+        harness
+            .vehicle
+            .send_as(
+                100,
+                &Heartbeat {
+                    type_: MavType::Camera,
+                    autopilot: MavAutopilot::Invalid,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        // The autopilot's bootstrap asks its own questions meanwhile.
+        loop {
+            let command = harness.vehicle.command().await;
+            if command.command == MavCmd::RequestMessage
+                && command.param1 == 259.0
+                && command.target_component == 100
+            {
+                break;
+            }
+        }
+    }
+}
+
 mod calibration {
     use mavio::default_dialect::{
         enums::{MagCalStatus, MavResult},
-        messages::{CommandAck, CommandLong, MagCalProgress, MagCalReport},
+        messages::{CommandLong, MagCalProgress, MagCalReport},
     };
 
     use super::*;
@@ -738,25 +928,6 @@ mod calibration {
     }
 
     impl MockVehicle {
-        /// The next command from the GCS.
-        async fn command(&mut self) -> CommandLong {
-            match self.recv().await {
-                DefaultDialect::CommandLong(command) => command,
-                other => panic!("expected a command, got {other:?}"),
-            }
-        }
-
-        async fn ack(&mut self, command: MavCmd, result: MavResult) {
-            self.send(&CommandAck {
-                command,
-                result,
-                target_system: DEFAULT_GCS_ID.system,
-                target_component: DEFAULT_GCS_ID.component,
-                ..Default::default()
-            })
-            .await;
-        }
-
         /// ArduPilot asking the GCS for an accelerometer orientation.
         async fn ask_position(&mut self, position: f32) {
             self.send(&CommandLong {

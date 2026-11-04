@@ -26,18 +26,41 @@
 //! shows it. The application tells the panel what it cannot know (whether
 //! it shows, whether a vehicle is armed, the setting) and then has it
 //! [`VideoPanel::sync`] its receiver with all of it.
+//!
+//! Where the selected vehicle has a camera that tracks, gestures on the
+//! picture ask it to track a point or a rectangle (see [`tracking`]), and
+//! what it reports tracking is drawn over the picture, in the panel, in
+//! the full screen, and where the floating shell shows the picture instead
+//! of the map. The gestures ask nothing first: they are the deliberate
+//! act, and stopping is one press.
+
+mod tracking;
 
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
+use groundhog_logic::{
+    SystemId,
+    domain::{
+        fleet::FleetSnapshot,
+        vehicle::camera::{CameraId, Tracking, TrackingSupport},
+    },
+    services::{Error, Result},
+};
 use groundhog_video::{Config, FrameSlot, Receiver, Recording, Source, State, Status};
 use iced::{
     Alignment, Element, Length, Padding, Task, Widget, mouse,
-    widget::{column, container, mouse_area, row, stack},
+    widget::{Canvas, column, container, mouse_area, row, stack},
 };
 
+use self::tracking::{Overlay, Request, Shade};
+use super::{
+    Context,
+    notifications::Notice,
+    operations::{Operations, Ticket},
+};
 use crate::{
     config::VideoSettings,
     ui::{self, Icon, TextExt, Tone},
@@ -61,6 +84,21 @@ pub enum Message {
     Record(bool),
     /// Receiver `id`'s state changed: a frame arrived, or its status.
     Updated(u64, State),
+    /// Have the camera track what a gesture picked.
+    Track(TrackKey, Request),
+    StopTracking(TrackKey),
+    Tracked(TrackKey, TrackAction, Ticket, Result<()>),
+}
+
+/// Which vehicle's camera tracking is about.
+pub type TrackKey = (SystemId, CameraId);
+
+/// What was asked of a camera, one at a time: a new request replaces the
+/// one before.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackAction {
+    Track(Request),
+    Stop,
 }
 
 /// What the application keeps of the panel.
@@ -176,16 +214,42 @@ pub struct VideoPanel {
     details: bool,
     /// Whether the picture fills the screen, alone.
     full_screen: bool,
-    /// Whether anything can show the picture; a stream on is received
-    /// only while it can, or while it is recorded.
+    /// Whether anything can currently show the picture.
     shown: bool,
     /// Where recordings go; nowhere without a data directory.
     recordings: Option<PathBuf>,
     /// The operator asked to record.
     record: bool,
+    /// Behavior for starting or stopping recording based on arming state.
     while_armed: WhileArmed,
     /// The identity the next receiver gets.
     next: u64,
+    tracking: Operations<TrackKey>,
+    /// What a camera was asked, while it has yet to answer.
+    asked: Option<(TrackKey, TrackAction)>,
+    /// The camera that accepted a track, until it is stopped: whether it
+    /// tracks, if it does not report.
+    engaged: Option<TrackKey>,
+}
+
+/// The selected vehicle's camera that tracks, and how it stands.
+#[derive(Debug, Clone, Copy)]
+struct Tracker {
+    key: TrackKey,
+    support: TrackingSupport,
+    tracking: Option<Tracking>,
+}
+
+impl Tracker {
+    fn of(fleet: &FleetSnapshot, selected: Option<SystemId>) -> Option<Self> {
+        let system = selected?;
+        let (camera, state) = fleet.vehicle(system)?.cameras.tracker()?;
+        Some(Self {
+            key: (system, camera),
+            support: state.tracking,
+            tracking: state.tracking(Instant::now()),
+        })
+    }
 }
 
 struct Receiving {
@@ -214,6 +278,9 @@ impl VideoPanel {
             record: false,
             while_armed: WhileArmed::default(),
             next: 0,
+            tracking: Operations::default(),
+            asked: None,
+            engaged: None,
         }
     }
 
@@ -298,7 +365,11 @@ impl VideoPanel {
             .map(|receiving| receiving.receiver.slot())
     }
 
-    pub fn update(&mut self, message: Message) -> (Task<Message>, Option<Event>) {
+    pub fn update(
+        &mut self,
+        message: Message,
+        cx: &mut Context<Message>,
+    ) -> (Task<Message>, Option<Event>) {
         match message {
             Message::EditSource(source) => {
                 self.source = source;
@@ -369,7 +440,119 @@ impl VideoPanel {
                 receiving.state = state;
                 (Task::none(), failed)
             }
+            Message::Track(key, request) => (self.do_tracking(key, TrackAction::Track(request), cx), None),
+            Message::StopTracking(key) => (self.do_tracking(key, TrackAction::Stop, cx), None),
+            Message::Tracked(key, action, ticket, result) => {
+                if !self.tracking.finish(&key, ticket) {
+                    return (Task::none(), None);
+                }
+                self.asked = None;
+                match (action, result) {
+                    (TrackAction::Track(_), Ok(())) => self.engaged = Some(key),
+                    (TrackAction::Stop, Ok(())) => self.engaged = None,
+                    (_, Err(error)) => notify_tracking(cx, key, action, error),
+                }
+                (Task::none(), None)
+            }
         }
+    }
+
+    /// Ask the camera `key` for `action`, in place of what it was asked
+    /// before.
+    fn do_tracking(
+        &mut self,
+        key: TrackKey,
+        action: TrackAction,
+        cx: &mut Context<Message>,
+    ) -> Task<Message> {
+        let (system, camera) = key;
+        let client = cx.services.vehicle(system);
+        self.asked = Some((key, action));
+        self.tracking.start(
+            key,
+            async move {
+                match action {
+                    TrackAction::Track(Request::Point(at)) => {
+                        client.track_point(camera, at, tracking::POINT_RADIUS).await
+                    }
+                    TrackAction::Track(Request::Rectangle(rect)) => {
+                        client.track_rectangle(camera, rect).await
+                    }
+                    TrackAction::Stop => client.stop_tracking(camera).await,
+                }
+            },
+            move |ticket, result| Message::Tracked(key, action, ticket, result),
+        )
+    }
+
+    /// Whether `tracker`'s camera tracks: as it reports, else as it last
+    /// accepted.
+    fn is_tracking(&self, tracker: &Tracker) -> bool {
+        match tracker.tracking {
+            Some(Tracking::Active(_) | Tracking::Error) => true,
+            Some(Tracking::Idle) => false,
+            None => self.engaged == Some(tracker.key),
+        }
+    }
+
+    /// The tracking overlay over `receiving`'s picture, for `tracker`'s
+    /// camera: gestures only while the picture is live.
+    fn view_tracking<'a>(
+        &'a self,
+        receiving: &'a Receiving,
+        tracker: Option<Tracker>,
+    ) -> impl Widget<Message> + 'a {
+        let live = Showing::of(&receiving.state) == Showing::Live;
+        let frame = receiving
+            .receiver
+            .slot()
+            .latest()
+            .map(|(_, frame)| (frame.width, frame.height));
+        let key = tracker.map(|tracker| tracker.key);
+        let asked = self.asked.and_then(|(asked, action)| match action {
+            TrackAction::Track(request) if Some(asked) == key => Some(request.target()),
+            TrackAction::Track(_) | TrackAction::Stop => None,
+        });
+        let reported = tracker.and_then(|tracker| match tracker.tracking {
+            Some(Tracking::Active(target)) => target,
+            _ => None,
+        });
+        let target = asked
+            .map(|target| (target, Shade::Asked))
+            .or(reported.map(|target| (target, Shade::Reported)));
+
+        Canvas::new(Overlay {
+            frame: frame.filter(|_| live || target.is_some()),
+            support: tracker
+                .filter(|_| live)
+                .map(|tracker| tracker.support)
+                .unwrap_or_default(),
+            target,
+            on_request: move |request| key.map(|key| Message::Track(key, request)),
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+    }
+
+    /// How `tracker`'s camera stands, and a way to stop it, for the chip.
+    fn view_tracking_state<'a>(&self, tracker: Option<Tracker>) -> Option<Element<'a, Message>> {
+        let tracker = tracker.filter(|tracker| self.is_tracking(tracker))?;
+        let (label, tone) = match tracker.tracking {
+            Some(Tracking::Error) => ("Target lost", Tone::Warning),
+            _ => ("Tracking", Tone::Success),
+        };
+        Some(
+            row![
+                ui::badge(label, tone),
+                ui::icon_button(Icon::Close)
+                    .hint("Stop tracking")
+                    .on_press(Message::StopTracking(tracker.key))
+                    .boxed(),
+            ]
+            .spacing(ui::space::XS)
+            .align_y(Alignment::Center)
+            .boxed(),
+        )
     }
 
     /// Start receiving the settings' source, replacing any receiver before.
@@ -401,7 +584,11 @@ impl VideoPanel {
         Task::stream(updates).map(move |state| Message::Updated(id, state))
     }
 
-    pub fn view<'a>(&'a self) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        fleet: &FleetSnapshot,
+        selected: Option<SystemId>,
+    ) -> Element<'a, Message> {
         let Some(receiving) = &self.receiving else {
             let header = ui::header(
                 ui::mono(&self.settings.uri).single_line(),
@@ -414,6 +601,7 @@ impl VideoPanel {
         // The picture fills the panel; what the panel would otherwise put
         // around it floats over its corner, the details on demand.
         let picture = self.view_picture(receiving);
+        let tracker = Tracker::of(fleet, selected);
 
         let (label, tone) = Showing::of(&receiving.state).badge();
         // Hovered, the indicator explains itself; pressed (as a finger
@@ -422,7 +610,7 @@ impl VideoPanel {
             mouse_area(ui::badge(label, tone))
                 .on_press(Message::ToggleDetails)
                 .interaction(mouse::Interaction::Pointer),
-            self.details_text(receiving),
+            self.details_text(receiving, tracker),
             iced::widget::tooltip::Position::Bottom,
         );
         let recording = self.is_recording();
@@ -442,6 +630,7 @@ impl VideoPanel {
             row![
                 indicator,
                 recording_badge(&receiving.state),
+                self.view_tracking_state(tracker),
                 record.boxed(),
                 ui::icon_button(Icon::Edit)
                     .chosen(self.form)
@@ -473,28 +662,40 @@ impl VideoPanel {
         let overlay = column![
             chip,
             self.details
-                .then(|| card(ui::text(self.details_text(receiving)).boxed())),
+                .then(|| card(ui::text(self.details_text(receiving, tracker)).boxed())),
             self.form.then(|| card(self.view_form().boxed())),
         ]
         .spacing(ui::space::S)
         .padding(ui::space::S);
 
-        ui::picture(stack![picture, overlay]).boxed()
+        ui::picture(stack![
+            picture,
+            self.view_tracking(receiving, tracker),
+            overlay
+        ])
+        .boxed()
     }
 
     /// The picture alone, filling the screen, with the stream's state and a
     /// way out (also Escape, or back) in its corner, clear of the platform's
     /// chrome by `insets`.
-    pub fn view_full_screen(&self, insets: Padding) -> Element<'_, Message> {
+    pub fn view_full_screen(
+        &self,
+        insets: Padding,
+        fleet: &FleetSnapshot,
+        selected: Option<SystemId>,
+    ) -> Element<'_, Message> {
         let Some(receiving) = &self.receiving else {
             return iced::widget::Space::new().boxed();
         };
+        let tracker = Tracker::of(fleet, selected);
 
         let (label, tone) = Showing::of(&receiving.state).badge();
         let chip = ui::floating(
             row![
                 ui::badge(label, tone),
                 recording_badge(&receiving.state),
+                self.view_tracking_state(tracker),
                 ui::icon_button(Icon::Minimize)
                     .hint("Leave full screen (Esc)")
                     .on_press(Message::FullScreen(false))
@@ -514,7 +715,12 @@ impl VideoPanel {
             left: insets.left + ui::space::S,
         });
 
-        ui::screen(stack![self.view_picture(receiving), corner]).boxed()
+        ui::screen(stack![
+            self.view_picture(receiving),
+            self.view_tracking(receiving, tracker),
+            corner
+        ])
+        .boxed()
     }
 
     /// The picture for elsewhere than the panel (the floating shell's map
@@ -522,17 +728,30 @@ impl VideoPanel {
     /// stopped, as in the panel, and, unless it is live, its state in a
     /// corner kept `clear` of what covers it. A frozen frame must not pass
     /// for live where the operator flies by it. Nothing while nothing is
-    /// received.
-    pub fn view_inset(&self, clear: Padding) -> Option<impl Widget<Message> + '_> {
+    /// received. Filling the screen, it tracks as the panel does, for the
+    /// vehicle `tracking` selects; in the corner (`None`), a tap swaps it.
+    pub fn view_inset(
+        &self,
+        clear: Padding,
+        tracking: Option<(&FleetSnapshot, Option<SystemId>)>,
+    ) -> Option<impl Widget<Message> + '_> {
         let receiving = self.receiving.as_ref()?;
         let showing = Showing::of(&receiving.state);
-        // The mark's layer stays, empty, while the picture is live, so the
-        // tree keeps its shape as the stream comes and goes.
-        let mark = if showing == Showing::Live {
+        let tracker = tracking.and_then(|(fleet, selected)| Tracker::of(fleet, selected));
+        let mark = row![
+            self.view_tracking_state(tracker),
+            (showing != Showing::Live).then(|| {
+                let (label, tone) = showing.badge();
+                ui::badge(label, tone)
+            }),
+        ]
+        .spacing(ui::space::XS);
+        // The mark's layer stays, empty, while there is nothing to say, so
+        // the tree keeps its shape as the stream comes and goes.
+        let mark = if showing == Showing::Live && !tracker.is_some_and(|it| self.is_tracking(&it)) {
             iced::widget::Space::new().boxed()
         } else {
-            let (label, tone) = showing.badge();
-            ui::floating::<Message, _>(ui::badge(label, tone))
+            ui::floating::<Message, _>(mark)
                 .padding(ui::space::XS)
                 .boxed()
         };
@@ -540,13 +759,14 @@ impl VideoPanel {
         Some(ui::screen(stack![
             video(receiving.receiver.slot()),
             ui::veil::<Message, _>(iced::widget::Space::new(), showing == Showing::Lost),
+            self.view_tracking(receiving, tracker),
             container(mark).padding(clear),
         ]))
     }
 
     /// The stream's details: where it comes from, what it is, and how it is
     /// received.
-    fn details_text(&self, receiving: &Receiving) -> String {
+    fn details_text(&self, receiving: &Receiving, tracker: Option<Tracker>) -> String {
         let mut lines = vec![self.settings.uri.clone()];
         if let Status::Streaming {
             width,
@@ -573,6 +793,18 @@ impl VideoPanel {
             Recording::Waiting => lines.push("Recording once video comes".to_string()),
             Recording::Failed(reason) => lines.push(format!("Not recording: {reason}")),
             Recording::Off => {}
+        }
+        // Gestures have no control to hint at them: say what they do.
+        if let Some(support) = tracker.map(|tracker| tracker.support) {
+            let gestures = match (support.point, support.rectangle) {
+                (true, true) => "right-click (or tap) a point, or drag a rectangle",
+                (true, false) => "right-click (or tap) a point",
+                (false, true) => "drag a rectangle",
+                (false, false) => "",
+            };
+            if !gestures.is_empty() {
+                lines.push(format!("To track: {gestures}"));
+            }
         }
         lines.join("\n")
     }
@@ -647,11 +879,55 @@ impl VideoPanel {
     }
 }
 
+fn notify_tracking(
+    cx: &mut Context<Message>,
+    (system, _): TrackKey,
+    action: TrackAction,
+    error: Error,
+) {
+    let what = match action {
+        TrackAction::Track(_) => "Starting of tracking",
+        TrackAction::Stop => "Stopping of tracking",
+    };
+    cx.notices.push(
+        Notice::error(format!(
+            "{what} on {} failed",
+            cx.fleet.vehicle_name(system)
+        ))
+        .detail(error)
+        .vehicle(system),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::features::test_support::Env;
+
+    /// Run `message` through the panel's `update` in a context over `env`'s
+    /// fleet.
+    fn update_in(
+        env: &mut Env,
+        panel: &mut VideoPanel,
+        message: Message,
+    ) -> (Task<Message>, Option<Event>) {
+        let snapshot = env.fleet.snapshot();
+        let mut cx = Context::new(
+            &snapshot,
+            &env.handle,
+            &mut env.notices,
+            None,
+            &env.settings,
+        );
+        panel.update(message, &mut cx)
+    }
+
+    /// [`update_in`] with no vehicle, for what is the stream's alone.
+    fn update(panel: &mut VideoPanel, message: Message) -> (Task<Message>, Option<Event>) {
+        update_in(&mut Env::new(), panel, message)
+    }
 
     /// Tell `panel` whether it shows, and sync it.
     fn show(panel: &mut VideoPanel, shown: bool) {
@@ -676,8 +952,8 @@ mod tests {
 
     /// A stream that was on is received once something can show it, not
     /// before.
-    #[test]
-    fn a_stream_on_waits_to_be_shown() {
+    #[tokio::test]
+    async fn a_stream_on_waits_to_be_shown() {
         let mut panel = VideoPanel::new(on("test://"), None);
         assert!(panel.slot().is_none(), "nothing shows it yet");
 
@@ -687,10 +963,10 @@ mod tests {
 
     /// Hidden, the stream pauses: no receiver, no full screen, and nothing
     /// to persist, as it is still on. Shown again, it resumes.
-    #[test]
-    fn hiding_pauses_the_stream_and_showing_resumes_it() {
+    #[tokio::test]
+    async fn hiding_pauses_the_stream_and_showing_resumes_it() {
         let mut panel = panel(on("test://"));
-        drop(panel.update(Message::FullScreen(true)));
+        drop(update(&mut panel, Message::FullScreen(true)));
 
         show(&mut panel, false);
         assert!(panel.slot().is_none());
@@ -702,12 +978,15 @@ mod tests {
     }
 
     /// Started while nothing shows it, the stream is on but not received.
-    #[test]
-    fn a_stream_started_while_hidden_waits() {
+    #[tokio::test]
+    async fn a_stream_started_while_hidden_waits() {
         let mut panel = VideoPanel::new(VideoSettings::default(), None);
-        drop(panel.update(Message::EditSource("test://".to_string())));
+        drop(update(
+            &mut panel,
+            Message::EditSource("test://".to_string()),
+        ));
 
-        let settings = changed(panel.update(Message::Start).1);
+        let settings = changed(update(&mut panel, Message::Start).1);
 
         assert!(settings.enabled);
         assert!(panel.slot().is_none());
@@ -723,8 +1002,8 @@ mod tests {
 
     /// Recording while armed starts at arming and ends `AFTER_DISARM`
     /// after the last vehicle disarms.
-    #[test]
-    fn recording_while_armed_outlasts_the_disarm() {
+    #[tokio::test]
+    async fn recording_while_armed_outlasts_the_disarm() {
         let start = Instant::now();
         let mut armed = WhileArmed {
             enabled: true,
@@ -746,8 +1025,8 @@ mod tests {
     }
 
     /// Without the setting, arming records nothing.
-    #[test]
-    fn arming_records_only_with_the_setting() {
+    #[tokio::test]
+    async fn arming_records_only_with_the_setting() {
         let now = Instant::now();
         let mut armed = WhileArmed::default();
         armed.observe(true, now);
@@ -756,8 +1035,8 @@ mod tests {
 
     /// Stopped by the operator, a recording while armed waits for the next
     /// arming.
-    #[test]
-    fn a_stopped_recording_waits_for_the_next_arming() {
+    #[tokio::test]
+    async fn a_stopped_recording_waits_for_the_next_arming() {
         let mut panel = panel(on("test://"));
         panel.recordings = recordings();
         panel.set_record_while_armed(true);
@@ -766,7 +1045,7 @@ mod tests {
         drop(panel.sync(now));
         assert!(panel.is_recording());
 
-        drop(panel.update(Message::Record(false)));
+        drop(update(&mut panel, Message::Record(false)));
         assert!(!panel.is_recording(), "stopped while still armed");
 
         panel.observe_armed(false, now);
@@ -777,60 +1056,60 @@ mod tests {
 
     /// A stream being recorded is received though nothing shows it, and
     /// paused once the recording ends.
-    #[test]
-    fn a_recorded_stream_is_received_while_hidden() {
+    #[tokio::test]
+    async fn a_recorded_stream_is_received_while_hidden() {
         let mut panel = panel(on("test://"));
         panel.recordings = recordings();
-        drop(panel.update(Message::Record(true)));
+        drop(update(&mut panel, Message::Record(true)));
         show(&mut panel, false);
         assert!(panel.slot().is_some(), "received for the recording");
         assert!(panel.is_recording());
 
-        drop(panel.update(Message::Record(false)));
+        drop(update(&mut panel, Message::Record(false)));
         assert!(panel.slot().is_none(), "paused: nothing shows it");
     }
 
     /// Without a directory to record into, nothing is recorded.
-    #[test]
-    fn nothing_is_recorded_without_a_directory() {
+    #[tokio::test]
+    async fn nothing_is_recorded_without_a_directory() {
         let mut panel = panel(on("test://"));
-        drop(panel.update(Message::Record(true)));
+        drop(update(&mut panel, Message::Record(true)));
         assert!(!panel.is_recording());
     }
 
     /// Stopping the video stops its recording, and the next stream is not
     /// recorded unasked.
-    #[test]
-    fn stopping_the_video_stops_recording() {
+    #[tokio::test]
+    async fn stopping_the_video_stops_recording() {
         let mut panel = panel(on("test://"));
         panel.recordings = recordings();
-        drop(panel.update(Message::Record(true)));
+        drop(update(&mut panel, Message::Record(true)));
 
-        drop(panel.update(Message::Stop));
+        drop(update(&mut panel, Message::Stop));
         assert!(!panel.is_recording());
-        drop(panel.update(Message::Start));
+        drop(update(&mut panel, Message::Start));
         assert!(panel.slot().is_some());
         assert!(!panel.is_recording());
     }
 
     /// A recording that fails says so once, not with every frame.
-    #[test]
-    fn a_failed_recording_is_announced_once() {
+    #[tokio::test]
+    async fn a_failed_recording_is_announced_once() {
         let mut panel = panel(on("test://"));
         let failed = State {
             recording: Recording::Failed("The test pattern is not recorded".to_string()),
             ..state(Status::Connecting, 0)
         };
 
-        let (_, event) = panel.update(Message::Updated(0, failed.clone()));
+        let (_, event) = update(&mut panel, Message::Updated(0, failed.clone()));
         assert!(matches!(event, Some(Event::RecordingFailed(_))));
-        let (_, event) = panel.update(Message::Updated(0, failed));
+        let (_, event) = update(&mut panel, Message::Updated(0, failed));
         assert!(event.is_none());
     }
 
     /// Whether `panel`'s picture outside the panel shows `text`.
     fn inset_shows(panel: &VideoPanel, text: &str) -> bool {
-        let Some(inset) = panel.view_inset(Padding::ZERO) else {
+        let Some(inset) = panel.view_inset(Padding::ZERO, None) else {
             return false;
         };
         iced_test::Simulator::new(inset).find(text).is_ok()
@@ -838,8 +1117,8 @@ mod tests {
 
     /// Outside the panel, a picture that stopped says so, and a live one
     /// shows alone.
-    #[test]
-    fn the_inset_marks_a_lost_picture() {
+    #[tokio::test]
+    async fn the_inset_marks_a_lost_picture() {
         let mut panel = panel(on("test://"));
         let live = Status::Streaming {
             width: 1,
@@ -847,15 +1126,169 @@ mod tests {
             decoder: None,
         };
 
-        drop(panel.update(Message::Updated(0, state(live, 30))));
+        drop(update(&mut panel, Message::Updated(0, state(live, 30))));
         assert!(!inset_shows(&panel, "Video lost"));
         assert!(!inset_shows(&panel, "Live"), "a live picture is unmarked");
 
-        drop(panel.update(Message::Updated(
-            0,
-            state(retrying("The video stopped"), 30),
-        )));
+        drop(update(
+            &mut panel,
+            Message::Updated(0, state(retrying("The video stopped"), 30)),
+        ));
         assert!(inset_shows(&panel, "Video lost"));
+    }
+
+    mod tracking {
+        use groundhog_logic::{
+            MavlinkId,
+            domain::vehicle::camera::{ImagePoint, ImageRect},
+            services::Rejection,
+        };
+        use mavio::{
+            DefaultDialect,
+            default_dialect::{enums::CameraCapFlags, messages::CameraInformation},
+        };
+
+        use super::*;
+
+        const A: SystemId = SystemId(1);
+        const AUTOPILOT: MavlinkId = MavlinkId {
+            system: A.0,
+            component: 1,
+        };
+        /// The camera the autopilot answers for as its first.
+        const KEY: TrackKey = (
+            A,
+            CameraId {
+                component: 1,
+                device: 1,
+            },
+        );
+
+        /// A vehicle whose autopilot described a camera that tracks.
+        fn env() -> Env {
+            let mut env = Env::new();
+            env.observe_vehicle(AUTOPILOT, true, 0);
+            env.observe(
+                AUTOPILOT,
+                &DefaultDialect::CameraInformation(CameraInformation {
+                    flags: CameraCapFlags::HAS_TRACKING_POINT
+                        | CameraCapFlags::HAS_TRACKING_RECTANGLE,
+                    camera_device_id: 1,
+                    ..Default::default()
+                }),
+            );
+            env
+        }
+
+        /// A panel showing a live picture.
+        fn live() -> VideoPanel {
+            let mut panel = panel(on("test://"));
+            let live = Status::Streaming {
+                width: 1,
+                height: 1,
+                decoder: None,
+            };
+            drop(update(&mut panel, Message::Updated(0, state(live, 30))));
+            panel
+        }
+
+        fn rectangle() -> Request {
+            Request::Rectangle(ImageRect {
+                top_left: ImagePoint { x: 0.25, y: 0.25 },
+                bottom_right: ImagePoint { x: 0.5, y: 0.5 },
+            })
+        }
+
+        /// Whether the picture filling the floating shell shows `text`.
+        fn shows(panel: &VideoPanel, env: &Env, text: &str) -> bool {
+            let snapshot = env.fleet.snapshot();
+            let Some(inset) = panel.view_inset(Padding::ZERO, Some((&snapshot, Some(A)))) else {
+                return false;
+            };
+            iced_test::Simulator::new(inset).find(text).is_ok()
+        }
+
+        /// Ask for `action`, and have the camera answer with `result`.
+        fn answer(
+            env: &mut Env,
+            panel: &mut VideoPanel,
+            action: TrackAction,
+            result: Result<()>,
+        ) -> Option<Event> {
+            let message = match action {
+                TrackAction::Track(request) => Message::Track(KEY, request),
+                TrackAction::Stop => Message::StopTracking(KEY),
+            };
+            drop(update_in(env, panel, message));
+            assert!(panel.tracking.is_running(&KEY));
+            let ticket = panel.tracking.ticket_of(&KEY).expect("running");
+            update_in(env, panel, Message::Tracked(KEY, action, ticket, result)).1
+        }
+
+        #[tokio::test]
+        async fn an_accepted_track_shows_until_it_is_stopped() {
+            let mut env = env();
+            let mut panel = live();
+            assert!(!shows(&panel, &env, "Tracking"));
+
+            answer(
+                &mut env,
+                &mut panel,
+                TrackAction::Track(rectangle()),
+                Ok(()),
+            );
+            assert!(
+                shows(&panel, &env, "Tracking"),
+                "the camera reports nothing, but it accepted"
+            );
+
+            answer(&mut env, &mut panel, TrackAction::Stop, Ok(()));
+            assert!(!shows(&panel, &env, "Tracking"));
+            assert_eq!(env.notices.history().count(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_refused_track_is_announced() {
+            let mut env = env();
+            let mut panel = live();
+
+            answer(
+                &mut env,
+                &mut panel,
+                TrackAction::Track(rectangle()),
+                Err(Error::Rejected(Rejection::Denied)),
+            );
+            let notice = env.notices.history().last().expect("a notice");
+            assert!(notice.title.starts_with("Tracking on"), "{}", notice.title);
+            assert!(!shows(&panel, &env, "Tracking"));
+        }
+
+        #[tokio::test]
+        async fn a_replaced_request_is_not_heard() {
+            let mut env = env();
+            let mut panel = live();
+
+            drop(update_in(
+                &mut env,
+                &mut panel,
+                Message::Track(KEY, rectangle()),
+            ));
+            let first = panel.tracking.ticket_of(&KEY).expect("running");
+            drop(update_in(&mut env, &mut panel, Message::StopTracking(KEY)));
+
+            drop(update_in(
+                &mut env,
+                &mut panel,
+                Message::Tracked(
+                    KEY,
+                    TrackAction::Track(rectangle()),
+                    first,
+                    Err(Error::Timeout),
+                ),
+            ));
+            assert_eq!(env.notices.history().count(), 0, "stale: ignored");
+            assert!(panel.tracking.is_running(&KEY), "the stop still runs");
+        }
     }
 
     fn changed(event: Option<Event>) -> VideoSettings {
@@ -865,40 +1298,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_stream_off_at_close_stays_off() {
+    #[tokio::test]
+    async fn a_stream_off_at_close_stays_off() {
         let panel = panel(VideoSettings::default());
         assert!(panel.slot().is_none());
     }
 
-    #[test]
-    fn an_invalid_source_does_not_start() {
+    #[tokio::test]
+    async fn an_invalid_source_does_not_start() {
         let mut panel = panel(VideoSettings::default());
-        drop(panel.update(Message::EditSource("5600".to_string())));
+        drop(update(&mut panel, Message::EditSource("5600".to_string())));
 
-        let (_, event) = panel.update(Message::Start);
+        let (_, event) = update(&mut panel, Message::Start);
 
         assert!(event.is_none());
         assert!(panel.slot().is_none());
     }
 
-    #[test]
-    fn starting_and_stopping_is_remembered() {
+    #[tokio::test]
+    async fn starting_and_stopping_is_remembered() {
         let mut panel = panel(VideoSettings::default());
-        drop(panel.update(Message::EditSource(" test:// ".to_string())));
+        drop(update(
+            &mut panel,
+            Message::EditSource(" test:// ".to_string()),
+        ));
 
-        let settings = changed(panel.update(Message::Start).1);
+        let settings = changed(update(&mut panel, Message::Start).1);
         assert_eq!(settings.uri, "test://");
         assert!(settings.enabled);
         assert!(panel.slot().is_some());
 
-        let settings = changed(panel.update(Message::Stop).1);
+        let settings = changed(update(&mut panel, Message::Stop).1);
         assert!(!settings.enabled);
         assert!(panel.slot().is_none());
     }
 
-    #[test]
-    fn a_replaced_receiver_is_not_heard() {
+    #[tokio::test]
+    async fn a_replaced_receiver_is_not_heard() {
         let mut panel = panel(VideoSettings {
             uri: "test://".to_string(),
             enabled: true,
@@ -915,15 +1351,15 @@ mod tests {
         };
 
         // Changing the latency starts a new receiver, the second.
-        drop(panel.update(Message::LowLatency(false)));
-        drop(panel.update(Message::Updated(0, streaming.clone())));
+        drop(update(&mut panel, Message::LowLatency(false)));
+        drop(update(&mut panel, Message::Updated(0, streaming.clone())));
         assert_ne!(
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming),
             "the first receiver's state is stale"
         );
 
-        drop(panel.update(Message::Updated(1, streaming.clone())));
+        drop(update(&mut panel, Message::Updated(1, streaming.clone())));
         assert_eq!(
             panel.receiving.as_ref().map(|it| &it.state),
             Some(&streaming)
@@ -946,8 +1382,8 @@ mod tests {
 
     /// The receiver's attempts do not show: before the first frame and
     /// after the last one, opening and waiting to open again read the same.
-    #[test]
-    fn retrying_reads_as_one_steady_state() {
+    #[tokio::test]
+    async fn retrying_reads_as_one_steady_state() {
         assert_eq!(Showing::of(&state(Status::Connecting, 0)), Showing::Waiting);
         assert_eq!(
             Showing::of(&state(retrying("No video arrives"), 0)),
@@ -970,8 +1406,8 @@ mod tests {
 
     /// Why the last attempt failed stays in the details while the receiver
     /// tries again, and goes once video comes.
-    #[test]
-    fn the_last_problem_is_in_the_details_until_video_comes() {
+    #[tokio::test]
+    async fn the_last_problem_is_in_the_details_until_video_comes() {
         let mut panel = panel(VideoSettings {
             uri: "test://".to_string(),
             enabled: true,
@@ -981,15 +1417,18 @@ mod tests {
             panel
                 .receiving
                 .as_ref()
-                .map(|receiving| panel.details_text(receiving))
+                .map(|receiving| panel.details_text(receiving, None))
                 .unwrap_or_default()
         };
 
-        drop(panel.update(Message::Updated(
-            0,
-            state(retrying("Connection refused"), 0),
-        )));
-        drop(panel.update(Message::Updated(0, state(Status::Connecting, 0))));
+        drop(update(
+            &mut panel,
+            Message::Updated(0, state(retrying("Connection refused"), 0)),
+        ));
+        drop(update(
+            &mut panel,
+            Message::Updated(0, state(Status::Connecting, 0)),
+        ));
         assert!(
             details(&panel).contains("Last attempt: Connection refused"),
             "{}",
@@ -1001,7 +1440,7 @@ mod tests {
             height: 1,
             decoder: None,
         };
-        drop(panel.update(Message::Updated(0, state(live, 1))));
+        drop(update(&mut panel, Message::Updated(0, state(live, 1))));
         assert!(
             !details(&panel).contains("Last attempt"),
             "{}",
@@ -1009,26 +1448,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn full_screen_needs_a_stream_and_ends_with_it() {
+    #[tokio::test]
+    async fn full_screen_needs_a_stream_and_ends_with_it() {
         let mut panel = panel(VideoSettings::default());
-        drop(panel.update(Message::FullScreen(true)));
+        drop(update(&mut panel, Message::FullScreen(true)));
         assert!(!panel.is_full_screen(), "nothing to show");
 
-        drop(panel.update(Message::EditSource("test://".to_string())));
-        drop(panel.update(Message::Start));
-        drop(panel.update(Message::FullScreen(true)));
+        drop(update(
+            &mut panel,
+            Message::EditSource("test://".to_string()),
+        ));
+        drop(update(&mut panel, Message::Start));
+        drop(update(&mut panel, Message::FullScreen(true)));
         assert!(panel.is_full_screen());
 
-        drop(panel.update(Message::Stop));
+        drop(update(&mut panel, Message::Stop));
         assert!(!panel.is_full_screen());
-        drop(panel.update(Message::Start));
+        drop(update(&mut panel, Message::Start));
         assert!(!panel.is_full_screen(), "a new stream starts in its panel");
     }
 
     /// The panel's receiver puts frames in the slot the video widget reads.
-    #[test]
-    fn the_test_pattern_reaches_the_slot() {
+    #[tokio::test]
+    async fn the_test_pattern_reaches_the_slot() {
         let panel = panel(VideoSettings {
             uri: "test://".to_string(),
             enabled: true,

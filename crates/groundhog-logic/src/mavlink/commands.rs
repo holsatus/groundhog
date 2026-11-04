@@ -22,6 +22,63 @@ pub(crate) fn request_message_id(message_id: u32) -> Command {
     .into()
 }
 
+/// `MAV_CMD_SET_MESSAGE_INTERVAL`: send the message with the given id every
+/// `interval`.
+pub(crate) fn set_message_interval(message_id: u32, interval: std::time::Duration) -> Command {
+    CommandLong {
+        command: MavCmd::SetMessageInterval,
+        param1: message_id as f32,
+        param2: interval.as_micros() as f32,
+        ..Default::default()
+    }
+    .into()
+}
+
+/// `MAV_CMD_CAMERA_TRACK_POINT`: track the point at `(x, y)` with `radius`,
+/// all normalized to the picture, on camera `device` of the component
+/// (0: the component itself, or all of its cameras).
+pub(crate) fn camera_track_point(x: f32, y: f32, radius: f32, device: u8) -> Command {
+    CommandLong {
+        command: MavCmd::CameraTrackPoint,
+        param1: x,
+        param2: y,
+        param3: radius,
+        param4: f32::from(device),
+        ..Default::default()
+    }
+    .into()
+}
+
+/// `MAV_CMD_CAMERA_TRACK_RECTANGLE`: track what lies between the corners
+/// `top_left` and `bottom_right`, normalized to the picture, on camera
+/// `device` of the component.
+pub(crate) fn camera_track_rectangle(
+    top_left: (f32, f32),
+    bottom_right: (f32, f32),
+    device: u8,
+) -> Command {
+    CommandLong {
+        command: MavCmd::CameraTrackRectangle,
+        param1: top_left.0,
+        param2: top_left.1,
+        param3: bottom_right.0,
+        param4: bottom_right.1,
+        param5: f32::from(device),
+        ..Default::default()
+    }
+    .into()
+}
+
+/// `MAV_CMD_CAMERA_STOP_TRACKING` on camera `device` of the component.
+pub(crate) fn camera_stop_tracking(device: u8) -> Command {
+    CommandLong {
+        command: MavCmd::CameraStopTracking,
+        param1: f32::from(device),
+        ..Default::default()
+    }
+    .into()
+}
+
 /// `MAV_CMD_MISSION_START` - start executing the stored mission.
 pub(crate) fn mission_start() -> Command {
     CommandLong {

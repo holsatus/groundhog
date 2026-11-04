@@ -216,9 +216,12 @@ impl Application {
         // While there is video, it and the map share the screen: one fills
         // it, the other sits in the corner of what shows, and a tap on the
         // corner swaps them. The video says when it stopped, either way.
-        let picture = |clear| {
-            self.video
-                .view_inset(clear)
+        // Filling the screen, the picture tracks; in the corner, a tap
+        // swaps it with the map.
+        let picture = |clear, fills: bool| {
+            self.features
+                .video
+                .view_inset(clear, fills.then_some((&*self.fleet, self.selected)))
                 .map(|picture| picture.boxed().map(Message::Video).boxed())
         };
         let filling = Padding {
@@ -227,13 +230,13 @@ impl Application {
             bottom: covered.bottom + ui::space::S,
             left: covered.left + ui::space::S,
         };
-        let (main, corner) = match picture(filling) {
+        let (main, corner) = match picture(filling, true) {
             Some(picture) if self.floating.is_video_main() => {
                 (picture, Some(self.view_map(Placement::Pane).boxed()))
             }
             _ => (
                 self.view_map(Placement::Window { covered }).boxed(),
-                picture(Padding::new(ui::space::XS)),
+                picture(Padding::new(ui::space::XS), false),
             ),
         };
         let corner = corner.map(|content| {

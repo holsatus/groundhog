@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use groundhog_video::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Range};
 use iced::{
-    Length, Rectangle, Widget, mouse, wgpu,
+    Length, Point, Rectangle, Size, Widget, mouse, wgpu,
     widget::shader::{self, Viewport},
 };
 
@@ -468,6 +468,21 @@ fn conversion(colour: Colour) -> ([[f32; 3]; 3], [f32; 3]) {
     )
 }
 
+/// Where a `width` by `height` frame shows in a video widget of `size`,
+/// relative to the widget: centred, keeping its aspect ratio, as the widget
+/// draws it.
+pub fn picture_bounds(width: u32, height: u32, size: Size) -> Rectangle {
+    let (scale_x, scale_y) = letterbox(width, height, size.width, size.height);
+    let picture = Size::new(size.width * scale_x, size.height * scale_y);
+    Rectangle::new(
+        Point::new(
+            (size.width - picture.width) / 2.0,
+            (size.height - picture.height) / 2.0,
+        ),
+        picture,
+    )
+}
+
 /// The quad's scale in clip space (1 fills that axis) that keeps a
 /// `width` by `height` frame's aspect ratio in a `bounds_width` by
 /// `bounds_height` widget.
@@ -487,6 +502,15 @@ fn letterbox(width: u32, height: u32, bounds_width: f32, bounds_height: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picture_is_centred_between_its_bands() {
+        let picture = picture_bounds(1920, 1080, Size::new(400.0, 400.0));
+        assert_eq!(picture.x, 0.0);
+        assert_eq!(picture.width, 400.0);
+        assert!((picture.height - 225.0).abs() < 1e-3);
+        assert!((picture.y - 87.5).abs() < 1e-3);
+    }
 
     #[test]
     fn a_frame_keeps_its_aspect_ratio() {

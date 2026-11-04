@@ -620,11 +620,11 @@ pub fn veil(_theme: &Theme) -> container::Style {
 }
 
 /// A pane's body that is a picture: [`screen`], its lower corners rounded
-/// as the pane's are inside its border.
+/// as the pane's are.
 pub fn picture(theme: &Theme) -> container::Style {
     container::Style {
         border: Border {
-            radius: Radius::default().bottom(PANE_RADIUS - PANE_BORDER_WIDTH),
+            radius: Radius::default().bottom(PANE_RADIUS),
             ..Border::default()
         },
         ..screen(theme)

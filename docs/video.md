@@ -247,7 +247,19 @@ until the desktop video works.
    after (a setting); a stream being recorded is received even where
    nothing shows it. Files go to `videos/` in the data directory, named
    as telemetry logs are.
-6. **Camera discovery** (`VIDEO_STREAM_INFORMATION`).
+6. **Tracking** (done). Where the selected vehicle has a camera that
+   says it tracks (`CAMERA_INFORMATION`'s capability flags), gestures on
+   the picture send `MAV_CMD_CAMERA_TRACK_POINT` (releasing the right
+   button, or a tap) and `MAV_CMD_CAMERA_TRACK_RECTANGLE` (a drag), in
+   the image's own normalized coordinates, letterboxing removed
+   (`features/video/tracking.rs`). What the camera reports tracking
+   (`CAMERA_TRACKING_IMAGE_STATUS`, asked for at 10 Hz once it tracks) is
+   drawn over the picture, and the chip says it tracks and stops it.
+   It works in the panel, in the full screen, and where the floating
+   shell shows the picture instead of the map.
+7. **Camera discovery** (`VIDEO_STREAM_INFORMATION`): which stream is
+   which camera's. Until then, the picture's tracking goes to the selected
+   vehicle's camera.
 
 ## Sources
 
