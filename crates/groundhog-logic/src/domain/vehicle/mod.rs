@@ -107,9 +107,6 @@ impl ComponentState {
     /// capabilities, else as its firmware is known to. `None` when neither
     /// is known, in which case parameter writes must not be attempted.
     pub fn param_encoding(&self) -> Option<ParamEncoding> {
-        // TODO: Until certain unnamed implementation gets its act together
-        return Some(ParamEncoding::CCast);
-
         self.capabilities
             .and_then(ParamEncoding::advertised)
             .or_else(|| {
