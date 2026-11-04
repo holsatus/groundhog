@@ -1414,10 +1414,12 @@ mod calibration {
     };
 
     use super::*;
-    use crate::domain::calibration::{CalibrationKind, Instruction, Outcome, Phase, Session, Side};
+    use crate::domain::calibration::{
+        CalibrationKind, Instruction, Outcome, Phase, Session, Side, StartBlocked,
+    };
 
     fn session(fleet: &FleetSnapshot) -> Option<&Session> {
-        fleet.vehicle(SYSTEM)?.calibration.as_ref()
+        fleet.vehicle(SYSTEM)?.calibration()
     }
 
     impl MockVehicle {
@@ -1543,6 +1545,36 @@ mod calibration {
         let client = harness.fleet.vehicle(SYSTEM);
         let result = client.start_calibration(CalibrationKind::Airspeed).await;
         assert!(matches!(result, Err(Error::CalibrationUnsupported)));
+    }
+
+    /// A vehicle that may be armed is not calibrated: the client refuses
+    /// before anything is sent or any run begins.
+    #[tokio::test]
+    async fn a_vehicle_not_known_to_be_disarmed_is_not_calibrated() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        harness
+            .vehicle
+            .send(&mavio::default_dialect::messages::Heartbeat {
+                type_: MavType::Quadrotor,
+                autopilot: MavAutopilot::Ardupilotmega,
+                base_mode: MavModeFlag::CUSTOM_MODE_ENABLED | MavModeFlag::SAFETY_ARMED,
+                ..Default::default()
+            })
+            .await;
+        until(&mut harness.updates, |fleet| {
+            fleet.vehicle(SYSTEM).and_then(Vehicle::armed) == Some(true)
+        })
+        .await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let result = client.start_calibration(CalibrationKind::Gyroscope).await;
+
+        assert_eq!(
+            result,
+            Err(Error::CalibrationBlocked(StartBlocked::NotDisarmed))
+        );
+        assert!(session(&harness.fleet.snapshot()).is_none());
     }
 
     /// A start dropped before the vehicle answers must not leave the session

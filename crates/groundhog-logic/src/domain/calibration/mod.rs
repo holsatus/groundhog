@@ -15,11 +15,20 @@
 //! [`CalibrationProtocol`] maps it to and from the wire: the command that
 //! starts each [`CalibrationKind`], how to confirm a step or cancel, and how
 //! the vehicle's feedback advances the session. The fleet runtime owns the
-//! session (it lives on the [`Vehicle`](super::vehicle::Vehicle)), so
-//! feedback is folded in as it arrives, independent of the UI.
+//! run (it lives on the [`Vehicle`](super::vehicle::Vehicle)), so feedback is
+//! folded in as it arrives, independent of the UI.
+//!
+//! One module, [`lifecycle`], owns the run: how it begins, what the operation
+//! running it and the vehicle's feedback do to it, when Groundhog ends it
+//! (a reboot, a lost vehicle, a stall), and when the operator may start,
+//! confirm or cancel one.
 
 pub(crate) mod ardupilot;
+mod lifecycle;
 pub(crate) mod px4;
+
+pub use lifecycle::StartBlocked;
+pub(crate) use lifecycle::{Calibration, Cancel, Confirmation, Ended, RunId};
 
 use std::collections::VecDeque;
 
@@ -29,7 +38,6 @@ use mavio::{
 };
 
 use super::vehicle::{StatusText, class::VehicleClass};
-use crate::MavlinkId;
 
 /// A calibration an operator can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -275,9 +283,11 @@ pub enum CompassStatus {
     Failed(&'static str),
 }
 
-/// What the operator can do about a running calibration.
+/// What the operator can do about calibrating a vehicle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CalibrationControls {
+    /// Why no calibration can be started now; `None` when one can.
+    pub start_blocked: Option<StartBlocked>,
     /// The vehicle waits for the operator to confirm the current step.
     pub confirm: bool,
     /// The vehicle can be told to stop. Without that, cancelling only stops
@@ -290,11 +300,6 @@ pub struct CalibrationControls {
 
 /// How many vehicle texts a session keeps.
 const MESSAGES: usize = 16;
-
-/// One run of a calibration, so that what the operation running it reports
-/// cannot land on another run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RunId(pub(crate) u64);
 
 /// A calibration run on one vehicle, as the operator sees it.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,12 +328,10 @@ pub struct Session {
     /// its progress reports. A compass whose progress never arrives is still
     /// part of the run, and its report is the only sign it finished.
     pub(crate) expected_compasses: u8,
-    /// The run this session follows.
-    run: RunId,
 }
 
 impl Session {
-    pub(crate) fn new(kind: CalibrationKind, completes_on_ack: bool, run: RunId) -> Self {
+    pub(crate) fn new(kind: CalibrationKind, completes_on_ack: bool) -> Self {
         Self {
             kind,
             phase: Phase::Starting,
@@ -341,18 +344,7 @@ impl Session {
             completes_on_ack,
             observed: false,
             expected_compasses: 0,
-            run,
         }
-    }
-
-    /// Whether the session follows `run`.
-    pub(crate) fn is_run(&self, run: RunId) -> bool {
-        self.run == run
-    }
-
-    /// The run this session follows.
-    pub(crate) fn run(&self) -> RunId {
-        self.run
     }
 
     pub fn is_running(&self) -> bool {
@@ -514,22 +506,6 @@ pub(crate) enum CalibrationUpdate {
     Cancel,
     /// The operator is done looking at a finished session.
     Dismiss,
-}
-
-/// A run that Groundhog ended itself, and what it must tell the vehicle.
-#[derive(Debug, Clone)]
-pub(crate) struct EndedRun {
-    /// The command that stops the run on the vehicle, when its firmware has
-    /// one.
-    pub(crate) cancel: Option<CalibrationCancel>,
-}
-
-/// A firmware's command that stops a calibration on the vehicle.
-#[derive(Debug, Clone)]
-pub(crate) struct CalibrationCancel {
-    pub(crate) target: MavlinkId,
-    pub(crate) command: CommandLong,
-    pub(crate) retries: u8,
 }
 
 /// `MAV_CMD_PREFLIGHT_CALIBRATION` with `params` as its seven parameters.

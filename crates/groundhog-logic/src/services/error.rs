@@ -9,7 +9,7 @@ use std::fmt;
 
 use mavio::default_dialect::enums::{MavMissionResult, MavResult};
 
-use crate::mavlink::MavError;
+use crate::{domain::calibration::StartBlocked, mavlink::MavError};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
@@ -35,6 +35,8 @@ pub enum Error {
     NoSuchMode,
     #[error("the vehicle's firmware does not support this calibration")]
     CalibrationUnsupported,
+    #[error("cannot calibrate now: {0}")]
+    CalibrationBlocked(StartBlocked),
     #[error("no calibration is waiting for that")]
     NotCalibrating,
     #[error("the vehicle is not known to be disarmed")]

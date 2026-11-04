@@ -61,7 +61,10 @@ use mavio::{
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{self, CalibrationControls, CalibrationKind, CalibrationUpdate, Feedback},
+        calibration::{
+            Calibration, CalibrationControls, CalibrationKind, CalibrationUpdate, Ended, Feedback,
+            Session,
+        },
         firmware::{self, Firmware, FlightMode, MissionLayout, ModeKind},
         geo::GeoPosition,
         mission::OnboardMission,
@@ -69,10 +72,6 @@ use crate::{
     },
     wire::{self, param::ParamEncoding},
 };
-
-/// How long the vehicle may say nothing about a calibration before it is
-/// failed.
-const CALIBRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How far an autopilot's `time_boot_ms` must step backwards to mean a
 /// reboot, rather than frames arriving out of order.
@@ -194,9 +193,7 @@ pub struct Vehicle {
     /// The cameras its components have described.
     pub cameras: Cameras,
     /// The latest calibration run, until dismissed.
-    pub calibration: Option<calibration::Session>,
-    /// When the calibration last advanced, for its no-progress timeout.
-    calibration_progress_at: Option<Instant>,
+    calibration: Calibration,
     /// The last `time_boot_ms` the autopilot reported.
     last_boot_time: Option<u32>,
     /// How many times the autopilot's boot time has jumped backwards.
@@ -430,78 +427,30 @@ impl Vehicle {
         self.mission.onboard = Some(Arc::new(mission));
     }
 
-    /// Apply what the operation running a calibration reports. Returns
-    /// whether it was applied: a vehicle whose firmware has no calibration
-    /// protocol cannot begin one.
-    pub(crate) fn update_calibration(&mut self, now: Instant, update: CalibrationUpdate) -> bool {
-        let before = self.calibration.clone();
+    /// Apply what the operation running a calibration reports. Returns the
+    /// run's end, if the update finished it.
+    pub(crate) fn update_calibration(
+        &mut self,
+        now: Instant,
+        update: CalibrationUpdate,
+    ) -> Option<Ended> {
+        let protocol = self.firmware().calibration();
+        self.calibration.apply(now, update, protocol)
+    }
 
-        let applied = match update {
-            CalibrationUpdate::Begin { kind, run } => {
-                let Some(protocol) = self.firmware().calibration() else {
-                    return false;
-                };
-                self.calibration = Some(calibration::Session::new(
-                    kind,
-                    protocol.completes_on_ack(kind),
-                    run,
-                ));
-                true
-            }
-            // What a run reports applies to that run only.
-            CalibrationUpdate::Acknowledged { run, result } => match &mut self.calibration {
-                Some(session) if session.is_run(run) => {
-                    session.acknowledged(result);
-                    true
-                }
-                _ => false,
-            },
-            CalibrationUpdate::Abandoned { run } => match &mut self.calibration {
-                Some(session) if session.is_run(run) => {
-                    session.fail("The start was abandoned before the vehicle answered");
-                    true
-                }
-                _ => false,
-            },
-            CalibrationUpdate::Confirmed { run, side } => match &mut self.calibration {
-                Some(session) if session.is_run(run) => {
-                    session.confirmed(side);
-                    true
-                }
-                _ => false,
-            },
-            CalibrationUpdate::ConfirmFailed { run, side } => match &mut self.calibration {
-                Some(session) if session.is_run(run) => {
-                    session.confirm_failed(side);
-                    true
-                }
-                _ => false,
-            },
-            CalibrationUpdate::Cancel => match &mut self.calibration {
-                Some(session) => {
-                    session.cancel();
-                    true
-                }
-                None => false,
-            },
-            CalibrationUpdate::Dismiss => {
-                if self
-                    .calibration
-                    .as_ref()
-                    .is_some_and(calibration::Session::is_running)
-                {
-                    false
-                } else {
-                    self.calibration = None;
-                    true
-                }
-            }
-        };
+    /// The latest calibration run, until dismissed.
+    pub fn calibration(&self) -> Option<&Session> {
+        self.calibration.session()
+    }
 
-        if applied && self.calibration != before {
-            self.calibration_progress_at = Some(now);
-        }
-        applied
+    /// The calibration, for the operations that run one and the fleet that
+    /// ages it.
+    pub(crate) fn calibration_state(&self) -> &Calibration {
+        &self.calibration
+    }
+
+    pub(crate) fn calibration_mut(&mut self) -> &mut Calibration {
+        &mut self.calibration
     }
 
     /// The calibrations the vehicle's firmware can run, in display order;
@@ -512,60 +461,10 @@ impl Vehicle {
             .map_or_else(Vec::new, |protocol| protocol.kinds(self.class()))
     }
 
-    /// What the operator can do about the running calibration.
+    /// What the operator can do about calibrating the vehicle: start a run,
+    /// or confirm or cancel the running one.
     pub fn calibration_controls(&self) -> CalibrationControls {
-        match (self.firmware().calibration(), &self.calibration) {
-            (Some(protocol), Some(session)) if session.is_running() => {
-                let cancel = protocol.cancel(session).is_some();
-                CalibrationControls {
-                    confirm: protocol.confirm(session).is_some(),
-                    cancel,
-                    cancel_note: (!cancel && session.phase == calibration::Phase::Starting)
-                        .then(|| protocol.cancel_note(session.kind))
-                        .flatten(),
-                }
-            }
-            _ => CalibrationControls::default(),
-        }
-    }
-
-    /// End the running calibration, if any, with `reason`, and report what
-    /// the vehicle must be told about it. `None` when no run was going.
-    pub(crate) fn end_calibration(
-        &mut self,
-        reason: impl Into<String>,
-    ) -> Option<calibration::EndedRun> {
-        let target = self.target();
-        let protocol = self.firmware().calibration();
-        let session = self.calibration.as_mut()?;
-        if !session.is_running() {
-            return None;
-        }
-
-        // Read the cancel before failing the session: the protocol decides it
-        // from the run that is ending.
-        let cancel = protocol.and_then(|protocol| {
-            let command = protocol.cancel(session)?;
-            Some(calibration::CalibrationCancel {
-                target,
-                command,
-                retries: protocol.cancel_retries(),
-            })
-        });
-        session.fail(reason);
-        Some(calibration::EndedRun { cancel })
-    }
-
-    /// Whether the running calibration has made no progress for too long,
-    /// while the vehicle (not the operator) is the one to act.
-    pub(crate) fn calibration_timed_out(&self, now: Instant) -> bool {
-        self.calibration.as_ref().is_some_and(|session| {
-            session.is_running()
-                && !session.instruction.waits_for_operator()
-                && self
-                    .calibration_progress_at
-                    .is_some_and(|at| now.saturating_duration_since(at) > CALIBRATION_TIMEOUT)
-        })
+        self.calibration.controls(self.armed(), self.liveness)
     }
 
     /// How many times the autopilot has rebooted, as far as this build can
@@ -587,29 +486,6 @@ impl Vehicle {
             );
         }
         self.last_boot_time = Some(time_boot_ms);
-    }
-
-    /// Fold the autopilot's feedback into a running calibration, noting when
-    /// the vehicle last said something about it.
-    fn observe_calibration(&mut self, time: Instant, feedback: Feedback<'_>) {
-        let protocol = self.firmware().calibration();
-        let Some(protocol) = protocol else {
-            return;
-        };
-
-        let Some(session) = &mut self.calibration else {
-            return;
-        };
-        if !session.is_running() {
-            return;
-        }
-
-        // Any feedback that belongs to the run keeps it alive, even when it
-        // repeats what the session already shows: a vehicle can spend a
-        // minute on the same percentage while the operator turns it.
-        if protocol.observe(session, feedback) {
-            self.calibration_progress_at = Some(time);
-        }
     }
 
     /// Fold a parameter list download's start or outcome in for `component`.
@@ -652,14 +528,15 @@ impl Vehicle {
         }
     }
 
-    /// Fold one decoded message from `component` into the vehicle. Returns a
-    /// status text the message completed, if any.
+    /// Fold one decoded message from `component` into the vehicle. Returns
+    /// what the fleet announces of it: a status text the message completed,
+    /// and the end of a calibration run it finished.
     pub(crate) fn handle_message(
         &mut self,
         time: Instant,
         component: u8,
         message: &DefaultDialect,
-    ) -> Option<StatusText> {
+    ) -> Folded {
         match message {
             DefaultDialect::Heartbeat(message) => {
                 let autopilot = Some(message.autopilot);
@@ -782,22 +659,38 @@ impl Vehicle {
             DefaultDialect::Statustext(message) => {
                 let text =
                     Arc::make_mut(&mut self.status).observe_statustext(component, message, time);
-                if let Some(text) = &text
-                    && self.is_authoritative(component)
-                {
-                    self.observe_calibration(time, Feedback::Text(text));
-                }
-                return text;
+                let calibration = match &text {
+                    Some(text) if self.is_authoritative(component) => {
+                        self.calibration.observe(time, Feedback::Text(text))
+                    }
+                    _ => None,
+                };
+                return Folded { text, calibration };
             }
             _ => (),
         }
 
-        if self.is_authoritative(component) {
-            self.observe_calibration(time, Feedback::Message(message));
-        }
+        let calibration = if self.is_authoritative(component) {
+            self.calibration.observe(time, Feedback::Message(message))
+        } else {
+            None
+        };
 
-        None
+        Folded {
+            text: None,
+            calibration,
+        }
     }
+}
+
+/// What folding one message into a vehicle produced, for the fleet to
+/// announce.
+#[derive(Debug, Default)]
+pub(crate) struct Folded {
+    /// A status text the message completed.
+    pub(crate) text: Option<StatusText>,
+    /// The end of the calibration run the message finished.
+    pub(crate) calibration: Option<Ended>,
 }
 
 /// Decode a fixed-size, NUL-terminated MAVLink string, if it is valid,
@@ -1491,133 +1384,6 @@ mod tests {
         assert_eq!(vehicle.home(), None);
     }
 
-    /// The controls a frontend offers come from the firmware's protocol and
-    /// the step the run is at, not from the frontend.
-    #[test]
-    fn calibration_controls_follow_the_firmware_and_the_step() {
-        let t = Instant::now();
-        let mut ardupilot = vehicle();
-        assert!(ardupilot.calibration_kinds().is_empty(), "unknown firmware");
-        ardupilot.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let kinds = ardupilot.calibration_kinds();
-        assert!(kinds.contains(&CalibrationKind::Accelerometer));
-        assert!(
-            !kinds.contains(&CalibrationKind::Airspeed),
-            "a copter has no airspeed sensor"
-        );
-
-        let run = calibration::RunId(1);
-        ardupilot.update_calibration(
-            t,
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Accelerometer,
-                run,
-            },
-        );
-        ardupilot.update_calibration(
-            t,
-            CalibrationUpdate::Acknowledged {
-                run,
-                result: Ok(()),
-            },
-        );
-        assert_eq!(
-            ardupilot.calibration_controls(),
-            CalibrationControls::default(),
-            "nothing to confirm before the vehicle asks"
-        );
-        ardupilot.handle_message(
-            t,
-            1,
-            &DefaultDialect::CommandLong(messages::CommandLong {
-                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
-                param1: 1.0,
-                ..Default::default()
-            }),
-        );
-        assert_eq!(
-            ardupilot.calibration_controls(),
-            CalibrationControls {
-                confirm: true,
-                cancel: false,
-                cancel_note: None,
-            }
-        );
-
-        let mut px4 = vehicle();
-        px4.handle_message(t, 1, &heartbeat(MavAutopilot::Px4));
-        px4.update_calibration(
-            t,
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Gyroscope,
-                run: calibration::RunId(2),
-            },
-        );
-        assert_eq!(
-            px4.calibration_controls(),
-            CalibrationControls {
-                confirm: false,
-                cancel: true,
-                cancel_note: None,
-            }
-        );
-        px4.update_calibration(t, CalibrationUpdate::Cancel);
-        assert_eq!(
-            px4.calibration_controls(),
-            CalibrationControls::default(),
-            "a finished run has no controls"
-        );
-    }
-
-    /// ArduPilot repeats its orientation request until the confirmation
-    /// arrives; the repeat must not offer Confirm again while it measures.
-    #[test]
-    fn a_repeated_orientation_request_does_not_re_offer_confirmation() {
-        let t = Instant::now();
-        let mut vehicle = vehicle();
-        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let run = calibration::RunId(1);
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Accelerometer,
-                run,
-            },
-        );
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Acknowledged {
-                run,
-                result: Ok(()),
-            },
-        );
-        let position = |param1| {
-            DefaultDialect::CommandLong(messages::CommandLong {
-                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
-                param1,
-                ..Default::default()
-            })
-        };
-        vehicle.handle_message(t, 1, &position(1.0));
-        assert!(vehicle.calibration_controls().confirm);
-
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Confirmed {
-                run,
-                side: calibration::Side::Level,
-            },
-        );
-        assert!(!vehicle.calibration_controls().confirm);
-
-        vehicle.handle_message(t, 1, &position(1.0));
-        assert_eq!(
-            vehicle.calibration.as_ref().unwrap().instruction,
-            calibration::Instruction::Confirming(calibration::Side::Level)
-        );
-        assert!(!vehicle.calibration_controls().confirm);
-    }
-
     /// A quaternion report reaches the attitude, not just the observer.
     #[test]
     fn a_quaternion_folds_into_attitude() {
@@ -1724,185 +1490,48 @@ mod tests {
         assert_eq!(vehicle.display_name(), "Acme Plane (1)");
     }
 
-    /// A finished run can be forgotten; a running one must not be.
+    /// The vehicle hands its calibration what only it knows: the firmware's
+    /// protocol, its armed state and liveness, and the autopilot's feedback.
     #[test]
-    fn only_a_finished_calibration_can_be_dismissed() {
+    fn the_calibration_follows_the_firmware_and_the_autopilot() {
         let t = Instant::now();
         let mut vehicle = vehicle();
+        assert!(vehicle.calibration_kinds().is_empty(), "unknown firmware");
         vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let run = calibration::RunId(1);
-
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Gyroscope,
-                run,
-            },
-        );
-        assert!(!vehicle.update_calibration(t, CalibrationUpdate::Dismiss));
-        assert!(vehicle.calibration.is_some(), "a running run stays");
-
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Acknowledged {
-                run,
-                result: Ok(()),
-            },
-        );
-        assert!(vehicle.calibration.is_some(), "a finished run is kept");
-        assert!(vehicle.update_calibration(t, CalibrationUpdate::Dismiss));
-        assert!(vehicle.calibration.is_none());
-    }
-
-    /// A failed confirmation puts the operator back on the step; the vehicle
-    /// is not waiting for a confirmation it never received.
-    #[test]
-    fn a_failed_confirmation_asks_again() {
-        let t = Instant::now();
-        let mut vehicle = vehicle();
-        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let run = calibration::RunId(1);
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Accelerometer,
-                run,
-            },
-        );
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Acknowledged {
-                run,
-                result: Ok(()),
-            },
-        );
-        vehicle.handle_message(
-            t,
-            1,
-            &DefaultDialect::CommandLong(messages::CommandLong {
-                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
-                param1: 1.0,
-                ..Default::default()
-            }),
-        );
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Confirmed {
-                run,
-                side: calibration::Side::Level,
-            },
-        );
-
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::ConfirmFailed {
-                run,
-                side: calibration::Side::Level,
-            },
+        let kinds = vehicle.calibration_kinds();
+        assert!(kinds.contains(&CalibrationKind::Accelerometer));
+        assert!(
+            !kinds.contains(&CalibrationKind::Airspeed),
+            "a copter has no airspeed sensor"
         );
         assert_eq!(
-            vehicle.calibration.as_ref().unwrap().instruction,
-            calibration::Instruction::Place(calibration::Side::Level)
+            vehicle.calibration_controls().start_blocked,
+            None,
+            "the heartbeat says it is disarmed"
         );
-    }
 
-    /// A confirmation of an earlier run that fails only after a newer run has
-    /// confirmed the same side does not ask the operator again.
-    #[test]
-    fn a_failed_confirmation_of_an_earlier_run_is_ignored() {
-        let t = Instant::now();
-        let mut vehicle = vehicle();
-        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let (old, new) = (calibration::RunId(1), calibration::RunId(2));
-        for run in [old, new] {
-            vehicle.update_calibration(
-                t,
-                CalibrationUpdate::Begin {
-                    kind: CalibrationKind::Accelerometer,
-                    run,
-                },
-            );
-        }
+        let run = crate::domain::calibration::RunId::next();
+        let kind = CalibrationKind::Accelerometer;
+        vehicle.update_calibration(t, CalibrationUpdate::Begin { kind, run });
         vehicle.update_calibration(
             t,
             CalibrationUpdate::Acknowledged {
-                run: new,
+                run,
                 result: Ok(()),
             },
         );
-        vehicle.handle_message(
-            t,
-            1,
-            &DefaultDialect::CommandLong(messages::CommandLong {
-                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
-                param1: 1.0,
-                ..Default::default()
-            }),
-        );
-        let level = calibration::Side::Level;
-        vehicle.update_calibration(
-            t,
-            CalibrationUpdate::Confirmed {
-                run: new,
-                side: level,
-            },
-        );
+        let position = DefaultDialect::CommandLong(messages::CommandLong {
+            command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
+            param1: 1.0,
+            ..Default::default()
+        });
 
-        assert!(!vehicle.update_calibration(
-            t,
-            CalibrationUpdate::ConfirmFailed {
-                run: old,
-                side: level,
-            },
-        ));
-        assert_eq!(
-            vehicle.calibration.as_ref().unwrap().instruction,
-            calibration::Instruction::Confirming(level)
-        );
-    }
-
-    /// A firmware with no calibration protocol cannot start a run.
-    #[test]
-    fn a_firmware_without_calibration_cannot_begin_one() {
-        let mut vehicle = vehicle();
-        vehicle.handle_message(Instant::now(), 1, &heartbeat(MavAutopilot::Generic));
-
-        assert!(!vehicle.update_calibration(
-            Instant::now(),
-            CalibrationUpdate::Begin {
-                kind: CalibrationKind::Gyroscope,
-                run: calibration::RunId(1),
-            },
-        ));
-        assert!(vehicle.calibration.is_none());
-    }
-
-    /// What a run reports lands on that run only: a start abandoned after a
-    /// newer one began leaves the newer one alone.
-    #[test]
-    fn calibration_updates_apply_to_their_own_run() {
-        let mut vehicle = vehicle();
-        vehicle.handle_message(Instant::now(), 1, &heartbeat(MavAutopilot::Ardupilotmega));
-        let (old, new) = (calibration::RunId(1), calibration::RunId(2));
-        let begin = |run| CalibrationUpdate::Begin {
-            kind: CalibrationKind::Gyroscope,
-            run,
-        };
-
-        vehicle.update_calibration(Instant::now(), begin(old));
-        vehicle.update_calibration(Instant::now(), begin(new));
+        vehicle.handle_message(t, 2, &position);
         assert!(
-            !vehicle.update_calibration(Instant::now(), CalibrationUpdate::Abandoned { run: old })
+            !vehicle.calibration_controls().confirm,
+            "a peripheral does not speak for the autopilot"
         );
-        let phase = || vehicle.calibration.as_ref().unwrap().phase.clone();
-        assert_eq!(phase(), calibration::Phase::Starting);
-
-        assert!(
-            vehicle.update_calibration(Instant::now(), CalibrationUpdate::Abandoned { run: new })
-        );
-        assert!(matches!(
-            vehicle.calibration.as_ref().unwrap().phase,
-            calibration::Phase::Failed(_)
-        ));
+        vehicle.handle_message(t, 1, &position);
+        assert!(vehicle.calibration_controls().confirm);
     }
 }

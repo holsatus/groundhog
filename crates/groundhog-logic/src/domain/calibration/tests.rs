@@ -11,7 +11,7 @@ use mavio::default_dialect::{
 use super::{ardupilot::ArduPilotCalibration, px4::Px4Calibration, *};
 
 fn session(protocol: &dyn CalibrationProtocol, kind: CalibrationKind) -> Session {
-    Session::new(kind, protocol.completes_on_ack(kind), RunId(1))
+    Session::new(kind, protocol.completes_on_ack(kind))
 }
 
 #[test]

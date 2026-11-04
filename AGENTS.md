@@ -289,7 +289,21 @@ gives the start, confirm and cancel commands and folds the vehicle's feedback
 into the session. The session lives on the `Vehicle`, so the runtime advances
 it as feedback arrives, and the UI (`features/calibration.rs`) only starts,
 confirms and cancels through `VehicleClient` and renders what the session and
-`Vehicle::calibration_controls` say. Finished runs are announced as `FleetEvent::CalibrationFinished`.
+`Vehicle::calibration_controls` say.
+
+One module owns the run: `domain::calibration::Calibration`
+(`domain/calibration/lifecycle.rs`), a private part of the `Vehicle`. It
+takes what the operation running a run reports (`CalibrationUpdate`, each
+naming its `RunId`, so a late report cannot land on a newer run), the
+vehicle's feedback, and the fleet's facts (the autopilot rebooted, the
+vehicle was lost, time passed), and answers with an `Ended` when the run
+finishes. The fleet forwards that as `FleetEvent::CalibrationFinished`, and
+sends the cancel it carries when Groundhog ended a run the vehicle may still
+be running (lost, or no progress for a minute; a reboot has already ended
+it). It also decides when a run may start: only on a vehicle known to be
+disarmed that has not been lost, and not while another runs
+(`StartBlocked`). The view shows it and `VehicleClient::start_calibration`
+refuses it, so no frontend can calibrate a vehicle that may be armed.
 
 ### Cameras describe themselves when asked
 
@@ -1041,6 +1055,7 @@ written by a newer build, saves nothing.
 | **Onboard mission** | What the vehicle holds as of the last transfer (`OnboardMission`). |
 | **Draft** | The operator's plan for a vehicle, or the offline plan. |
 | **Plan index / wire sequence** | An item's position in the plan, versus its sequence number on the wire. They differ by the firmware's home slot. |
+| **Calibration run** | One start of a sensor calibration on a vehicle, identified by a `RunId`, followed until the operator dismisses it once finished. |
 | **Liveness** | Active, stale (no frame for 3 s) or lost (no frame for 10 s). |
 | **Revision** | A counter that changes whenever content changes; used as a cache key. |
 | **Operation / `Ticket`** | A tracked, cancellable task from the UI, and the identity of one run of it. |

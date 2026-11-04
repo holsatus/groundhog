@@ -49,6 +49,19 @@ fn shows(panel: &CalibrationPanel, env: &Env, text: &str) -> bool {
     simulator.find(text).is_ok()
 }
 
+/// The backend says when a calibration may start; the panel says why not.
+#[tokio::test]
+async fn an_armed_vehicle_is_asked_to_disarm_first() {
+    let mut env = Env::new();
+    env.observe_vehicle(ADDRESS, true, 0);
+    let panel = CalibrationPanel::default();
+
+    assert!(shows(&panel, &env, "Disarm the vehicle to calibrate."));
+
+    env.observe_vehicle(ADDRESS, false, 0);
+    assert!(!shows(&panel, &env, "Disarm the vehicle to calibrate."));
+}
+
 #[tokio::test]
 async fn a_whole_accelerometer_run_walks_through_every_side() {
     let mut env = env();
@@ -80,8 +93,7 @@ async fn a_whole_accelerometer_run_walks_through_every_side() {
         let instruction = snapshot
             .vehicle(A)
             .unwrap()
-            .calibration
-            .as_ref()
+            .calibration()
             .unwrap()
             .instruction;
         assert_eq!(instruction, Instruction::Place(side));

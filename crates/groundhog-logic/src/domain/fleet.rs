@@ -27,7 +27,7 @@ use mavio::{DefaultDialect, default_dialect::enums::MavAutopilot};
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{CalibrationCancel, CalibrationKind, CalibrationUpdate, Outcome, Session},
+        calibration::{CalibrationKind, CalibrationUpdate, Cancel, Ended, Outcome},
         firmware::FlightMode,
         mission::OnboardMission,
         parameter::{DownloadUpdate, Parameters},
@@ -126,10 +126,11 @@ pub struct Fleet {
 }
 
 /// What one aging step produced: the events to report, and the cancels to
-/// send to vehicles whose run Groundhog ended itself.
+/// send to vehicles whose run Groundhog ended itself, with the address of
+/// each.
 pub(crate) struct Tick {
     pub(crate) events: Vec<FleetEvent>,
-    pub(crate) cancels: Vec<CalibrationCancel>,
+    pub(crate) cancels: Vec<(MavlinkId, Cancel)>,
 }
 
 impl Tick {
@@ -138,6 +139,14 @@ impl Tick {
             events: Vec::new(),
             cancels: Vec::new(),
         }
+    }
+
+    /// Announce a run Groundhog ended on `vehicle`, and stop it there.
+    fn ended(&mut self, vehicle: &Vehicle, mut ended: Ended) {
+        if let Some(cancel) = ended.cancel.take() {
+            self.cancels.push((vehicle.target(), cancel));
+        }
+        self.events.push(finished(vehicle.system, ended));
     }
 }
 
@@ -256,7 +265,6 @@ impl Fleet {
             return events;
         };
 
-        let calibrating_before = is_calibrating(vehicle);
         let armed_before = vehicle.armed();
         let mode_before = vehicle.flight_mode();
         let boots_before = vehicle.boot_count();
@@ -269,9 +277,12 @@ impl Fleet {
         };
         let camera_before = is_camera(vehicle);
 
-        if let Some(text) = vehicle.handle_message(received_at, source.component, message) {
+        let folded = vehicle.handle_message(received_at, source.component, message);
+        if let Some(text) = folded.text {
             events.push(FleetEvent::StatusText(id, text));
         }
+        // The vehicle finished the run itself, so nothing is sent.
+        events.extend(folded.calibration.map(|ended| finished(id, ended)));
 
         if !camera_before && is_camera(vehicle) {
             events.push(FleetEvent::CameraAppeared(source));
@@ -280,11 +291,12 @@ impl Fleet {
         if vehicle.boot_count() != boots_before {
             events.push(FleetEvent::Rebooted(id));
             // A reboot ends the run on the vehicle too, so nothing is sent.
-            let _ = vehicle.end_calibration("the autopilot rebooted");
-            // And applies what a finished one waited for.
-            if let Some(session) = vehicle.calibration.as_mut() {
-                session.needs_reboot = false;
-            }
+            events.extend(
+                vehicle
+                    .calibration_mut()
+                    .rebooted()
+                    .map(|ended| finished(id, ended)),
+            );
         }
 
         if had_heartbeat {
@@ -302,10 +314,6 @@ impl Fleet {
 
         if !stale_before && vehicle.mission.onboard_is_stale() {
             events.push(FleetEvent::OnboardMissionStale(id));
-        }
-
-        if calibrating_before {
-            events.extend(calibration_finished(id, vehicle));
         }
 
         events
@@ -338,22 +346,19 @@ impl Fleet {
                 vehicle.liveness = liveness;
 
                 if liveness == Liveness::Lost
-                    && let Some(ended) =
-                        vehicle.end_calibration("contact with the vehicle was lost")
+                    && let Some(ended) = vehicle.calibration_mut().lost()
                 {
-                    // Only a run that was going is announced; a finished one
-                    // stays announced once.
-                    tick.events.extend(calibration_finished(*id, vehicle));
-                    tick.cancels.extend(ended.cancel);
+                    tick.ended(vehicle, ended);
                 }
             }
 
-            if vehicle.calibration_timed_out(now)
-                && let Some(ended) =
-                    Arc::make_mut(vehicle).end_calibration("the calibration made no progress")
-            {
-                tick.events.extend(calibration_finished(*id, vehicle));
-                tick.cancels.extend(ended.cancel);
+            // Asked first, so that an idle vehicle is not copied out of the
+            // last snapshot on every tick.
+            if vehicle.calibration_state().is_stalled(now) {
+                let vehicle = Arc::make_mut(vehicle);
+                if let Some(ended) = vehicle.calibration_mut().tick(now) {
+                    tick.ended(vehicle, ended);
+                }
             }
         }
 
@@ -388,7 +393,7 @@ impl Fleet {
     /// tests.
     #[cfg(feature = "test-support")]
     pub fn test_begin_calibration(&mut self, id: SystemId, kind: CalibrationKind, now: Instant) {
-        let run = crate::domain::calibration::RunId(0);
+        let run = crate::domain::calibration::RunId::next();
         self.update_calibration(id, now, CalibrationUpdate::Begin { kind, run });
         self.update_calibration(
             id,
@@ -400,26 +405,17 @@ impl Fleet {
         );
     }
 
-    /// Apply what a calibration operation reports. Returns the events it
-    /// caused; none for an unknown vehicle.
+    /// Apply what a calibration operation reports. Returns the event for the
+    /// run it finished, if it did; none for an unknown vehicle.
     pub(crate) fn update_calibration(
         &mut self,
         id: SystemId,
         now: Instant,
         update: CalibrationUpdate,
-    ) -> Vec<FleetEvent> {
-        let Some(vehicle) = self.vehicle_mut(id) else {
-            return Vec::new();
-        };
-
-        // A run replaced by a new one is not reported as finished.
-        let calibrating_before =
-            is_calibrating(vehicle) && !matches!(update, CalibrationUpdate::Begin { .. });
-        if !vehicle.update_calibration(now, update) || !calibrating_before {
-            return Vec::new();
-        }
-
-        calibration_finished(id, vehicle).into_iter().collect()
+    ) -> Option<FleetEvent> {
+        let ended = self.vehicle_mut(id)?.update_calibration(now, update)?;
+        // The operation that ended it tells the vehicle itself.
+        Some(finished(id, ended))
     }
 
     /// Record a parameter list download's progress. Returns whether the
@@ -439,19 +435,9 @@ impl Fleet {
     }
 }
 
-fn is_calibrating(vehicle: &Vehicle) -> bool {
-    vehicle
-        .calibration
-        .as_ref()
-        .is_some_and(Session::is_running)
-}
-
-/// The event for a vehicle's calibration having finished, if it has.
-fn calibration_finished(id: SystemId, vehicle: &Vehicle) -> Option<FleetEvent> {
-    vehicle.calibration.as_ref().and_then(|session| {
-        let outcome = session.phase.outcome()?;
-        Some(FleetEvent::CalibrationFinished(id, session.kind, outcome))
-    })
+/// The event for a calibration run on `id` having ended.
+fn finished(id: SystemId, ended: Ended) -> FleetEvent {
+    FleetEvent::CalibrationFinished(id, ended.kind, ended.outcome)
 }
 
 #[cfg(test)]
@@ -827,8 +813,12 @@ mod tests {
 
 #[cfg(test)]
 mod calibration_tests {
+    //! The calibration's own rules are tested in `calibration::lifecycle`;
+    //! these check that the fleet hands it the vehicle's facts and forwards
+    //! what it answers.
+
     use super::*;
-    use crate::domain::calibration::{CalibrationKind, Outcome, Phase, RunId, Session, Side};
+    use crate::domain::calibration::RunId;
     use mavio::default_dialect::{
         enums::{MagCalStatus, MavCmd, MavModeFlag, MavType},
         messages,
@@ -843,19 +833,6 @@ mod calibration_tests {
         }
     }
 
-    fn heartbeat() -> DefaultDialect {
-        heartbeat_of(MavAutopilot::Ardupilotmega)
-    }
-
-    fn heartbeat_of(autopilot: MavAutopilot) -> DefaultDialect {
-        DefaultDialect::Heartbeat(messages::Heartbeat {
-            type_: MavType::Quadrotor,
-            autopilot,
-            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
-            ..Default::default()
-        })
-    }
-
     fn attitude(time_boot_ms: u32) -> DefaultDialect {
         DefaultDialect::Attitude(messages::Attitude {
             time_boot_ms,
@@ -863,46 +840,18 @@ mod calibration_tests {
         })
     }
 
-    fn accelcal_position(position: f32) -> DefaultDialect {
-        DefaultDialect::CommandLong(messages::CommandLong {
-            command: MavCmd::AccelcalVehiclePos,
-            param1: position,
+    /// An ArduPilot copter running a compass calibration.
+    fn calibrating(at: Instant) -> Fleet {
+        let mut fleet = Fleet::default();
+        let heartbeat = DefaultDialect::Heartbeat(messages::Heartbeat {
+            type_: MavType::Quadrotor,
+            autopilot: MavAutopilot::Ardupilotmega,
+            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
             ..Default::default()
-        })
-    }
-
-    fn mag_progress(compass_id: u8, completion_pct: u8) -> DefaultDialect {
-        DefaultDialect::MagCalProgress(messages::MagCalProgress {
-            compass_id,
-            completion_pct,
-            cal_status: MagCalStatus::MagCalRunningStepOne,
-            ..Default::default()
-        })
-    }
-
-    fn statustext(text: &str) -> DefaultDialect {
-        let mut bytes = [0u8; 50];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        DefaultDialect::Statustext(messages::Statustext {
-            text: bytes,
-            ..Default::default()
-        })
-    }
-
-    fn register(fleet: &mut Fleet, at: Instant) {
-        register_with(fleet, at, MavAutopilot::Ardupilotmega);
-    }
-
-    fn register_with(fleet: &mut Fleet, at: Instant, autopilot: MavAutopilot) {
-        fleet.observe(source(), at, Some(&heartbeat_of(autopilot)));
-    }
-
-    fn start(fleet: &mut Fleet, at: Instant) {
-        start_kind(fleet, at, CalibrationKind::Accelerometer);
-    }
-
-    fn start_kind(fleet: &mut Fleet, at: Instant, kind: CalibrationKind) {
-        let run = RunId(1);
+        });
+        fleet.observe(source(), at, Some(&heartbeat));
+        let run = RunId::next();
+        let kind = CalibrationKind::Compass;
         fleet.update_calibration(A, at, CalibrationUpdate::Begin { kind, run });
         fleet.update_calibration(
             A,
@@ -912,312 +861,88 @@ mod calibration_tests {
                 result: Ok(()),
             },
         );
-    }
-
-    fn running(fleet: &Fleet) -> bool {
         fleet
-            .vehicle(A)
-            .and_then(|vehicle| vehicle.calibration.as_ref())
-            .is_some_and(Session::is_running)
     }
 
-    fn finished(events: &[FleetEvent]) -> Option<&str> {
+    fn failed(events: &[FleetEvent]) -> Option<&str> {
         events.iter().find_map(|event| match event {
-            FleetEvent::CalibrationFinished(_, _, Outcome::Failed(reason)) => Some(reason.as_str()),
+            FleetEvent::CalibrationFinished(
+                A,
+                CalibrationKind::Compass,
+                Outcome::Failed(reason),
+            ) => Some(reason.as_str()),
             _ => None,
         })
     }
 
     #[test]
-    fn a_reboot_ends_a_running_calibration() {
-        let mut fleet = Fleet::default();
+    fn a_reboot_ends_the_run_and_is_announced() {
         let at = Instant::now();
-        register(&mut fleet, at);
-        start(&mut fleet, at);
-        assert!(running(&fleet));
-
-        // A boot time stepping forward is normal.
-        fleet.observe(source(), at, Some(&attitude(50_000)));
-        assert!(running(&fleet), "no reboot yet");
-
-        let events = fleet.observe(source(), at, Some(&attitude(1_000)));
-        assert!(events.contains(&FleetEvent::Rebooted(A)));
-        assert!(
-            finished(&events).is_some_and(|reason| reason.contains("rebooted")),
-            "the calibration ends with the reboot: {events:?}"
-        );
-        assert!(!running(&fleet));
-    }
-
-    #[test]
-    fn a_calibration_times_out_only_while_the_vehicle_is_to_act() {
-        let mut fleet = Fleet::default();
-        let start_at = Instant::now();
-        register(&mut fleet, start_at);
-        start(&mut fleet, start_at);
-
-        // The vehicle asks for the level side: the operator may take as long
-        // as they need.
-        fleet.observe(source(), start_at, Some(&accelcal_position(1.0)));
-        assert_eq!(
-            fleet
-                .vehicle(A)
-                .unwrap()
-                .calibration
-                .as_ref()
-                .unwrap()
-                .instruction,
-            crate::domain::calibration::Instruction::Place(Side::Level)
-        );
-
-        let waited = start_at + Duration::from_secs(120);
-        fleet.observe(source(), waited, Some(&heartbeat()));
-        let events = fleet.tick(waited).events;
-        assert!(
-            finished(&events).is_none(),
-            "not while waiting for the operator"
-        );
-        assert!(running(&fleet));
-
-        // Confirmed: the vehicle takes over, and owes progress.
-        fleet.update_calibration(
-            A,
-            waited,
-            CalibrationUpdate::Confirmed {
-                run: RunId(1),
-                side: Side::Level,
-            },
-        );
-        let later = waited + Duration::from_secs(61);
-        fleet.observe(source(), later, Some(&heartbeat()));
-        let events = fleet.tick(later).events;
-        assert!(
-            finished(&events).is_some_and(|reason| reason.contains("no progress")),
-            "a silent vehicle fails the run: {events:?}"
-        );
-        assert!(!running(&fleet));
-    }
-
-    /// ArduPilot can repeat the same percentage for over a minute while the
-    /// operator turns the vehicle: that is a live run, not a stalled one.
-    #[test]
-    fn repeated_compass_progress_keeps_the_run_alive() {
-        let mut fleet = Fleet::default();
-        let start_at = Instant::now();
-        register(&mut fleet, start_at);
-        start_kind(&mut fleet, start_at, CalibrationKind::Compass);
-
-        for second in 1..=62u64 {
-            let at = start_at + Duration::from_secs(second);
-            fleet.observe(source(), at, Some(&heartbeat()));
-            fleet.observe(source(), at, Some(&mag_progress(0, 87)));
-            let tick = fleet.tick(at);
-            assert!(
-                finished(&tick.events).is_none(),
-                "still running at {second} s: {:?}",
-                tick.events
-            );
-            assert!(tick.cancels.is_empty());
-        }
-        assert!(running(&fleet));
-
-        // Now the vehicle keeps heartbeating but says nothing about the run.
-        let mut cancel = None;
-        for second in 63..=130u64 {
-            let at = start_at + Duration::from_secs(second);
-            fleet.observe(source(), at, Some(&heartbeat()));
-            let tick = fleet.tick(at);
-            if let Some(reason) = finished(&tick.events) {
-                assert!(reason.contains("no progress"), "{reason}");
-                cancel = tick.cancels.into_iter().next();
-                break;
-            }
-        }
-
-        let cancel = cancel.expect("the silent run times out");
-        assert_eq!(cancel.command.command, MavCmd::DoCancelMagCal);
-        assert_eq!(cancel.target, source());
-        assert!(!running(&fleet));
-    }
-
-    /// ArduPilot repeats pre-arm texts while disarmed. They are not
-    /// calibration feedback, so a stalled run still times out.
-    #[test]
-    fn ardupilot_prearm_texts_do_not_keep_a_run_alive() {
-        let mut fleet = Fleet::default();
-        let start_at = Instant::now();
-        register(&mut fleet, start_at);
-        start_kind(&mut fleet, start_at, CalibrationKind::Compass);
-        fleet.observe(source(), start_at, Some(&mag_progress(0, 10)));
-
-        let mut cancel = None;
-        for second in 1..=130u64 {
-            let at = start_at + Duration::from_secs(second);
-            fleet.observe(source(), at, Some(&heartbeat()));
-            if second % 30 == 0 {
-                fleet.observe(
-                    source(),
-                    at,
-                    Some(&statustext("PreArm: Compass not calibrated")),
-                );
-            }
-            let tick = fleet.tick(at);
-            if let Some(reason) = finished(&tick.events) {
-                assert!(reason.contains("no progress"), "{reason}");
-                cancel = tick.cancels.into_iter().next();
-                break;
-            }
-        }
-
-        let cancel = cancel.expect("the stalled run times out");
-        assert_eq!(cancel.command.command, MavCmd::DoCancelMagCal);
-        assert!(!running(&fleet));
-    }
-
-    /// PX4 repeats the same `[cal] progress` text; that too is a live run.
-    #[test]
-    fn repeated_px4_progress_keeps_the_run_alive() {
-        let mut fleet = Fleet::default();
-        let start_at = Instant::now();
-        register_with(&mut fleet, start_at, MavAutopilot::Px4);
-        start_kind(&mut fleet, start_at, CalibrationKind::Compass);
-
-        for second in 1..=62u64 {
-            let at = start_at + Duration::from_secs(second);
-            fleet.observe(source(), at, Some(&heartbeat_of(MavAutopilot::Px4)));
-            fleet.observe(source(), at, Some(&statustext("[cal] progress <42>")));
-            let tick = fleet.tick(at);
-            assert!(
-                finished(&tick.events).is_none(),
-                "still running at {second} s: {:?}",
-                tick.events
-            );
-        }
-        assert!(running(&fleet));
-
-        let mut cancel = None;
-        for second in 63..=130u64 {
-            let at = start_at + Duration::from_secs(second);
-            fleet.observe(source(), at, Some(&heartbeat_of(MavAutopilot::Px4)));
-            let tick = fleet.tick(at);
-            if let Some(reason) = finished(&tick.events) {
-                assert!(reason.contains("no progress"), "{reason}");
-                cancel = tick.cancels.into_iter().next();
-                break;
-            }
-        }
-
-        let cancel = cancel.expect("the silent run times out");
-        assert_eq!(cancel.command.command, MavCmd::PreflightCalibration);
-        assert_eq!(
-            [
-                cancel.command.param1,
-                cancel.command.param2,
-                cancel.command.param3,
-                cancel.command.param4,
-                cancel.command.param5,
-                cancel.command.param6,
-                cancel.command.param7,
-            ],
-            [0.0; 7],
-            "PX4 cancels with an empty preflight calibration"
-        );
-        assert_eq!(cancel.retries, 1);
-        assert!(!running(&fleet));
-    }
-
-    /// A lost vehicle may come back still calibrating: Groundhog stops the
-    /// run on its side too, best effort.
-    #[test]
-    fn losing_a_compass_run_cancels_it_on_the_vehicle() {
-        let mut fleet = Fleet::default();
-        let at = Instant::now();
-        register(&mut fleet, at);
-        start_kind(&mut fleet, at, CalibrationKind::Compass);
-        fleet.observe(source(), at, Some(&mag_progress(0, 10)));
-
-        let tick = fleet.tick(at + Duration::from_secs(11));
-
-        assert!(
-            finished(&tick.events).is_some_and(|reason| reason.contains("lost")),
-            "{:?}",
-            tick.events
-        );
-        let cancel = tick.cancels.into_iter().next().expect("a cancel");
-        assert_eq!(cancel.command.command, MavCmd::DoCancelMagCal);
-        assert_eq!(cancel.target, source());
-    }
-
-    /// A reboot ends the run on the vehicle's side too, so nothing is sent.
-    #[test]
-    fn a_reboot_ends_a_compass_run_without_cancelling_it() {
-        let mut fleet = Fleet::default();
-        let at = Instant::now();
-        register(&mut fleet, at);
-        start_kind(&mut fleet, at, CalibrationKind::Compass);
-        fleet.observe(source(), at, Some(&mag_progress(0, 10)));
+        let mut fleet = calibrating(at);
         fleet.observe(source(), at, Some(&attitude(50_000)));
 
         let events = fleet.observe(source(), at, Some(&attitude(1_000)));
+
         assert!(events.contains(&FleetEvent::Rebooted(A)));
-        assert!(!running(&fleet));
+        assert!(
+            failed(&events).is_some_and(|reason| reason.contains("rebooted")),
+            "{events:?}"
+        );
         assert!(fleet.tick(at).cancels.is_empty());
     }
 
-    /// A compass calibration applies only after a reboot; once the autopilot
-    /// has rebooted, the finished run no longer waits for one.
     #[test]
-    fn a_reboot_applies_a_calibration_that_waited_for_it() {
-        let mut fleet = Fleet::default();
+    fn feedback_that_ends_the_run_is_announced() {
         let at = Instant::now();
-        register(&mut fleet, at);
-        start_kind(&mut fleet, at, CalibrationKind::Compass);
-        fleet.observe(source(), at, Some(&mag_progress(0, 10)));
+        let mut fleet = calibrating(at);
+        let report = DefaultDialect::MagCalReport(messages::MagCalReport {
+            compass_id: 0,
+            cal_status: MagCalStatus::MagCalFailed,
+            ..Default::default()
+        });
         fleet.observe(
             source(),
             at,
-            Some(&DefaultDialect::MagCalReport(messages::MagCalReport {
+            Some(&DefaultDialect::MagCalProgress(messages::MagCalProgress {
                 compass_id: 0,
-                cal_status: MagCalStatus::MagCalSuccess,
+                cal_status: MagCalStatus::MagCalRunningStepOne,
                 ..Default::default()
             })),
         );
-        let session = |fleet: &Fleet| {
-            fleet
-                .vehicle(A)
-                .and_then(|vehicle| vehicle.calibration.clone())
-                .expect("the finished run is kept")
-        };
-        assert_eq!(session(&fleet).phase, Phase::Succeeded);
-        assert!(session(&fleet).needs_reboot);
 
-        fleet.observe(source(), at, Some(&attitude(50_000)));
-        fleet.observe(source(), at, Some(&attitude(1_000)));
+        let events = fleet.observe(source(), at, Some(&report));
 
-        assert_eq!(session(&fleet).phase, Phase::Succeeded, "still a success");
-        assert!(!session(&fleet).needs_reboot);
+        assert!(failed(&events).is_some(), "{events:?}");
     }
 
-    /// A calibration that succeeded is announced once; losing the vehicle
-    /// later must not announce it again.
+    /// A lost vehicle's run ends, and the vehicle is told to stop it at the
+    /// autopilot's address.
     #[test]
-    fn losing_a_vehicle_does_not_re_announce_a_finished_calibration() {
-        let mut fleet = Fleet::default();
+    fn losing_the_vehicle_ends_the_run_and_cancels_it_there() {
         let at = Instant::now();
-        register(&mut fleet, at);
-        start_kind(&mut fleet, at, CalibrationKind::Gyroscope);
-        assert!(!running(&fleet), "a gyro run completes with its ack");
+        let mut fleet = calibrating(at);
 
-        let tick = fleet.tick(at + Duration::from_secs(11));
+        let tick = fleet.tick(at + LOST_AFTER + Duration::from_secs(1));
 
-        assert!(
-            !tick
-                .events
-                .iter()
-                .any(|event| matches!(event, FleetEvent::CalibrationFinished(..))),
-            "announced once, not again on loss: {:?}",
-            tick.events
-        );
-        assert!(tick.cancels.is_empty());
+        assert!(failed(&tick.events).is_some_and(|reason| reason.contains("lost")));
+        let [(target, cancel)] = tick.cancels.as_slice() else {
+            panic!("one cancel: {:?}", tick.cancels);
+        };
+        assert_eq!(*target, source());
+        assert_eq!(cancel.command.command, MavCmd::DoCancelMagCal);
+    }
+
+    #[test]
+    fn a_stalled_run_ends_and_is_cancelled() {
+        let at = Instant::now();
+        let mut fleet = calibrating(at);
+        let later = at + Duration::from_secs(61);
+        // Still heard from, so not lost: only the run is silent.
+        fleet.observe(source(), later, Some(&attitude(1)));
+
+        let tick = fleet.tick(later);
+
+        assert!(failed(&tick.events).is_some_and(|reason| reason.contains("no progress")));
+        assert_eq!(tick.cancels.len(), 1);
     }
 }

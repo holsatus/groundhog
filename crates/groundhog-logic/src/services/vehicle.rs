@@ -23,9 +23,7 @@ use super::{Error, FleetHandle, Result, runtime::Input};
 use crate::{
     MavlinkId, SystemId,
     domain::{
-        calibration::{
-            CalibrationKind, CalibrationProtocol, CalibrationUpdate, Instruction, RunId, Session,
-        },
+        calibration::{CalibrationKind, CalibrationUpdate, Confirmation, RunId},
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
         parameter::{DownloadId, DownloadOutcome, DownloadUpdate},
@@ -128,10 +126,6 @@ impl Drop for DownloadReport<'_> {
 /// unique within the process.
 static LAST_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 
-/// The last calibration run handed out; run ids only need to be unique
-/// within the process.
-static LAST_CALIBRATION_RUN: AtomicU64 = AtomicU64::new(0);
-
 /// Reports a calibration start to the runtime, naming its run: begun when
 /// created, then acknowledged, or abandoned if dropped first. A dropped start
 /// must not leave the session starting in every reader's snapshot, and the
@@ -144,7 +138,7 @@ struct CalibrationStart<'a> {
 
 impl<'a> CalibrationStart<'a> {
     fn begin(client: &'a VehicleClient, kind: CalibrationKind) -> Self {
-        let run = RunId(LAST_CALIBRATION_RUN.fetch_add(1, Ordering::Relaxed) + 1);
+        let run = RunId::next();
         client.report_calibration(CalibrationUpdate::Begin { kind, run });
         Self {
             client,
@@ -689,22 +683,32 @@ impl VehicleClient {
     /// Run a calibration. Returns once the vehicle acknowledged the start (or,
     /// for calibrations the firmware completes before acknowledging, the
     /// outcome). The run itself is followed by the fleet runtime and visible
-    /// as the vehicle's [`Session`] in the snapshot.
+    /// as the vehicle's [`Session`](crate::domain::calibration::Session) in
+    /// the snapshot.
     ///
     /// # Errors
     ///
     /// [`Error::CalibrationUnsupported`] if the vehicle's firmware does not
-    /// offer `kind` on this vehicle's class, [`Error::UnknownVehicle`] if it
-    /// left the fleet, [`Error::Rejected`] if it refuses to start, or
-    /// [`Error::Timeout`] / [`Error::NoLink`]. The command is never resent.
+    /// offer `kind` on this vehicle's class, [`Error::CalibrationBlocked`]
+    /// if the vehicle is not known to be disarmed, does not answer, or
+    /// already calibrates, [`Error::UnknownVehicle`] if it left the fleet,
+    /// [`Error::Rejected`] if it refuses to start, or [`Error::Timeout`] /
+    /// [`Error::NoLink`]. The command is never resent.
     pub async fn start_calibration(&self, kind: CalibrationKind) -> Result<()> {
-        let (target, protocol, class) = self.with_vehicle(|vehicle| {
-            let protocol = vehicle.firmware().calibration();
-            (vehicle.target(), protocol, vehicle.class())
+        let (target, protocol, class, blocked) = self.with_vehicle(|vehicle| {
+            (
+                vehicle.target(),
+                vehicle.firmware().calibration(),
+                vehicle.class(),
+                vehicle.calibration_controls().start_blocked,
+            )
         })?;
         let protocol = protocol
             .filter(|protocol| protocol.supports(kind, class))
             .ok_or(Error::CalibrationUnsupported)?;
+        if let Some(blocked) = blocked {
+            return Err(Error::CalibrationBlocked(blocked));
+        }
 
         // Before the command: feedback can arrive before the acknowledgement.
         let start = CalibrationStart::begin(self, kind);
@@ -735,15 +739,10 @@ impl VehicleClient {
     /// [`Error::Rejected`] / [`Error::Timeout`] / [`Error::NoLink`]. The
     /// command is never resent.
     pub async fn confirm_calibration_step(&self) -> Result<()> {
-        let (target, (command, run, side)) = self.with_calibration(|protocol, session| {
-            let side = match session.instruction {
-                Instruction::Place(side) => Some(side),
-                _ => None,
-            };
-            (protocol.confirm(session), session.run(), side)
+        let (target, confirmation) = self.with_vehicle(|vehicle| {
+            (vehicle.target(), vehicle.calibration_state().confirmation())
         })?;
-        let command = command.ok_or(Error::NotCalibrating)?;
-        let side = side.ok_or(Error::NotCalibrating)?;
+        let Confirmation { command, run, side } = confirmation.ok_or(Error::NotCalibrating)?;
 
         // The operator is done; the vehicle takes over. Until its next
         // progress the session must not ask again: a repeat would be refused
@@ -778,20 +777,28 @@ impl VehicleClient {
     /// tell the vehicle is logged rather than returned: the session has ended
     /// either way.
     pub async fn cancel_calibration(&self) -> Result<()> {
-        let (target, (command, retries)) = self.with_calibration(|protocol, session| {
-            (protocol.cancel(session), protocol.cancel_retries())
+        let (target, running, cancel) = self.with_vehicle(|vehicle| {
+            let calibration = vehicle.calibration_state();
+            (
+                vehicle.target(),
+                calibration.is_running(),
+                calibration.cancel_command(),
+            )
         })?;
+        if !running {
+            return Err(Error::NotCalibrating);
+        }
         self.report_calibration(CalibrationUpdate::Cancel);
 
-        if let Some(command) = command {
+        if let Some(cancel) = cancel {
             // The retry count is the firmware's: PX4 acknowledges a cancel
             // twice, once refusing it as a new command while busy, and the
             // outcome shows in its texts instead.
             if let Err(error) = self
                 .fleet
                 .router()
-                .command(target, command)
-                .retries(retries)
+                .command(target, cancel.command)
+                .retries(cancel.retries)
                 .await
             {
                 log::debug!("Calibration cancel on {target:?}: {error}");
@@ -810,22 +817,6 @@ impl VehicleClient {
             system: self.system,
             update,
         });
-    }
-
-    /// Read the running calibration and its protocol.
-    fn with_calibration<T>(
-        &self,
-        read: impl FnOnce(&dyn CalibrationProtocol, &Session) -> T,
-    ) -> Result<(MavlinkId, T)> {
-        self.with_vehicle(|vehicle| {
-            let protocol = vehicle.firmware().calibration()?;
-            let session = vehicle
-                .calibration
-                .as_ref()
-                .filter(|session| session.is_running())?;
-            Some((vehicle.target(), read(protocol, session)))
-        })?
-        .ok_or(Error::NotCalibrating)
     }
 
     /// Command the vehicle's mode of `kind` (return, land, ...), whatever its

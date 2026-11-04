@@ -3,14 +3,18 @@
 //!
 //! The running calibration is vehicle state (a [`Session`] in the snapshot,
 //! advanced by the fleet runtime as the vehicle reports); this panel only
-//! starts, confirms and cancels, and shows what the session says to do.
+//! starts, confirms and cancels, and shows what the session says to do. When
+//! a start, a confirmation or a cancel is possible is the backend's to say
+//! (`Vehicle::calibration_controls`).
 
 use groundhog_logic::{
     SystemId,
     domain::{
-        calibration::{CalibrationKind, CompassStatus, Instruction, Phase, Session, Side},
+        calibration::{
+            CalibrationKind, CompassStatus, Instruction, Phase, Session, Side, StartBlocked,
+        },
         fleet::FleetSnapshot,
-        vehicle::{Liveness, Vehicle},
+        vehicle::Vehicle,
     },
     services::{Error, Result},
 };
@@ -143,20 +147,15 @@ impl CalibrationPanel {
             .boxed();
         }
 
-        let blocker = if vehicle.armed() == Some(true) {
-            Some("Disarm the vehicle to calibrate.")
-        } else if vehicle.liveness == Liveness::Lost {
-            Some("The vehicle is not responding.")
-        } else {
-            None
-        };
-
-        let running = vehicle
-            .calibration
-            .as_ref()
-            .is_some_and(Session::is_running);
-        let can_start =
-            blocker.is_none() && !running && !self.is_busy(vehicle.system, Action::Start);
+        let start_blocked = vehicle.calibration_controls().start_blocked;
+        // A running calibration shows itself; only the other reasons need
+        // saying.
+        let blocker = start_blocked.and_then(|blocked| match blocked {
+            StartBlocked::NotDisarmed => Some("Disarm the vehicle to calibrate."),
+            StartBlocked::Lost => Some("The vehicle is not responding."),
+            StartBlocked::Running => None,
+        });
+        let can_start = start_blocked.is_none() && !self.is_busy(vehicle.system, Action::Start);
 
         let calibrations = kinds.into_iter().map(|kind| {
             row![
@@ -191,8 +190,7 @@ impl CalibrationPanel {
         let contents = column![
             blocker.map(|blocker| ui::banner(blocker, Tone::Warning)),
             vehicle
-                .calibration
-                .as_ref()
+                .calibration()
                 .map(|session| self.view_session(vehicle, session)),
             ui::section("Sensors", [ui::card_list(calibrations).boxed()]),
         ]
@@ -357,7 +355,9 @@ fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
         // A refused or unanswered start ends the session, which announces
         // itself; only failures before there is a session are news.
         Action::Start => match error {
-            Error::CalibrationUnsupported | Error::UnknownVehicle => "Starting the calibration",
+            Error::CalibrationUnsupported
+            | Error::CalibrationBlocked(_)
+            | Error::UnknownVehicle => "Starting the calibration",
             _ => return,
         },
         Action::Confirm => "Confirming the orientation",

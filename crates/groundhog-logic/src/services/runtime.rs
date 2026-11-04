@@ -169,18 +169,15 @@ async fn run(
                 // A run Groundhog ended itself must also be stopped on the
                 // vehicle, best effort: a lost vehicle may have no link left
                 // to hear it, and it may come back still calibrating.
-                for cancel in tick.cancels {
+                for (target, cancel) in tick.cancels {
                     let router = handle.router().clone();
                     tokio::spawn(async move {
                         if let Err(error) = router
-                            .command(cancel.target, cancel.command)
+                            .command(target, cancel.command)
                             .retries(cancel.retries)
                             .await
                         {
-                            log::warn!(
-                                "Calibration cancel on {:?} failed: {error}",
-                                cancel.target
-                            );
+                            log::warn!("Calibration cancel on {target:?} failed: {error}");
                         }
                     });
                 }
@@ -237,7 +234,10 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
             fleet.set_param_download(address, update);
         }
         Input::Calibration { system, update } => {
-            return fleet.update_calibration(system, std::time::Instant::now(), update);
+            return fleet
+                .update_calibration(system, std::time::Instant::now(), update)
+                .into_iter()
+                .collect();
         }
     }
     Vec::new()
