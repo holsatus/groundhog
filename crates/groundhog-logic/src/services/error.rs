@@ -189,4 +189,87 @@ mod tests {
             "the vehicle refused the mission: not enough space for the mission"
         );
     }
+
+    /// Every middleware failure keeps its category at the boundary; the
+    /// notice wording depends on it.
+    #[test]
+    fn middleware_failures_keep_their_category() {
+        for (mav, service) in [
+            (MavError::NoLink, Error::NoLink),
+            (MavError::LinkCongested, Error::LinkCongested),
+            (MavError::Timeout, Error::Timeout),
+            (
+                MavError::Rejected(MavResult::Denied),
+                Error::Rejected(Rejection::Denied),
+            ),
+            (MavError::Encode("bad".into()), Error::Encode("bad".into())),
+            (MavError::ParamEncoding, Error::ParamEncoding),
+            (
+                MavError::MissionFailed(MavMissionResult::MavMissionDenied),
+                Error::MissionRejected(MissionRejection::Denied),
+            ),
+            (
+                MavError::MissionProtocol("bad".into()),
+                Error::Protocol("bad".into()),
+            ),
+            (MavError::ResourceClosed, Error::Unavailable),
+        ] {
+            assert_eq!(Error::from(mav), service);
+        }
+    }
+
+    /// Every mission result maps to a reason, including the parameter number
+    /// the vehicle names for an invalid item.
+    #[test]
+    fn every_mission_result_maps_to_a_reason() {
+        use MavMissionResult as R;
+
+        for (result, rejection) in [
+            (R::MavMissionError, MissionRejection::Error),
+            (R::MavMissionAccepted, MissionRejection::Error),
+            (
+                R::MavMissionUnsupportedFrame,
+                MissionRejection::UnsupportedFrame,
+            ),
+            (R::MavMissionUnsupported, MissionRejection::Unsupported),
+            (R::MavMissionNoSpace, MissionRejection::NoSpace),
+            (R::MavMissionInvalid, MissionRejection::Invalid),
+            (
+                R::MavMissionInvalidParam1,
+                MissionRejection::InvalidParam(1),
+            ),
+            (
+                R::MavMissionInvalidParam2,
+                MissionRejection::InvalidParam(2),
+            ),
+            (
+                R::MavMissionInvalidParam3,
+                MissionRejection::InvalidParam(3),
+            ),
+            (
+                R::MavMissionInvalidParam4,
+                MissionRejection::InvalidParam(4),
+            ),
+            (
+                R::MavMissionInvalidParam5X,
+                MissionRejection::InvalidParam(5),
+            ),
+            (
+                R::MavMissionInvalidParam6Y,
+                MissionRejection::InvalidParam(6),
+            ),
+            (
+                R::MavMissionInvalidParam7,
+                MissionRejection::InvalidParam(7),
+            ),
+            (
+                R::MavMissionInvalidSequence,
+                MissionRejection::InvalidSequence,
+            ),
+            (R::MavMissionDenied, MissionRejection::Denied),
+            (R::MavMissionOperationCancelled, MissionRejection::Cancelled),
+        ] {
+            assert_eq!(MissionRejection::from(result), rejection, "{result:?}");
+        }
+    }
 }
