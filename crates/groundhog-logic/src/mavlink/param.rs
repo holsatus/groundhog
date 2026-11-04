@@ -75,7 +75,11 @@ impl MavlinkRouter {
         value: Value,
         encoding: ParamEncoding,
     ) -> Result<Value> {
-        let (param_value, param_type) = encoding.encode(value);
+        // Refuse a value the encoding cannot carry before taking any lock or
+        // sending: a rounded value comes back as another one.
+        let Some((param_value, param_type)) = encoding.encode(value) else {
+            return Err(MavError::ParamEncoding);
+        };
 
         // Share the target's reply channel with other sets, but keep list
         // downloads out: their values would otherwise answer this set.
@@ -138,14 +142,20 @@ impl MavlinkRouter {
     /// inbound message stream; this only drives the protocol to completion.
     /// If `request_capabilities` is set, `AUTOPILOT_VERSION` is requested first,
     /// since the capabilities determine how parameter values are encoded.
+    /// `on_started` runs once `target`'s reply channel is held, before anything
+    /// is sent: a download announced earlier would overlap the one that holds
+    /// the channel, which is the only one receiving its values.
     ///
     /// Returns what arrived; see [`ParamListResult`].
     pub(crate) async fn param_list(
         &self,
         target: MavlinkId,
         request_capabilities: bool,
+        on_started: impl FnOnce() + Send,
     ) -> Result<ParamListResult> {
         let _lock = self.lock_channel(target).await;
+
+        on_started();
 
         if request_capabilities {
             // Both messages contain the capabilities flag, but AUTOPILOT_VERSION

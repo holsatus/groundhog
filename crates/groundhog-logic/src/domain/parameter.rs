@@ -122,8 +122,13 @@ impl ParamDownload {
         self.received.insert(index);
         self.expected = count;
         if refused {
-            self.refused += 1;
+            self.refuse_one();
         }
+    }
+
+    /// Count one more value of this download as received but left out.
+    fn refuse_one(&mut self) {
+        self.refused += 1;
     }
 
     fn finish(&mut self, outcome: DownloadOutcome) {
@@ -225,7 +230,10 @@ impl Parameters {
     }
 
     /// Re-decode every value under `encoding`, now that it is known. A no-op
-    /// when it matches the current one.
+    /// when it matches the current one. A value the new encoding cannot decode
+    /// is dropped: it was only ever decoded bytewise for display, and keeping
+    /// it would present a value the component never reported under that type.
+    /// One from the current download also counts as refused by it.
     pub(crate) fn set_encoding(&mut self, encoding: Option<ParamEncoding>) {
         if encoding == self.encoding {
             return;
@@ -233,10 +241,24 @@ impl Parameters {
 
         self.encoding = encoding;
         let decoder = encoding.unwrap_or(ParamEncoding::Bytewise);
-        for param in self.map.values_mut() {
-            if let Some(value) = decoder.decode(param.raw, param.raw_type) {
-                param.value = value;
-            }
+        let generation = self.download.generation;
+        let mut refused = 0;
+        self.map
+            .retain(|_, param| match decoder.decode(param.raw, param.raw_type) {
+                Some(value) => {
+                    param.value = value;
+                    true
+                }
+                None => {
+                    if param.generation == generation {
+                        refused += 1;
+                    }
+                    false
+                }
+            });
+
+        for _ in 0..refused {
+            self.download.refuse_one();
         }
     }
 
@@ -473,9 +495,12 @@ impl ParamEdits {
     }
 
     /// Turn values loaded from a file into edits, where they differ from what
-    /// the component reports (`None`: it reports nothing yet). Values of
-    /// parameters it does not report, or of another type, are skipped: a file
-    /// cannot add parameters, nor change their type.
+    /// the component reports (`None`: it reports nothing yet). A value equal to
+    /// the reported one means the component already holds it, so an edit of
+    /// that parameter is dropped unless its upload is in flight (that upload's
+    /// result settles it). Values of parameters the component does not report,
+    /// or of another type, are skipped: a file cannot add parameters, nor
+    /// change their type.
     pub fn load(&mut self, reported: Option<&Parameters>, loaded: &ParamValues) -> LoadSummary {
         let mut summary = LoadSummary {
             changed: 0,
@@ -489,6 +514,12 @@ impl ParamEdits {
                         self.edits
                             .insert(ident.clone(), ParamEdit::to_value(*value, current));
                         summary.changed += 1;
+                    } else if self
+                        .edits
+                        .get(ident)
+                        .is_some_and(|edit| edit.status != EditStatus::Uploading)
+                    {
+                        self.edits.remove(ident);
                     }
                 }
                 _ => summary.skipped += 1,
@@ -746,6 +777,51 @@ mod tests {
         assert!(parameters.is_empty(), "the refused value is not stored");
     }
 
+    /// A value decoded bytewise only because the encoding was unknown is not
+    /// real: once the encoding is known and refuses the raw form, it is
+    /// dropped like a value refused on arrival, and counted in the download
+    /// that reported it.
+    #[test]
+    fn a_value_refused_under_the_learned_encoding_is_dropped() {
+        let mut parameters = Parameters::default();
+        parameters.set_download(DownloadUpdate::Start);
+        parameters
+            .observe(ident(), -1.0, MavParamType::Uint8, 0, 1, None)
+            .unwrap();
+        assert_eq!(
+            parameters.value(&ident()),
+            Some(Value::U8(0)),
+            "decoded bytewise for display while the encoding is unknown"
+        );
+
+        parameters.set_encoding(Some(ParamEncoding::CCast));
+
+        assert_eq!(
+            parameters.value(&ident()),
+            None,
+            "a C-cast sentinel is not a value"
+        );
+        assert_eq!(parameters.download().received(), 1);
+        assert_eq!(parameters.download().refused(), 1);
+    }
+
+    /// Only a value from the current download counts as refused by it; an
+    /// older generation's value is removed without touching the count.
+    #[test]
+    fn a_refusal_counts_only_in_the_download_that_reported_the_value() {
+        let mut parameters = Parameters::default();
+        parameters.set_download(DownloadUpdate::Start);
+        parameters
+            .observe(ident(), -1.0, MavParamType::Uint8, 0, 1, None)
+            .unwrap();
+
+        parameters.set_download(DownloadUpdate::Start);
+        parameters.set_encoding(Some(ParamEncoding::CCast));
+
+        assert_eq!(parameters.value(&ident()), None);
+        assert_eq!(parameters.download().refused(), 0);
+    }
+
     #[test]
     fn an_edit_to_the_current_value_is_no_edit() {
         assert!(ParamEdit::new(Value::F32(1.0), "1".into()).is_none());
@@ -906,6 +982,49 @@ mod tests {
             edits.reset(&ident());
             edits.edit(ident(), Some(Value::F32(1.0)), "6".into());
         });
+    }
+
+    /// A loaded value equal to the reported one means "the component already
+    /// holds this", so a pending edit to another value is stale and goes:
+    /// otherwise Upload would still send the typed value.
+    #[test]
+    fn a_loaded_reported_value_clears_a_stale_edit() {
+        let reported = reported(&[("PARAM_ONE", 1.0)]);
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), reported.value(&ident()), "5".into());
+        assert_eq!(edits.len(), 1);
+
+        let loaded: ParamValues = [(ident(), Value::F32(1.0))].into_iter().collect();
+        let summary = edits.load(Some(&reported), &loaded);
+
+        assert_eq!(
+            summary,
+            LoadSummary {
+                changed: 0,
+                skipped: 0
+            }
+        );
+        assert!(edits.is_empty(), "the typed value is no longer an edit");
+    }
+
+    /// An upload already in flight owns its edit: the file may have been
+    /// loaded before the upload's result arrives, which settles it.
+    #[test]
+    fn a_loaded_reported_value_keeps_an_uploading_edit() {
+        let reported = reported(&[("PARAM_ONE", 1.0)]);
+        let mut edits = ParamEdits::default();
+        edits.edit(ident(), reported.value(&ident()), "5".into());
+        let upload = edits.begin_upload(&ident()).unwrap();
+
+        let loaded: ParamValues = [(ident(), Value::F32(1.0))].into_iter().collect();
+        edits.load(Some(&reported), &loaded);
+
+        assert_eq!(
+            edits.get(&ident()).map(|edit| edit.status.clone()),
+            Some(EditStatus::Uploading)
+        );
+        let outcome = edits.finish_upload(&ident(), upload, Ok::<_, String>(Value::F32(5.0)));
+        assert_eq!(outcome, Some(UploadOutcome::Set));
     }
 
     #[test]

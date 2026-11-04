@@ -36,11 +36,12 @@ impl ParamEncoding {
         }
     }
 
-    /// Encode `value` for the wire.
-    pub(crate) fn encode(self, value: Value) -> (f32, MavParamType) {
+    /// Encode `value` for the wire, or `None` when this encoding cannot carry
+    /// it exactly (see [`value_into_c_cast`]).
+    pub(crate) fn encode(self, value: Value) -> Option<(f32, MavParamType)> {
         match self {
             ParamEncoding::CCast => value_into_c_cast(value),
-            ParamEncoding::Bytewise => value_into_bytewise(value),
+            ParamEncoding::Bytewise => Some(value_into_bytewise(value)),
         }
     }
 
@@ -112,16 +113,25 @@ pub(crate) fn value_from_c_cast(param_value: f32, param_type: MavParamType) -> O
     })
 }
 
-pub(crate) fn value_into_c_cast(value: Value) -> (f32, MavParamType) {
-    match value {
+/// A C-cast value for the wire, or `None` when the encoding cannot carry it
+/// exactly. Every integer up to 2²⁴ converts exactly; above that an `f32`
+/// holds only some, and a value it does not hold would be read back as another
+/// one, so the set would fail although the vehicle stored what it was sent.
+pub(crate) fn value_into_c_cast(value: Value) -> Option<(f32, MavParamType)> {
+    /// `raw`, if it is `value` and not a rounded neighbour.
+    fn exact(raw: f32, value: f64) -> Option<f32> {
+        (f64::from(raw) == value).then_some(raw)
+    }
+
+    Some(match value {
         Value::U8(v) => (v as f32, MavParamType::Uint8),
         Value::I8(v) => (v as f32, MavParamType::Int8),
         Value::U16(v) => (v as f32, MavParamType::Uint16),
         Value::I16(v) => (v as f32, MavParamType::Int16),
-        Value::U32(v) => (v as f32, MavParamType::Uint32),
-        Value::I32(v) => (v as f32, MavParamType::Int32),
+        Value::U32(v) => (exact(v as f32, f64::from(v))?, MavParamType::Uint32),
+        Value::I32(v) => (exact(v as f32, f64::from(v))?, MavParamType::Int32),
         Value::F32(v) => (v, MavParamType::Real32),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -152,9 +162,13 @@ mod tests {
     /// a C-cast autopilot arrives as a denormal float, i.e. zero.
     #[test]
     fn the_encodings_disagree_on_integers() {
-        let (bytewise, _) = ParamEncoding::Bytewise.encode(Value::I32(1));
+        let (bytewise, _) = ParamEncoding::Bytewise
+            .encode(Value::I32(1))
+            .expect("bytewise carries every value");
         assert_eq!(bytewise as i32, 0);
-        let (c_cast, _) = ParamEncoding::CCast.encode(Value::I32(1));
+        let (c_cast, _) = ParamEncoding::CCast
+            .encode(Value::I32(1))
+            .expect("1 is exact");
         assert_eq!(c_cast, 1.0);
     }
 
@@ -167,10 +181,28 @@ mod tests {
                 Value::I32(-100_000),
                 Value::F32(1.5),
             ] {
-                let (raw, ty) = encoding.encode(value);
+                let (raw, ty) = encoding.encode(value).expect("an exact value");
                 assert_eq!(encoding.decode(raw, ty), Some(value), "{encoding:?}");
             }
         }
+    }
+
+    /// Above 2²⁴ an `f32` holds only some integers. A value it does not hold
+    /// would be read back as another one, so the set would fail although the
+    /// vehicle stored what it was sent.
+    #[test]
+    fn c_cast_refuses_integers_f32_cannot_hold_exactly() {
+        assert_eq!(value_into_c_cast(Value::I32(i32::MAX)), None);
+        assert_eq!(value_into_c_cast(Value::U32(16_777_217)), None);
+        assert_eq!(value_into_c_cast(Value::I32(-16_777_217)), None);
+        assert_eq!(
+            value_into_c_cast(Value::I32(1 << 24)),
+            Some((16_777_216.0, MavParamType::Int32))
+        );
+        assert_eq!(
+            value_into_c_cast(Value::U32(16_777_216)),
+            Some((16_777_216.0, MavParamType::Uint32))
+        );
     }
 
     /// A sentinel or an out-of-range value must not become an editable

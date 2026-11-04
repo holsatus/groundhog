@@ -546,6 +546,113 @@ async fn a_dropped_parameter_download_reports_itself_cancelled() {
     until(&mut harness.updates, cancelled).await;
 }
 
+/// A download requested while another runs queues for the target's reply
+/// channel. It must not begin until it holds the channel: a start that is
+/// announced earlier bumps the generation the running download's values are
+/// stamped with, so its completion would delete them.
+#[tokio::test(start_paused = true)]
+async fn a_queued_download_does_not_truncate_the_one_that_completes() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let a = Ident::from_str_truncated("PARAM_A");
+    let b = Ident::from_str_truncated("PARAM_B");
+    let first = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 1.0, 0, 2))
+        .await;
+    // The first value must be folded before the second download starts, or it
+    // would be stamped with the newer generation.
+    until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| parameters.value(&a).is_some())
+    })
+    .await;
+
+    // Queued behind the first download, which holds the channel. The sleep
+    // lets it reach the lock: it sends nothing while it waits.
+    let client = harness.fleet.vehicle(SYSTEM);
+    let queued = tokio::spawn(async move { client.fetch_parameters().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    harness
+        .vehicle
+        .send(&param_value("PARAM_B", 2.0, 1, 2))
+        .await;
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        DownloadOutcome::Complete,
+        "the first download saw both values"
+    );
+
+    // Abort the second so it cannot complete its own download. Whether it
+    // began by now or not, it cannot have ended, so an idle download holding
+    // both values is the state after the first one completed.
+    queued.abort();
+    assert!(queued.await.unwrap_err().is_cancelled());
+
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            !parameters.download().is_running()
+                && parameters.value(&a).is_some()
+                && parameters.value(&b).is_some()
+        })
+    })
+    .await;
+    let parameters = parameters(&fleet).unwrap();
+    assert_eq!(parameters.value(&a), Some(Value::F32(1.0)));
+    assert_eq!(parameters.value(&b), Some(Value::F32(2.0)));
+}
+
+/// A download aborted before it held the channel has done nothing: it leaves
+/// no cancelled outcome in the snapshot and does not disturb the download that
+/// completes.
+#[tokio::test(start_paused = true)]
+async fn a_download_aborted_while_queued_leaves_no_trace() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+    let a = Ident::from_str_truncated("PARAM_A");
+    let b = Ident::from_str_truncated("PARAM_B");
+    let first = start_download(&mut harness).await;
+    harness
+        .vehicle
+        .send(&param_value("PARAM_A", 1.0, 0, 2))
+        .await;
+    until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| parameters.value(&a).is_some())
+    })
+    .await;
+
+    let client = harness.fleet.vehicle(SYSTEM);
+    let queued = tokio::spawn(async move { client.fetch_parameters().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    queued.abort();
+    assert!(queued.await.unwrap_err().is_cancelled());
+
+    harness
+        .vehicle
+        .send(&param_value("PARAM_B", 2.0, 1, 2))
+        .await;
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        DownloadOutcome::Complete,
+        "the aborted download did not touch the first one"
+    );
+
+    let fleet = until(&mut harness.updates, |fleet| {
+        parameters(fleet).is_some_and(|parameters| {
+            parameters.download().outcome() == Some(&DownloadOutcome::Complete)
+                && parameters.value(&a).is_some()
+                && parameters.value(&b).is_some()
+        })
+    })
+    .await;
+    let parameters = parameters(&fleet).unwrap();
+    assert_eq!(parameters.value(&a), Some(Value::F32(1.0)));
+    assert_eq!(parameters.value(&b), Some(Value::F32(2.0)));
+}
+
 /// The download of a component that answers with nothing is not a failure:
 /// the protocol cannot tell "no parameters" from "did not answer".
 #[tokio::test(start_paused = true)]

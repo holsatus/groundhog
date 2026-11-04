@@ -9,7 +9,7 @@
 //! reader sees them.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -49,29 +49,47 @@ const CALIBRATION_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a calibration step confirmation may take to be acknowledged.
 const CALIBRATION_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Reports a parameter download to the runtime: in progress from the start,
-/// then its outcome, or cancelled if the download is dropped first. A dropped
-/// download must not stay in progress in every reader's snapshot.
+/// Reports a parameter download to the runtime: in progress once it holds the
+/// target's reply channel, then its outcome, or cancelled if the download is
+/// dropped first. A dropped download must not stay in progress in every
+/// reader's snapshot.
+///
+/// A download that is still queued for the channel has not started: reporting
+/// it would begin a new generation, and the running download's completion
+/// would then drop every value it received before this one was requested.
 struct DownloadReport<'a> {
     fleet: &'a FleetHandle,
     address: MavlinkId,
+    started: AtomicBool,
     finished: bool,
 }
 
 impl<'a> DownloadReport<'a> {
-    fn start(fleet: &'a FleetHandle, address: MavlinkId) -> Self {
-        fleet.report(Input::ParamDownload {
-            address,
-            update: DownloadUpdate::Start,
-        });
+    fn new(fleet: &'a FleetHandle, address: MavlinkId) -> Self {
         Self {
             fleet,
             address,
+            started: AtomicBool::new(false),
             finished: false,
         }
     }
 
+    /// Report the start, once: the caller runs this when it holds the target's
+    /// reply channel, from inside the download's future.
+    fn started(&self) {
+        if !self.started.swap(true, Ordering::Relaxed) {
+            self.fleet.report(Input::ParamDownload {
+                address: self.address,
+                update: DownloadUpdate::Start,
+            });
+        }
+    }
+
     fn finish(mut self, outcome: DownloadOutcome) {
+        // A download that ends without having reported its start cannot
+        // happen (the callback runs first), but the outcome must not be
+        // folded into the generation before it either.
+        self.started();
         self.finished = true;
         self.fleet.report(Input::ParamDownload {
             address: self.address,
@@ -82,7 +100,7 @@ impl<'a> DownloadReport<'a> {
 
 impl Drop for DownloadReport<'_> {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished && self.started.load(Ordering::Relaxed) {
             self.fleet.report(Input::ParamDownload {
                 address: self.address,
                 update: DownloadUpdate::Finish(DownloadOutcome::Cancelled),
@@ -239,12 +257,12 @@ impl VehicleClient {
             )
         })?;
 
-        let report = DownloadReport::start(&self.fleet, target);
+        let report = DownloadReport::new(&self.fleet, target);
 
         let result = self
             .fleet
             .router()
-            .param_list(target, !encoding_known)
+            .param_list(target, !encoding_known, || report.started())
             .await;
 
         let outcome = match &result {

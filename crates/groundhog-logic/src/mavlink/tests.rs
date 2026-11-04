@@ -443,7 +443,7 @@ fn start_list(
     capabilities: bool,
 ) -> tokio::task::JoinHandle<super::error::Result<ParamListResult>> {
     let router = router.clone();
-    tokio::spawn(async move { router.param_list(VEHICLE, capabilities).await })
+    tokio::spawn(async move { router.param_list(VEHICLE, capabilities, || {}).await })
 }
 
 #[tokio::test(start_paused = true)]
@@ -582,8 +582,9 @@ async fn start_set(
 
 /// A `PARAM_VALUE` for the parameter of `set`, reporting `value`.
 fn value_of(set: &mavio::default_dialect::messages::ParamSet, value: f32) -> ParamValue {
-    let (param_value, param_type) =
-        crate::wire::param::ParamEncoding::Bytewise.encode(Value::F32(value));
+    let (param_value, param_type) = crate::wire::param::ParamEncoding::Bytewise
+        .encode(Value::F32(value))
+        .expect("bytewise carries every value");
     assert_eq!(param_type, set.param_type);
     ParamValue {
         param_id: set.param_id,
@@ -614,7 +615,7 @@ async fn param_set_waits_for_a_list_download() {
 
     let download = tokio::spawn({
         let router = router.clone();
-        async move { router.param_list(VEHICLE, false).await }
+        async move { router.param_list(VEHICLE, false, || {}).await }
     });
 
     assert!(matches!(
@@ -702,6 +703,27 @@ async fn parameter_sets_of_different_parameters_overlap() {
 
     assert_eq!(first.await.unwrap().unwrap(), Value::F32(1.5));
     assert_eq!(second.await.unwrap().unwrap(), Value::F32(2.5));
+}
+
+/// An integer a C-cast `f32` cannot hold exactly is refused before anything is
+/// sent: the echo would report the rounded value, and the set would look
+/// rejected although the vehicle stored what it was sent.
+#[tokio::test(start_paused = true)]
+async fn param_set_refuses_an_integer_c_cast_cannot_carry() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let result = router
+        .param_set(
+            VEHICLE,
+            Ident::try_from(b"TEST_PARAM").unwrap(),
+            Value::I32(i32::MAX),
+            crate::wire::param::ParamEncoding::CCast,
+        )
+        .await;
+
+    assert!(matches!(result, Err(MavError::ParamEncoding)), "{result:?}");
+    let sent = tokio::time::timeout(Duration::from_millis(100), vehicle.recv()).await;
+    assert!(sent.is_err(), "nothing is sent: {sent:?}");
 }
 
 #[tokio::test(start_paused = true)]
