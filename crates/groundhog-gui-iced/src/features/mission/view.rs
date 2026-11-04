@@ -57,7 +57,7 @@ impl MissionEditor {
     /// The panel, in the order a mission is worked: how the plan stands
     /// against the vehicle (and its files), the vehicle's and the plan's
     /// actions, a transfer under way, then the items and the one selected.
-    pub fn view<'a>(
+    pub(super) fn view_editor<'a>(
         &'a self,
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,

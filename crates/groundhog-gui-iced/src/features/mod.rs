@@ -7,6 +7,10 @@
 //! selected vehicle, move the map, remember a directory, persist what it
 //! holds — it requests through its [`Context`] as an [`Effect`], so features
 //! never reach into each other or into the application's state.
+//!
+//! A feature the operator opens is a [`Panel`]: one interface for its
+//! messages, its view, and what it draws on the map. The application lists
+//! its panels once (`app/panels.rs`) and routes to them through it.
 
 pub mod calibration;
 pub mod confirm;
@@ -22,9 +26,12 @@ mod test_support;
 pub mod vehicles;
 pub mod video;
 
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
-use iced::theme::Palette;
+use iced::{Element, Task, theme::Palette};
 
 use groundhog_logic::{
     SystemId,
@@ -34,6 +41,49 @@ use groundhog_logic::{
 };
 
 use self::{confirm::Confirmation, notifications::Notifications};
+use crate::map::LayerSet;
+
+/// A feature the operator opens in a pane or a sheet.
+///
+/// The application owns one of each, routes its messages to
+/// [`Panel::update`] with a [`Context`], shows [`Panel::view`] wherever the
+/// shell puts it, and draws its [`Panel::layers`] on the map.
+pub trait Panel {
+    type Message: Clone + fmt::Debug + Send + 'static;
+
+    /// Handle one of the panel's messages.
+    fn update(
+        &mut self,
+        message: Self::Message,
+        cx: &mut Context<'_, Self::Message>,
+    ) -> Task<Self::Message>;
+
+    /// The panel's content, the same in every shell.
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Self::Message>;
+
+    /// The layers the panel draws on the map, if it draws any.
+    fn layers<'a>(&'a self, _map: MapContext<'a>, _layers: &mut LayerSet<'a, Self::Message>) {}
+
+    /// The fleet published a new snapshot (`cx.fleet`).
+    fn on_fleet(&mut self, _cx: &mut Context<'_, Self::Message>) -> Task<Self::Message> {
+        Task::none()
+    }
+}
+
+/// What a panel's view may read: the application's state as it is now.
+#[derive(Clone, Copy)]
+pub struct ViewContext<'a> {
+    /// The fleet as last published.
+    pub fleet: &'a FleetSnapshot,
+    /// The vehicle the UI shows.
+    pub selected: Option<SystemId>,
+    /// Whether the map follows the selected vehicle.
+    pub following: bool,
+    /// The operator's notices, as the log shows them.
+    pub notices: &'a Notifications,
+    /// The links and their status.
+    pub links: &'a LinkManager,
+}
 
 /// Something a feature asks the application to do.
 #[derive(Debug)]

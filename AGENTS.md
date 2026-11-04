@@ -149,7 +149,7 @@ are shared by all.
 | gui `features/` | One module per UI feature | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
 | gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
-| gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
+| gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; the list of panels (`app/panels.rs`); each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame`; finding `.local` cameras through Avahi | GStreamer, `tokio::sync`, `zbus` on Linux | know about vehicles or the frontend |
@@ -346,7 +346,7 @@ are re-decoded if the encoding is learned later.
 
 ### The map engine knows nothing about features
 
-Features contribute type-erased `map::MapLayer`s through `map::MapPlugin`.
+Panels contribute type-erased `map::MapLayer`s through `Panel::layers`.
 The engine (`map/overlay.rs`) owns all pointer state in the canvas widget's own
 state: hover, press, drag (which keeps the map from panning), click detection,
 and escape-to-cancel. A drag can therefore never get stuck through lost
@@ -368,6 +368,16 @@ map, remember a directory, persist what it keeps in the configuration file
 (`Effect::Persist`). An `Effect` is the only way a feature asks the
 application for anything. Features never reach into each other or into the
 application.
+
+A feature the operator opens is a `features::Panel`, one interface for all
+of them: `update` with a `Context`, `view` with a `ViewContext` (the
+application's state to read: the snapshot, the selected vehicle, whether
+the map follows it, the notices, the links), and optional hooks: `layers`
+to draw on the map, `on_fleet` for each snapshot. The application lists its
+panels once, in `app/panels.rs`: a macro turns the list into the panels'
+message (`PanelMessage`, one variant each), their state (`Panels`), and the
+routing of messages, views, layers and snapshots, all statically typed. A
+test checks that every panel the shells offer is listed.
 
 ### The workspace is three columns around the map
 
@@ -867,7 +877,7 @@ Render it before and after a change to the look, and compare.
 ### Draw something on the map
 
 Implement `map::MapLayer` for a small struct that borrows your feature's state,
-and return it from your feature's `MapPlugin` implementation:
+and push it from your panel's `Panel::layers`:
 
 ```rust
 struct Fences<'a> { fence: &'a Fence }
@@ -895,8 +905,16 @@ impl MapLayer<Message> for Fences<'_> {
 }
 ```
 
-Then add `layers.plugin(&self.features.fence, context, Message::Fence)` in
-`Application::pane_body`. Layers in use, by z-index:
+```rust
+impl Panel for FencePanel {
+    // ...
+    fn layers<'a>(&'a self, _: MapContext<'a>, layers: &mut LayerSet<'a, Message>) {
+        layers.push(Fences { fence: &self.fence });
+    }
+}
+```
+
+The application draws every listed panel's layers. Layers in use, by z-index:
 
 | z | Layer |
 |---|---|
@@ -948,13 +966,16 @@ commands with a location), the file formats, and jump-target translation (for
    destination only for a new task: the navigation bar holds five. Where a
    panel opens in the tiled shell is the operator's choice (see
    [The workspace](#the-workspace-is-three-columns-around-the-map)).
-2. Create `features/<name>.rs` (or a directory) with its state, `Message`,
-   `update(&mut self, message, cx: &mut Context<Message>) -> Task<Message>`,
-   and `view`, which returns a `ui::panel`.
-3. In `app.rs`: add the state (to `Features` if it takes a `Context`), a
-   `Message` variant routed through `dispatch`, and an arm in `pane_body`,
-   which both shells show. Check it in a narrow sheet too: a phone gives a
-   panel about 400 logical pixels of width.
+2. Create `features/<name>.rs` (or a directory) with its state and
+   `Message`, and implement `features::Panel`: `update`, which gets a
+   `Context`, and `view`, which gets a `ViewContext` and returns a
+   `ui::panel`. Override `layers` to draw on the map, and `on_fleet` to
+   follow each snapshot.
+3. List it in `app/panels.rs` (`Variant: field: Type`, the variant being its
+   `layout::Panel`), and build it in `Application::boot`. Both shells show
+   it, and its messages, map layers and snapshots reach it from there. Check
+   it in a narrow sheet too: a phone gives a panel about 400 logical pixels
+   of width.
 
 ### Add a setting
 

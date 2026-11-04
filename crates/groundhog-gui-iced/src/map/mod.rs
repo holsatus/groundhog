@@ -1,15 +1,16 @@
 //! The map engine: a slippy tile map with a layered, interactive overlay.
 //!
 //! The engine knows nothing about vehicles or missions. Features contribute
-//! [`MapLayer`]s — usually through a [`MapPlugin`] — and the engine draws them
+//! [`MapLayer`]s, gathered in a [`LayerSet`], and the engine draws them
 //! in z-order, caches their geometry by revision, hit-tests their
 //! [`Handle`]s, and runs the pointer state machine (hover, click, drag,
 //! cancel), reporting gestures back to the owning layer as [`LayerEvent`]s.
 //!
 //! ```ignore
+//! let mut mission = LayerSet::new();
+//! mission.push(Route { draft });
 //! let mut layers = LayerSet::new();
-//! layers.plugin(&self.vehicles, context, Message::Vehicles);
-//! layers.plugin(&self.mission, context, Message::Mission);
+//! layers.extend(mission, Message::Mission);
 //! self.map.view(layers, Message::Map, &theme, Placement::Pane)
 //! ```
 
@@ -18,9 +19,7 @@ mod layered;
 mod overlay;
 mod view;
 
-pub use layer::{
-    Anchor, Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapLayer, MapPlugin,
-};
+pub use layer::{Anchor, Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapLayer};
 pub use view::{MapFrame, MapView};
 
 use std::path::PathBuf;

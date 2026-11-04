@@ -3,13 +3,14 @@
 //! A feature test drives a panel's `update` with a [`Context`] over a
 //! synthetic [`Fleet`] and a real [`FleetHandle`], then asserts on the
 //! feature's state, its notices and the effects it requested. [`Env`] owns
-//! the fleet and the context's inputs; [`Feature`] adapts each panel's
-//! `update` to [`Env::step`].
+//! the fleet and the context's inputs, and drives any [`Panel`].
 
 use std::time::Instant;
 
 use groundhog_logic::{
-    Backend, BackendOptions, MavlinkId, domain::fleet::Fleet, services::FleetHandle,
+    Backend, BackendOptions, MavlinkId, SystemId,
+    domain::fleet::{Fleet, FleetSnapshot},
+    services::FleetHandle,
 };
 use iced::Task;
 use mavio::{
@@ -20,15 +21,7 @@ use mavio::{
     },
 };
 
-use super::{
-    Context, Effect,
-    calibration::{CalibrationPanel, Message as CalibrationMessage},
-    link_panel::{LinkPanel, Message as LinkMessage},
-    mission::{Message as MissionMessage, MissionEditor},
-    parameter_panel::{Message as ParameterMessage, ParameterPanel},
-    vehicles::{Message as VehicleMessage, VehiclePanel},
-    video::{Message as VideoMessage, VideoPanel},
-};
+use super::{Context, Effect, Panel, ViewContext};
 use crate::{config::Settings, features::notifications::Notifications};
 
 /// A synthetic fleet and everything a feature's `update` reads from.
@@ -92,16 +85,52 @@ impl Env {
     /// Run one message through `feature`'s `update`, returning the effects it
     /// requested. The task it returned is dropped, as a view interaction
     /// whose result the test does not drive.
-    pub fn step<M, F: Feature<M>>(&mut self, feature: &mut F, message: M) -> Vec<Effect<M>> {
-        run(self, feature, message)
+    pub fn step<P: Panel>(
+        &mut self,
+        panel: &mut P,
+        message: P::Message,
+    ) -> Vec<Effect<P::Message>> {
+        let (task, effects) = self.update(panel, message);
+        drop(task);
+        effects
     }
 
-    /// Run one message through `feature`'s `update`, returning the task it
+    /// Run one message through `panel`'s `update`, returning the task it
     /// returned and the effects it requested.
-    pub fn update<M, F: Feature<M>>(
+    pub fn update<P: Panel>(
         &mut self,
-        feature: &mut F,
-        message: M,
+        panel: &mut P,
+        message: P::Message,
+    ) -> (Task<P::Message>, Vec<Effect<P::Message>>) {
+        self.with_context(|cx| panel.update(message, cx))
+    }
+
+    /// Tell `panel` the fleet published, as the application does with each
+    /// snapshot. Returns the effects it requested.
+    pub fn on_fleet<P: Panel>(&mut self, panel: &mut P) -> Vec<Effect<P::Message>> {
+        let (task, effects) = self.with_context(|cx| panel.on_fleet(cx));
+        drop(task);
+        effects
+    }
+
+    /// What a view of `fleet` reads, with `selected` shown.
+    pub fn view_context<'a>(
+        &'a self,
+        fleet: &'a FleetSnapshot,
+        selected: Option<SystemId>,
+    ) -> ViewContext<'a> {
+        ViewContext {
+            fleet,
+            selected,
+            following: false,
+            notices: &self.notices,
+            links: self.backend.links(),
+        }
+    }
+
+    fn with_context<M>(
+        &mut self,
+        run: impl FnOnce(&mut Context<'_, M>) -> Task<M>,
     ) -> (Task<M>, Vec<Effect<M>>) {
         let snapshot = self.fleet.snapshot();
         let mut cx = Context::new(
@@ -112,76 +141,7 @@ impl Env {
             None,
             &self.settings,
         );
-        let task = feature.update(message, &mut cx);
+        let task = run(&mut cx);
         (task, cx.into_effects())
-    }
-}
-
-/// [`Env::step`] as a function, for a test module that wraps the message in
-/// one of its own.
-pub fn run<M, F: Feature<M>>(env: &mut Env, feature: &mut F, message: M) -> Vec<Effect<M>> {
-    let (task, effects) = env.update(feature, message);
-    drop(task);
-    effects
-}
-
-/// A panel whose `update` a test can drive through [`Env::step`].
-pub trait Feature<M> {
-    fn update(&mut self, message: M, cx: &mut Context<M>) -> Task<M>;
-}
-
-impl Feature<CalibrationMessage> for CalibrationPanel {
-    fn update(
-        &mut self,
-        message: CalibrationMessage,
-        cx: &mut Context<CalibrationMessage>,
-    ) -> Task<CalibrationMessage> {
-        CalibrationPanel::update(self, message, cx)
-    }
-}
-
-impl Feature<MissionMessage> for MissionEditor {
-    fn update(
-        &mut self,
-        message: MissionMessage,
-        cx: &mut Context<MissionMessage>,
-    ) -> Task<MissionMessage> {
-        MissionEditor::update(self, message, cx)
-    }
-}
-
-impl Feature<ParameterMessage> for ParameterPanel {
-    fn update(
-        &mut self,
-        message: ParameterMessage,
-        cx: &mut Context<ParameterMessage>,
-    ) -> Task<ParameterMessage> {
-        ParameterPanel::update(self, message, cx)
-    }
-}
-
-impl Feature<VehicleMessage> for VehiclePanel {
-    fn update(
-        &mut self,
-        message: VehicleMessage,
-        cx: &mut Context<VehicleMessage>,
-    ) -> Task<VehicleMessage> {
-        VehiclePanel::update(self, message, cx)
-    }
-}
-
-impl Feature<LinkMessage> for LinkPanel {
-    fn update(&mut self, message: LinkMessage, cx: &mut Context<LinkMessage>) -> Task<LinkMessage> {
-        LinkPanel::update(self, message, cx)
-    }
-}
-
-impl Feature<VideoMessage> for VideoPanel {
-    fn update(
-        &mut self,
-        message: VideoMessage,
-        cx: &mut Context<VideoMessage>,
-    ) -> Task<VideoMessage> {
-        VideoPanel::update(self, message, cx)
     }
 }

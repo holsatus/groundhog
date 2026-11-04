@@ -15,7 +15,6 @@ use groundhog_logic::{
     SystemId,
     domain::{
         firmware::{FlightMode, ModeKind},
-        fleet::FleetSnapshot,
         vehicle::{Liveness, Vehicle},
     },
 };
@@ -26,11 +25,14 @@ use iced::{
 use mavio::default_dialect::enums::{GpsFixType, MissionState};
 
 use super::{
-    Context, Effect,
+    Context, Effect, MapContext, Panel, ViewContext,
     confirm::Confirmation,
     operations::{Activity, Finished, Operations},
 };
-use crate::ui::{self, Icon, TextExt, Tone};
+use crate::{
+    map::LayerSet,
+    ui::{self, Icon, TextExt, Tone},
+};
 
 /// The commands the panel runs, one of each kind per vehicle at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,8 +91,14 @@ pub enum Message {
     Finished(Finished<Key, ()>),
 }
 
-impl VehiclePanel {
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+impl Panel for VehiclePanel {
+    type Message = Message;
+
+    fn layers<'a>(&'a self, map: MapContext<'a>, layers: &mut LayerSet<'a, Message>) {
+        self.map_layers(map, layers);
+    }
+
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::Select(system) => cx.request(Effect::SelectVehicle(system)),
             Message::Follow(follow) => cx.request(Effect::FollowVehicle(follow)),
@@ -209,12 +217,13 @@ impl VehiclePanel {
 
     /// The panel, most urgent first: which vehicle, how it is (mode,
     /// arming, a recent alert), the commands, then the read-outs.
-    pub fn view<'a>(
-        &'a self,
-        fleet: &'a FleetSnapshot,
-        selected: Option<SystemId>,
-        follow: bool,
-    ) -> Element<'a, Message> {
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        let ViewContext {
+            fleet,
+            selected,
+            following: follow,
+            ..
+        } = cx;
         let picker = (!fleet.is_empty()).then(|| {
             ui::pick_list(selected, fleet.ids().collect::<Vec<_>>(), move |id| {
                 fleet.vehicle_name(*id)
@@ -261,7 +270,9 @@ impl VehiclePanel {
 
         ui::panel_with(header, scrollable(contents).height(Length::Fill)).boxed()
     }
+}
 
+impl VehiclePanel {
     fn view_controls<'a>(&'a self, vehicle: &'a Vehicle) -> impl Widget<Message> + 'a {
         let system = vehicle.system;
         let busy = |command| self.commands.is_running(&(system, command));

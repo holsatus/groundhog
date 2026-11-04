@@ -14,8 +14,7 @@ use super::{Draft, Message, MessageKind, MissionEditor, PlanKey};
 use crate::{
     features::MapContext,
     map::{
-        Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer,
-        MapPlugin, MapView,
+        Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer, MapView,
     },
     ui::style,
 };
@@ -23,10 +22,13 @@ use crate::{
 /// Screen-space hit radius of an item marker.
 const MARKER_HIT_RADIUS: f32 = 12.0;
 
-impl<'a> MapPlugin<'a, MapContext<'a>> for MissionEditor {
-    type Message = Message;
-
-    fn layers(&'a self, context: MapContext<'a>, layers: &mut LayerSet<'a, Message>) {
+impl MissionEditor {
+    /// The displayed plan's route and markers.
+    pub(super) fn map_layers<'a>(
+        &'a self,
+        context: MapContext<'a>,
+        layers: &mut LayerSet<'a, Message>,
+    ) {
         let plan = context.selected;
         let Some(draft) = self.displayed(plan) else {
             return;

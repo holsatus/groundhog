@@ -22,7 +22,9 @@ use groundhog_logic::{
     services::{self, LinkManager, LinkStats, LinkStatus, Saved},
 };
 
-use super::{Context, Effect, Persisted, confirm::Confirmation, notifications::Notice};
+use super::{
+    Context, Effect, Panel, Persisted, ViewContext, confirm::Confirmation, notifications::Notice,
+};
 use crate::ui::{self, Icon, TextExt, Tone};
 
 pub struct LinkPanel {
@@ -54,14 +56,10 @@ pub enum Message {
     Delete(LinkId),
 }
 
-impl LinkPanel {
-    pub fn new() -> Self {
-        Self {
-            configurator: LinkConfigurator::new(LinkBuilder::default_udp(), "New link".to_owned()),
-        }
-    }
+impl Panel for LinkPanel {
+    type Message = Message;
 
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::ChangeName(name) => self.configurator.name = name,
             Message::SetHighLatency(high_latency) => {
@@ -172,8 +170,20 @@ impl LinkPanel {
         Task::none()
     }
 
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        self.view_links(cx.links).boxed()
+    }
+}
+
+impl LinkPanel {
+    pub fn new() -> Self {
+        Self {
+            configurator: LinkConfigurator::new(LinkBuilder::default_udp(), "New link".to_owned()),
+        }
+    }
+
     /// The configured links with their controls, and the editor.
-    pub fn view<'a>(&'a self, manager: &'a LinkManager) -> impl Widget<Message> + 'a {
+    fn view_links<'a>(&'a self, manager: &'a LinkManager) -> impl Widget<Message> + 'a {
         let links = if manager.entries().next().is_none() {
             ui::text("No links yet. Add one below.")
                 .tone(Tone::Muted)

@@ -140,7 +140,7 @@ async fn a_reboot_is_sent_only_once_confirmed() {
 fn shows(env: &Env, text: &str) -> bool {
     let panel = VehiclePanel::default();
     let snapshot = env.fleet.snapshot();
-    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(A), false));
+    let mut simulator = iced_test::Simulator::new(panel.view(env.view_context(&snapshot, Some(A))));
     simulator.find(text).is_ok()
 }
 

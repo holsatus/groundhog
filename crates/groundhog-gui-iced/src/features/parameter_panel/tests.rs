@@ -268,7 +268,9 @@ async fn a_cancelled_download_ignores_its_late_result() {
 /// Whether `panel` shows a download's activity.
 fn shows_a_download(panel: &ParameterPanel, env: &Env) -> bool {
     let snapshot = env.fleet.snapshot();
-    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(ADDRESS.system_id())));
+    let mut simulator = iced_test::Simulator::new(
+        panel.view(env.view_context(&snapshot, Some(ADDRESS.system_id()))),
+    );
     simulator
         .find(
             |candidate: iced_test::selector::Candidate<'_>| match candidate {
@@ -309,7 +311,9 @@ async fn an_incomplete_set_shows_no_download_once_it_stops() {
     assert!(!shows_a_download(&panel, &env));
 
     let snapshot = env.fleet.snapshot();
-    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(ADDRESS.system_id())));
+    let mut simulator = iced_test::Simulator::new(
+        panel.view(env.view_context(&snapshot, Some(ADDRESS.system_id()))),
+    );
     assert!(
         simulator.find("1 of 2").is_ok(),
         "the header counts what is missing"

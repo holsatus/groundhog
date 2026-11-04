@@ -219,10 +219,10 @@ impl Application {
         // Filling the screen, the picture tracks; in the corner, a tap
         // swaps it with the map.
         let picture = |clear, fills: bool| {
-            self.features
+            self.panels
                 .video
                 .view_inset(clear, fills.then_some((&*self.fleet, self.selected)))
-                .map(|picture| picture.boxed().map(Message::Video).boxed())
+                .map(|picture| picture.boxed().map(Message::from).boxed())
         };
         let filling = Padding {
             top: covered.top + ui::space::S,

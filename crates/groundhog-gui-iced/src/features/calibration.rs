@@ -15,7 +15,6 @@ use groundhog_logic::{
         calibration::{
             CalibrationKind, CompassStatus, Instruction, Phase, Session, Side, StartBlocked,
         },
-        fleet::FleetSnapshot,
         vehicle::Vehicle,
     },
     services::{Error, Result},
@@ -26,7 +25,7 @@ use iced::{
 };
 
 use super::{
-    Context,
+    Context, Panel, ViewContext,
     confirm::Confirmation,
     operations::{Activity, Finished, Operations},
 };
@@ -94,8 +93,10 @@ pub enum Message {
     Finished(Finished<Key, ()>),
 }
 
-impl CalibrationPanel {
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+impl Panel for CalibrationPanel {
+    type Message = Message;
+
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::Start(system, kind) => {
                 let client = cx.services.vehicle(system);
@@ -139,23 +140,10 @@ impl CalibrationPanel {
         Task::none()
     }
 
-    fn run(
-        &mut self,
-        key: Key,
-        operation: impl Future<Output = Result<()>> + Send + 'static,
-    ) -> Task<Message> {
-        self.operations.start(key, operation, Message::Finished)
-    }
-
-    fn is_busy(&self, system: SystemId, action: Action) -> bool {
-        self.operations.is_running(&(system, action))
-    }
-
-    pub fn view<'a>(
-        &'a self,
-        fleet: &'a FleetSnapshot,
-        selected: Option<SystemId>,
-    ) -> Element<'a, Message> {
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        let ViewContext {
+            fleet, selected, ..
+        } = cx;
         let Some(vehicle) = selected.and_then(|id| fleet.vehicle(id)) else {
             return ui::empty("No vehicle. Connect a link to begin.").boxed();
         };
@@ -220,6 +208,20 @@ impl CalibrationPanel {
         .spacing(ui::space::L);
 
         ui::panel_with(header, scrollable(contents).height(Length::Fill)).boxed()
+    }
+}
+
+impl CalibrationPanel {
+    fn run(
+        &mut self,
+        key: Key,
+        operation: impl Future<Output = Result<()>> + Send + 'static,
+    ) -> Task<Message> {
+        self.operations.start(key, operation, Message::Finished)
+    }
+
+    fn is_busy(&self, system: SystemId, action: Action) -> bool {
+        self.operations.is_running(&(system, action))
     }
 
     fn view_session<'a>(

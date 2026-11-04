@@ -26,7 +26,7 @@ use crate::{
     features::MapContext,
     map::{
         Anchor, Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer,
-        MapPlugin, MapView,
+        MapView,
     },
     widget::attitude,
 };
@@ -40,10 +40,14 @@ const BANDS: usize = 24;
 const BAND_MAX_ALT_M: f32 = 1000.0;
 const ICON_SIZE: f32 = 40.0;
 
-impl<'a> MapPlugin<'a, MapContext<'a>> for super::VehiclePanel {
-    type Message = Message;
-
-    fn layers(&'a self, context: MapContext<'a>, layers: &mut LayerSet<'a, Message>) {
+impl super::VehiclePanel {
+    /// The vehicles' trails, homes and icons, and the selected vehicle's
+    /// attitude.
+    pub(super) fn map_layers<'a>(
+        &'a self,
+        context: MapContext<'a>,
+        layers: &mut LayerSet<'a, Message>,
+    ) {
         // Every casing below every core, so a tail never covers the body's
         // core where the two meet.
         for pass in [TrailPass::Casing, TrailPass::Core] {
@@ -446,7 +450,7 @@ mod tests {
         };
 
         let mut layers = LayerSet::new();
-        layers.plugin(&panel, context, |message| message);
+        panel.map_layers(context, &mut layers);
         let order: Vec<&str> = layers
             .into_sorted()
             .iter()

@@ -27,19 +27,21 @@ use iced::{
 };
 use mavio::default_dialect::enums::MavSeverity;
 
+use self::panels::{PanelEnv, PanelMessage, Panels};
+
 use crate::{
     config::{self, ConfigWriter, Configuration, Loaded, Settings},
     features::{
-        Context, Effect, MapContext, Persisted,
-        calibration::{self, CalibrationPanel},
+        Effect, MapContext, Persisted, ViewContext,
+        calibration::CalibrationPanel,
         confirm::{self, Answer, Confirmation},
-        link_panel::{self, LinkPanel},
-        log_panel::{self, LogPanel},
-        mission::{self, MissionEditor},
+        link_panel::LinkPanel,
+        log_panel::LogPanel,
+        mission::MissionEditor,
         notifications::{self, Level, Notice, Notifications},
-        parameter_panel::{self, ParameterPanel},
+        parameter_panel::ParameterPanel,
         settings_panel,
-        vehicles::{self, VehiclePanel},
+        vehicles::VehiclePanel,
         video::{self, VideoPanel},
     },
     layout::{self, Layout},
@@ -48,17 +50,6 @@ use crate::{
     shell::{self, Floating, Shell},
     ui,
 };
-
-/// The features that take a [`Context`], grouped so their state can be
-/// borrowed apart from the context's.
-struct Features {
-    vehicles: VehiclePanel,
-    mission: MissionEditor,
-    parameters: ParameterPanel,
-    calibration: CalibrationPanel,
-    video: VideoPanel,
-    links: LinkPanel,
-}
 
 pub struct Application {
     layout: Layout,
@@ -79,8 +70,7 @@ pub struct Application {
     recorder: Option<TlogRecorder>,
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
-    features: Features,
-    log_panel: LogPanel,
+    panels: Panels,
     /// How much of the window the platform's own chrome covers.
     insets: Insets,
     /// The theme whose system-bar icons were requested, if any.
@@ -124,13 +114,8 @@ pub enum Message {
     /// The keyboard modifiers changed.
     Modifiers(keyboard::Modifiers),
     Map(map::Message),
-    Vehicles(vehicles::Message),
-    Mission(mission::Message),
-    Parameters(parameter_panel::Message),
-    Calibration(calibration::Message),
-    Links(link_panel::Message),
-    Logs(log_panel::Message),
-    Video(video::Message),
+    /// A message to one of the panels.
+    Panel(PanelMessage),
     Settings(settings_panel::Message),
     Notifications(notifications::Message),
     Confirm(Answer),
@@ -224,15 +209,15 @@ impl Application {
             recorder: None,
             notices,
             confirmation: None,
-            features: Features {
+            panels: Panels {
                 vehicles: VehiclePanel::default(),
                 mission: MissionEditor::default(),
                 parameters: ParameterPanel::default(),
                 calibration: CalibrationPanel::default(),
-                video,
                 links: LinkPanel::new(),
+                video,
+                logs: LogPanel::new(),
             },
-            log_panel: LogPanel::new(),
             insets: platform::insets(),
             system_bars: None,
             scale_preview: None,
@@ -316,9 +301,9 @@ impl Application {
                 Task::none()
             }
             Message::Fleet(update) => {
-                self.on_fleet(update);
+                let task = self.on_fleet(update);
                 // Whether a vehicle is armed decides recording while armed.
-                self.sync_video()
+                Task::batch([task, self.sync_video()])
             }
             Message::FleetStopped => {
                 self.notices.push(
@@ -364,13 +349,13 @@ impl Application {
                 let target = back_target(
                     captured,
                     self.confirmation.is_some(),
-                    self.features.video.is_full_screen(),
+                    self.panels.video.is_full_screen(),
                     self.shell() == Shell::Floating,
                 );
                 match target {
                     Some(BackTarget::Dismiss) => self.update(Message::Confirm(Answer::Dismiss)),
                     Some(BackTarget::LeaveVideo) => {
-                        self.update(Message::Video(video::Message::FullScreen(false)))
+                        self.update(video::Message::FullScreen(false).into())
                     }
                     Some(BackTarget::StepBack) => {
                         self.update(Message::Floating(shell::Message::Back))
@@ -425,30 +410,10 @@ impl Application {
                 Task::none()
             }
             Message::Map(message) => self.map.update(message).map(Message::Map),
-            Message::Vehicles(message) => self.dispatch(Message::Vehicles, |features, cx| {
-                features.vehicles.update(message, cx)
-            }),
-            Message::Mission(message) => self.dispatch(Message::Mission, |features, cx| {
-                features.mission.update(message, cx)
-            }),
-            Message::Parameters(message) => self.dispatch(Message::Parameters, |features, cx| {
-                features.parameters.update(message, cx)
-            }),
-            Message::Calibration(message) => self.dispatch(Message::Calibration, |features, cx| {
-                features.calibration.update(message, cx)
-            }),
-            Message::Links(message) => self.dispatch(Message::Links, |features, cx| {
-                features.links.update(message, cx)
-            }),
-            Message::Video(message) => {
-                let task = self.dispatch(Message::Video, |features, cx| {
-                    features.video.update(message, cx)
-                });
+            Message::Panel(message) => {
+                let task = self.with_panels(|panels, env| panels.update(message, env));
+                // The video's own full screen is the window's.
                 Task::batch([task, self.sync_full_screen()])
-            }
-            Message::Logs(message) => {
-                self.log_panel.update(message);
-                Task::none()
             }
             Message::Settings(message) => {
                 self.on_settings(message);
@@ -477,33 +442,30 @@ impl Application {
         }
     }
 
-    /// Run a feature update with a fresh [`Context`], then apply the effects
-    /// it requested.
-    fn dispatch<M>(
+    /// Run `run` on the panels with what their updates are given, then
+    /// apply the effects they requested.
+    fn with_panels(
         &mut self,
-        wrap: fn(M) -> Message,
-        update: impl FnOnce(&mut Features, &mut Context<M>) -> Task<M>,
-    ) -> Task<Message>
-    where
-        M: Send + 'static,
-    {
+        run: impl FnOnce(&mut Panels, &mut PanelEnv<'_>) -> Task<PanelMessage>,
+    ) -> Task<Message> {
         let fleet = self.fleet.clone();
         // A handle of its own, so the links can be borrowed beside it.
         let services = self.backend.fleet().clone();
-        let mut context = Context::new(
-            &fleet,
-            &services,
-            self.backend.links_mut(),
-            &mut self.notices,
-            self.configuration.file_picker_path.as_deref(),
-            &self.configuration.settings,
-        );
+        let mut env = PanelEnv {
+            fleet: &fleet,
+            services: &services,
+            links: self.backend.links_mut(),
+            notices: &mut self.notices,
+            directory: self.configuration.file_picker_path.as_deref(),
+            settings: &self.configuration.settings,
+            effects: Vec::new(),
+        };
 
-        let task = update(&mut self.features, &mut context).map(wrap);
-        let effects = context.into_effects();
+        let task = run(&mut self.panels, &mut env).map(Message::Panel);
+        let effects = env.effects;
 
         for effect in effects {
-            self.apply(effect.map(wrap));
+            self.apply(effect.map(Message::Panel));
         }
 
         task
@@ -559,15 +521,16 @@ impl Application {
         }
     }
 
-    fn on_fleet(&mut self, update: FleetUpdate) {
+    fn on_fleet(&mut self, update: FleetUpdate) -> Task<Message> {
         self.fleet = update.snapshot;
-        self.features.mission.sync(&self.fleet);
+        let task = self.with_panels(|panels, env| panels.on_fleet(env));
 
         for event in update.events {
             self.on_fleet_event(event);
         }
 
         self.follow_selected();
+        task
     }
 
     /// Fleet events become selection changes and operator notices.
@@ -730,26 +693,26 @@ impl Application {
     /// is armed; and the setting to record while one is. A recording that
     /// starts or stops on its own is announced.
     fn sync_video(&mut self) -> Task<Message> {
-        let was_recording = self.features.video.is_recording();
+        let was_recording = self.panels.video.is_recording();
         let armed = self
             .fleet
             .vehicles()
             .any(|vehicle| vehicle.armed() == Some(true));
         let now = Instant::now();
 
-        self.features
+        self.panels
             .video
             .set_shown(video_shown(self.shell(), &self.layout));
-        self.features
+        self.panels
             .video
             .set_record_while_armed(self.configuration.settings.record_video_while_armed);
-        self.features.video.observe_armed(armed, now);
-        let task = self.features.video.sync(now);
+        self.panels.video.observe_armed(armed, now);
+        let task = self.panels.video.sync(now);
 
-        match (was_recording, self.features.video.is_recording()) {
+        match (was_recording, self.panels.video.is_recording()) {
             (false, true) => {
                 let mut notice = Notice::info("Recording the video");
-                if let Some(directory) = self.features.video.recordings() {
+                if let Some(directory) = self.panels.video.recordings() {
                     notice = notice.detail(format!("Into {}", directory.display()));
                 }
                 self.notices.push(notice);
@@ -760,13 +723,13 @@ impl Application {
             _ => {}
         }
 
-        Task::batch([task.map(Message::Video), self.sync_full_screen()])
+        Task::batch([task.map(Message::from), self.sync_full_screen()])
     }
 
     /// Puts the window in the mode the application and the video ask for,
     /// if it is not in it already.
     fn sync_full_screen(&mut self) -> Task<Message> {
-        match self.full_screen.sync(self.features.video.is_full_screen()) {
+        match self.full_screen.sync(self.panels.video.is_full_screen()) {
             Some(mode) => {
                 iced::window::latest().and_then(move |window| iced::window::set_mode(window, mode))
             }
@@ -809,12 +772,12 @@ impl Application {
 
         // The full-screen video still shows the notices: an alert must not
         // go unseen for watching the video.
-        let base = if self.features.video.is_full_screen() {
+        let base = if self.panels.video.is_full_screen() {
             stack![
-                self.features
+                self.panels
                     .video
                     .view_full_screen(insets, &self.fleet, self.selected)
-                    .map(Message::Video),
+                    .map(Message::from),
                 self.view_toasts(ui::space::XL),
             ]
             .boxed()
@@ -871,7 +834,7 @@ impl Application {
 
     /// Whether the floating shell's video fills the map's screen.
     fn video_is_main(&self) -> bool {
-        self.features.video.slot().is_some() && self.floating.is_video_main()
+        self.panels.video.slot().is_some() && self.floating.is_video_main()
     }
 
     /// The map with the features' layers, placed as `placement`.
@@ -883,17 +846,16 @@ impl Application {
             palette: *theme.palette(),
         };
 
+        let mut panels = LayerSet::new();
+        self.panels.layers(context, &mut panels);
         let mut layers = LayerSet::new();
-        layers.plugin(&self.features.vehicles, context, Message::Vehicles);
-        layers.plugin(&self.features.mission, context, Message::Mission);
+        layers.extend(panels, Message::Panel);
 
         self.map.view(layers, Message::Map, &theme, placement)
     }
 
     /// A panel's content, the same in every shell.
     fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
-        let fleet: &FleetSnapshot = &self.fleet;
-
         match panel {
             // A `Stack` hides the pointer from the map only where an upper
             // layer shows one: here, over the toasts, which are meant to
@@ -903,55 +865,29 @@ impl Application {
                 self.view_toasts(ui::space::M)
             ]
             .boxed(),
-            layout::Panel::Vehicles => self
-                .features
-                .vehicles
-                .view(fleet, self.selected, self.map.is_following())
-                .map(Message::Vehicles)
-                .boxed(),
-            layout::Panel::Parameters => self
-                .features
-                .parameters
-                .view(fleet, self.selected)
-                .map(Message::Parameters)
-                .boxed(),
-            layout::Panel::Calibration => self
-                .features
-                .calibration
-                .view(fleet, self.selected)
-                .map(Message::Calibration)
-                .boxed(),
-            layout::Panel::Mission => self
-                .features
-                .mission
-                .view(fleet, self.selected)
-                .map(Message::Mission)
-                .boxed(),
-            layout::Panel::Links => self
-                .features
-                .links
-                .view(self.backend.links())
-                .map(Message::Links)
-                .boxed(),
-            layout::Panel::Video => self
-                .features
-                .video
-                .view(fleet, self.selected)
-                .map(Message::Video)
-                .boxed(),
-            layout::Panel::Logs => self
-                .log_panel
-                .view(fleet, self.selected, &self.notices)
-                .map(Message::Logs)
-                .boxed(),
             layout::Panel::Settings => settings_panel::view(
                 &self.configuration.settings,
                 self.scale_preview,
                 self.recorder.as_ref().map(TlogRecorder::path),
-                self.features.video.recordings(),
+                self.panels.video.recordings(),
             )
             .map(Message::Settings)
             .boxed(),
+            panel => match self.panels.view(panel, self.view_context()) {
+                Some(view) => view.map(Message::Panel).boxed(),
+                None => ui::empty(format!("{} is not available.", panel.title())).boxed(),
+            },
+        }
+    }
+
+    /// What the panels' views read.
+    fn view_context(&self) -> ViewContext<'_> {
+        ViewContext {
+            fleet: &self.fleet,
+            selected: self.selected,
+            following: self.map.is_following(),
+            notices: &self.notices,
+            links: self.backend.links(),
         }
     }
 
@@ -975,7 +911,7 @@ impl Application {
             .entries()
             .any(|(_, _, status)| status.is_active());
         let refresh =
-            if self.notices.has_toasts() || active_links || self.features.video.needs_ticks() {
+            if self.notices.has_toasts() || active_links || self.panels.video.needs_ticks() {
                 iced::time::every(Duration::from_secs(1)).map(Message::Tick)
             } else {
                 Subscription::none()
@@ -1108,6 +1044,7 @@ fn video_shown(shell: Shell, layout: &Layout) -> bool {
 mod floating;
 #[cfg(test)]
 mod gallery;
+mod panels;
 mod tiled;
 
 #[cfg(test)]

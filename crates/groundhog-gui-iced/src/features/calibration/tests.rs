@@ -45,7 +45,7 @@ fn position(env: &mut Env, position: f32) {
 
 fn shows(panel: &CalibrationPanel, env: &Env, text: &str) -> bool {
     let snapshot = env.fleet.snapshot();
-    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(A)));
+    let mut simulator = iced_test::Simulator::new(panel.view(env.view_context(&snapshot, Some(A))));
     simulator.find(text).is_ok()
 }
 

@@ -26,16 +26,17 @@ use groundhog_logic::{
     services::Result,
     storage::mission::{WplMission, parse_wpl, write_wpl},
 };
-use iced::Task;
+use iced::{Element, Task};
 use mavio::default_dialect::enums::MavCmd;
 
 use super::{
-    Context, Effect,
+    Context, Effect, MapContext, Panel, ViewContext,
     confirm::Confirmation,
     file_dialog,
     notifications::Notice,
     operations::{Activity, Finished, Operations, ProgressReporter, Progressed, Settled},
 };
+use crate::map::LayerSet;
 
 /// Which draft: a vehicle's, or the offline plan (`None`).
 pub type PlanKey = Option<SystemId>;
@@ -214,41 +215,10 @@ pub enum MessageKind {
     LoadedConfirmed(PathBuf, WplMission),
 }
 
-impl MissionEditor {
-    /// The draft the UI shows for `selected`.
-    fn displayed(&self, selected: Option<SystemId>) -> Option<&Draft> {
-        self.drafts.get(&selected)
-    }
+impl Panel for MissionEditor {
+    type Message = Message;
 
-    /// The draft for `plan`, created on first use.
-    fn draft_mut(&mut self, plan: PlanKey) -> &mut Draft {
-        self.drafts.entry(plan).or_insert_with(|| Draft::new(plan))
-    }
-
-    /// Fold a new fleet snapshot in: every vehicle gets a draft, and each
-    /// draft follows its vehicle as [`MissionDraft::follow`] decides.
-    pub fn sync(&mut self, fleet: &FleetSnapshot) {
-        for system in fleet.ids() {
-            let draft = self.draft_mut(Some(system));
-            let replaced = draft.mission.follow(fleet);
-            draft.replaced(replaced);
-        }
-    }
-
-    /// How the draft for `plan` relates to its vehicle.
-    pub fn status(&self, plan: PlanKey, fleet: &FleetSnapshot) -> SyncStatus {
-        self.drafts
-            .get(&plan)
-            .map_or(SyncStatus::Unknown, |draft| draft.mission.status(fleet))
-    }
-
-    /// Whether a transfer is running for `system`.
-    fn transferring(&self, system: SystemId) -> bool {
-        self.operations
-            .any(|(running, operation)| *running == system && operation.is_transfer())
-    }
-
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         let Message { plan, kind } = message;
         let wrap = move |kind| Message { plan, kind };
 
@@ -367,6 +337,50 @@ impl MissionEditor {
                 Task::none()
             }
         }
+    }
+
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        self.view_editor(cx.fleet, cx.selected)
+    }
+
+    fn layers<'a>(&'a self, map: MapContext<'a>, layers: &mut LayerSet<'a, Message>) {
+        self.map_layers(map, layers);
+    }
+
+    /// Fold a new fleet snapshot in: every vehicle gets a draft, and each
+    /// draft follows its vehicle as [`MissionDraft::follow`] decides.
+    fn on_fleet(&mut self, cx: &mut Context<Message>) -> Task<Message> {
+        for system in cx.fleet.ids() {
+            let draft = self.draft_mut(Some(system));
+            let replaced = draft.mission.follow(cx.fleet);
+            draft.replaced(replaced);
+        }
+        Task::none()
+    }
+}
+
+impl MissionEditor {
+    /// The draft the UI shows for `selected`.
+    fn displayed(&self, selected: Option<SystemId>) -> Option<&Draft> {
+        self.drafts.get(&selected)
+    }
+
+    /// The draft for `plan`, created on first use.
+    fn draft_mut(&mut self, plan: PlanKey) -> &mut Draft {
+        self.drafts.entry(plan).or_insert_with(|| Draft::new(plan))
+    }
+
+    /// How the draft for `plan` relates to its vehicle.
+    pub fn status(&self, plan: PlanKey, fleet: &FleetSnapshot) -> SyncStatus {
+        self.drafts
+            .get(&plan)
+            .map_or(SyncStatus::Unknown, |draft| draft.mission.status(fleet))
+    }
+
+    /// Whether a transfer is running for `system`.
+    fn transferring(&self, system: SystemId) -> bool {
+        self.operations
+            .any(|(running, operation)| *running == system && operation.is_transfer())
     }
 
     /// Apply an edit to a draft. Edits to a vehicle's draft are refused while

@@ -8,7 +8,7 @@ use groundhog_logic::{
 use mavio::{DefaultDialect, default_dialect::messages};
 
 use super::*;
-use crate::features::test_support::{Env, run};
+use crate::features::test_support::Env;
 
 const A: SystemId = SystemId(1);
 const ADDRESS: MavlinkId = MavlinkId {
@@ -45,7 +45,7 @@ fn set_onboard(env: &mut Env, editor: &mut MissionEditor, items: Vec<MissionItem
             opaque_id,
         },
     );
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(editor);
 }
 
 fn step(
@@ -54,7 +54,7 @@ fn step(
     plan: PlanKey,
     kind: MessageKind,
 ) -> Vec<Effect<Message>> {
-    run(env, editor, Message { plan, kind })
+    env.step(editor, Message { plan, kind })
 }
 
 fn draft(editor: &MissionEditor, plan: PlanKey) -> &Draft {
@@ -86,7 +86,7 @@ fn waypoint(lat: f64) -> MissionItem {
 async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     step(&mut env, &mut editor, None, MessageKind::AddWaypoint);
 
@@ -103,7 +103,7 @@ async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
 async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     editor
         .draft_mut(None)
         .plan_mut()
@@ -130,7 +130,7 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
     let mut env = env();
     place_vehicle(&mut env);
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
 
@@ -165,7 +165,7 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
 async fn map_clicks_only_place_while_placing() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     step(
         &mut env,
@@ -189,7 +189,7 @@ async fn map_clicks_only_place_while_placing() {
 async fn an_unmodified_draft_follows_the_onboard_mission() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
         SyncStatus::Unknown
@@ -233,7 +233,7 @@ async fn a_modified_draft_is_never_overwritten() {
 async fn downloading_over_changes_asks_first() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     place(&mut env, &mut editor, Some(A), 1.0);
 
     let effects = step(
@@ -262,7 +262,7 @@ async fn downloading_over_changes_asks_first() {
 async fn edits_wait_for_a_running_transfer() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     step(
         &mut env,
@@ -287,7 +287,7 @@ async fn edits_wait_for_a_running_transfer() {
 async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     step(
         &mut env,
@@ -389,7 +389,7 @@ async fn resuming_asks_and_pausing_does_not() {
 async fn failures_are_shown_to_the_operator() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     // An empty plan asks first; this one was confirmed.
     step(
@@ -419,7 +419,7 @@ async fn failures_are_shown_to_the_operator() {
 async fn drags_address_items_by_id() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     place(&mut env, &mut editor, None, 1.0);
     place(&mut env, &mut editor, None, 2.0);
 
@@ -494,7 +494,7 @@ async fn jumping_needs_a_synced_plan_and_a_confirmation() {
 async fn clearing_the_vehicle_always_asks() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
 
     let effects = step(
         &mut env,
@@ -511,7 +511,7 @@ async fn clearing_the_vehicle_always_asks() {
 async fn a_transfer_keeps_selection_enabled_and_edits_disabled() {
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     let adding = editor.draft_mut(Some(A));
     let first = adding.plan_mut().push(waypoint(1.0));
     let second = adding.plan_mut().push(waypoint(2.0));
@@ -561,7 +561,7 @@ async fn loading_a_file_asks_over_edits_and_waits_for_a_transfer() {
 
     let mut env = env();
     let mut editor = MissionEditor::default();
-    editor.sync(&env.fleet.snapshot());
+    env.on_fleet(&mut editor);
     editor.draft_mut(Some(A)).plan_mut().push(waypoint(1.0));
 
     let path = PathBuf::from("mission.waypoints");

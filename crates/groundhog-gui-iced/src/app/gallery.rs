@@ -55,7 +55,7 @@ use mavio::{
 
 use super::*;
 use crate::{
-    features::mission::MessageKind,
+    features::{link_panel, mission, mission::MessageKind, parameter_panel},
     shell::{Destination, ShellMode},
     ui::{style, theme::ThemeMode},
     widget::pane_grid::{self, PaneGrid},
@@ -324,7 +324,7 @@ async fn gallery() {
     }));
 
     // A configured link, so the link list shows.
-    let _ = app.update(Message::Links(link_panel::Message::Save(LinkConfig {
+    let _ = app.update(Message::from(link_panel::Message::Save(LinkConfig {
         name: "SITL".to_string(),
         auto_connect: false,
         high_latency: false,
@@ -336,7 +336,7 @@ async fn gallery() {
         },
     })));
 
-    let _ = app.update(Message::Links(link_panel::Message::Save(LinkConfig {
+    let _ = app.update(Message::from(link_panel::Message::Save(LinkConfig {
         name: "Telemetry radio".to_string(),
         auto_connect: false,
         high_latency: false,
@@ -348,12 +348,12 @@ async fn gallery() {
     })));
 
     // An edited parameter and a selected mission item, so their editors show.
-    let _ = app.update(Message::Parameters(parameter_panel::Message::Edit(
+    let _ = app.update(Message::from(parameter_panel::Message::Edit(
         AUTOPILOT,
         Ident::from_str_truncated("WPNAV_SPEED"),
         "750".into(),
     )));
-    let _ = app.update(Message::Mission(mission::Message {
+    let _ = app.update(Message::from(mission::Message {
         plan: Some(SYSTEM),
         kind: MessageKind::AddWaypoint,
     }));
@@ -422,13 +422,13 @@ async fn gallery() {
         layout::Panel::Video,
         layout::Slot::Right,
     )));
-    let _ = app.update(Message::Video(video::Message::EditSource(
+    let _ = app.update(Message::from(video::Message::EditSource(
         "test://".to_string(),
     )));
-    let _ = app.update(Message::Video(video::Message::Start));
+    let _ = app.update(Message::from(video::Message::Start));
     for _ in 0..250 {
         if app
-            .features
+            .panels
             .video
             .slot()
             .is_some_and(|slot| slot.latest().is_some())
@@ -437,7 +437,7 @@ async fn gallery() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let _ = app.update(Message::Video(video::Message::Updated(
+    let _ = app.update(Message::from(video::Message::Updated(
         0,
         groundhog_video::State {
             status: groundhog_video::Status::Streaming {
@@ -464,28 +464,28 @@ async fn gallery() {
             &theme,
             video_pane(&app),
         );
-        let _ = app.update(Message::Video(video::Message::ToggleDetails));
+        let _ = app.update(Message::from(video::Message::ToggleDetails));
         gallery.render(
             &format!("panel-video-details-{suffix}"),
             Size::new(1200.0, 700.0),
             &theme,
             video_pane(&app),
         );
-        let _ = app.update(Message::Video(video::Message::ToggleDetails));
-        let _ = app.update(Message::Video(video::Message::ToggleForm));
+        let _ = app.update(Message::from(video::Message::ToggleDetails));
+        let _ = app.update(Message::from(video::Message::ToggleForm));
         gallery.render(
             &format!("panel-video-source-{suffix}"),
             Size::new(1200.0, 700.0),
             &theme,
             video_pane(&app),
         );
-        let _ = app.update(Message::Video(video::Message::ToggleForm));
+        let _ = app.update(Message::from(video::Message::ToggleForm));
     }
 
     // Recording: the button chosen, and the badge a file being written
     // shows. The receiver's own state is not run, so it is handed one.
-    let _ = app.update(Message::Video(video::Message::Record(true)));
-    let _ = app.update(Message::Video(video::Message::Updated(
+    let _ = app.update(Message::from(video::Message::Record(true)));
+    let _ = app.update(Message::from(video::Message::Updated(
         0,
         groundhog_video::State {
             status: groundhog_video::Status::Streaming {
@@ -503,17 +503,17 @@ async fn gallery() {
         &app.theme(),
         video_pane(&app),
     );
-    let _ = app.update(Message::Video(video::Message::Record(false)));
+    let _ = app.update(Message::from(video::Message::Record(false)));
 
     // The video alone, filling the screen.
-    let _ = app.update(Message::Video(video::Message::FullScreen(true)));
+    let _ = app.update(Message::from(video::Message::FullScreen(true)));
     gallery.render(
         "video-full-screen",
         Size::new(1600.0, 1000.0),
         &app.theme(),
         app.view(),
     );
-    let _ = app.update(Message::Video(video::Message::FullScreen(false)));
+    let _ = app.update(Message::from(video::Message::FullScreen(false)));
 
     // Dragging the parameters (right column) by their title bar, to show
     // where they would land: the bottom half of the vehicles pane (splitting
@@ -605,7 +605,7 @@ async fn gallery() {
         .find(|(_, config, _)| config.name == "SITL")
         .map(|(id, ..)| id.clone())
         .expect("the SITL link is saved");
-    let _ = app.update(Message::Links(link_panel::Message::EditLink(sitl.clone())));
+    let _ = app.update(Message::from(link_panel::Message::EditLink(sitl.clone())));
     gallery.render(
         "panel-links-overwrite-dark",
         Size::new(560.0, 820.0),
@@ -615,7 +615,7 @@ async fn gallery() {
 
     // The link connected. (Its details are in a tooltip, which shows only
     // after a hover delay that a snapshot does not wait for.)
-    let _ = app.update(Message::Links(link_panel::Message::Connect(sitl.clone())));
+    let _ = app.update(Message::from(link_panel::Message::Connect(sitl.clone())));
     for _ in 0..100 {
         if app.backend.links().status(&sitl).is_connected() {
             break;
@@ -672,7 +672,7 @@ async fn gallery() {
 
         // The feed drops out: the corner dims its last frame and says so.
         let video_state = |status| {
-            Message::Video(video::Message::Updated(
+            Message::from(video::Message::Updated(
                 0,
                 groundhog_video::State {
                     status,
@@ -728,7 +728,7 @@ async fn gallery() {
     let _ = app.update(Message::Settings(settings_panel::Message::Theme(
         ThemeMode::Dark,
     )));
-    let _ = app.update(Message::Mission(mission::Message {
+    let _ = app.update(Message::from(mission::Message {
         plan: Some(SYSTEM),
         kind: MessageKind::Clear { confirmed: false },
     }));

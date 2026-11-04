@@ -33,7 +33,7 @@ use iced::{
 use mav_param::{Ident, Value};
 
 use super::{
-    Context, Effect, file_dialog,
+    Context, Effect, Panel, ViewContext, file_dialog,
     notifications::Notice,
     operations::{Activity, Finished, Operations, Settled},
 };
@@ -143,31 +143,10 @@ pub struct ParameterPanel {
     component: BTreeMap<SystemId, u8>,
 }
 
-impl ParameterPanel {
-    /// The component shown for `vehicle`: the operator's choice, else its
-    /// autopilot (or the conventional component 1 before one is known).
-    fn selected_component(&self, vehicle: &Vehicle) -> u8 {
-        self.component
-            .get(&vehicle.system)
-            .copied()
-            .unwrap_or_else(|| vehicle.default_parameter_component())
-    }
+impl Panel for ParameterPanel {
+    type Message = Message;
 
-    fn edit(&self, address: MavlinkId, ident: &Ident) -> Option<&ParamEdit> {
-        self.edits.get(&address)?.get(ident)
-    }
-
-    /// Whether `address`'s component is downloading its parameters: the panel
-    /// started a reload, or the vehicle is being read by someone else.
-    fn is_downloading(&self, address: MavlinkId, cx: &Context<Message>) -> bool {
-        self.reloads.is_running(&Download(address))
-            || cx
-                .fleet
-                .parameters(address)
-                .is_some_and(|parameters| parameters.download().is_running())
-    }
-
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::FilterIdentPattern(pattern) => self.filter.ident_pattern = pattern,
             Message::FilterOnlyChanged(only) => self.filter.only_changed = only,
@@ -409,38 +388,11 @@ impl ParameterPanel {
         Task::none()
     }
 
-    fn upload(
-        &mut self,
-        address: MavlinkId,
-        ident: Ident,
-        cx: &mut Context<Message>,
-    ) -> Task<Message> {
-        let Some(upload) = self
-            .edits
-            .get_mut(&address)
-            .and_then(|edits| edits.begin_upload(&ident))
-        else {
-            return Task::none();
-        };
-
-        let client = cx.services.component(address);
-        let key = (address, ident.clone());
-
-        let value = upload.value;
-        self.uploads.start_with(
-            key,
-            upload,
-            async move { client.set_parameter(ident, value).await },
-            Message::Uploaded,
-        )
-    }
-
     /// Render the parameter panel.
-    pub fn view<'a>(
-        &'a self,
-        fleet: &'a FleetSnapshot,
-        selected: Option<SystemId>,
-    ) -> Element<'a, Message> {
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        let ViewContext {
+            fleet, selected, ..
+        } = cx;
         let Some(vehicle) = selected.and_then(|system| fleet.vehicle(system)) else {
             return ui::empty("No vehicle selected.").boxed();
         };
@@ -616,6 +568,57 @@ impl ParameterPanel {
             .spacing(ui::space::M),
         )
         .boxed()
+    }
+}
+
+impl ParameterPanel {
+    /// The component shown for `vehicle`: the operator's choice, else its
+    /// autopilot (or the conventional component 1 before one is known).
+    fn selected_component(&self, vehicle: &Vehicle) -> u8 {
+        self.component
+            .get(&vehicle.system)
+            .copied()
+            .unwrap_or_else(|| vehicle.default_parameter_component())
+    }
+
+    fn edit(&self, address: MavlinkId, ident: &Ident) -> Option<&ParamEdit> {
+        self.edits.get(&address)?.get(ident)
+    }
+
+    /// Whether `address`'s component is downloading its parameters: the panel
+    /// started a reload, or the vehicle is being read by someone else.
+    fn is_downloading(&self, address: MavlinkId, cx: &Context<Message>) -> bool {
+        self.reloads.is_running(&Download(address))
+            || cx
+                .fleet
+                .parameters(address)
+                .is_some_and(|parameters| parameters.download().is_running())
+    }
+
+    fn upload(
+        &mut self,
+        address: MavlinkId,
+        ident: Ident,
+        cx: &mut Context<Message>,
+    ) -> Task<Message> {
+        let Some(upload) = self
+            .edits
+            .get_mut(&address)
+            .and_then(|edits| edits.begin_upload(&ident))
+        else {
+            return Task::none();
+        };
+
+        let client = cx.services.component(address);
+        let key = (address, ident.clone());
+
+        let value = upload.value;
+        self.uploads.start_with(
+            key,
+            upload,
+            async move { client.set_parameter(ident, value).await },
+            Message::Uploaded,
+        )
     }
 
     fn view_param_list<'a>(

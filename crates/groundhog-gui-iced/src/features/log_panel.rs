@@ -16,12 +16,15 @@ use groundhog_logic::{
     },
 };
 use iced::{
-    Alignment, Length, Widget,
+    Alignment, Element, Length, Task, Widget,
     widget::{container, row, scrollable},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
-use super::notifications::{Level, Notice, Notifications};
+use super::{
+    Context, Panel, ViewContext,
+    notifications::{Level, Notice, Notifications},
+};
 use crate::{
     ui::{self, TextExt, Tone},
     widget::virtualized::virtual_list,
@@ -129,19 +132,28 @@ fn severity_of(level: Level) -> MavSeverity {
     }
 }
 
+impl Panel for LogPanel {
+    type Message = Message;
+
+    fn update(&mut self, message: Message, _cx: &mut Context<Message>) -> Task<Message> {
+        match message {
+            Message::SetScope(scope) => self.filter.scope = scope,
+            Message::SetMinSeverity(severity) => self.filter.min_severity = severity,
+        }
+        Task::none()
+    }
+
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        self.view_log(cx.fleet, cx.selected, cx.notices).boxed()
+    }
+}
+
 impl LogPanel {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn update(&mut self, message: Message) {
-        match message {
-            Message::SetScope(scope) => self.filter.scope = scope,
-            Message::SetMinSeverity(severity) => self.filter.min_severity = severity,
-        }
-    }
-
-    pub fn view<'a>(
+    fn view_log<'a>(
         &'a self,
         fleet: &'a FleetSnapshot,
         selected: Option<SystemId>,

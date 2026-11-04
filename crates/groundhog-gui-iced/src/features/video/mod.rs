@@ -58,7 +58,7 @@ use iced::{
 
 use self::tracking::{Overlay, Request, Shade};
 use super::{
-    Context, Effect, Persisted,
+    Context, Effect, Panel, Persisted, ViewContext,
     notifications::Notice,
     operations::{Activity, Finished, Operations, Settled},
 };
@@ -269,6 +269,108 @@ struct Receiving {
     recording_into: Option<PathBuf>,
 }
 
+impl Panel for VideoPanel {
+    type Message = Message;
+
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+        match message {
+            Message::EditSource(source) => {
+                self.source = source;
+                Task::none()
+            }
+            Message::LowLatency(low_latency) => {
+                self.settings.low_latency = low_latency;
+                // A running stream takes the new setting at once.
+                self.receiving = None;
+                let task = self.sync(Instant::now());
+                self.persist(task, cx)
+            }
+            Message::Start => {
+                if Source::parse(&self.source).is_err() {
+                    return Task::none();
+                }
+                self.settings.uri = self.source.trim().to_string();
+                self.settings.enabled = true;
+                self.form = false;
+                // A new source is a new receiver.
+                self.receiving = None;
+                let task = self.sync(Instant::now());
+                self.persist(task, cx)
+            }
+            Message::Stop => {
+                self.full_screen = false;
+                self.settings.enabled = false;
+                self.record = false;
+                let task = self.sync(Instant::now());
+                self.persist(task, cx)
+            }
+            Message::Record(record) => {
+                self.record = record;
+                // Stopped, a recording while armed waits for the next
+                // arming.
+                if !record {
+                    self.while_armed.dismissed = true;
+                }
+                self.sync(Instant::now())
+            }
+            Message::ToggleForm => {
+                self.form = !self.form;
+                Task::none()
+            }
+            Message::ToggleDetails => {
+                self.details = !self.details;
+                Task::none()
+            }
+            Message::FullScreen(full_screen) => {
+                self.full_screen = full_screen && self.receiving.is_some();
+                Task::none()
+            }
+            Message::Updated(id, state) => {
+                let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) else {
+                    return Task::none();
+                };
+                match &state.status {
+                    Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
+                    Status::Streaming { .. } => receiving.problem = None,
+                    Status::Connecting | Status::Failed(_) => {}
+                }
+                if let Recording::Failed(reason) = &state.recording
+                    && receiving.state.recording != state.recording
+                {
+                    cx.notices
+                        .push(Notice::error("Could not record the video").detail(reason));
+                }
+                receiving.state = state;
+                Task::none()
+            }
+            Message::Track(key, request) => self.do_tracking(key, TrackAction::Track(request), cx),
+            Message::StopTracking(key) => self.do_tracking(key, TrackAction::Stop, cx),
+            Message::Tracked(finished) => {
+                let Some(Settled {
+                    key,
+                    context: action,
+                    result,
+                }) = self.tracking.settle(finished, cx)
+                else {
+                    return Task::none();
+                };
+                self.asked = None;
+                // A failure was announced when it settled.
+                match (action, result) {
+                    (TrackAction::Track(_), Ok(())) => self.engaged = Some(key),
+                    (TrackAction::Stop, Ok(())) => self.engaged = None,
+                    (_, Err(_)) => {}
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        self.view_pane(cx.fleet, cx.selected)
+    }
+}
+
 impl VideoPanel {
     /// The panel for `settings`, receiving nothing until it is shown,
     /// recording into `recordings`.
@@ -370,100 +472,6 @@ impl VideoPanel {
         self.receiving
             .as_ref()
             .map(|receiving| receiving.receiver.slot())
-    }
-
-    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
-        match message {
-            Message::EditSource(source) => {
-                self.source = source;
-                Task::none()
-            }
-            Message::LowLatency(low_latency) => {
-                self.settings.low_latency = low_latency;
-                // A running stream takes the new setting at once.
-                self.receiving = None;
-                let task = self.sync(Instant::now());
-                self.persist(task, cx)
-            }
-            Message::Start => {
-                if Source::parse(&self.source).is_err() {
-                    return Task::none();
-                }
-                self.settings.uri = self.source.trim().to_string();
-                self.settings.enabled = true;
-                self.form = false;
-                // A new source is a new receiver.
-                self.receiving = None;
-                let task = self.sync(Instant::now());
-                self.persist(task, cx)
-            }
-            Message::Stop => {
-                self.full_screen = false;
-                self.settings.enabled = false;
-                self.record = false;
-                let task = self.sync(Instant::now());
-                self.persist(task, cx)
-            }
-            Message::Record(record) => {
-                self.record = record;
-                // Stopped, a recording while armed waits for the next
-                // arming.
-                if !record {
-                    self.while_armed.dismissed = true;
-                }
-                self.sync(Instant::now())
-            }
-            Message::ToggleForm => {
-                self.form = !self.form;
-                Task::none()
-            }
-            Message::ToggleDetails => {
-                self.details = !self.details;
-                Task::none()
-            }
-            Message::FullScreen(full_screen) => {
-                self.full_screen = full_screen && self.receiving.is_some();
-                Task::none()
-            }
-            Message::Updated(id, state) => {
-                let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) else {
-                    return Task::none();
-                };
-                match &state.status {
-                    Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
-                    Status::Streaming { .. } => receiving.problem = None,
-                    Status::Connecting | Status::Failed(_) => {}
-                }
-                if let Recording::Failed(reason) = &state.recording
-                    && receiving.state.recording != state.recording
-                {
-                    cx.notices
-                        .push(Notice::error("Could not record the video").detail(reason));
-                }
-                receiving.state = state;
-                Task::none()
-            }
-            Message::Track(key, request) => self.do_tracking(key, TrackAction::Track(request), cx),
-            Message::StopTracking(key) => self.do_tracking(key, TrackAction::Stop, cx),
-            Message::Tracked(finished) => {
-                let Some(Settled {
-                    key,
-                    context: action,
-                    result,
-                }) = self.tracking.settle(finished, cx)
-                else {
-                    return Task::none();
-                };
-                self.asked = None;
-                // A failure was announced when it settled.
-                match (action, result) {
-                    (TrackAction::Track(_), Ok(())) => self.engaged = Some(key),
-                    (TrackAction::Stop, Ok(())) => self.engaged = None,
-                    (_, Err(_)) => {}
-                }
-                Task::none()
-            }
-        }
     }
 
     /// Have the application save the settings, which just changed.
@@ -600,7 +608,7 @@ impl VideoPanel {
         Task::stream(updates).map(move |state| Message::Updated(id, state))
     }
 
-    pub fn view<'a>(
+    fn view_pane<'a>(
         &'a self,
         fleet: &FleetSnapshot,
         selected: Option<SystemId>,

@@ -8,9 +8,9 @@
 //! for the frame, and type-erased, so the map knows nothing about missions,
 //! vehicles or any other feature.
 //!
-//! A feature usually contributes its layers through [`MapPlugin`], which the
-//! application calls with its own context type (fleet snapshot, theme, ...)
-//! to collect every plugin's layers into one [`LayerSet`].
+//! Each feature fills a [`LayerSet`] of its own messages; the application
+//! gathers them into one with [`LayerSet::extend`], translating each
+//! feature's messages into its own.
 
 use std::rc::Rc;
 
@@ -172,20 +172,6 @@ impl<'a, Message: 'a> LayerSet<'a, Message> {
         self.layers.push(Box::new(layer));
     }
 
-    /// Collect `plugin`'s layers, translating their messages with `map`.
-    pub fn plugin<Context, P: MapPlugin<'a, Context>>(
-        &mut self,
-        plugin: &'a P,
-        context: Context,
-        map: impl Fn(P::Message) -> Message + 'a,
-    ) where
-        P::Message: 'a,
-    {
-        let mut layers = LayerSet::new();
-        plugin.layers(context, &mut layers);
-        self.extend(layers, map);
-    }
-
     /// Add every layer of `other`, translating its messages with `map`.
     pub fn extend<Other: 'a>(
         &mut self,
@@ -207,17 +193,6 @@ impl<'a, Message: 'a> LayerSet<'a, Message> {
         self.layers.sort_by_key(|layer| layer.z_index());
         self.layers
     }
-}
-
-/// A source of map layers: typically a feature, contributing layers built
-/// from its own state and the application's `Context`.
-///
-/// The context is passed by value and borrows for the frame (`'a`), so the
-/// application can build it on the fly in its `view`.
-pub trait MapPlugin<'a, Context> {
-    type Message;
-
-    fn layers(&'a self, context: Context, layers: &mut LayerSet<'a, Self::Message>);
 }
 
 /// A layer whose messages are translated to another type.
