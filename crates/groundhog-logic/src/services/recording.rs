@@ -228,11 +228,19 @@ mod tests {
         let (mut peer, gcs) = tokio::io::duplex(4096);
         let (reader, writer) = tokio::io::split(gcs);
         let _guard = router.attach_reader_writer(LinkId::new("test"), reader, writer, false);
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
         peer.write_all(&bytes).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         recorder.stop();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
 
         let written = std::fs::read(&path).unwrap();
         drop(std::fs::remove_dir_all(&directory));
@@ -241,8 +249,8 @@ mod tests {
         assert_eq!(&written[8..], bytes.as_slice());
         let micros = u64::from_be_bytes(written[..8].try_into().unwrap());
         assert!(
-            micros > 1_600_000_000_000_000,
-            "a plausible wall-clock time"
+            (before..=after).contains(&micros),
+            "the timestamp is the reception time, not a constant: {micros} not in {before}..={after}"
         );
     }
 }

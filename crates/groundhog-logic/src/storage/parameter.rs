@@ -316,6 +316,11 @@ mod tests {
         values.insert(Ident::from_str_truncated("ARMING_CHECK"), Value::I32(1));
         values.insert(Ident::from_str_truncated("WPNAV_SPEED"), Value::F32(500.5));
         values.insert(Ident::from_str_truncated("SERIAL1_BAUD"), Value::I16(57));
+        values.insert(
+            Ident::from_str_truncated("BATT_CAPACITY"),
+            Value::U32(70_000),
+        );
+        values.insert(Ident::from_str_truncated("SERVO_FUNCTION"), Value::U8(7));
         values
     }
 

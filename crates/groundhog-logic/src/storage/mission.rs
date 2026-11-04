@@ -490,7 +490,8 @@ mod tests {
     fn a_utf8_bom_is_stripped() {
         let text = "\u{feff}QGC WPL 110\n\
                     0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n";
-        assert!(parse_wpl(text).is_ok());
+        let mission = parse_wpl(text).expect("a BOM is not part of the header");
+        assert!(mission.home.is_some(), "the home row still parsed");
     }
 
     #[test]

@@ -311,16 +311,16 @@ async fn concurrent_request_messages_queue_instead_of_starving() {
         async move { router.request_message::<SystemTime>(VEHICLE).await }
     });
 
-    // The mock answers each completed COMMAND_LONG with its ACK and the
-    // message, in sequence: the replies arrive one round apart.
-    for _ in 0..2 {
+    // The mock answers each completed COMMAND_LONG with its ACK and a distinct
+    // message, in sequence: a reply delivered to the wrong waiter would show.
+    for time_unix_usec in [1, 2] {
         let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
             panic!("expected COMMAND_LONG")
         };
         vehicle.ack(long.command, MavResult::Accepted).await;
         vehicle
             .send(&SystemTime {
-                time_unix_usec: 42,
+                time_unix_usec,
                 ..Default::default()
             })
             .await;
@@ -334,9 +334,9 @@ async fn concurrent_request_messages_queue_instead_of_starving() {
         .await
         .unwrap()
         .expect("the queued second request must resolve");
-    assert_eq!(first.time_unix_usec, 42);
-    assert_eq!(second.time_unix_usec, 42);
-    assert_eq!(first.time_unix_usec, second.time_unix_usec);
+    let mut replies = [first.time_unix_usec, second.time_unix_usec];
+    replies.sort_unstable();
+    assert_eq!(replies, [1, 2], "each request got its own reply");
 }
 
 #[tokio::test]

@@ -125,8 +125,10 @@ mod tests {
     #[test]
     fn battery_status_takes_precedence() {
         let mut battery = Battery::default();
+        // The summary disagrees with the cells, so the assertion shows which
+        // one is used.
         battery.observe_sys_status(&messages::SysStatus {
-            voltage_battery: 12_000,
+            voltage_battery: 11_000,
             current_battery: 100,
             battery_remaining: 50,
             ..Default::default()
