@@ -2,7 +2,11 @@
 
 A single living list for Groundhog, merged from `CODE_REVIEW.md`,
 `LOGIC_REVIEW.md` and `REVIEW.md` and verified against `5389934` on
-2026-10-25. Only open work is here. Fixed items are in
+2026-10-25, then extended with a review of `groundhog-logic` at `757d6f4` on
+2026-11-04 (PROTO-7…13, MISSION-12…19, PARAM-11…15, LINK-8…9, CAL-10…14,
+SVC-18…21, API-14…20; tagged "From R-1104"). Most R-1104 entries were
+reproduced with a test; the rest are marked *by reading*. Only open work is
+here. Fixed items are in
 [Appendix A](#appendix-a--fixed-since-the-reviews); claims that were wrong or
 too weak to act on are in [Appendix B](#appendix-b--rejected-claims) and
 [Appendix C](#appendix-c--parked).
@@ -27,7 +31,11 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [UI-1](#ui-1--the-confirmation-dialog-does-not-fit-a-phone) — the accept button can be off-screen |
+| **P1** | [PROTO-7](#proto-7--a-corrupt-frame-suppresses-its-intact-copy) — a corrupt copy hides the intact one and takes the route |
+| **P1** | [PARAM-11](#param-11--overlapping-downloads-delete-parameters-and-report-complete) — a queued download truncates the list that completes first |
+| **P1** | [CAL-10](#cal-10--the-no-progress-timeout-ends-runs-that-are-alive-and-leaves-them-running) — the timeout fails a live compass run, which then saves anyway |
+| **P1** | [PROTO-8](#proto-8--one-in_progress-cuts-the-callers-timeout-to-five-seconds) — one `IN_PROGRESS` cuts a 10 s timeout to 5 s and cancels the command |
+| **P1** | [MISSION-17](#mission-17--our-own-upload-is-announced-as-changed-elsewhere) — every upload to PX4 / ArduPilot 4.5+ warns "changed elsewhere" |
 
 ---
 
@@ -68,7 +76,157 @@ return success for a frame never sent.
 
 **Fix:** remove first, then cancel, or have `closed()` await teardown.
 
+### PROTO-7 · A corrupt frame suppresses its intact copy
+**P1** · Effort S · From R-1104
+
+mavio's parser does not verify checksums, so corrupt frames arrive as `Ok`.
+The reader counts them as parse errors but still calls `handle_frame`
+(`router.rs:727-745`), and `dispatch` enters them in duplicate suppression and
+refreshes the route (`router.rs:560-593`). The suppression key
+`(sequence, message id, checksum)` uses the *transmitted* checksum, which a
+payload bit-flip does not change. With a noisy fast radio and a clean LTE
+link, a garbled `COMMAND_ACK` on the radio makes the intact LTE copy a
+"duplicate": the ACK is lost and the radio becomes the command route. A
+`retries(0)` command (calibration start) then times out while the vehicle runs it.
+
+**Fix:** a frame for which `is_corrupt` is true goes no further than its
+counter: no suppression entry, no route refresh, no dispatch. Frames of
+messages outside the dialect cannot be checked and pass as today.
+
+**Test:** a corrupt copy on link A followed by the intact copy on link B: the
+intact copy is dispatched and B is the route.
+
+### PROTO-8 · One `IN_PROGRESS` cuts the caller's timeout to five seconds
+**P1** · Effort S · From R-1104
+
+`CommandRequest::run` sets `timeout = PROGRESS_TIMEOUT` (5 s) on the first
+`IN_PROGRESS` (`transaction.rs:209-212`), replacing a longer `.timeout()`
+the caller chose. `start_calibration` asks for 10 s; a firmware that reports
+progress once and finishes 6 s later gets `Err(Timeout)`, and `Pending::drop`
+then sends `COMMAND_CANCEL` (`:267-280`) to a command that was succeeding.
+
+**Fix:** use `self.response_timeout.max(PROGRESS_TIMEOUT)` while in progress.
+Cancelling a command the transaction gives up on is right (the caller is told
+it failed, so the vehicle must not go on with it); say so in the
+`CommandRequest` doc.
+
+**Test:** paused clock, `.timeout(10 s)`, one `IN_PROGRESS`, final ACK after
+7 s: `Ok`, and no `COMMAND_CANCEL`.
+
+### PROTO-9 · A late ACK of a resent command answers the next one
+**P2** · Effort M · From R-1104 · Decision needed (see the tracker)
+
+The ACK registration and the lock are released at the first final ACK
+(`transaction.rs:180-232`, `acks.rs`). When a command was resent because its
+first ACK was slower than `RESPONSE_TIMEOUT`, the vehicle answers both copies.
+The second answer is still in flight when the transaction ends, and the next
+command of the same kind to the same target takes it as its own. Concretely:
+arm is sent, its ACK takes 1.2 s, arm is resent, the first ACK completes it;
+the operator disarms; the second "Accepted" for arm arrives and completes the
+disarm; the vehicle's real answer to the disarm ("Denied") is logged as
+unsolicited. The operator is told the disarm succeeded. Same for two mode
+changes in a row. Only happens after a resend; MAVLink ACKs carry no
+sequence or confirmation number, so it cannot be told apart from the reply.
+
+**Fix:** a transaction that sent more than one attempt keeps its ACK
+registration and lock for a drain period after it completes, discarding up
+to `attempts - 1` further ACKs for at most `response_timeout`. The caller
+gets its result at once; only the next command of the same kind to the same
+target waits, and only after a resend.
+
+**Test:** arm with a short timeout, two attempts each acknowledged; a disarm
+issued right after, whose vehicle answers `Accepted` (the straggler) then
+`Denied`: the disarm returns `Rejected(Denied)`.
+
+### PROTO-10 · The tolerant decoder patches only one unknown enum
+**P2** · Effort S · From R-1104
+
+`decode` re-decodes once after patching the field `InvalidEnumValue` named
+(`decode.rs:117,145,159`). A message with two unknown enum values (a
+`HEARTBEAT` whose `type` and `autopilot` are both newer than the dialect, a
+`CAMERA_TRACKING_IMAGE_STATUS` with a new status and mode) still fails, and
+the vehicle never registers.
+
+**Fix:** loop: patch the named field in one working payload buffer and decode
+again, at most once per fallback field of the message, until it decodes or
+names a field without a fallback.
+
+**Test:** a heartbeat with bytes 4 and 5 both 200 decodes, generic type and
+generic autopilot.
+
+### PROTO-11 · Component 0 targets lock differently than their ACKs route
+**P3** · Effort M · From R-1104 · Latent
+
+Lock keys and pending-ACK keys are exact `MavlinkId`s, but `route_ack` treats
+a pending entry for component 0 as "any component of the system"
+(`acks.rs:42-65`). Commands to `(1, 0)` and `(1, 1)` of one kind can run at
+once, and an ACK from `(1, 1)` goes to the `(1, 1)` transaction even if it
+answers `(1, 0)`'s. No caller targets component 0 today (`Vehicle::target`
+falls back to 1).
+
+**Fix:** assert in `CommandRequest::run` (debug) that the target component is
+not 0, and document it in the router; implement system-wide locking only if a
+caller ever needs it.
+
+### PROTO-12 · `mission_clear` accepts a stale `MISSION_ACK`
+**P3** · Effort S · From R-1104 · *by reading*
+
+The download sets `listener.not_before` before it sends (`mission.rs:454`);
+`mission_clear` does not (`mission.rs:225-256`). A late `Accepted` from an
+earlier, timed-out transfer completes a clear the vehicle never did, and the
+runtime records an empty onboard mission.
+
+**Fix:** set `not_before` before sending `MISSION_CLEAR_ALL`, as the download
+does.
+
+### PROTO-13 · The parser does not resynchronise after a false start
+**P3** · Effort M · From R-1104 · Upstream (mavio fork)
+
+mavio's `FrameParser` takes any `0xFD`/`0xFE` as a frame start and never
+checks the checksum, so a false start inside a payload swallows the following
+real frames up to its bogus length. Fix in the fork: on a checksum failure,
+restart the search one byte after the false start.
+
 ## Mission
+
+### MISSION-17 · Our own upload is announced as "changed elsewhere"
+**P1** · Effort M · From R-1104
+
+The upload's result reaches the runtime through the `Input` channel
+(`vehicle.rs` `upload_mission`), frames through the router's channel, and
+nothing orders the two (`runtime.rs:170-200`). A vehicle that reports
+`mission_id` (PX4, ArduPilot 4.5+) sends `MISSION_CURRENT` with the new id
+right after the ACK; when it is folded before the result, `onboard_is_stale`
+compares it with the old id and the fleet emits `OnboardMissionStale`. On a
+multi-thread runtime this happened 30 times in 30. `clear_mission` races the
+same way.
+
+**Fix:** the runtime knows a transfer is running: the service reports its start
+before the first frame and its end (with or without a result) from a drop
+guard. `onboard_is_stale` is false while a transfer runs.
+
+**Test:** multi-thread runtime, PX4 mock: upload, ACK with id 11, then
+`MISSION_CURRENT` id 11, twenty times: never `OnboardMissionStale`.
+
+### MISSION-18 · "Changed elsewhere" needs mission ids
+**P2** · Effort S · From R-1104 · *by reading*
+
+`onboard_is_stale` decides only when both ids are known (`vehicle/mission.rs:51-58`).
+Older firmware reports none, so another GCS's upload leaves the draft
+"Synced", and neither Start nor Upload warns as `AGENTS.md` promises.
+
+**Fix:** when no id is reported, a reported `MISSION_CURRENT.total` that
+differs from the onboard mission's item count also means stale. A partial
+check; say so in the doc.
+
+### MISSION-19 · `MissionDraft::transferred` drops edits made meanwhile
+**P3** · Effort S · From R-1104
+
+`transferred` replaces the plan with what was uploaded (`draft.rs:286`). The
+iced frontend disables editing during a transfer (WP12), so it cannot happen
+there, but the domain model leaves the rule to each frontend. Either document
+on `transferred` that the frontend must block edits while a transfer runs, or
+after an upload only rebase (`base = items`) and keep the plan.
 
 ## Parameters
 
@@ -123,6 +281,68 @@ the `debug` feature is on. Use a summary `Debug` as `FleetUpdate` does.
 `link_panel/mod.rs:112-119` spawns `detect_serial_ports` with no busy flag, so
 repeated actions can race. Put it behind `Operations` or a small busy guard.
 
+### PARAM-11 · Overlapping downloads delete parameters and report Complete
+**P1** · Effort S · From R-1104
+
+`fetch_parameters` reports `DownloadUpdate::Start` (`vehicle.rs:242`) before
+`param_list` takes the channel lock (`mavlink/param.rs:148`). `Start` bumps
+the download generation, and a `Complete` keeps only values of the current
+generation (`parameter.rs:243-257`). So: download A runs and has values;
+download B is requested, reports `Start` at once, and queues on the lock;
+A completes and deletes every value it received before B started. The
+snapshot says `Complete` with a partial list, and stays that way if B is then
+cancelled. Bootstrap leaves seconds for this: it requests
+`AUTOPILOT_VERSION` and `HOME_POSITION` before its download, while the
+panel's Reload is still enabled.
+
+**Fix:** report `Start` only once the channel lock is held.
+
+**Test:** in `services/tests.rs`: a download receives index 0 of 2; a second
+`fetch_parameters` is queued; the first completes with index 1: both values
+are in the snapshot.
+
+### PARAM-12 · A value decoded under the wrong encoding survives
+**P2** · Effort S · From R-1104
+
+`set_encoding` keeps a parameter's old value when the new decoder refuses its
+raw form (`parameter.rs:229-240`). A C-cast `UINT8` sentinel of `-1.0`,
+decoded bytewise as `U8(0)` before the capabilities arrived, stays `U8(0)`
+once C-cast is known: shown, saved to files and used as an edit base,
+against WP5's rule that a refused value is not presented.
+
+**Fix:** treat it as the fold treats a value refused on arrival: drop it from
+the map and count it as refused in the download.
+
+### PARAM-13 · Loading a file leaves a stale edit behind
+**P2** · Effort S · From R-1104
+
+`ParamEdits::load` skips a loaded value equal to the reported one
+(`parameter.rs:479-492`) but leaves an existing edit for that parameter. Typed
+`GAIN = 5` (vehicle has 1), then a file with `GAIN = 1`: Upload still sends 5.
+
+**Fix:** a loaded value equal to the reported value removes any edit that is
+not uploading.
+
+### PARAM-14 · The INI reader accepts inf and NaN
+**P2** · Effort S · From R-1104
+
+`.param` and `.params` filter `is_finite` (`storage/parameter.rs:181`); the
+INI reader does not (`:268-276`), so `f32 = inf` loads as an uploadable
+value. Part of PARAM-5's one policy; listed apart because it lets a
+non-finite value reach a vehicle.
+
+### PARAM-15 · C-cast integers above 2²⁴ cannot round-trip
+**P3** · Effort S · From R-1104 · *by reading*
+
+`value_into_c_cast` sends `i32::MAX` as `2147483648.0` (`wire/param.rs:115-121`),
+which `value_from_c_cast` refuses as out of range (`:91-103`), so `param_set`
+fails even when the vehicle stored it. More generally, C-cast cannot carry an
+integer `f32` does not represent exactly.
+
+**Fix:** `value_into_c_cast` refuses an `I32`/`U32` whose `as f32` does not
+convert back to the same integer, with `Error::ParamEncoding`, which
+`set_parameter` already documents for "cannot be represented".
+
 ## Links & transports
 
 ### LINK-1 · Renaming a link leaves a duplicate behind
@@ -167,7 +387,96 @@ datagram.
 (`link.rs:331-336`); the panel warns by wording/colour but does not confirm.
 Ask when a live link will be disconnected.
 
+### LINK-8 · A reopened link races its own closing transport
+**P2** · Effort M · From R-1104
+
+`disconnect` only aborts the supervisor (`services/link.rs:248-263`); the
+transport closes later, when the router's reader and writer tasks wind down.
+`save` → reconnect, or Disconnect then Connect, opens the new transport
+before that. A fixed-port UDP link fails with `EADDRINUSE` (28 of 50 on a
+multi-thread runtime) and, with `auto_reconnect: false`, ends in `Failed`.
+A serial port on Windows (exclusive handles) would do the same.
+
+**Fix:** a new session waits for the previous one's transport to be dropped
+before it opens (see WP13 for the shape).
+
+**Test:** a fixed-port UDP link, `auto_reconnect: false`: save it with a
+changed transport setting; it reaches `Connected`, 50 times in a row.
+
+### LINK-9 · An aborted supervisor can publish after `Disconnected`
+**P2** · Effort S · From R-1104
+
+`disconnect` publishes `Disconnected` itself, while the aborted supervisor,
+mid-poll on another worker, can still publish `Connected`
+(`link.rs:248-263` vs `:376-414`). The last event says connected (and the
+app toasts it) while `status()` says disconnected; 26 of 200 runs.
+
+**Fix:** the supervisor is the only publisher (see WP13).
+
 ## Firmware & calibration
+
+### CAL-10 · The no-progress timeout ends runs that are alive, and leaves them running
+**P1** · Effort M · From R-1104
+
+The timer resets only when the `Session` value changes
+(`vehicle/mod.rs` `observe_calibration`). ArduPilot's `MAG_CAL_PROGRESS`
+often repeats the same percentage for a minute while the operator looks for
+new orientations, and PX4 repeats identical `[cal]` texts (which `note`
+drops), so a live run fails after 60 s with "the calibration made no
+progress". Nothing tells the vehicle: `end_calibration` sends no
+`DO_CANCEL_MAG_CAL`, and with autosave on, ArduPilot later saves offsets from
+a run the operator was told had failed.
+
+**Fix:** the timer means "the vehicle said nothing about the calibration for
+60 s": it resets on any feedback the protocol accepts as belonging to the
+run, changed or not. When Groundhog ends a running session (timeout, loss of
+contact), it also sends the firmware's cancel, best effort. 60 s stays.
+
+**Test:** 62 s of identical `MAG_CAL_PROGRESS` at 1 Hz: still running. 61 s of
+silence: failed, and the mock receives `DO_CANCEL_MAG_CAL`.
+
+### CAL-11 · Losing a vehicle re-announces a finished calibration
+**P2** · Effort S · From R-1104
+
+On `Lost`, `Fleet::tick` calls `end_calibration` and ignores its result, then
+emits `calibration_finished` for any undismissed finished session
+(`fleet.rs:306-309`). A calibration that succeeded an hour ago is announced
+again when the vehicle powers off. Emit only when `end_calibration` ended a
+running session.
+
+### CAL-12 · A late orientation request re-offers Confirm
+**P2** · Effort S · From R-1104
+
+`Confirmed` sets `Instruction::Confirming(side)` before the command is sent;
+ArduPilot repeats `ACCELCAL_VEHICLE_POS(side)` at 1 Hz until it receives
+it, and `observe_position` (`calibration/ardupilot.rs:153`) sets
+`Place(side)` again. With 100–300 ms of round trip that hits a good share of
+confirmations: the panel asks for the side again and offers Confirm while the
+vehicle measures; a second press is refused.
+
+**Fix:** a request for the side being confirmed does not change the
+instruction; only a request for another side, or success/failure, does.
+
+### CAL-13 · Compass completion ignores `cal_mask`
+**P2** · Effort S · From R-1104
+
+The run counts as done when every compass that *sent progress* has reported
+(`calibration/ardupilot.rs:173-227`). On a saturated radio a compass's
+progress may never arrive, and the run succeeds (and asks for a reboot) while
+it is still calibrating. Every `MAG_CAL_PROGRESS`/`MAG_CAL_REPORT` carries
+`cal_mask`, the compasses in the run.
+
+**Fix:** keep the union of `cal_mask` seen in the run; finish only when every
+compass in it has a final report.
+
+### CAL-14 · PX4 sub-modes outside AUTO are dropped
+**P2** · Effort S · From R-1104
+
+`decode_mode` zeroes the sub byte unless the main mode is AUTO
+(`firmware/px4.rs:153-173`). PX4 reports Orbit as POSCTL with sub-mode 1 (and
+newer PX4 Position Slow as sub-mode 2), so an orbiting vehicle reads
+"Position", and entering or leaving Orbit raises no `ModeChanged`. Verify the
+values against PX4's `px4_custom_mode.h` before adding them.
 
 ## Services & vehicle state
 
@@ -206,7 +515,10 @@ to both flags. Test the mixed case.
 
 `recording.rs:60-63` uses `SystemTime::now()` in the writer, not the receive
 time; a lagging writer skews the timeline. `stop()` also does not await the
-final flush (the test sleeps to hide it).
+final flush (the test sleeps to hide it). R-1104 adds: `stop()` leaves the
+unbiased `select!` without draining frames already queued, and the timestamp
+and the frame are two `write_all`s, so a failed flush can leave a timestamp
+without its frame. Write each record with one `write_all`.
 
 ### SVC-6 · A fold panic kills the only state-advancing task
 **P3** · Effort S · From REVIEW area 8
@@ -275,6 +587,41 @@ Structured errors, `String` and `anyhow` coexist; `storage/parameter.rs` uses
 in `AGENTS.md`, and give parameter files a typed line error. In features,
 import the services result as `ServiceResult` to avoid
 `std::result::Result` noise.
+
+### SVC-18 · Background tasks outlive the `Backend`
+**P3** · Effort S · From R-1104
+
+The runtime starts each bootstrap and each `describe_camera` with a bare
+`tokio::spawn` (`runtime.rs:187-195`). Aborting the runtime does not abort
+them: they keep a `FleetHandle` and run their transactions until those fail.
+`AGENTS.md` says dropping the `Backend` stops all of it.
+
+### SVC-19 · A vehicle is bootstrapped once per process
+**P2** · Effort M · From R-1104 · *by reading*
+
+`Registered` fires only for a new system id, and vehicles are never removed
+(`fleet.rs`, `runtime.rs:185-196`). A bootstrap that failed over a lossy link
+is never retried, and after a reboot (or a reflash) parameters, home and the
+onboard mission stay as they were before it.
+
+### SVC-20 · Disabled ArduPilot arming checks read "Not ready" forever
+**P2** · Effort S · From R-1104
+
+ArduPilot always marks `PREARM_CHECK` present, enabled only while arming checks
+are enabled, and healthy only when enabled and passing
+(`GCS_MAVLink/GCS.cpp`). `prearm_passes` ignores `enabled`
+(`health.rs:166-170`), so `ARMING_CHECK = 0` shows a red "Not ready" forever.
+Present but not enabled means "checks disabled": say that, not "failing".
+
+### SVC-21 · Two `persist` edges
+**P3** · Effort S · From R-1104
+
+`write_durably` creates the temporary file with default permissions and only
+then copies the target's (`persist.rs:79-88`), so a `0600` file's contents
+are briefly readable by others: create it with the target's mode
+(`OpenOptions` + `mode()` on unix). `read_or_set_aside` renames onto
+`<name>.corrupt` (`:139-147`), destroying an earlier set-aside file: pick a
+free name as `recording.rs` does.
 
 ## UI & shells
 
@@ -510,7 +857,11 @@ so, or give the service layer one failure type.
 `video::Status`, `Source::parse` and the config writer use `String`;
 `CalibrationUpdate::Acknowledged(Result<(), String>)` and
 `EditStatus::Failed(String)` lose the reason. Keep `String` only for
-display-boundary passthrough and say so in `AGENTS.md`.
+display-boundary passthrough and say so in `AGENTS.md`. R-1104 adds:
+`set_current_mission_item` reports an out-of-range index as
+`Error::Protocol(format!(..))` (`vehicle.rs` `set_current_mission_item`);
+give it `Error::NoSuchItem { index }`. `DownloadOutcome::Failed(String)` can
+hold the services `Error`, which is `Clone`.
 
 ### API-6 · Result variants name the same lifecycle differently
 **P3** · Effort S · From CODE-F4.2
@@ -526,6 +877,8 @@ feature.
 `SystemId(pub u8)` and `MavlinkId { pub system, pub component }` are public and
 `Default` (0/0 broadcast); the GUI hand-converts with `as` and truncates
 `u64`→`u32` in map helper ids. Consider private fields and conversion methods.
+Components are a bare `u8` throughout (`component_state(u8)`,
+`target_for(u8)`); a `ComponentId` would match `SystemId`.
 
 ### API-8 · Docs that still contradict the code
 **P3** · Effort S · From CODE-F8.3
@@ -561,6 +914,93 @@ Either commit reference images or state that the gallery is a manual tool.
 `size`, `panes` and the `(Panel, f32)` tuples are now defaulted, but the tuple
 shape is still fixed. If the layout schema must evolve, a custom deserializer
 is the next step.
+
+### API-14 · A component client sends vehicle commands to the autopilot
+**P2** · Effort M · From R-1104 · Latent
+
+`FleetHandle::component(address)` returns a `VehicleClient` whose component
+only parameters honour: `arm`, `set_mode`, mission and calibration operations
+target `Vehicle::target()` (`vehicle.rs` `run`, `upload_mission`, …). So
+`fleet.component(gimbal).arm(true)` arms the autopilot. The GUI uses
+`component` only for parameters today (`parameter_panel.rs:154,391`).
+
+**Fix:** a `ComponentClient` with the per-component operations (parameters),
+and a `VehicleClient` with the vehicle's; neither can address the other's
+target.
+
+### API-15 · One reader, unbounded queues, nothing to await
+**P2** · Effort M · From R-1104
+
+`FleetUpdates` and `LinkEvents` each have one consumer and an unbounded queue
+(`runtime.rs:104-105`, `services/link.rs:186`): a frontend that does not
+drain them grows without bound, and a second reader (a logger beside the UI)
+cannot subscribe. `FleetHandle` offers `snapshot()` and
+`wait_for(system, timeout) -> bool`; "wait for any vehicle" or "wait until
+parameters are downloaded" means polling.
+
+### API-16 · A vehicle's readiness is invisible
+**P2** · Effort M · From R-1104
+
+`VehicleClient::bootstrap` is `pub` although the runtime runs it
+(`vehicle.rs:177`). Nothing says when it is done, so a headless client that
+sets a parameter right after the vehicle appears gets
+`ParamEncodingUnknown`, and its own `fetch_parameters` races bootstrap's.
+
+### API-17 · Operator safety rules live in the frontend
+**P2** · Effort M · From R-1104
+
+`AGENTS.md` puts rules every frontend would share in the logic crate, as
+`MissionDraft::check` does for missions. These are in the GUI: whether a mode
+change asks (`features/vehicles/mod.rs:305-309`), what blocks a calibration
+(armed, lost; `features/calibration.rs:129-135`), and the heading shown (yaw,
+else course over ground above 0.5 m/s; `features/vehicles/map.rs:367`).
+`start_calibration` itself does not refuse an armed vehicle.
+
+### API-18 · Public enums are not `#[non_exhaustive]`
+**P3** · Effort S · From R-1104
+
+No item in the crate is. `FleetEvent`, `services::Error`, `Rejection`,
+`MissionRejection`, `LinkStatus`, `DownloadOutcome` and
+`calibration::Outcome` will grow, and a new variant breaks every frontend's
+exhaustive match. `FleetEvent` also mixes tuple variants
+(`ArmedChanged(SystemId, bool)`) with struct variants
+(`LivenessChanged { system, .. }`), and has no `system()` accessor for
+per-vehicle filtering.
+
+### API-19 · Internals and dependency types in the public API
+**P3** · Effort M · From R-1104
+
+- `Firmware` and `CalibrationProtocol` are public, implementable traits, but
+  an implementation cannot be registered (`for_autopilot` is crate-private),
+  and they expose wire builders (`start/confirm/cancel -> CommandLong`,
+  `set_mode -> SetMode`) and a fold (`observe`), against `AGENTS.md`'s "instead
+  of the firmware's command builders".
+- `DownloadUpdate` (a runtime input), `Vehicle::new`, `Vehicle::is_authoritative`,
+  `target`/`target_for`, and `MissionProgress::current_seq` with
+  `current_index(layout)` (which invites the by-hand seq/index conversion
+  `Vehicle::current_mission_index` exists to avoid) are public.
+- nalgebra 0.34 is in public fields (`Attitude::attitude: UnitQuaternion`,
+  `velocity_ned: Vector3`); the GUI calls `euler_angles()` without depending
+  on nalgebra.
+- `mav_param::{Ident, Value}` are needed to call `set_parameter` but not
+  re-exported, so every frontend pins the same git revision.
+
+### API-20 · Units and sentinels break the crate's own conventions
+**P3** · Effort M · From R-1104
+
+- No unit in the name: `BatteryState { voltage, current, remaining }`,
+  `Home::altitude_msl`, `climb_rate()`, `ground_speed()`.
+- `GlobalPosition::alt_agl` is documented "above home": that is relative
+  altitude, not AGL.
+- Sentinels instead of `Option`: `OnboardMission::opaque_id` (0 = none) next
+  to `MissionProgress::mission_id: Option<u32>`; `ParamDownload::expected()`
+  (0 = unknown).
+- `status::rank(MavSeverity)` is inverted (lower is worse), and the GUI
+  compares ranks by hand (`app.rs:622`).
+- `arm(bool)` and `pause_mission(bool)` take a flag for two operations.
+- Mission transfers report progress only through a `&dyn Fn` callback
+  (callers write `&|_| {}`), while parameter downloads show theirs in the
+  snapshot.
 
 ---
 
@@ -606,6 +1046,12 @@ Verified at `5389934`; do not re-open without new evidence.
 
 ## Appendix B — Rejected claims
 
+- **R-1104's "undefined behaviour in `mav-param`'s `into_bytewise`":** the
+  pinned revision (`04034d9`) zero-initialises the union before writing a
+  value narrower than four bytes; the claim was read from an older checkout.
+- **R-1104's "never cancel a command the transaction gives up on":** the
+  caller is told the command failed, so the vehicle must not go on with it;
+  only the premature give-up is a bug (PROTO-8).
 - **`PARAM-2`'s "empty complete list":** the protocol cannot tell a component
   without parameters from one that never answered, so nothing-arrived is its
   own `NoParameters` outcome with a reason and a retry, not `Complete (0, 0)`.
@@ -671,3 +1117,6 @@ already editing the file.
 - Domain design: a component's `Invalid` heartbeat can clear its
   `param_encoding` while `Vehicle::firmware()` still says ArduPilot (writes are
   refused, so it fails safe). A comment or one resolved value would close it.
+  Re-observed by R-1104: a device heartbeating as component 1 with `Invalid`
+  would flip the encoding, and re-decode every parameter, each second. Still
+  parked: component 1 is the autopilot's.

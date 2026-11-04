@@ -20,36 +20,44 @@ sections of the issue list.
 
 ## Overview
 
+Phase 1 of the first review (packages 1–7) is done and removed; packages
+29–40 come from the 2026-11-04 review (R-1104) and now form Phase 1.
+
 | # | Package | Closes | Priority | After | Status |
 |---|---|---|---|---|---|
-| 1 | [Empty plans upload nothing](#wp1--empty-plans-upload-nothing) | MISSION-1, CAL-8 | P0 | — | Done |
-| 2 | [Raw mission items](#wp2--raw-mission-items) | PROTO-1 (missions) | P0 | 1 | Done |
-| 3 | [One tolerant decoder](#wp3--one-tolerant-decoder) | PROTO-1 (status messages) | P0 | — | Done |
-| 4 | [Parameter channel lock](#wp4--parameter-channel-lock) | PARAM-1 | P1 | — | Done |
-| 5 | [One parameter download model](#wp5--one-parameter-download-model) | PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 | P1 | 4 | Done |
-| 6 | [PX4 modes per class](#wp6--px4-modes-per-class) | CAL-1 | P1 | — | Done |
-| 7 | [Overlays that fit the window](#wp7--overlays-that-fit-the-window) | UI-1, UI-10, UI-13 (dialog, toast) | P1 | — | Done |
+| 29 | [Panic-free mission references](#wp29--panic-free-mission-references) | MISSION-12, MISSION-13, MISSION-14, MISSION-15, MISSION-16 | P0 | — | Done |
+| 30 | [Only intact frames reach the router](#wp30--only-intact-frames-reach-the-router) | PROTO-7 | P1 | — | Todo |
+| 31 | [Parameter downloads and edits in order](#wp31--parameter-downloads-and-edits-in-order) | PARAM-11, PARAM-12, PARAM-13, PARAM-15 | P1 | — | Todo |
+| 32 | [Calibration ends on both sides](#wp32--calibration-ends-on-both-sides) | CAL-10, CAL-11, CAL-12, CAL-13 | P1 | — | Todo |
+| 33 | [Command transaction timing](#wp33--command-transaction-timing) | PROTO-8, PROTO-9, PROTO-11, PROTO-12 | P1 | — | Todo |
+| 34 | [Mission transfers known to the runtime](#wp34--mission-transfers-known-to-the-runtime) | MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) | P1 | — | Todo |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
 | 10 | [Mission transfer identity and cancellation](#wp10--mission-transfer-identity-and-cancellation) | PROTO-3, PROTO-6 | P2 | 2 | Done |
 | 11 | [Mission model at the boundaries](#wp11--mission-model-at-the-boundaries) | MISSION-5, MISSION-6, MISSION-9, MISSION-10, MISSION-11 | P2 | 2 | Done |
 | 12 | [Mission panel during transfers and loads](#wp12--mission-panel-during-transfers-and-loads) | MISSION-2, MISSION-3, MISSION-4, MISSION-8 | P2 | 8, 11 | Done |
-| 13 | [Router link lifecycle](#wp13--router-link-lifecycle) | PROTO-4, PROTO-5 | P2 | — | Todo |
-| 14 | [Duplicate suppression by stream position](#wp14--duplicate-suppression-by-stream-position) | PROTO-2 | P2 | — | Todo |
+| 13 | [Router link lifecycle](#wp13--router-link-lifecycle) | PROTO-4, PROTO-5, LINK-8, LINK-9 | P2 | — | Todo |
+| 14 | [Duplicate suppression by stream position](#wp14--duplicate-suppression-by-stream-position) | PROTO-2 | P2 | 30 | Todo |
 | 15 | [Link management by id](#wp15--link-management-by-id) | LINK-1, LINK-7, SVC-8, PARAM-10, API-2 | P2 | 13 | Todo |
 | 16 | [UDP framing per datagram; serial opens](#wp16--udp-framing-per-datagram-serial-opens) | LINK-2, LINK-6, LINK-4 | P2 | 13 | Todo |
-| 17 | [Vehicle state: freshness and health](#wp17--vehicle-state-freshness-and-health) | SVC-3, SVC-4, SVC-12, SVC-16 | P2 | — | Todo |
+| 17 | [Vehicle state: freshness and health](#wp17--vehicle-state-freshness-and-health) | SVC-3, SVC-4, SVC-12, SVC-20 | P2 | — | Todo |
 | 18 | [Fold cost](#wp18--fold-cost) | SVC-9, SVC-10 | P3 | — | Todo |
 | 19 | [Test-only fleet folding](#wp19--test-only-fleet-folding) | SVC-13 | P2 | 8 | Done |
-| 20 | [Parameter files](#wp20--parameter-files) | PARAM-3, PARAM-4, PARAM-5, PARAM-8, PARAM-9, SVC-17 (parameter files) | P2 | 5 | Todo |
-| 21 | [Recording and runtime robustness](#wp21--recording-and-runtime-robustness) | SVC-2, SVC-5, SVC-6, SVC-7, API-3 | P2 | — | Todo |
+| 20 | [Parameter files](#wp20--parameter-files) | PARAM-3, PARAM-4, PARAM-5, PARAM-8, PARAM-9, PARAM-14, SVC-17 (parameter files) | P2 | 31 | Todo |
+| 21 | [Recording, persistence and runtime robustness](#wp21--recording-persistence-and-runtime-robustness) | SVC-2, SVC-5, SVC-6, SVC-7, SVC-21, API-3 | P2 | — | Todo |
 | 22 | [One finger tracker](#wp22--one-finger-tracker) | UI-7, UI-8 | P2 | — | Todo |
-| 23 | [Layout, density and settings](#wp23--layout-density-and-settings) | UI-2, UI-3, UI-4, UI-5, UI-6, UI-9, UI-12, UI-13 (rest) | P2 | 7 | Todo |
+| 23 | [Layout, density and settings](#wp23--layout-density-and-settings) | UI-2, UI-3, UI-4, UI-5, UI-6, UI-9, UI-12, UI-13 (rest) | P2 | — | Todo |
 | 24 | [Map engine](#wp24--map-engine) | MAP-1 … MAP-7 | P2 | — | Todo |
 | 25 | [Video receiver](#wp25--video-receiver) | VIDEO-1 … VIDEO-5 | P2 | — | Todo |
+| 35 | [Decoding coverage](#wp35--decoding-coverage) | PROTO-10, CAL-14 | P2 | — | Todo |
+| 36 | [Bootstrap lifecycle and readiness](#wp36--bootstrap-lifecycle-and-readiness) | SVC-18, SVC-19, API-16 | P2 | — | Todo |
+| 37 | [Clients that match their target](#wp37--clients-that-match-their-target) | API-14, API-20 (flags) | P2 | 36 | Todo |
+| 38 | [Observing the fleet](#wp38--observing-the-fleet) | API-15, API-18, SVC-16 | P2 | 36 | Todo |
+| 39 | [Safety rules in the backend](#wp39--safety-rules-in-the-backend) | API-17 | P2 | — | Todo |
 | 26 | [Log panel timeline](#wp26--log-panel-timeline) | UI-11 | P3 | — | Todo |
 | 27 | [Feature tests for command features](#wp27--feature-tests-for-command-features) | API-11, API-6 | P3 | 8 | Todo |
 | 28 | [Docs and policy](#wp28--docs-and-policy) | API-1, API-4, API-7, API-8, API-9, API-12, API-13, SVC-15, SVC-17 (policy) | P3 | — | Todo |
+| 40 | [Public vocabulary](#wp40--public-vocabulary) | API-19, API-20 (rest), API-4 (R-1104 part) | P3 | 37, 38 | Todo |
 
 ## Decisions needed before starting
 
@@ -57,184 +65,299 @@ These change the scope of a package; settle them before it starts.
 
 | Package | Question | Decision |
 |---|---|---|
-| 3 | Also regenerate the dialect in the mavio fork from current MAVLink definitions, or only make Groundhog tolerant? | Tolerance now; the fork bump is a separate change. |
-| 11 | Detect a WPL file without a home row (row 0 is home if its `current` column is 1, or it is a `NAV_WAYPOINT` in an absolute frame), or park MISSION-7? | Park MISSION-7; row 0 stays home. |
 | 17 | Drop the "clear stale position" part of SVC-3 and show the age of the data instead? | Keep the last known values, show their age and dim them; only a zeroed `HOME_POSITION` clears home. |
 | 20 | With pending edits, does "Save to a file" include them, or save reported values and say so? | Save reported values and say the pending edits were not included. |
+| 32 | Is the 60 s no-progress timeout too strict? | Keep 60 s, but reset it on any feedback that belongs to the run, changed or not (CAL-10). Then it fires only when the vehicle has gone quiet about the calibration. |
+| 33 | PROTO-9: drain stray ACKs after a resend, or accept the limitation and document it? | **Open.** Leaning: drain. It costs nothing until a command is resent, and then delays only the next command of the same kind to the same target, by at most one response timeout. If declined, do only the documentation step and move PROTO-9 to Appendix C. |
+| 36 | After a reboot, re-run the whole bootstrap, or only parameters and home? | Leaning: the whole bootstrap; a reboot can follow a reflash or a mission change. The capability request is still skipped when the encoding is known. |
+| 37, 38, 40 | Break the public API in place, or deprecate first? | Break in place, and update `groundhog-gui-iced` in the same commit: the crate has one frontend. |
 
 ## Claims to reframe in `OPEN_ISSUES.md`
 
 When the package that would have applied the issue's own **Fix:** starts, move
 that part to Appendix B with one sentence:
 
-- **MISSION-6's "refuse to write a home row"** (package 11): the WPL format
-  requires one; the fault is reading a zero home back as real.
 - **SVC-3's clearing of position** (package 17, if decided as leaning).
 - **UI-3's "report the expanded sheet's area"** (package 23): nothing of the
   map shows while the sheet is expanded; the collapsed sheet is what covers it.
 
 ---
 
-## Phase 1 — safety and whole-feature failures (P0, P1)
+## Phase 1 — panics and wrong results (P0, P1)
 
-### WP1 · Empty plans upload nothing
-**Closes:** MISSION-1, CAL-8 · **Status:** Done
+Every package in this phase is a bug fix: per `AGENTS.md`, write the tests it
+names first and see them fail. Line numbers are as of `757d6f4`; trust the
+symbol.
 
-`codec::encode` inserts a home item whenever the layout has a home slot, so an
-empty plan travels as `MISSION_COUNT = 1` and ArduPilot appends a waypoint at
-0,0. Ship this alone, before the larger mission changes.
+### WP29 · Panic-free mission references
+**Closes:** MISSION-12, MISSION-13, MISSION-14, MISSION-15, MISSION-16 ·
+**Status:** Done
 
-- `codec::encode` returns no items for an empty plan, whatever the layout: the
-  home slot exists only when there are items to follow it. `mission_upload`
-  then sends `MISSION_COUNT = 0`, which both ArduPilot and PX4 complete with an
-  ACK.
-- `encode` returns `Result` and refuses a plan longer than the wire can number
-  (`u16::MAX` minus the home slot); `MissionLayout::wire_seq` uses checked
-  arithmetic. `upload_mission` maps the refusal to a `services::Error`.
-- Update `encode`'s doc: the zero home placeholder is sent only beside items.
+Item-reference parameters (`ParamKind::ItemIndex`, e.g. DO_JUMP's target) are
+`f32`s that three places move with integer arithmetic. Give them one rule, and
+narrow every editor value before checking it.
 
-**Tests:** an empty plan encodes to nothing under the ArduPilot layout; an
-oversized plan is refused; `services/tests.rs` uploads an empty plan and the
-mock vehicle receives count 0.
+- **One rule** (MISSION-12): add `pub(crate) fn item_ref(param: f32) ->
+  Option<u16>` in `domain/mission/item.rs`, next to `item_index_slots`. It is
+  `Some` only for a finite value with no fractional part in `0.0..=65535.0`.
+  Anything else (negative, huge, NaN, fractional) is *opaque*: no code moves
+  it.
+- `MissionPlan::remap_targets` (`plan.rs:306`) reads each target with
+  `item_ref` instead of `target as usize`, skips opaque ones, and writes back
+  a mapped value only if it is `<= u16::MAX`; otherwise it leaves the target
+  as it was (its existing "`None` means untouched" rule). `insert`'s closure
+  then cannot overflow.
+- `codec::shift_targets` (`codec.rs:111`) reads each target with `item_ref`
+  and shifts with `checked_add_signed`; an opaque value or a result outside
+  `u16` is left as it was, except for the home slot below.
+- **The home slot** (MISSION-13): under a home-slot layout, decoding maps wire
+  target `0` to `-1.0` in the plan, and encoding maps exactly `-1.0` back to
+  `0`. Document on `shift_targets` that `-1` in a plan means "the home slot".
+  It is opaque to plan edits by the rule above. In the GUI, the editor shows
+  an `ItemNumber` field holding `-1` as "Home"
+  (`features/mission/view.rs`). WPL load/save go through `codec`, so they
+  follow.
+- **Narrow, then check** (MISSION-14), in `MissionItem::set_field`
+  (`item.rs:353-373`):
+  - `Altitude`/`Z` and plain params: `let narrowed = value as f32;` refuse
+    unless `narrowed.is_finite()`.
+  - `X`/`Y`: `i32::try_from` of `value.round()` (through an `f64` range check,
+    since `f64` has no `TryInto<i32>`); refuse out of range.
+  - `ItemIndex`: refuse a value outside `1.0..=65535.0` before storing
+    `value - 1`.
+- **WPL** (MISSION-14, MISSION-15, `storage/mission.rs`): `param1..4` refuse
+  `±inf` (NaN stays accepted where WP11 allowed it). `row.seq =
+  u16::try_from(rows.len())` with a new `WplError::TooManyRows`.
+- **Limit** (MISSION-16): `MissionLayout::max_items` returns 65534 with a home
+  slot and 65535 without; `MISSION_COUNT.count` is the `u16` that bounds them,
+  not the highest sequence number. Correct the comment and
+  `a_plan_that_the_wire_cannot_number_is_refused`.
 
-### WP2 · Raw mission items
-**Closes:** PROTO-1 (mission half) · **After:** 1 · **Status:** Done
+**Tests:**
+- A DO_JUMP whose target is `1e30`: `push`, `insert(0, ..)`, `remove`,
+  `codec::encode` under the ArduPilot layout, and a WPL save neither panic nor
+  change it.
+- `set_field(ItemNumber, 1e30)` and `set_field(Altitude, 1e40)` return false;
+  `set_field(X, 3e9)` returns false.
+- Under the ArduPilot layout, a downloaded DO_JUMP to wire 0 re-encodes to 0;
+  the same through WPL load and save.
+- A plan of exactly `max_items()` encodes, and one more is `PlanTooLong`.
 
-`MissionItem.command` is a `MavCmd` and `frame` a `MavFrame`, so an item whose
-command or frame is newer than the dialect cannot be represented: its
-`MISSION_ITEM_INT` fails to decode and the download re-requests it until it
-times out. The module doc's promise that unknown commands round-trip is false.
+### WP30 · Only intact frames reach the router
+**Closes:** PROTO-7 · **Status:** Todo
 
-- `MissionItem` holds `command: u16` and `frame: u8`, with `known_command() ->
-  Option<MavCmd>` and `known_frame() -> Option<MavFrame>`. Constructors keep
-  taking typed values. `SPECS` stays keyed by `MavCmd`; an unknown command has
-  no spec and is edited through the raw `Param`/`X`/`Y`/`Z` fields that exist
-  for commands without metadata, labelled "Command 31050".
-- A crate-private `wire::mission_item` encodes and decodes the fixed
-  `MISSION_ITEM_INT` payload layout (including the `mission_type` extension
-  and MAVLink 2 truncation). The outbound form implements `mavio::Message`, which
-  `MavlinkRouter::route` already takes as `&dyn Message`; `MissionListener`
-  decodes items with it instead of `DefaultDialect`.
-- `codec` and `storage::mission` work on the raw form; WPL rows with unknown
-  commands now load and save.
-- The GUI's command picker and map read `known_command()`.
+The owner asked whether duplicate suppression should commit only after
+"parsing and CRC-checking" the packet. A checksum check is what is needed;
+full decoding is not. A frame that fails to decode because of an unknown
+enum value is intact, and must still suppress its duplicates. Decoding stays
+in the runtime's tolerant decoder.
 
-**Tests:** a mock vehicle serves an item with an unknown command and frame; the
-download succeeds and re-uploading sends identical bytes. A WPL row with an
-unknown command round-trips. Existing codec and editor tests still pass.
+- Move the `is_corrupt` check into the start of
+  `MavlinkRouter::handle_frame`, so unit tests reach it: a corrupt frame
+  returns `None` before `dispatch` (no suppression entry, no route refresh,
+  no ACK routing, no recorder tap, no event). Keep counting it in
+  `parse_errors` in the reader (`router.rs:727-735`), and keep updating
+  `last_rx`: bytes are arriving, so the link is alive.
+- Frames of messages outside the dialect cannot be checked
+  (`validate_checksum` has no CRC_EXTRA for them) and pass as today; say so
+  where `is_corrupt` is defined.
+- Rewrite the reader's comment ("It is still routed (decoding refuses it
+  later)"), and add to `AGENTS.md`'s "Lossless router events; duplicates
+  identified exactly": "only frames whose checksum verifies take part".
+- PROTO-13 (the parser's resynchronisation) is a change in the mavio fork,
+  not here; open it there and leave the entry.
 
-### WP3 · One tolerant decoder
-**Closes:** PROTO-1 (status-message half) · **Status:** Done
+**Tests** (router tests, with `handle_frame`):
+- Build a `COMMAND_ACK` frame, serialize it, flip one payload byte, and parse
+  it back. `handle_frame(A, corrupt)` is `None`, then `handle_frame(B,
+  intact)` dispatches it, and `best_link_for(source) == Some(B)`.
+- A corrupt frame registers no pending ACK delivery.
 
-Four places decode frames on their own (`services/runtime.rs`,
-`MissionListener::next`, the router's ACK routing, `mavlink/recv.rs`), and only
-the runtime special-cases one message (`MAG_CAL_REPORT`). A heartbeat with a
-newer `MavType` never registers its vehicle.
+### WP31 · Parameter downloads and edits in order
+**Closes:** PARAM-11, PARAM-12, PARAM-13, PARAM-15 · **Status:** Todo
 
-- One `pub(crate)` decode function in `mavlink/`, used by all four.
-- On `SpecError::InvalidEnumValue` it consults a short table of messages
-  whose enum fields have a meaningful fallback, patches any unknown value at
-  its offset to that fallback, and decodes again:
-  - `HEARTBEAT`: type → `MAV_TYPE_GENERIC` (classified `VehicleClass::Other`,
-    still a vehicle); autopilot → `MAV_AUTOPILOT_GENERIC` (so parameter
-    writes stay refused).
-  - `COMMAND_ACK`: result → `MAV_RESULT_UNSUPPORTED` (values 7–9 are all
-    "not this way"), which triggers the existing fallbacks.
-  - `MISSION_ACK`: type → `MAV_MISSION_ERROR`.
-  - `MAG_CAL_REPORT`: status → `MAG_CAL_FAILED` (moved from the runtime).
-- Each patch logs once at debug with the raw value. Messages not in the table
-  keep being dropped, and the `AGENTS.md` pitfall says to add a row.
+- **Start under the lock** (PARAM-11): `MavlinkRouter::param_list` takes a
+  third argument, `on_started: impl FnOnce() + Send`, and calls it right after
+  `lock_channel` returns (`mavlink/param.rs:148`), before the capability
+  requests. In `VehicleClient::fetch_parameters`, `DownloadReport` gains a
+  `started: AtomicBool` (the callback runs inside the future, so it must be
+  `Send + Sync` to borrow). `DownloadReport::new` reports nothing;
+  `started(&self)` reports `DownloadUpdate::Start` and sets the flag. `Drop`
+  reports `Cancelled` only if started. `finish` reports `Start` first if the
+  flag is unset, which should not happen, then the outcome. A download
+  dropped while queued then leaves no trace in the snapshot.
+- **Re-decode or drop** (PARAM-12): in `Parameters::set_encoding`, a parameter
+  whose raw form the new decoder refuses is removed from the map and counted
+  in the download's refused count. This is what the fold does for a value
+  refused on arrival; reuse its counter rather than adding one.
+- **Loads clear stale edits** (PARAM-13): in `ParamEdits::load`, a loaded
+  value equal to the reported value removes an existing edit for that ident
+  unless the edit is uploading. Count it with the unchanged values in the
+  `LoadSummary`.
+- **C-cast range** (PARAM-15): `value_into_c_cast` returns `Option` (or
+  `Result`). For `I32` and `U32` it refuses a value whose `as f32` does not
+  convert back to the same integer. `param_set` maps the refusal to
+  `MavError` → `Error::ParamEncoding`, which `set_parameter` already
+  documents.
 
-**Tests:** a heartbeat with an unknown `MavType` registers its vehicle; one
-with an unknown autopilot registers it with generic firmware; a `COMMAND_ACK`
-with result 8 reaches its transaction as unsupported; the existing
-`MAG_CAL_REPORT` test passes through the shared decoder.
+**Tests:**
+- PARAM-11, in `services/tests.rs`: A downloads index 0 of 2; B is started
+  and queued (`received()` still 1 in the snapshot, and no second `Start`
+  seen); A receives index 1 and completes. Both parameters are in the
+  snapshot, and the outcome is `Complete`. Dropping B while queued leaves
+  `Complete`.
+- PARAM-12: a C-cast `UINT8` with raw `-1.0`, folded while the encoding is
+  unknown, then the encoding set to C-cast: the parameter is gone and counted
+  as refused.
+- PARAM-13: edit `GAIN = 5` over a reported 1, then load a file with
+  `GAIN = 1`: no edit remains.
+- PARAM-15: setting `I32(i32::MAX)` under C-cast is `ParamEncoding` and sends
+  nothing; `I32(1 << 24)` is sent.
 
-### WP4 · Parameter channel lock
-**Closes:** PARAM-1 · **Status:** Done
+### WP32 · Calibration ends on both sides
+**Closes:** CAL-10, CAL-11, CAL-12, CAL-13 · **Status:** Todo
 
-A list download and a set both consume `PARAM_VALUE` from the same target, so a
-list value can satisfy a set.
+- **Liveness, not change** (CAL-10, part 1): `CalibrationProtocol::observe`
+  returns `bool`: whether the feedback belonged to the running session,
+  whether or not it changed it. `Vehicle::observe_calibration` sets
+  `calibration_progress_at = Some(time)` when it returns true, replacing the
+  `*session != before` test. What belongs:
+  - ArduPilot: an `ACCELCAL_VEHICLE_POS`; a `MAG_CAL_PROGRESS` or
+    `MAG_CAL_REPORT` for a compass in the run (the reports that
+    `observe_compass_report` already rejects as from an earlier run do not
+    count); a calibration status text.
+  - PX4: any `[cal]` text, repeats included. The note log still drops
+    repeats.
+  - `CALIBRATION_TIMEOUT` stays 60 s; rewrite its doc to "the vehicle said
+    nothing about the calibration for this long".
+- **Tell the vehicle** (CAL-10, part 2): `Vehicle::end_calibration(reason)`
+  returns `Option<EndedRun>` instead of `bool`, with `EndedRun { cancel:
+  Option<CommandLong> }`. `cancel` is `protocol.cancel(session)`, computed
+  before the session is failed. `Fleet::tick` returns a crate-private `Tick
+  { events, cancels: Vec<(MavlinkId, CommandLong, u8 /* retries */)> }`, and
+  collects a cancel for the timeout and for loss of contact. The cancel for
+  loss is best effort: the vehicle may come back still calibrating. A reboot
+  ends the run on the vehicle's side, so `Fleet::observe` sends none. The
+  runtime spawns each cancel as `router.command(target,
+  cancel).retries(retries)`, logging a failure at warn. Use the task set
+  from WP36 if it has landed, else a bare `tokio::spawn`.
+- **One announcement** (CAL-11): in `Fleet::tick`'s `Lost` branch, emit
+  `calibration_finished` only when `end_calibration` returned `Some`.
+- **Confirming holds** (CAL-12): in `calibration/ardupilot.rs`
+  `observe_position`, when the session's instruction is
+  `Instruction::Confirming(side)` and the requested position is the same
+  `side`, change nothing; return true (it is feedback for the run). A
+  different side, success or failure proceed as today.
+- **All compasses** (CAL-13): the session's ArduPilot state keeps
+  `expected_compasses: u8`, the union of every `cal_mask` seen in the run's
+  `MAG_CAL_PROGRESS` and `MAG_CAL_REPORT`. The run finishes only when every
+  bit in it has a final report. Keep the existing rule (every compass seen
+  has reported) as a lower bound, for firmware that sends a zero mask.
 
-- `LockMap` gains shared and exclusive modes for one new key,
-  `LockKey::ParamChannel(target)`. `param_list` holds it exclusively;
-  `param_set` holds it shared, plus its existing per-parameter lock, so sets of
-  different parameters still run side by side inside the permit window.
-- The preference for a reply equal to the request stays: another GCS's
-  download or the vehicle's own broadcasts cannot be locked out.
-- The parameter panel disables Upload and Upload all while its component
-  downloads, with a hint saying why.
+**Tests** (`domain/calibration/tests.rs` and `fleet.rs`):
+- 62 s of identical `MAG_CAL_PROGRESS` (87 %) at 1 Hz: still running. Then
+  61 s of silence: `CalibrationFinished(Failed)`, and `Tick::cancels` holds
+  `DO_CANCEL_MAG_CAL` for the vehicle. In `services/tests.rs`, the mock
+  receives it.
+- A gyro calibration that succeeded, then the vehicle goes `Lost`: no second
+  `CalibrationFinished`.
+- `Place(Level)`, `Confirmed(Level)`, then `ACCELCAL_VEHICLE_POS(Level)`: the
+  instruction stays `Confirming(Level)`, and `calibration_controls().confirm`
+  is false.
+- Progress for compass 0 with `cal_mask = 0b11`, then a success report for
+  compass 0: still running; a report for compass 1 finishes it.
 
-**Tests:** in `mavlink/tests.rs`, a set started during a download waits for it,
-and a list value for the same ident does not answer it; two sets of different
-parameters still overlap. A panel test: Upload is unavailable during a download.
+### WP33 · Command transaction timing
+**Closes:** PROTO-8, PROTO-9, PROTO-11, PROTO-12 · **Status:** Todo ·
+**Decision:** PROTO-9 (above)
 
-### WP5 · One parameter download model
-**Closes:** PARAM-2, PARAM-6, PARAM-7, SVC-1, API-5, LINK-3, LINK-5, SVC-11 ·
-**After:** 4 · **Status:** Done
+All in `mavlink/transaction.rs` and `mavlink/mission.rs`.
 
-`Parameters` keeps two records of one download: `LoadingState`, fed by the
-fold, and `DownloadState`, set from the transaction's result. They disagree
-(a refused value counts in one and not the other), the call's return value
-gives a third verdict, and nothing removes a parameter the vehicle no longer
-has.
+- **Progress keeps the caller's patience** (PROTO-8): in
+  `CommandRequest::run`, on `IN_PROGRESS` set `timeout =
+  self.response_timeout.max(PROGRESS_TIMEOUT)`. Keep the cancel that
+  `Pending::drop` sends when a command in progress is given up on, and say in
+  `CommandRequest`'s doc that giving up cancels it, as dropping does.
+- **Drain stray ACKs** (PROTO-9, if decided):
+  - `run` counts the attempts it sent. When it completes with more than one
+    sent, it does not drop its `Pending` and lock at once. It hands both to a
+    drain that receives and discards at most `attempts - 1` further ACKs, for
+    at most `response_timeout`, then drops them. The caller gets its result
+    without waiting.
+  - When `run` acquired the lock itself (the common case), the drain is a
+    spawned task owning `Pending` and the `KeyGuard`; `KeyGuard` is already
+    owned, so this means keeping it in a local rather than a `&mut`
+    temporary. When the guard is borrowed (`command_with_lock`, used by
+    `request_message`), drain inline before returning: its callers are
+    background requests.
+  - `Pending::in_progress` is false after completion, so the drain never
+    sends a cancel.
+  - If declined: document the limitation at `CommandRequest` and in
+    `AGENTS.md`'s Pitfalls, and move PROTO-9 to Appendix C.
+- **No component 0** (PROTO-11): `debug_assert_ne!(target.component, 0)` in
+  `run`, with a comment on `route_ack` explaining the system-wide fallback is
+  for ACKs that name no target. Do not build system-wide locking until a
+  caller needs it.
+- **Clear ignores stale ACKs** (PROTO-12): in `mission_clear`, set
+  `listener.not_before = Some(Instant::now())` before the first send, as the
+  download does (`mission.rs:454`).
 
-- Replace both with one `ParamDownload` in `Parameters`: its phase, the
-  advertised count, the indices received, how many values were refused, and a
-  generation per download.
-- The fold notes an index even when it refuses the value, and counts the
-  refusal. `value_from_c_cast` returns `None` for non-finite and out-of-range
-  values, so a sentinel is refused rather than shown as an editable value
-  (LINK-3). The `wire::param` module doc names the unsupported 64-bit types
-  (LINK-5).
-- Each stored parameter remembers the generation it was last reported in. A
-  download that completes removes parameters it did not report; a failed or
-  cancelled one keeps them.
-- The transaction returns what happened, including "nothing ever arrived".
-  The service turns that into a `DownloadOutcome`: `Complete`,
-  `Incomplete(Progress)`, `NoParameters`, or `Failed(String)` (the snapshot
-  cannot hold a services `Error`). It stores the outcome in the snapshot
-  **and** returns the same value, so the panel's notice and banner cannot
-  disagree. `NoParameters` shows as a warning with a reason and Retry, not a
-  danger banner.
-- One `Progress { done, total }`, shared from the crate root and re-exported
-  by services, replaces `TransferProgress`, `ParamListSummary` and
-  `(usize, u16)`.
-- `on_param_value` uses `component_mut_if` for an unchanged repeat (SVC-11).
+**Tests** (`mavlink/tests.rs`, paused clock):
+- `.timeout(10 s)`, the mock answers `IN_PROGRESS` and then `ACCEPTED` 7 s
+  later: `Ok`, and no `COMMAND_CANCEL` is received.
+- `.timeout(1 s)`, `IN_PROGRESS`, then silence: `Timeout`, and
+  `COMMAND_CANCEL` is received (kept behaviour).
+- PROTO-9: arm with a 100 ms timeout, two attempts, the mock ACKs after the
+  resend; then disarm, the mock sends `ACCEPTED` (the straggler) then
+  `DENIED`: the disarm returns `Rejected(Denied)`. A command with no resend
+  releases its lock at once (a second command starts without delay).
+- PROTO-12: an `Accepted` `MISSION_ACK` queued before `mission_clear` sends
+  does not complete it.
 
-**Tests:** a mock that answers `PARAM_REQUEST_LIST` with nothing gives
-`NoParameters`; a partial download gives the same `Incomplete` in snapshot and
-result; a refused value still completes the download; a parameter missing from
-a complete reload disappears, and survives an incomplete one; a NaN C-cast
-value is refused.
+### WP34 · Mission transfers known to the runtime
+**Closes:** MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) ·
+**Status:** Todo
 
-### WP6 · PX4 modes per class
-**Closes:** CAL-1 · **Status:** Done
+Parameter downloads already report to the runtime from start to end (WP5,
+WP31). Give mission transfers the same shape, and the race and the callback go
+away together.
 
-- Per-class tables in `firmware/px4.rs`, as `ardupilot.rs` has: multicopter,
-  fixed-wing, VTOL, rover and boat, submarine. Takeoff and Land go to aircraft
-  only, Precision Land to multicopters and VTOL, VTOL Takeoff to VTOL.
-- `decode_mode` looks up the union of the tables, so a mode the vehicle
-  *reports* outside its class's table still gets its name; `modes(class)`
-  decides only what is offered.
+- **Inputs:** `runtime::Input` gains `MissionTransfer { system, update:
+  TransferUpdate }`, with `TransferUpdate::{Start(Direction), Progress(Progress),
+  End}` and `Direction::{Upload, Download, Clear}`. A drop guard in
+  `services/vehicle.rs`, shaped like `DownloadReport`, reports `Start`
+  before the router call, `Progress` from the router's progress callback,
+  and `End` when dropped. It drops after the `Input::OnboardMission` result
+  has been reported, so the runtime sees the result first.
+- **State:** `VehicleMission` gains `pub transfer: Option<MissionTransfer {
+  direction, progress }>`, set by `Start`/`Progress` and cleared by `End`.
+  `onboard_is_stale()` returns false while `transfer.is_some()`
+  (MISSION-17). `Fleet::observe` already compares stale-before and
+  stale-after, so no event fires mid-transfer. After `End`, the next
+  `MISSION_CURRENT` decides as usual.
+- **API** (API-20's progress part): `download_mission` and `upload_mission`
+  lose their `progress` parameter; the GUI reads progress from
+  `vehicle.mission.transfer`, as it reads `ParamDownload`. Bootstrap's
+  download becomes visible to every reader.
+- **Id-less change detection** (MISSION-18): in `onboard_is_stale`, when
+  `progress.mission_id` is `None` and `progress.total` is `Some(total)`,
+  `usize::from(total) != onboard.items.len()` also means stale (`total`
+  excludes home, as does `items`). Say in the doc that this catches only a
+  changed item count.
+- **Draft contract** (MISSION-19): document on
+  `MissionDraft::transferred` that a frontend must not let the plan change
+  while a transfer runs (the iced frontend's WP12 gate), and point to
+  `VehicleMission::transfer` as the way to know.
 
-**Tests:** `modes()` and `mode_of_kind()` per class; a rover offers no Land,
-so the quick Land button is hidden; a reported mode outside the class's table
-still decodes.
-
-### WP7 · Overlays that fit the window
-**Closes:** UI-1, UI-10, UI-13 (dialog and toast) · **Status:** Done
-
-- Move the confirmation dialog and its backdrop into `ui::dialog`, and the
-  toast into `ui::toast`. Both take the platform insets.
-- The dialog fills the width up to a max-width token, padded by `space::L`
-  plus the insets. Its body scrolls, so the buttons stay on screen in a short
-  landscape window. On a narrow window the buttons stack.
-- Toasts keep clear of the system bars; so does the maximized-pane fallback in
-  `app/tiled.rs`.
-
-**Tests:** a `Simulator` test at 400×700 and at 700×320: the accept button is
-inside the window and pressing it answers. Gallery before and after.
+**Tests:**
+- Multi-thread runtime, PX4 mock, twenty rounds: upload, ACK with a new
+  `opaque_id`, and the mock sends `MISSION_CURRENT` with that id
+  immediately. No `OnboardMissionStale` is emitted.
+- The same with `clear_mission`.
+- During a slow upload a snapshot shows `transfer: Some(Upload, progress)`;
+  after it, `None`. A dropped upload ends the transfer.
+- No mission id, a reported total of 3 against an onboard mission of 2
+  items: stale; equal counts: not stale.
 
 ---
 
@@ -335,7 +458,7 @@ loading over a modified draft asks; a revert after a declined follow adopts the
 onboard mission.
 
 ### WP13 · Router link lifecycle
-**Closes:** PROTO-4, PROTO-5 · **Status:** Todo
+**Closes:** PROTO-4, PROTO-5, LINK-8, LINK-9 · **Status:** Todo
 
 - **Closed means removed** (PROTO-5): split the link's cancellation token into
   "shutdown requested" and "closed". The reader's tail cancels "closed" only
@@ -346,13 +469,37 @@ onboard mission.
   and the separate heartbeat task goes. Each write has a stall timeout; a
   stalled write closes the link and the supervisor reconnects.
 - `LinkStats` gains `last_tx`.
+- **Shutdown waits for the transport** (LINK-8): `LinkGuard::shutdown(self)`
+  requests the shutdown and resolves once the reader and writer tasks have
+  dropped their halves of the transport and `remove_link` has run. That is
+  the "closed" token above, plus the writer's exit; the reader tail at
+  `router.rs:769-772` must not hold the transport while it awaits
+  `events.send`.
+- **The supervisor is the only publisher** (LINK-9), in `services/link.rs`:
+  - `Session` holds a `CancellationToken` and the supervisor's
+    `JoinHandle`. `disconnect` cancels the token and moves the handle to
+    `LinkEntry::closing`. It publishes nothing itself; `status()` of an
+    entry without a session still reads `Disconnected` at once.
+  - `supervise` races each of its awaits (open, `closed()`, the backoff
+    sleep) against the token. On cancellation it calls
+    `guard.shutdown().await` if attached, publishes `Disconnected`, and
+    returns.
+  - `connect` takes `closing` and passes it to the new supervisor, which
+    awaits it before its first open (LINK-8). A reopen then never races the
+    old socket or port, and every event of the old session precedes the
+    new one's.
+  - Dropping the `LinkManager` still aborts everything.
 
 **Tests:** after `closed()` resolves, routing to that link fails; a writer that
 never completes a write closes the link within the stall timeout; a flood of
-bulk traffic does not delay the heartbeat.
+bulk traffic does not delay the heartbeat. On a multi-thread runtime,
+fifty times each:
+- A fixed-port UDP link with `auto_reconnect: false`, disconnected and
+  connected again, reaches `Connected`.
+- Connect, wait 20 µs, then disconnect: the last event is `Disconnected`.
 
 ### WP14 · Duplicate suppression by stream position
-**Closes:** PROTO-2 · **Status:** Todo
+**Closes:** PROTO-2 · **After:** 30 · **Status:** Todo
 
 A window of 192 packets cannot catch a backlog longer than itself. Instead of a
 larger window, track where each link is in a source's stream:
@@ -406,7 +553,10 @@ differs from its previous status.
 the next real frame; a truncated datagram does not corrupt the following one.
 
 ### WP17 · Vehicle state: freshness and health
-**Closes:** SVC-3, SVC-4, SVC-12, SVC-16 · **Status:** Todo
+**Closes:** SVC-3, SVC-4, SVC-12, SVC-20 · **Status:** Todo
+
+SVC-16 (`from`/`to` on events) moved to WP38, which reshapes `FleetEvent`
+once.
 
 - **Freshness** (SVC-3): position, velocity and GPS carry when they were
   received; views show the age next to a stale or lost vehicle and dim it. A
@@ -415,12 +565,15 @@ the next real frame; a truncated datagram does not corrupt the following one.
   (over the present ones only when none is enabled), the same rule as
   `enabled`; `failing()` follows.
 - **Names** (SVC-12): `string_from_cstring` decodes lossily, like status texts.
-- **Events** (SVC-16): `ArmedChanged` and `ModeChanged` carry `from` as well
-  as `to`; the before values are already computed in `Fleet::observe`.
+- **Arming checks** (SVC-20): `Health::prearm_passes() -> Option<bool>`
+  becomes `prearm() -> Option<Prearm>` with `Prearm::{Passing, Failing,
+  Disabled}`: present but not enabled is `Disabled`. The vehicles panel
+  (`features/vehicles/mod.rs`, the read-out near line 462) shows "Arming
+  checks off" in a warning tone for `Disabled`.
 
 **Tests:** a healthy primary with a disabled backup is healthy; a zeroed home
-clears it; one invalid byte keeps the rest of a vendor name; mode and arm
-events carry both values.
+clears it; one invalid byte keeps the rest of a vendor name; `PREARM_CHECK`
+present and not enabled is `Disabled`.
 
 ### WP18 · Fold cost
 **Closes:** SVC-9, SVC-10 · **Status:** Todo
@@ -442,13 +595,15 @@ Add a `test-support` feature to `groundhog-logic`, enabled only from
 under that feature. Note the feature in `AGENTS.md`'s testing section.
 
 ### WP20 · Parameter files
-**Closes:** PARAM-3, PARAM-4, PARAM-5, PARAM-8, PARAM-9, SVC-17 (parameter
-files) · **After:** 5 · **Status:** Todo
+**Closes:** PARAM-3, PARAM-4, PARAM-5, PARAM-8, PARAM-9, PARAM-14, SVC-17
+(parameter files) · **After:** 31 · **Status:** Todo
 
 - One reader policy for `.ini`, `.param` and `.params`: a bad line is skipped
   and reported as a typed `LineError`, replacing `Result<_, String>`. The
   reader returns the values with the file's address (where the format has one),
-  the skipped lines, the truncated names and the duplicates.
+  the skipped lines, the truncated names and the duplicates. Every reader
+  refuses non-finite values the same way (PARAM-14: today the INI reader does
+  not).
 - `ParamEdits::load` reports all of it in the load summary, including "N values
   were for another component", and leaves those values out (PARAM-4).
 - Saving is disabled while the encoding is unknown, with a reason (PARAM-3).
@@ -460,14 +615,24 @@ files) · **After:** 5 · **Status:** Todo
 duplicate gives the same summary; a `.params` file for another component loads
 nothing and says so; Save is unavailable while the encoding is unknown.
 
-### WP21 · Recording and runtime robustness
-**Closes:** SVC-2, SVC-5, SVC-6, SVC-7, API-3 · **Status:** Todo
+### WP21 · Recording, persistence and runtime robustness
+**Closes:** SVC-2, SVC-5, SVC-6, SVC-7, SVC-21, API-3 · **Status:** Todo
 
 - The recorder's channel is bounded, and each entry carries its receive time,
   which the tlog writes (SVC-5). Overflow drops the oldest and is counted.
+  Each record (timestamp and frame) is built in one buffer and written with
+  one `write_all`.
 - A write error ends the recording visibly: `TlogRecorder` exposes its status,
   and the frontend raises a notice. `stop()` is async and returns a `Result`
-  after the final flush (SVC-2).
+  after the final flush (SVC-2). On stop, the writer first drains the frames
+  already queued (`try_recv` until empty), then flushes. The app's close path
+  (`app.rs`, beside the config writer's flush) awaits it.
+- `persist` (SVC-21): `write_durably` creates the temporary file with the
+  target's permissions on unix (`OpenOptions::new().write(true)
+  .create_new(true).mode(..)`, from the target's metadata, else the default),
+  before writing; elsewhere it keeps setting them after. `read_or_set_aside`
+  moves the file to the first free name of `<name>.corrupt`,
+  `<name>.corrupt.1`, … rather than replacing an earlier one.
 - The `Backend` watches the runtime task; a panic becomes a lasting
   `BackendEvent` that the UI shows as a banner ("vehicle state stopped
   updating") rather than a silently frozen snapshot (SVC-6).
@@ -477,8 +642,10 @@ nothing and says so; Save is unavailable while the encoding is unknown.
   `AGENTS.md` (API-3).
 
 **Tests:** a writer that fails reports it through the status and `stop()`; the
-tlog's timestamps are receive times; a panicking fold produces the backend
-event.
+tlog's timestamps are receive times; `stop()` right after a burst of frames
+returns with all of them on disk; a panicking fold produces the backend
+event; a `0600` file is replaced by a `0600` file; setting aside twice keeps
+both copies.
 
 ### WP22 · One finger tracker
 **Closes:** UI-7, UI-8 · **Status:** Todo
@@ -496,7 +663,7 @@ cursor.
 
 ### WP23 · Layout, density and settings
 **Closes:** UI-2, UI-3, UI-4, UI-5, UI-6, UI-9, UI-12, UI-13 (rest) ·
-**After:** 7 · **Status:** Todo
+**Status:** Todo
 
 - The tiled rail scrolls when it does not fit (UI-2).
 - The map's covered area is always the collapsed sheet's, whether or not the
@@ -553,6 +720,159 @@ after a zoom; a cancelled screen-anchored drag returns to its origin.
   colour matrix not taken for BT.709; a failed supervisor spawn reports
   `Failed`; frame generation assigned under the lock and advanced by `clear()`.
 
+### WP35 · Decoding coverage
+**Closes:** PROTO-10, CAL-14 · **Status:** Todo
+
+- **Several unknown enums** (PROTO-10), `mavlink/decode.rs`: replace the
+  single patch-and-retry with a loop over one working copy of the payload
+  bytes. On `InvalidEnumValue { enum_name }`, look the field up in the
+  message's `TolerantMessage` row and patch it in the buffer. Stop when the
+  message decodes, when the named field has no fallback, or after
+  `fields.len()` patches. `patched()` becomes "patch this buffer in place".
+  Each patch keeps its debug log line.
+- **PX4 sub-modes** (CAL-14), `firmware/px4.rs`: first check the values
+  against PX4's `src/modules/commander/px4_custom_mode.h` (expected:
+  `PX4_CUSTOM_SUB_MODE_POSCTL_POSCTL = 0`, `_ORBIT = 1`, `_SLOW = 2`).
+  - Add reported-only modes "Orbit" (`ModeKind::Guided`: the vehicle flies
+    itself to an operator's target) and "Position Slow"
+    (`ModeKind::PositionHold`). They go in the union `decode_mode` searches,
+    not in any class's offered table.
+  - `decode_mode` keeps the sub byte for `MAIN_AUTO` and `MAIN_POSCTL`.
+    For those two, an unknown sub-mode decodes to `None` (unknown mode),
+    not to the main mode's name; for the other main modes the sub byte stays
+    ignored.
+  - Update the comment "Only AUTO distinguishes sub modes".
+
+**Tests:** a heartbeat with `type` and `autopilot` both 200 decodes with both
+fallbacks; POSCTL/1 decodes "Orbit" and POSCTL/0 "Position"; POSCTL/9 is
+`None`; a change between Position and Orbit emits `ModeChanged`.
+
+### WP36 · Bootstrap lifecycle and readiness
+**Closes:** SVC-18, SVC-19, API-16 · **Status:** Todo · **Decision:** 36
+(above)
+
+- **Owned tasks** (SVC-18): the runtime keeps a `tokio::task::JoinSet<()>` (a
+  local in `run`) for every task it starts: bootstraps, `describe_camera`,
+  and WP32's calibration cancels. Aborting the runtime drops the set, which
+  aborts them. Reap finished tasks with `join_next` in the `select!` loop
+  (a branch guarded by `!set.is_empty()`), so the set does not grow.
+- **One bootstrap per vehicle at a time, re-run when needed** (SVC-19): the
+  runtime keeps `BTreeMap<SystemId, AbortHandle>` of running bootstraps. A
+  bootstrap starts on `Registered`, on `Rebooted` (aborting a running one),
+  and on `LivenessChanged { to: Active, .. }` from `Lost` when the vehicle's
+  last bootstrap did not finish cleanly.
+- **Readiness in the snapshot** (API-16): `Vehicle` gains `pub bootstrap:
+  Bootstrap`, with `Bootstrap::{Pending, Running, Done { failed: Vec<Step> }}`
+  and `Step::{Capabilities, Home, Parameters, Mission, Camera}`.
+  - `VehicleClient::bootstrap` reports `Running` through a new
+    `Input::Bootstrap`, notes each step that fails, and reports `Done` at
+    the end. A drop guard reports `Done` with the remaining steps failed if
+    it is aborted.
+  - The fleet emits `FleetEvent::Bootstrapped(SystemId)` on `Done`. A
+    frontend that needs the encoding waits for this, or for
+    `component_state(c).param_encoding().is_some()`.
+- `VehicleClient::bootstrap` becomes `pub(crate)`.
+
+**Tests:**
+- Dropping the `Backend` while a bootstrap waits on a silent mock: the
+  mock's link sees no further requests.
+- A vehicle that reboots (boot time steps back) is bootstrapped again:
+  the mock receives a second `PARAM_REQUEST_LIST`.
+- A failed mission download yields `Done { failed: [Mission] }`, and a
+  return from `Lost` re-runs it.
+- `Bootstrapped` is emitted once per run.
+
+### WP37 · Clients that match their target
+**Closes:** API-14, API-20 (flags) · **After:** 36 · **Status:** Todo
+
+- Split `services::VehicleClient`:
+  - `VehicleClient { fleet, system }` keeps the vehicle's operations: arm,
+    modes, missions, calibration, cameras (they take a `CameraId`, which
+    names its component).
+  - A new `ComponentClient { fleet, address: MavlinkId }` gets
+    `fetch_parameters` and `set_parameter`, moved from `VehicleClient`.
+  - `FleetHandle::component(address) -> ComponentClient`, and
+    `VehicleClient::parameters(&self) -> ComponentClient` for the vehicle's
+    default parameter component, resolved from the snapshot when called.
+  - `component_of` and the `component: Option<u8>` field go.
+- Flags become operations: `arm()` / `disarm()`, `pause_mission()` /
+  `resume_mission()`.
+- Update the call sites in `groundhog-gui-iced` (`parameter_panel.rs`, the
+  vehicles and mission features), and bootstrap
+  (`self.parameters().fetch_parameters()`).
+- Re-export `ComponentClient` from `services`, and update the
+  `services/mod.rs` and `AGENTS.md` references to `VehicleClient` where
+  they mean parameters.
+
+**Tests:** existing parameter tests through `ComponentClient`; a
+`ComponentClient` has no `arm` (a compile-level guarantee, nothing to test);
+`disarm()` sends param1 = 0.
+
+### WP38 · Observing the fleet
+**Closes:** API-15, API-18, SVC-16 · **After:** 36 · **Status:** Todo
+
+- **Many readers, bounded:**
+  - The runtime publishes events on a `tokio::sync::broadcast` channel
+    (capacity 1024) instead of the unbounded `mpsc`; snapshots stay on the
+    `watch`. `FleetHandle::subscribe() -> FleetUpdates` makes a reader, and
+    `BackendEvents::fleet` is simply the first.
+  - `FleetUpdate` gains `lagged: u64`: events dropped for this reader since
+    its last update (from `RecvError::Lagged`). A reader that lagged
+    re-derives from the snapshot. Document it on `FleetUpdate`.
+  - `LinkEvents` gets the same treatment from `LinkManager`.
+- **Waiting:** `FleetHandle::wait_until<T>(&self, timeout, f: impl
+  FnMut(&FleetSnapshot) -> Option<T>) -> Option<T>`; `wait_for` becomes a
+  one-line use of it, or goes.
+- **One event shape** (SVC-16, API-18):
+  - Every `FleetEvent` variant has named fields: `ArmedChanged { system,
+    from, to }`, `ModeChanged { system, from, to }` (the before values are
+    already computed in `Fleet::observe`),
+    `CalibrationFinished { system, kind, outcome }`, and so on.
+  - Add `FleetEvent::system(&self) -> SystemId`.
+  - Update `app.rs`'s `on_fleet_event` and the feature matches.
+- **`#[non_exhaustive]`** (API-18) on `FleetEvent`, `services::Error`,
+  `Rejection`, `MissionRejection`, `LinkStatus`, `DownloadOutcome`, and
+  `calibration::Outcome`. Not on structs: a non-exhaustive struct cannot be
+  built outside the crate even with `..Default::default()`, which would break
+  `BackendOptions { links, .. }`.
+
+**Tests:** two subscribers both receive every event; a subscriber that never
+reads does not stop the other, and when it reads again it sees `lagged > 0`
+and the current snapshot; `wait_until` returns the parameter outcome once the
+download ends; `ModeChanged` carries `from`.
+
+### WP39 · Safety rules in the backend
+**Closes:** API-17 · **Status:** Todo
+
+Mirror `MissionDraft::check` for vehicle operations, so every frontend asks
+and refuses alike.
+
+- `domain::vehicle::VehicleAction::{Arm, Disarm, SetMode(FlightMode),
+  StartCalibration(CalibrationKind)}` and `Vehicle::check(&self, action) ->
+  Verdict`, reusing `domain::mission::Verdict`. Move `Verdict`, `Caution` and
+  `Refusal` to a shared module (`domain::check`) and re-export them from
+  `mission` so existing paths keep working. The rules, moved from the GUI:
+  - `Arm` always confirms, with no caution (`Verdict::Confirm(vec![])`, as
+    `Start` does for missions).
+  - `SetMode` confirms with `Caution::Armed` while `armed() != Some(false)`
+    (`features/vehicles/mod.rs` `mode_change_asks`).
+  - `StartCalibration` is refused while `armed() == Some(true)`
+    (`Refusal::Armed`) or `liveness == Lost` (`Refusal::NotResponding`),
+    and when `calibration_kinds()` lacks the kind
+    (`features/calibration.rs:129-135`).
+  - `Disarm` goes without asking.
+- `VehicleClient::start_calibration` enforces its refusals: it returns a new
+  `Error::Refused(Refusal)` before sending.
+- `Vehicle::heading_rad() -> Option<f32>`: attitude yaw, else course over
+  ground when ground speed exceeds 0.5 m/s, else `None`. Moved from
+  `features/vehicles/map.rs:367`, which then calls it.
+- The GUI's three call sites use `check`, keeping their wording.
+
+**Tests:** in `domain/vehicle`: `SetMode` confirms when armed or unknown and
+goes when disarmed; `StartCalibration` is refused when armed and when lost;
+`heading_rad` falls back to the course and is `None` when slow. In
+`services/tests.rs`, `start_calibration` on an armed vehicle sends nothing.
+
 ---
 
 ## Phase 3 — maintainability and polish (P3)
@@ -593,3 +913,54 @@ Mostly writing; one commit per issue.
 - API-12: state in `AGENTS.md` that the gallery is a manual tool, and check that
   its `XDG_*` directories are throwaway.
 - API-13: no change unless the layout schema must evolve; move to Appendix C.
+
+### WP40 · Public vocabulary
+**Closes:** API-19, API-20 (rest), API-4 (R-1104 part) · **After:** 37, 38 ·
+**Status:** Todo
+
+Mechanical, but every item changes a public name. Do one commit per bullet,
+each updating `groundhog-gui-iced` in the same commit.
+
+- **Units in names** (API-20):
+  - `BatteryState { voltage_v, current_a, remaining_pct }`.
+  - `Home::altitude_msl_m`, `climb_rate_mps()`, `ground_speed_mps()`.
+  - `GlobalPosition::alt_agl` → `alt_rel_m`, with the doc "above home".
+- **Sentinels to `Option`** (API-20): `OnboardMission::opaque_id:
+  Option<u32>`, with `None` where it is 0 today. The router keeps the raw
+  value; map it at `codec::decode` and at `upload_mission`.
+  `ParamDownload::expected() -> Option<u16>`.
+- **Severity** (API-20): replace `status::rank` with `StatusText::is_at_least(
+  MavSeverity) -> bool` (MAVLink severities count down: `Emergency` is 0).
+  `app.rs:622` uses it.
+- **Firmware behind the vehicle** (API-19): the GUI calls only
+  `vehicle.firmware().name()`.
+  - Add `Vehicle::firmware_name() -> &'static str`.
+  - Make `Vehicle::firmware()`, the `Firmware` and `CalibrationProtocol`
+    traits, and `Firmware::set_mode`/`decode_mode` `pub(crate)`. What a
+    frontend needs is on `Vehicle` already (`modes`, `mode_of_kind`,
+    `calibration_kinds`, `calibration_controls`).
+  - `unreachable_pub` will name whatever else must follow.
+- **Crate-private internals** (API-19): `DownloadUpdate`,
+  `Vehicle::is_authoritative`, `target`, `target_for` become `pub(crate)`.
+  `Vehicle::new` becomes `pub(crate)`, re-exported under `test-support` if
+  the frontend's tests need it. `MissionProgress::current_seq` becomes
+  `pub(crate)` and `current_index(layout)` goes; frontends use
+  `Vehicle::current_mission_index`.
+- **No nalgebra in the API** (API-19):
+  - `Attitude` keeps its quaternion private and offers
+    `roll_rad()`/`pitch_rad()`/`yaw_rad()`.
+  - `velocity_ned` becomes a crate type
+    `Ned { north_mps, east_mps, down_mps }`.
+  - The GUI's `euler_angles()` calls go.
+- **Re-export what the API needs** (API-19): `pub use mav_param::{Ident,
+  Value};` in `domain::parameter`. The GUI imports them from there.
+- **Typed errors** (API-4, R-1104 part):
+  - `Error::NoSuchItem { index }` for `set_current_mission_item`'s
+    out-of-range index.
+  - `DownloadOutcome::Failed(services::Error)`. Move the `Clone` error type
+    so `domain` can name it, or keep a small domain enum of reasons; pick
+    whichever keeps `domain` free of `services`.
+
+**Tests:** existing tests, renamed; `is_at_least` across the scale; an
+upload's `opaque_id` of 0 reads `None`; attitude angles match
+`euler_angles()` for a few quaternions.
