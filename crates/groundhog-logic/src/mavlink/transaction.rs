@@ -25,7 +25,7 @@ use super::{
 use crate::MavlinkId;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_ATTEMPTS: u8 = 3;
 
 /// How long to wait for a requested message after the request was accepted.
@@ -151,8 +151,19 @@ impl Command {
 ///
 /// Resolves to the final `COMMAND_ACK` if the command was accepted, and
 /// [`MavError::Rejected`] otherwise. The command is resent if no ACK arrives in
-/// time, and while the target reports `IN_PROGRESS` a longer timeout applies.
-/// Dropping the future while the command is in progress sends `COMMAND_CANCEL`.
+/// time, and while the target reports `IN_PROGRESS` a longer timeout applies,
+/// but never one shorter than the caller's.
+///
+/// Dropping the future while the command is in progress sends `COMMAND_CANCEL`,
+/// and so does giving up on it: the caller is told the command failed, so the
+/// vehicle must not go on with it.
+///
+/// MAVLink command ACKs carry no transaction id. When a command was resent
+/// because its first ACK was late, the vehicle answers both copies, and the
+/// second answer can complete the next command of the same kind to the same
+/// target: a disarm can report the arm's `Accepted`. Serialising transactions
+/// per target and kind keeps them from overlapping, but nothing can tell a late
+/// answer from a current one.
 pub struct CommandRequest<'a> {
     router: MavlinkRouter,
     target: MavlinkId,
@@ -178,6 +189,11 @@ impl CommandRequest<'_> {
     }
 
     async fn run(mut self) -> Result<CommandAck> {
+        debug_assert_ne!(
+            self.target.component, 0,
+            "a command addresses one component, not the whole system"
+        );
+
         let kind: MavCmd = self.command.kind();
 
         let _lock = match self.lock.take() {
@@ -209,7 +225,7 @@ impl CommandRequest<'_> {
                     MavResult::InProgress => {
                         log::debug!("{kind:?} in progress: {}%", ack.progress);
                         pending.in_progress = true;
-                        timeout = PROGRESS_TIMEOUT;
+                        timeout = self.response_timeout.max(PROGRESS_TIMEOUT);
                     }
                     MavResult::Accepted => {
                         pending.in_progress = false;

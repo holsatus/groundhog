@@ -25,7 +25,7 @@ use mavio::{
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
-use super::{error::MavError, locks::LockKey, *};
+use super::{error::MavError, locks::LockKey, transaction::PROGRESS_TIMEOUT, *};
 use crate::{
     SystemId,
     domain::fleet::Fleet,
@@ -221,6 +221,71 @@ async fn command_in_progress_then_rejected() {
 
     let result = task.await.unwrap();
     assert!(matches!(result, Err(MavError::Rejected(MavResult::Denied))));
+}
+
+/// An `IN_PROGRESS` keeps a longer timeout the caller chose, so a slow but
+/// healthy command is not cancelled.
+#[tokio::test(start_paused = true)]
+async fn progress_keeps_a_longer_caller_timeout() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let command = router
+        .command(VEHICLE, commands::request_message::<SystemTime>())
+        .timeout(Duration::from_secs(10));
+    let task = tokio::spawn(command.into_future());
+
+    let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
+        panic!("expected COMMAND_LONG")
+    };
+    vehicle.ack(long.command, MavResult::InProgress).await;
+
+    // Let the transaction fold the progress in before time moves on.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The caller allowed 10 s; the answer arrives after the 5 s progress
+    // timeout would have expired.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    vehicle.ack(long.command, MavResult::Accepted).await;
+
+    let ack = task.await.unwrap().expect("command should be accepted");
+    assert_eq!(ack.result, MavResult::Accepted);
+
+    let later = tokio::time::timeout(Duration::from_secs(1), vehicle.recv()).await;
+    assert!(later.is_err(), "no COMMAND_CANCEL: {later:?}");
+}
+
+/// Giving up on a command in progress waits `PROGRESS_TIMEOUT`, not the
+/// caller's shorter timeout, and then tells the vehicle to stop.
+#[tokio::test(start_paused = true)]
+async fn giving_up_on_progress_waits_the_progress_timeout_and_cancels() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let command = router
+        .command(VEHICLE, commands::request_message::<SystemTime>())
+        .timeout(Duration::from_secs(1));
+    let started = tokio::time::Instant::now();
+    let task = tokio::spawn(command.into_future());
+
+    let DefaultDialect::CommandLong(long) = vehicle.recv().await else {
+        panic!("expected COMMAND_LONG")
+    };
+    vehicle.ack(long.command, MavResult::InProgress).await;
+
+    // Let the transaction fold the progress in before time moves on.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let result = task.await.unwrap();
+    assert!(matches!(result, Err(MavError::Timeout)));
+    assert!(
+        started.elapsed() >= PROGRESS_TIMEOUT,
+        "gave up after {:?}",
+        started.elapsed()
+    );
+
+    let DefaultDialect::CommandCancel(cancel) = vehicle.recv().await else {
+        panic!("expected COMMAND_CANCEL")
+    };
+    assert_eq!(cancel.command, long.command);
 }
 
 /// A result value newer than the bundled dialect's still reaches the

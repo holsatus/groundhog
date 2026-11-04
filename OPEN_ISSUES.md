@@ -31,7 +31,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [PROTO-8](#proto-8--one-in_progress-cuts-the-callers-timeout-to-five-seconds) — one `IN_PROGRESS` cuts a 10 s timeout to 5 s and cancels the command |
 | **P1** | [MISSION-17](#mission-17--our-own-upload-is-announced-as-changed-elsewhere) — every upload to PX4 / ArduPilot 4.5+ warns "changed elsewhere" |
 
 ---
@@ -73,48 +72,6 @@ return success for a frame never sent.
 
 **Fix:** remove first, then cancel, or have `closed()` await teardown.
 
-### PROTO-8 · One `IN_PROGRESS` cuts the caller's timeout to five seconds
-**P1** · Effort S · From R-1104
-
-`CommandRequest::run` sets `timeout = PROGRESS_TIMEOUT` (5 s) on the first
-`IN_PROGRESS` (`transaction.rs:209-212`), replacing a longer `.timeout()`
-the caller chose. `start_calibration` asks for 10 s; a firmware that reports
-progress once and finishes 6 s later gets `Err(Timeout)`, and `Pending::drop`
-then sends `COMMAND_CANCEL` (`:267-280`) to a command that was succeeding.
-
-**Fix:** use `self.response_timeout.max(PROGRESS_TIMEOUT)` while in progress.
-Cancelling a command the transaction gives up on is right (the caller is told
-it failed, so the vehicle must not go on with it); say so in the
-`CommandRequest` doc.
-
-**Test:** paused clock, `.timeout(10 s)`, one `IN_PROGRESS`, final ACK after
-7 s: `Ok`, and no `COMMAND_CANCEL`.
-
-### PROTO-9 · A late ACK of a resent command answers the next one
-**P2** · Effort M · From R-1104 · Decision needed (see the tracker)
-
-The ACK registration and the lock are released at the first final ACK
-(`transaction.rs:180-232`, `acks.rs`). When a command was resent because its
-first ACK was slower than `RESPONSE_TIMEOUT`, the vehicle answers both copies.
-The second answer is still in flight when the transaction ends, and the next
-command of the same kind to the same target takes it as its own. Concretely:
-arm is sent, its ACK takes 1.2 s, arm is resent, the first ACK completes it;
-the operator disarms; the second "Accepted" for arm arrives and completes the
-disarm; the vehicle's real answer to the disarm ("Denied") is logged as
-unsolicited. The operator is told the disarm succeeded. Same for two mode
-changes in a row. Only happens after a resend; MAVLink ACKs carry no
-sequence or confirmation number, so it cannot be told apart from the reply.
-
-**Fix:** a transaction that sent more than one attempt keeps its ACK
-registration and lock for a drain period after it completes, discarding up
-to `attempts - 1` further ACKs for at most `response_timeout`. The caller
-gets its result at once; only the next command of the same kind to the same
-target waits, and only after a resend.
-
-**Test:** arm with a short timeout, two attempts each acknowledged; a disarm
-issued right after, whose vehicle answers `Accepted` (the straggler) then
-`Denied`: the disarm returns `Rejected(Denied)`.
-
 ### PROTO-10 · The tolerant decoder patches only one unknown enum
 **P2** · Effort S · From R-1104
 
@@ -130,31 +87,6 @@ names a field without a fallback.
 
 **Test:** a heartbeat with bytes 4 and 5 both 200 decodes, generic type and
 generic autopilot.
-
-### PROTO-11 · Component 0 targets lock differently than their ACKs route
-**P3** · Effort M · From R-1104 · Latent
-
-Lock keys and pending-ACK keys are exact `MavlinkId`s, but `route_ack` treats
-a pending entry for component 0 as "any component of the system"
-(`acks.rs:42-65`). Commands to `(1, 0)` and `(1, 1)` of one kind can run at
-once, and an ACK from `(1, 1)` goes to the `(1, 1)` transaction even if it
-answers `(1, 0)`'s. No caller targets component 0 today (`Vehicle::target`
-falls back to 1).
-
-**Fix:** assert in `CommandRequest::run` (debug) that the target component is
-not 0, and document it in the router; implement system-wide locking only if a
-caller ever needs it.
-
-### PROTO-12 · `mission_clear` accepts a stale `MISSION_ACK`
-**P3** · Effort S · From R-1104 · *by reading*
-
-The download sets `listener.not_before` before it sends (`mission.rs:454`);
-`mission_clear` does not (`mission.rs:225-256`). A late `Accepted` from an
-earlier, timed-out transfer completes a clear the vehicle never did, and the
-runtime records an empty onboard mission.
-
-**Fix:** set `not_before` before sending `MISSION_CLEAR_ALL`, as the download
-does.
 
 ### PROTO-13 · The parser does not resynchronise after a false start
 **P3** · Effort M · From R-1104 · Upstream (mavio fork)
@@ -915,6 +847,12 @@ Verified at `5389934`; do not re-open without new evidence.
 
 ## Appendix B — Rejected claims
 
+- **PROTO-12's fix ("`mission_clear` should set `not_before`"):**
+  `not_before` only excludes what arrived before the transfer began, and a
+  listener installed for the clear never sees those anyway. A late
+  `MISSION_ACK` that arrives *during* the clear cannot be told from its
+  answer: it carries no transfer id. That is PROTO-9's limitation for
+  missions, documented with it (WP33).
 - **R-1104's "undefined behaviour in `mav-param`'s `into_bytewise`":** the
   pinned revision (`04034d9`) zero-initialises the union before writing a
   value narrower than four bytes; the claim was read from an older checkout.
@@ -966,6 +904,9 @@ already editing the file.
 - **A WPL file without a home row (MISSION-7):** row 0 stays home. Detecting
   the difference from the `current`/`index` columns risks dropping a real item
   or inventing a waypoint at home.
+
+- **A late ACK of a resent command (PROTO-9):** documented at
+  `CommandRequest` and in `AGENTS.md`; a drain after resends was declined.
 
 - Mechanical: derive ordering, `Default` vs `empty()`, module declarations at
   the bottom of `app.rs`, banner comments, constructor naming, adjacent literal

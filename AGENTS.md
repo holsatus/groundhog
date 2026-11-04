@@ -976,6 +976,14 @@ written by a newer build, saves nothing.
   resent start restarts or repeats the calibration, and a resent ArduPilot
   orientation confirmation is refused once measuring has begun.
   `VehicleClient` sends them with `retries(0)` and a long timeout.
+- **A late ACK can answer the next transaction.** MAVLink ACKs carry no
+  transaction id, so when a command is resent because its first ACK was late,
+  the vehicle answers both copies and the second answer can complete the next
+  command of the same kind to the same target: a disarm can report the arm's
+  `Accepted`. A late `MISSION_ACK` from an earlier transfer can likewise
+  complete a `mission_clear`. Serialising transactions per resource keeps them
+  from overlapping, but nothing can tell a late answer from a current one, so
+  do not add delays to drain it.
 - **Messages are formatted on every update** when iced's `debug` feature is
   on (see [The UI](#the-ui-iced)). A derived `Debug` on a large payload costs
   milliseconds per message.

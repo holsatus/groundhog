@@ -222,6 +222,11 @@ impl Drop for CancelOnDrop<'_> {
 
 impl MavlinkRouter {
     /// Clear the mission of `target` and wait for the vehicle to accept.
+    ///
+    /// `MISSION_ACK` carries no transfer id either, so a late ACK of an
+    /// earlier transfer that arrives during this one completes it. The
+    /// listener starts with the clear, which does not help: it never sees what
+    /// arrived before the transfer began anyway.
     pub async fn mission_clear(
         &self,
         target: MavlinkId,

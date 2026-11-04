@@ -39,6 +39,12 @@ impl PendingAckMap {
     /// Route `ack`, received from `source`, to the transaction waiting for it.
     ///
     /// Some systems leave the target fields empty, so those are accepted too.
+    ///
+    /// The lookup falls back to an entry registered for component 0, "the
+    /// system as a whole": a vehicle may answer a command sent to its system
+    /// from one of its components. Lock keys are exact `MavlinkId`s, so a
+    /// command to component 0 and one to a specific component of the same kind
+    /// would not be serialised; no caller sends a command to component 0.
     pub(super) fn route_ack(&self, gcs_id: MavlinkId, source: MavlinkId, ack: &CommandAck) {
         // Some systems leave the target fields empty, so accept those as well
         let for_us = (ack.target_system == 0 || ack.target_system == gcs_id.system)

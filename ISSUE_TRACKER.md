@@ -29,7 +29,7 @@ Phase 1 of the first review (packages 1–7) is done and removed; packages
 | 30 | [Only intact frames reach the router](#wp30--only-intact-frames-reach-the-router) | PROTO-7 | P1 | — | Done |
 | 31 | [Parameter downloads and edits in order](#wp31--parameter-downloads-and-edits-in-order) | PARAM-11, PARAM-12, PARAM-13, PARAM-15 | P1 | — | Done |
 | 32 | [Calibration ends on both sides](#wp32--calibration-ends-on-both-sides) | CAL-10, CAL-11, CAL-12, CAL-13 | P1 | — | Done |
-| 33 | [Command transaction timing](#wp33--command-transaction-timing) | PROTO-8, PROTO-9, PROTO-11, PROTO-12 | P1 | — | Todo |
+| 33 | [Command transaction timing](#wp33--command-transaction-timing) | PROTO-8, PROTO-9 (documented), PROTO-11 | P1 | — | Done |
 | 34 | [Mission transfers known to the runtime](#wp34--mission-transfers-known-to-the-runtime) | MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) | P1 | — | Todo |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
 | 9 | [Calibration session lifecycle](#wp9--calibration-session-lifecycle) | CAL-2, CAL-3, CAL-4, CAL-5, CAL-6, CAL-7, CAL-9, SVC-14 | P2 | 8 | Done |
@@ -68,7 +68,7 @@ These change the scope of a package; settle them before it starts.
 | 17 | Drop the "clear stale position" part of SVC-3 and show the age of the data instead? | Keep the last known values, show their age and dim them; only a zeroed `HOME_POSITION` clears home. |
 | 20 | With pending edits, does "Save to a file" include them, or save reported values and say so? | Save reported values and say the pending edits were not included. |
 | 32 | Is the 60 s no-progress timeout too strict? | Keep 60 s, but reset it on any feedback that belongs to the run, changed or not (CAL-10). Then it fires only when the vehicle has gone quiet about the calibration. |
-| 33 | PROTO-9: drain stray ACKs after a resend, or accept the limitation and document it? | **Open.** Leaning: drain. It costs nothing until a command is resent, and then delays only the next command of the same kind to the same target, by at most one response timeout. If declined, do only the documentation step and move PROTO-9 to Appendix C. |
+| 33 | PROTO-9: drain stray ACKs after a resend, or accept the limitation and document it? | Document only (owner's decision, 2026-11-04). PROTO-9 goes to Appendix C; PROTO-12, the same limitation for mission ACKs, to Appendix B. |
 | 36 | After a reboot, re-run the whole bootstrap, or only parameters and home? | Leaning: the whole bootstrap; a reboot can follow a reflash or a mission change. The capability request is still skipped when the encoding is known. |
 | 37, 38, 40 | Break the public API in place, or deprecate first? | Break in place, and update `groundhog-gui-iced` in the same commit: the crate has one frontend. |
 
@@ -317,51 +317,58 @@ in the runtime's tolerant decoder.
   never seen, is ignored.
 
 ### WP33 · Command transaction timing
-**Closes:** PROTO-8, PROTO-9, PROTO-11, PROTO-12 · **Status:** Todo ·
+**Closes:** PROTO-8, PROTO-9 (documented), PROTO-11 · **Status:** Done ·
 **Decision:** PROTO-9 (above)
 
-All in `mavlink/transaction.rs` and `mavlink/mission.rs`.
+In `mavlink/transaction.rs`, `mavlink/acks.rs` and `mavlink/mission.rs`, plus
+`AGENTS.md`.
 
 - **Progress keeps the caller's patience** (PROTO-8): in
   `CommandRequest::run`, on `IN_PROGRESS` set `timeout =
   self.response_timeout.max(PROGRESS_TIMEOUT)`. Keep the cancel that
   `Pending::drop` sends when a command in progress is given up on, and say in
   `CommandRequest`'s doc that giving up cancels it, as dropping does.
-- **Drain stray ACKs** (PROTO-9, if decided):
-  - `run` counts the attempts it sent. When it completes with more than one
-    sent, it does not drop its `Pending` and lock at once. It hands both to a
-    drain that receives and discards at most `attempts - 1` further ACKs, for
-    at most `response_timeout`, then drops them. The caller gets its result
-    without waiting.
-  - When `run` acquired the lock itself (the common case), the drain is a
-    spawned task owning `Pending` and the `KeyGuard`; `KeyGuard` is already
-    owned, so this means keeping it in a local rather than a `&mut`
-    temporary. When the guard is borrowed (`command_with_lock`, used by
-    `request_message`), drain inline before returning: its callers are
-    background requests.
-  - `Pending::in_progress` is false after completion, so the drain never
-    sends a cancel.
-  - If declined: document the limitation at `CommandRequest` and in
-    `AGENTS.md`'s Pitfalls, and move PROTO-9 to Appendix C.
-- **No component 0** (PROTO-11): `debug_assert_ne!(target.component, 0)` in
-  `run`, with a comment on `route_ack` explaining the system-wide fallback is
-  for ACKs that name no target. Do not build system-wide locking until a
-  caller needs it.
-- **Clear ignores stale ACKs** (PROTO-12): in `mission_clear`, set
-  `listener.not_before = Some(Instant::now())` before the first send, as the
-  download does (`mission.rs:454`).
+- **Stray ACKs are a documented limitation** (PROTO-9, decided: document
+  only; PROTO-12 was the same limitation, see Appendix B):
+  - In the `CommandRequest` doc (`transaction.rs`), add a paragraph: MAVLink
+    ACKs carry no transaction id. When a command was resent because its
+    first ACK was late, the vehicle answers both copies, and the second
+    answer can complete the next command of the same kind to the same target
+    (so a disarm can report the arm's `Accepted`). Locks serialise
+    transactions, but they cannot tell a late answer from a current one.
+  - Say the same of mission transfers in `mission_clear`'s doc, where a late
+    `MISSION_ACK` of an earlier transfer that arrives during the clear
+    completes it. `MISSION_ACK` has no transfer id either; `not_before` only
+    excludes what arrived before the transfer began, which a new listener
+    never sees anyway.
+  - Add a Pitfalls entry to `AGENTS.md`, "A late ACK can answer the next
+    transaction", with the two cases in two or three sentences.
+  - In `OPEN_ISSUES.md`, move PROTO-9 to Appendix C (Parked) with one
+    sentence: documented at `CommandRequest` and in `AGENTS.md`; a drain
+    after resends was declined.
+- **No component 0** (PROTO-11):
+  - Add `debug_assert_ne!(self.target.component, 0, "…")` at the start of
+    `CommandRequest::run`, with a message saying commands address one
+    component.
+  - Add a comment on `PendingAckMap::route_ack` (`acks.rs`) explaining the
+    system-wide fallback: it is for ACKs from a vehicle that answers a
+    command sent to its system as a whole. Lock keys are exact, so a
+    component-0 command and a component-specific one of the same kind would
+    not be serialised.
+  - Do not build system-wide locking until a caller needs it. Check that no
+    test or production path sends a command to component 0; the assertion
+    will show any in the test run.
 
-**Tests** (`mavlink/tests.rs`, paused clock):
+**Tests** (`mavlink/tests.rs`, paused clock, next to
+`command_in_progress_then_rejected`):
 - `.timeout(10 s)`, the mock answers `IN_PROGRESS` and then `ACCEPTED` 7 s
-  later: `Ok`, and no `COMMAND_CANCEL` is received.
-- `.timeout(1 s)`, `IN_PROGRESS`, then silence: `Timeout`, and
-  `COMMAND_CANCEL` is received (kept behaviour).
-- PROTO-9: arm with a 100 ms timeout, two attempts, the mock ACKs after the
-  resend; then disarm, the mock sends `ACCEPTED` (the straggler) then
-  `DENIED`: the disarm returns `Rejected(Denied)`. A command with no resend
-  releases its lock at once (a second command starts without delay).
-- PROTO-12: an `Accepted` `MISSION_ACK` queued before `mission_clear` sends
-  does not complete it.
+  later: `Ok`, and no `COMMAND_CANCEL` is received. This fails before the
+  fix.
+- `.timeout(1 s)`, `IN_PROGRESS`, then silence: `Timeout` after
+  `PROGRESS_TIMEOUT` (not 1 s), and `COMMAND_CANCEL` is received (kept
+  behaviour).
+- PROTO-9 and PROTO-11 are documentation and an assertion; the full test
+  run passing with the assertion in place is their check.
 
 ### WP34 · Mission transfers known to the runtime
 **Closes:** MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) ·
