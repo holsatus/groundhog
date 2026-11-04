@@ -114,15 +114,12 @@ impl MissionLayout {
         u16::try_from(index).ok()?.checked_add(self.offset())
     }
 
-    /// The largest plan this layout can number on the wire.
+    /// The largest plan this layout can send, as bounded by
+    /// `MISSION_COUNT.count`.
     pub(crate) fn max_items(self) -> usize {
-        // Without a home slot, plan item 0 is sequence 0; with one, it is
-        // sequence 1, so one fewer item fits below u16::MAX.
-        if self.home_slot {
-            usize::from(u16::MAX)
-        } else {
-            usize::from(u16::MAX) + 1
-        }
+        // `MISSION_COUNT.count` is a `u16` and counts the home row too, so a
+        // plan of 65 535 items fits without a home slot and 65 534 with one.
+        usize::from(u16::MAX) - usize::from(self.home_slot)
     }
 
     /// The plan index of wire sequence `seq`, or `None` for the home slot.
@@ -212,18 +209,18 @@ mod tests {
         assert_eq!(ardupilot.wire_seq(0), Some(1));
         assert_eq!(ardupilot.plan_index(1), Some(0));
         assert_eq!(ardupilot.plan_index(0), None, "seq 0 is home");
-        assert_eq!(ardupilot.max_items(), usize::from(u16::MAX));
+        assert_eq!(ardupilot.max_items(), usize::from(u16::MAX) - 1);
         assert_eq!(
-            ardupilot.wire_seq(usize::from(u16::MAX) - 1),
-            Some(u16::MAX)
+            ardupilot.wire_seq(ardupilot.max_items() - 1),
+            Some(u16::MAX - 1)
         );
         assert_eq!(ardupilot.wire_seq(usize::from(u16::MAX)), None);
 
         let px4 = MissionLayout { home_slot: false };
         assert_eq!(px4.wire_seq(0), Some(0));
         assert_eq!(px4.plan_index(0), Some(0));
-        assert_eq!(px4.max_items(), usize::from(u16::MAX) + 1);
-        assert_eq!(px4.wire_seq(usize::from(u16::MAX)), Some(u16::MAX));
+        assert_eq!(px4.max_items(), usize::from(u16::MAX));
+        assert_eq!(px4.wire_seq(px4.max_items() - 1), Some(u16::MAX - 1));
         assert_eq!(px4.wire_seq(usize::from(u16::MAX) + 1), None);
     }
 

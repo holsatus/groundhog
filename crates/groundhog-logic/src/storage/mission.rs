@@ -49,6 +49,11 @@ impl WplError {
             message: message.into(),
         }
     }
+
+    /// A file with more rows than a mission can number with `u16` sequences.
+    fn too_many_rows(line: usize) -> Self {
+        WplError::at(line, "more rows than a mission can number")
+    }
 }
 
 /// Serialize a plan as a "QGC WPL 110" document, with `home` (or a zero
@@ -122,8 +127,9 @@ pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
         }
 
         let mut row = parse_row(line, line_number)?;
-        // The index column is advisory; rows are taken in file order.
-        row.seq = rows.len() as u16;
+        // The index column is advisory; rows are taken in file order, and a
+        // row past the last 16-bit sequence cannot replace home with row 0.
+        row.seq = u16::try_from(rows.len()).map_err(|_| WplError::too_many_rows(line_number))?;
         rows.push(row);
     }
 
@@ -197,10 +203,24 @@ fn parse_row(line: &str, line_number: usize) -> Result<RawMissionItem, WplError>
     let command = u16::try_from(command_raw)
         .map_err(|_| WplError::at(line_number, format!("command out of range: {command_raw}")))?;
 
-    let param1 = float(4, "param1")? as f32;
-    let param2 = float(5, "param2")? as f32;
-    let param3 = float(6, "param3")? as f32;
-    let param4 = float(7, "param4")? as f32;
+    // Parameters are stored as `f32`: narrow before checking, so a value that
+    // becomes infinite is refused as well. NaN stays: for an optional
+    // parameter it means "vehicle default".
+    let param = |index: usize, name: &str| -> Result<f32, WplError> {
+        let value = float(index, name)? as f32;
+        if value.is_infinite() {
+            return Err(WplError::at(
+                line_number,
+                format!("{name} is not a finite number: '{}'", fields[index]),
+            ));
+        }
+        Ok(value)
+    };
+
+    let param1 = param(4, "param1")?;
+    let param2 = param(5, "param2")?;
+    let param3 = param(6, "param3")?;
+    let param4 = param(7, "param4")?;
     let lat = float(8, "latitude")?;
     let lon = float(9, "longitude")?;
     let alt = float(10, "altitude")?;
@@ -218,13 +238,13 @@ fn parse_row(line: &str, line_number: usize) -> Result<RawMissionItem, WplError>
             format!("longitude out of range: {lon}"),
         ));
     }
+    let alt = alt as f32;
     if !alt.is_finite() {
         return Err(WplError::at(
             line_number,
             format!("altitude is not a finite number: {alt}"),
         ));
     }
-    let alt = alt as f32;
 
     Ok(RawMissionItem {
         frame: import_frame(frame, command),
@@ -331,6 +351,82 @@ mod tests {
         let jump_row = text.lines().nth(3).unwrap();
         let target: f32 = jump_row.split('\t').nth(4).unwrap().parse().unwrap();
         assert_eq!(target, 1.0, "row 1, after home");
+    }
+
+    /// Row 0 is the home slot, so a jump to it means home and not the first
+    /// plan item. The file says so with a target of 0, as it came in.
+    #[test]
+    fn a_jump_to_home_survives_a_file_round_trip() {
+        let text = "QGC WPL 110\n\
+                    0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n\
+                    1\t0\t3\t16\t0\t0\t0\t0\t47.4\t8.5\t120\t1\n\
+                    2\t0\t3\t177\t0\t1\t0\t0\t0\t0\t0\t1\n";
+
+        let mission = parse_wpl(text).expect("valid file");
+        assert_eq!(mission.items[1].params[0], -1.0, "row 0 is home");
+
+        let written = write_wpl(&mission.items, mission.home.as_ref()).expect("fits in a file");
+        let jump_row = written.lines().nth(3).unwrap();
+        let target: f32 = jump_row.split('\t').nth(4).unwrap().parse().unwrap();
+        assert_eq!(target, 0.0, "home again");
+    }
+
+    /// A target the item-reference rule does not read comes through a file
+    /// unchanged, and saving it neither panics nor rewrites it.
+    #[test]
+    fn an_opaque_jump_target_round_trips_in_a_file() {
+        let text = "QGC WPL 110\n\
+                    0\t1\t0\t16\t0\t0\t0\t0\t47.0\t8.0\t400\t1\n\
+                    1\t0\t3\t16\t0\t0\t0\t0\t47.1\t8.1\t50\t1\n\
+                    2\t0\t3\t177\t1e30\t1\t0\t0\t0\t0\t0\t1\n";
+
+        let mission = parse_wpl(text).expect("valid file");
+        assert_eq!(mission.items[1].params[0], 1e30);
+
+        let written = write_wpl(&mission.items, mission.home.as_ref()).expect("fits in a file");
+        let reparsed = parse_wpl(&written).expect("the file round-trips");
+        assert_eq!(reparsed.items[1].params[0], 1e30);
+    }
+
+    /// WPL parameters are stored as `f32`. An infinity cannot be one, while
+    /// NaN keeps meaning "vehicle default" where the parameter is optional.
+    #[test]
+    fn infinite_params_are_refused_and_nan_is_kept() {
+        let file = |param1: &str| {
+            format!(
+                "QGC WPL 110\n\
+                 0\t1\t0\t16\t0\t0\t0\t0\t47\t8\t400\t1\n\
+                 1\t0\t3\t177\t{param1}\t1\t0\t0\t0\t0\t0\t1\n"
+            )
+        };
+
+        for infinite in ["inf", "-inf"] {
+            assert!(
+                parse_wpl(&file(infinite)).is_err(),
+                "param1 = {infinite} is not a finite number"
+            );
+        }
+
+        let mission = parse_wpl(&file("NaN")).expect("NaN is still vehicle default");
+        assert!(mission.items[0].params[0].is_nan());
+    }
+
+    /// Row numbers are the wire sequence, and a mission has only 16 bits of
+    /// them. The row past the last one is refused rather than wrapping to 0
+    /// and replacing home.
+    #[test]
+    fn more_rows_than_a_mission_can_number_are_refused() {
+        let mut text = String::from("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t1\t1\t400\t1\n");
+        for i in 1..=65_536u32 {
+            let lat = 10.0 + f64::from(i) * 1e-6;
+            text.push_str(&format!("{i}\t0\t3\t16\t0\t0\t0\t0\t{lat}\t8\t50\t1\n"));
+        }
+
+        let error = parse_wpl(&text).expect_err("more rows than u16 sequences");
+        assert!(
+            error.to_string().contains("more rows"),
+            "the error says what is wrong: {error}"
+        );
     }
 
     #[test]

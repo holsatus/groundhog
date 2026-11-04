@@ -8,6 +8,7 @@
 
 use mavio::default_dialect::enums::MavMissionType;
 
+use super::item::item_ref;
 use super::{MissionItem, OnboardMission, PlanTooLong, Position};
 use crate::domain::firmware::MissionLayout;
 use crate::wire::mission_item::RawMissionItem;
@@ -21,7 +22,7 @@ use crate::wire::mission_item::RawMissionItem;
 ///
 /// # Errors
 ///
-/// [`PlanTooLong`] when `items` cannot be numbered with 16-bit wire sequences.
+/// [`PlanTooLong`] when `MISSION_COUNT.count` cannot number `items`.
 pub(crate) fn encode(
     items: &[MissionItem],
     home: Option<&MissionItem>,
@@ -105,18 +106,34 @@ pub(crate) fn decode(
     }
 }
 
-/// Move every item reference of `item` by `by`. A target that would fall
-/// before the plan is left as it is rather than clamped: an invalid target
-/// must not silently become the first item.
+/// Move every item reference of `item` by `by`.
+///
+/// In a plan, `-1` means the home slot: a home-slot layout decodes wire
+/// sequence `0` to it and encodes it back to `0`. It is opaque to the
+/// item-reference rule, so both directions are spelled out here. Every other
+/// target the rule cannot read is left as it is, as is a result that would
+/// leave the wire's `u16` range: an invalid target must not silently become
+/// another item.
 fn shift_targets(item: &mut MissionItem, by: i64) {
     let slots: Vec<usize> = item.item_index_slots().collect();
     for slot in slots {
         let target = item.params[slot];
-        if target.is_finite() && target >= 0.0 {
-            let shifted = target as i64 + by;
-            if shifted >= 0 {
-                item.params[slot] = shifted as f32;
+
+        if target == -1.0 {
+            if by > 0 {
+                item.params[slot] = 0.0;
             }
+            continue;
+        }
+
+        let Some(target) = item_ref(target) else {
+            continue;
+        };
+        let shifted = i64::from(target) + by;
+        if shifted == -1 && by < 0 {
+            item.params[slot] = -1.0;
+        } else if let Ok(shifted) = u16::try_from(shifted) {
+            item.params[slot] = f32::from(shifted);
         }
     }
 }
@@ -193,6 +210,62 @@ mod tests {
         assert_eq!(decode(&wire, 0, PX4).items, plan());
     }
 
+    /// Wire 0 is the home slot, not the first plan item. A plan says so with
+    /// `-1`, which encodes back to 0; nothing shifts it on the way.
+    #[test]
+    fn a_jump_to_the_home_slot_stays_a_jump_to_home() {
+        let home = MissionItem::home(Position {
+            lat: 47.0,
+            lon: 8.0,
+            alt_m: 400.0,
+        });
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = 0.0;
+
+        let wire = vec![
+            home.to_wire(0, MavMissionType::Mission),
+            plan()[0].to_wire(1, MavMissionType::Mission),
+            jump.to_wire(2, MavMissionType::Mission),
+        ];
+
+        let onboard = decode(&wire, 0, ARDUPILOT);
+        assert_eq!(
+            onboard.items[1].params[0], -1.0,
+            "home, not the first plan item"
+        );
+
+        let back = encoded(&onboard.items, onboard.home.as_ref(), ARDUPILOT);
+        assert_eq!(back[2].params[0], 0.0, "the home slot again");
+    }
+
+    /// Without a home slot there is no home reference to shift.
+    #[test]
+    fn without_a_home_slot_a_zero_target_stays_item_zero() {
+        let wire = encoded(&plan(), None, PX4);
+        let onboard = decode(&wire, 0, PX4);
+
+        assert_eq!(onboard.items[1].params[0], 0.0);
+        assert_eq!(encoded(&onboard.items, None, PX4)[1].params[0], 0.0);
+    }
+
+    /// A target the rule cannot read is opaque and comes through untouched,
+    /// whether the layout shifts references or not.
+    #[test]
+    fn an_opaque_jump_target_is_encoded_unchanged() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = 1e30;
+
+        let items = vec![plan()[0].clone(), jump];
+        for layout in [ARDUPILOT, PX4] {
+            let wire = encoded(&items, None, layout);
+            assert_eq!(
+                wire.last().expect("the jump is encoded").params[0],
+                1e30,
+                "{layout:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_empty_plan_encodes_to_nothing_even_with_a_home_slot() {
         let home = MissionItem::home(Position {
@@ -216,6 +289,9 @@ mod tests {
             lon: 8.0,
             alt_m: 40.0,
         });
+
+        assert_eq!(ARDUPILOT.max_items(), 65_534, "home takes one of 65 535");
+        assert_eq!(PX4.max_items(), 65_535, "no home row");
 
         for layout in [ARDUPILOT, PX4] {
             let fits = vec![item.clone(); layout.max_items()];

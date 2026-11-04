@@ -350,15 +350,31 @@ impl MissionItem {
 
     /// Set one field from its display value (see [`FieldView::value`]).
     /// Returns whether the item changed.
+    ///
+    /// The value is narrowed to what the wire stores before it is checked, so
+    /// a value that would become infinite or would not fit is refused rather
+    /// than saturated. A non-optional parameter never becomes NaN.
     pub fn set_field(&mut self, field: Field, value: f64) -> bool {
         let before = self.clone();
 
         match field {
             Field::Latitude => self.x = degrees_e7(value),
             Field::Longitude => self.y = degrees_e7(value),
-            Field::Altitude | Field::Z => self.z = value as f32,
-            Field::X => self.x = value as i32,
-            Field::Y => self.y = value as i32,
+            Field::Altitude | Field::Z => {
+                let narrowed = value as f32;
+                if !narrowed.is_finite() {
+                    return false;
+                }
+                self.z = narrowed;
+            }
+            Field::X => match i32_field(value) {
+                Some(narrowed) => self.x = narrowed,
+                None => return false,
+            },
+            Field::Y => match i32_field(value) {
+                Some(narrowed) => self.y = narrowed,
+                None => return false,
+            },
             Field::Param(index) if index < 4 => {
                 let kind = self
                     .spec()
@@ -366,10 +382,29 @@ impl MissionItem {
                     .map(|param| param.kind);
 
                 self.params[index] = match kind {
-                    Some(ParamKind::ItemIndex) => (value - 1.0).max(0.0).round() as f32,
-                    Some(ParamKind::Integer) => value.round() as f32,
+                    Some(ParamKind::ItemIndex) => {
+                        if !(1.0..=f64::from(u16::MAX)).contains(&value) {
+                            return false;
+                        }
+                        (value - 1.0).round() as f32
+                    }
+                    Some(ParamKind::Integer) => {
+                        let narrowed = value.round() as f32;
+                        if !narrowed.is_finite() {
+                            return false;
+                        }
+                        narrowed
+                    }
                     Some(ParamKind::Bool) => f32::from(value != 0.0),
-                    _ => value as f32,
+                    _ => {
+                        let narrowed = value as f32;
+                        if narrowed.is_infinite()
+                            || (narrowed.is_nan() && kind != Some(ParamKind::OptionalNumber))
+                        {
+                            return false;
+                        }
+                        narrowed
+                    }
                 };
             }
             Field::Param(_) => {}
@@ -459,6 +494,31 @@ impl MissionItem {
             autocontinue: message.autocontinue != 0,
         }
     }
+}
+
+/// Interpret `param` as an item reference this code may move.
+///
+/// Only a finite, whole number in the wire's `0..=u16::MAX` names an item.
+/// Everything else — negative (including the home slot's `-1`), fractional,
+/// NaN or too large — is opaque: it has no item to move to, so callers leave
+/// it exactly as it is.
+pub(crate) fn item_ref(param: f32) -> Option<u16> {
+    if !param.is_finite() || param.fract() != 0.0 {
+        return None;
+    }
+    if !(0.0..=f32::from(u16::MAX)).contains(&param) {
+        return None;
+    }
+    Some(param as u16)
+}
+
+/// The `i32` a raw `x`/`y` field rounds to, or `None` when it does not fit.
+fn i32_field(value: f64) -> Option<i32> {
+    let rounded = value.round();
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return None;
+    }
+    Some(rounded as i32)
 }
 
 /// Whether x/y are latitude/longitude in `frame`.
@@ -626,6 +686,68 @@ mod tests {
             .unwrap();
         assert_eq!(view.kind, FieldKind::ItemNumber);
         assert_eq!(view.value, 3.0);
+    }
+
+    #[test]
+    fn only_whole_numbers_in_wire_range_are_item_references() {
+        assert_eq!(item_ref(0.0), Some(0));
+        assert_eq!(item_ref(f32::from(u16::MAX)), Some(u16::MAX));
+
+        for opaque in [
+            -1.0,
+            -0.5,
+            1.5,
+            f32::from(u16::MAX) + 1.0,
+            1e30,
+            f32::NAN,
+            f32::INFINITY,
+        ] {
+            assert_eq!(item_ref(opaque), None, "{opaque} is not a wire reference");
+        }
+    }
+
+    /// A field is narrowed to what the wire stores before it is checked: a
+    /// value that would become infinite or would not fit is refused, never
+    /// clamped or saturated.
+    #[test]
+    fn fields_refuse_values_that_do_not_survive_narrowing() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+
+        assert!(
+            !jump.set_field(Field::Param(0), 1e30),
+            "an enormous target is refused"
+        );
+        assert_eq!(jump.params[0], 0.0, "and nothing was written");
+
+        assert!(
+            !jump.set_field(Field::Param(0), 0.0),
+            "item numbers are 1-based"
+        );
+        assert!(
+            !jump.set_field(Field::Param(0), 65_536.0),
+            "past the wire's u16"
+        );
+        assert_eq!(jump.params[0], 0.0);
+
+        assert!(jump.set_field(Field::Param(0), 65_535.0));
+        assert_eq!(jump.params[0], 65_534.0, "stored zero-based");
+
+        let mut waypoint = MissionItem::waypoint(at(47.0, 8.0, 50.0));
+        assert!(
+            !waypoint.set_field(Field::Altitude, 1e40),
+            "narrows to infinity"
+        );
+        assert_eq!(waypoint.z, 50.0);
+
+        assert!(!waypoint.set_field(Field::X, 3e9), "outside i32");
+        assert_eq!(waypoint.x, 470_000_000);
+
+        let mut yaw = MissionItem::new(MavCmd::ConditionYaw, None);
+        assert!(
+            !yaw.set_field(Field::Param(0), 1e40),
+            "a plain parameter narrows to infinity too"
+        );
+        assert_eq!(yaw.params[0], 0.0);
     }
 
     #[test]

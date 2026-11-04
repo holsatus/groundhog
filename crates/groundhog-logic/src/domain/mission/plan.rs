@@ -7,11 +7,12 @@
 //! resolves.
 //!
 //! Jump targets are plan indices. The plan keeps them pointing at the same
-//! item when items are inserted, removed or moved.
+//! item when items are inserted, removed or moved. The one exception is the
+//! home slot, stored as `-1`, which no plan edit moves.
 
 use mavio::default_dialect::enums::MavCmd;
 
-use super::item::{MissionItem, Position};
+use super::item::{MissionItem, Position, item_ref};
 
 /// A plan-unique, stable item identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -301,18 +302,19 @@ impl MissionPlan {
         true
     }
 
-    /// Rewrite every jump target through `map`, leaving targets outside the
-    /// plan untouched.
+    /// Rewrite every readable jump target through `map`. An opaque target,
+    /// and a mapped result that no longer fits the wire, are left untouched.
     fn remap_targets(&mut self, map: impl Fn(usize) -> Option<usize>) {
         for slot in &mut self.items {
             let slots: Vec<usize> = slot.item.item_index_slots().collect();
             for param in slots {
-                let target = slot.item.params[param];
-                if target < 0.0 || !target.is_finite() {
+                let Some(target) = item_ref(slot.item.params[param]) else {
                     continue;
-                }
-                if let Some(mapped) = map(target as usize) {
-                    slot.item.params[param] = mapped as f32;
+                };
+                if let Some(mapped) = map(usize::from(target))
+                    && let Ok(mapped) = u16::try_from(mapped)
+                {
+                    slot.item.params[param] = f32::from(mapped);
                 }
             }
         }
@@ -456,6 +458,60 @@ mod tests {
             target < plan.len() as f32,
             "a target never points past the plan"
         );
+    }
+
+    /// A target the rule cannot read is opaque: it has no index to move, so
+    /// every edit leaves it exactly as it was instead of overflowing.
+    #[test]
+    fn an_opaque_jump_target_survives_every_plan_edit() {
+        let huge = 1e30_f32;
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = huge;
+
+        let mut plan = MissionPlan::default();
+        let first = plan.push(waypoint(1.0));
+        let jump = plan.push(jump);
+        plan.push(waypoint(2.0));
+
+        assert_eq!(plan.get(jump).unwrap().params[0], huge, "after a push");
+
+        plan.insert(0, waypoint(0.0));
+        assert_eq!(plan.get(jump).unwrap().params[0], huge, "after an insert");
+
+        plan.remove(first);
+        assert_eq!(plan.get(jump).unwrap().params[0], huge, "after a remove");
+    }
+
+    /// `-1` in a plan is the home slot, which no plan edit may move.
+    #[test]
+    fn a_home_target_is_opaque_to_plan_edits() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = -1.0;
+
+        let mut plan = MissionPlan::default();
+        let first = plan.push(waypoint(1.0));
+        let jump = plan.push(jump);
+        plan.push(waypoint(2.0));
+
+        plan.insert(0, waypoint(0.0));
+        assert_eq!(plan.get(jump).unwrap().params[0], -1.0, "after an insert");
+
+        plan.remove(first);
+        assert_eq!(plan.get(jump).unwrap().params[0], -1.0, "after a remove");
+    }
+
+    /// A mapped target that no longer fits the wire is left as it was: a
+    /// number past `u16` is not a reference any more.
+    #[test]
+    fn a_target_that_would_leave_the_wire_range_is_left_alone() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = f32::from(u16::MAX);
+
+        let mut plan = MissionPlan::default();
+        let jump = plan.push(jump);
+        plan.insert(0, waypoint(1.0));
+
+        assert_eq!(plan.get(jump).unwrap().params[0], f32::from(u16::MAX));
     }
 
     #[test]

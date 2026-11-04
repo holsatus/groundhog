@@ -475,6 +475,9 @@ fn format_value(view: FieldView) -> String {
 
     match (view.field, view.kind) {
         (Field::Latitude | Field::Longitude, _) => format!("{:.7}", view.value),
+        // A jump to the home slot is stored as -1, which the fields show as
+        // item number 0. The editor has no "item 0": it is home.
+        (_, FieldKind::ItemNumber) if view.value == 0.0 => "Home".to_string(),
         (_, FieldKind::Integer | FieldKind::ItemNumber) => format!("{}", view.value.round()),
         // Every other field is an `f32` on the wire, widened: narrowing it
         // back is exact, and prints the shortest text that reads back as the
@@ -521,5 +524,20 @@ mod tests {
             .expect("a waypoint has an altitude");
 
         assert_eq!(format_value(altitude), "12.3");
+    }
+
+    /// A target of `-1` is the firmware's home slot, which the item's fields
+    /// show one-based as 0. The editor names it rather than offering "item 0".
+    #[test]
+    fn a_home_jump_target_reads_as_home() {
+        let mut jump = MissionItem::new(MavCmd::DoJump, None);
+        jump.params[0] = -1.0;
+
+        let target = jump
+            .fields()
+            .into_iter()
+            .find(|view| view.field == Field::Param(0))
+            .expect("a jump has a target");
+        assert_eq!(format_value(target), "Home");
     }
 }
