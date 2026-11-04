@@ -691,4 +691,53 @@ mod tests {
         let item = draft.plan().get(second).unwrap().position().unwrap();
         assert_eq!((item.lat, item.lon, item.alt_m), (56.0, 13.0, 80.0));
     }
+
+    /// Downloading replaces the plan, so edits in it are at stake; a clean
+    /// draft is replaced without a question.
+    #[test]
+    fn downloading_over_edits_asks_before_discarding_them() {
+        let (fleet, mut draft) = synced();
+        draft.plan_mut().push(waypoint(3.0));
+        assert_eq!(
+            draft.check(MissionAction::Download, &fleet.snapshot()),
+            Verdict::Confirm(vec![Caution::DiscardsEdits])
+        );
+
+        let (fleet, draft) = synced();
+        assert_eq!(
+            draft.check(MissionAction::Download, &fleet.snapshot()),
+            Verdict::Go
+        );
+    }
+
+    /// Clearing deletes what the vehicle holds, and always asks; an armed
+    /// vehicle adds its own warning.
+    #[test]
+    fn clearing_always_asks_and_warns_while_armed() {
+        let (fleet, draft) = synced();
+        assert_eq!(
+            draft.check(MissionAction::Clear, &fleet.snapshot()),
+            Verdict::Confirm(vec![Caution::DeletesMission])
+        );
+
+        let fleet = armed_fleet(true);
+        let draft = MissionDraft::new(Some(SYSTEM));
+        assert_eq!(
+            draft.check(MissionAction::Clear, &fleet.snapshot()),
+            Verdict::Confirm(vec![Caution::DeletesMission, Caution::Armed])
+        );
+    }
+
+    /// A jump to an item the plan does not hold is refused rather than sent.
+    #[test]
+    fn a_jump_to_an_unknown_item_is_refused() {
+        let (fleet, draft) = synced();
+        assert_eq!(
+            draft.check(
+                MissionAction::Jump(ItemId::from_raw(9_999)),
+                &fleet.snapshot()
+            ),
+            Verdict::Refuse(Refusal::NoSuchItem)
+        );
+    }
 }
