@@ -318,17 +318,21 @@ impl MissionDraft {
                     .map(|position| position.pos)
                     .or_else(|| vehicle.home().map(|home| home.position))
             })?;
-        Some(self.place_waypoint(at, default_altitude_m))
+        self.place_waypoint(at, default_altitude_m)
     }
 
-    /// Append a waypoint at `at`, at the plan's next altitude.
-    pub fn place_waypoint(&mut self, at: GeoPosition, default_altitude_m: f32) -> ItemId {
-        let alt_m = self.plan.next_altitude(default_altitude_m);
-        self.plan.push(MissionItem::waypoint(Position {
+    /// Append a waypoint at `at`, at the plan's next altitude. `None`, and
+    /// nothing added, when `at` is off the globe (or NaN): a waypoint must
+    /// say where it goes.
+    pub fn place_waypoint(&mut self, at: GeoPosition, default_altitude_m: f32) -> Option<ItemId> {
+        let position = Position {
             lat: at.lat,
             lon: at.lon,
-            alt_m,
-        }))
+            alt_m: self.plan.next_altitude(default_altitude_m),
+        };
+        position
+            .is_on_globe()
+            .then(|| self.plan.push(MissionItem::waypoint(position)))
     }
 
     /// Adopt `items` as both the plan and its base, keeping the plan's ids
@@ -659,6 +663,15 @@ mod tests {
         // A vehicle with neither a position nor a home knows no better.
         let mut draft = MissionDraft::new(Some(SYSTEM));
         assert_eq!(draft.add_waypoint(&fleet.snapshot(), 50.0), None);
+
+        // Nor does a point off the globe, such as a NaN the map produced.
+        for at in [
+            GeoPosition::new(f64::NAN, 8.0),
+            GeoPosition::new(47.0, 190.0),
+        ] {
+            assert_eq!(offline.place_waypoint(at, 50.0), None, "{at:?}");
+        }
+        assert!(offline.plan().is_empty());
     }
 
     #[test]

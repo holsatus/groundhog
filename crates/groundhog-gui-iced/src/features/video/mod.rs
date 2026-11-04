@@ -1196,8 +1196,8 @@ mod tests {
 
         fn rectangle() -> Request {
             Request::Rectangle(ImageRect {
-                top_left: ImagePoint { x: 0.25, y: 0.25 },
-                bottom_right: ImagePoint { x: 0.5, y: 0.5 },
+                top_left: ImagePoint::new(0.25, 0.25).unwrap(),
+                bottom_right: ImagePoint::new(0.5, 0.5).unwrap(),
             })
         }
 

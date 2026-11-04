@@ -508,8 +508,8 @@ pub(crate) enum CalibrationUpdate {
     Abandoned { run: RunId },
     /// The confirmation of `side` was sent.
     Confirmed { run: RunId, side: Side },
-    /// Sending the confirmation of `side` failed.
-    ConfirmFailed { side: Side },
+    /// Sending the confirmation of `side` in `run` failed.
+    ConfirmFailed { run: RunId, side: Side },
     /// The operator cancelled.
     Cancel,
     /// The operator is done looking at a finished session.

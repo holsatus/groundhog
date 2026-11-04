@@ -480,14 +480,18 @@ impl VehicleClient {
     ///
     /// # Errors
     ///
-    /// [`Error::TrackingUnsupported`] if the camera has not said it tracks
-    /// points, [`Error::UnknownVehicle`] if the vehicle left the fleet,
-    /// [`Error::Rejected`] if the camera refuses, or [`Error::Timeout`] /
-    /// [`Error::NoLink`].
+    /// [`Error::TrackingRadius`] if `radius` is NaN (clamping cannot make it
+    /// a size), [`Error::TrackingUnsupported`] if the camera has not said it
+    /// tracks points, [`Error::UnknownVehicle`] if the vehicle left the
+    /// fleet, [`Error::Rejected`] if the camera refuses, or
+    /// [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn track_point(&self, camera: CameraId, at: ImagePoint, radius: f32) -> Result<()> {
+        if radius.is_nan() {
+            return Err(Error::TrackingRadius);
+        }
         self.check_tracking(camera, |support| support.point)?;
         let command =
-            commands::camera_track_point(at.x, at.y, radius.clamp(0.0, 1.0), camera.device);
+            commands::camera_track_point(at.x(), at.y(), radius.clamp(0.0, 1.0), camera.device);
         self.run_on_camera(camera, command).await?;
         self.request_tracking_reports(camera).await;
         Ok(())
@@ -502,8 +506,8 @@ impl VehicleClient {
     pub async fn track_rectangle(&self, camera: CameraId, rect: ImageRect) -> Result<()> {
         self.check_tracking(camera, |support| support.rectangle)?;
         let command = commands::camera_track_rectangle(
-            (rect.top_left.x, rect.top_left.y),
-            (rect.bottom_right.x, rect.bottom_right.y),
+            (rect.top_left.x(), rect.top_left.y()),
+            (rect.bottom_right.x(), rect.bottom_right.y()),
             camera.device,
         );
         self.run_on_camera(camera, command).await?;
@@ -696,7 +700,7 @@ impl VehicleClient {
             .map_err(Error::from);
 
         if result.is_err() {
-            self.report_calibration(CalibrationUpdate::ConfirmFailed { side });
+            self.report_calibration(CalibrationUpdate::ConfirmFailed { run, side });
         }
 
         result

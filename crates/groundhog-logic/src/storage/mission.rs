@@ -50,9 +50,9 @@ impl WplError {
         }
     }
 
-    /// A file with more rows than a mission can number with `u16` sequences.
+    /// A file with more rows than a mission can hold.
     fn too_many_rows(line: usize) -> Self {
-        WplError::at(line, "more rows than a mission can number")
+        WplError::at(line, "more rows than a mission can hold")
     }
 }
 
@@ -127,8 +127,13 @@ pub fn parse_wpl(text: &str) -> Result<WplMission, WplError> {
         }
 
         let mut row = parse_row(line, line_number)?;
-        // The index column is advisory; rows are taken in file order, and a
-        // row past the last 16-bit sequence cannot replace home with row 0.
+        // The index column is advisory; rows are taken in file order. Row 0
+        // is home, so `rows.len()` is the plan length this row would make;
+        // a longer plan than the layout holds could be read but neither
+        // written back nor uploaded.
+        if rows.len() > WPL_LAYOUT.max_items() {
+            return Err(WplError::too_many_rows(line_number));
+        }
         row.seq = u16::try_from(rows.len()).map_err(|_| WplError::too_many_rows(line_number))?;
         rows.push(row);
     }
@@ -411,18 +416,29 @@ mod tests {
         assert!(mission.items[0].params[0].is_nan());
     }
 
-    /// Row numbers are the wire sequence, and a mission has only 16 bits of
-    /// them. The row past the last one is refused rather than wrapping to 0
-    /// and replacing home.
+    /// A file holds at most the longest plan the format can write back:
+    /// `MISSION_COUNT` counts the home row too, so 65 534 items. The longest
+    /// plan round-trips; one item more is refused on reading, rather than
+    /// loading a plan that cannot be saved or uploaded.
     #[test]
-    fn more_rows_than_a_mission_can_number_are_refused() {
-        let mut text = String::from("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t1\t1\t400\t1\n");
-        for i in 1..=65_536u32 {
-            let lat = 10.0 + f64::from(i) * 1e-6;
-            text.push_str(&format!("{i}\t0\t3\t16\t0\t0\t0\t0\t{lat}\t8\t50\t1\n"));
-        }
+    fn a_file_holds_no_more_rows_than_a_plan_can_write_back() {
+        let file = |items: u32| {
+            let mut text = String::from("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t1\t1\t400\t1\n");
+            for i in 1..=items {
+                let lat = 10.0 + f64::from(i) * 1e-6;
+                text.push_str(&format!("{i}\t0\t3\t16\t0\t0\t0\t0\t{lat}\t8\t50\t1\n"));
+            }
+            text
+        };
+        let longest = u32::try_from(WPL_LAYOUT.max_items()).unwrap();
+        assert_eq!(longest, 65_534);
 
-        let error = parse_wpl(&text).expect_err("more rows than u16 sequences");
+        let mission = parse_wpl(&file(longest)).expect("the longest plan reads");
+        assert_eq!(mission.items.len(), 65_534);
+        write_wpl(&mission.items, mission.home.as_ref()).expect("and writes back");
+
+        let error = parse_wpl(&file(longest + 1)).expect_err("one item more");
+        assert_eq!(error.line, 65_537, "the header, home, then the extra row");
         assert!(
             error.to_string().contains("more rows"),
             "the error says what is wrong: {error}"

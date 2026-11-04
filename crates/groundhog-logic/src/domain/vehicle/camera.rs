@@ -39,10 +39,15 @@ pub struct CameraId {
 }
 
 /// A position in the picture, normalized to `0..=1` from its top left.
+///
+/// Always within the picture: the only way to make one is [`Self::new`],
+/// which refuses NaN and values outside `0..=1`. `MAV_CMD_CAMERA_TRACK_*`
+/// gives NaN no meaning, and [`ImageRect::spanning`]'s `min`/`max` would
+/// silently drop one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImagePoint {
-    pub x: f32,
-    pub y: f32,
+    x: f32,
+    y: f32,
 }
 
 impl ImagePoint {
@@ -50,6 +55,16 @@ impl ImagePoint {
     pub fn new(x: f32, y: f32) -> Option<Self> {
         let within = |value: f32| (0.0..=1.0).contains(&value);
         (within(x) && within(y)).then_some(Self { x, y })
+    }
+
+    /// From the left edge, `0..=1`.
+    pub fn x(self) -> f32 {
+        self.x
+    }
+
+    /// From the top edge, `0..=1`.
+    pub fn y(self) -> f32 {
+        self.y
     }
 }
 

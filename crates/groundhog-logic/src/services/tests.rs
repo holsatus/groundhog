@@ -1084,8 +1084,8 @@ mod camera {
 
     fn rect() -> ImageRect {
         ImageRect {
-            top_left: ImagePoint { x: 0.25, y: 0.5 },
-            bottom_right: ImagePoint { x: 0.75, y: 0.875 },
+            top_left: ImagePoint::new(0.25, 0.5).unwrap(),
+            bottom_right: ImagePoint::new(0.75, 0.875).unwrap(),
         }
     }
 
@@ -1180,7 +1180,7 @@ mod camera {
         let mut harness = with_camera().await;
         let client = harness.fleet.vehicle(SYSTEM);
 
-        let point = ImagePoint { x: 0.5, y: 0.5 };
+        let point = ImagePoint::new(0.5, 0.5).unwrap();
         assert_eq!(
             client.track_point(ATTACHED, point, 0.05).await,
             Err(Error::TrackingUnsupported)
@@ -1227,7 +1227,15 @@ mod camera {
         .await;
 
         let client = harness.fleet.vehicle(SYSTEM);
-        let point = ImagePoint { x: 0.25, y: 0.75 };
+        let point = ImagePoint::new(0.25, 0.75).unwrap();
+
+        // A NaN radius survives clamping, so it is refused unsent: the next
+        // command the camera sees is the valid one below.
+        assert_eq!(
+            client.track_point(ATTACHED, point, f32::NAN).await,
+            Err(Error::TrackingRadius)
+        );
+
         let tracking = tokio::spawn(async move { client.track_point(ATTACHED, point, 2.0).await });
 
         let command = harness.vehicle.command().await;

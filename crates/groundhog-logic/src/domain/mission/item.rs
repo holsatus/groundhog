@@ -22,6 +22,15 @@ pub struct Position {
     pub alt_m: f32,
 }
 
+impl Position {
+    /// Whether the latitude and longitude are a place on the globe (and so
+    /// neither NaN nor infinite). The altitude is not checked: it travels as
+    /// a float, so whatever it holds reaches the vehicle unchanged.
+    pub fn is_on_globe(&self) -> bool {
+        on_globe(self.lat, self.lon)
+    }
+}
+
 /// A mission item in wire form: command, frame, `param1..4`, `x`/`y`/`z`.
 ///
 /// `command` and `frame` are the raw wire numbers, so an item whose command or
@@ -110,7 +119,8 @@ pub struct FieldView {
 
 impl MissionItem {
     /// A fresh item of `command` with its default parameters, placed at
-    /// `position` if the command has a location.
+    /// `position` if the command has a location. A position off the globe
+    /// (or NaN) is not placed, as if none were given.
     pub fn new(command: MavCmd, position: Option<Position>) -> MissionItem {
         let spec = spec_of(command);
         let positional = spec.is_some_and(CommandSpec::is_positional);
@@ -159,7 +169,7 @@ impl MissionItem {
         let required = spec_of(command).is_some_and(|spec| spec.location == Location::Required);
         let position = match self.position() {
             Some(position) => Some(position),
-            None if required => Some(fallback?),
+            None if required => Some(fallback.filter(Position::is_on_globe)?),
             // An optional location left out means "where the vehicle is".
             None => None,
         };
@@ -226,16 +236,25 @@ impl MissionItem {
         })
     }
 
-    /// Move the item to `position` (latitude, longitude and altitude).
+    /// Move the item to `position` (latitude, longitude and altitude), unless
+    /// it is off the globe.
     fn set_position(&mut self, position: Position) {
-        self.set_lat_lon(position.lat, position.lon);
-        self.z = position.alt_m;
+        if self.set_lat_lon(position.lat, position.lon) {
+            self.z = position.alt_m;
+        }
     }
 
-    /// Move the item horizontally, keeping its altitude.
-    pub fn set_lat_lon(&mut self, lat: f64, lon: f64) {
+    /// Move the item horizontally, keeping its altitude. A latitude or
+    /// longitude off the globe (or NaN) leaves the item where it is:
+    /// `degrees_e7` would saturate it, or turn NaN into 0. Returns whether
+    /// the item moved there.
+    pub fn set_lat_lon(&mut self, lat: f64, lon: f64) -> bool {
+        if !on_globe(lat, lon) {
+            return false;
+        }
         self.x = degrees_e7(lat);
         self.y = degrees_e7(lon);
+        true
     }
 
     /// The fields the editor should present, in order.
@@ -360,10 +379,8 @@ impl MissionItem {
         match field {
             // A coordinate outside the globe, or NaN, has no place on the
             // wire: `degrees_e7` would saturate it, or turn NaN into 0.
-            Field::Latitude if (-90.0..=90.0).contains(&value) => self.x = degrees_e7(value),
-            Field::Longitude if (-180.0..=180.0).contains(&value) => {
-                self.y = degrees_e7(value);
-            }
+            Field::Latitude if on_globe(value, 0.0) => self.x = degrees_e7(value),
+            Field::Longitude if on_globe(0.0, value) => self.y = degrees_e7(value),
             Field::Latitude | Field::Longitude => return false,
             Field::Altitude | Field::Z => {
                 let narrowed = value as f32;
@@ -509,6 +526,12 @@ pub(crate) fn item_ref(param: f32) -> Option<u16> {
         return None;
     }
     Some(param as u16)
+}
+
+/// Whether `(lat, lon)` is a place on the globe: within ±90/±180, and so
+/// neither NaN nor infinite.
+fn on_globe(lat: f64, lon: f64) -> bool {
+    (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)
 }
 
 /// The `i32` a raw `x`/`y` field rounds to, or `None` when it does not fit.
@@ -802,6 +825,37 @@ mod tests {
         // An optional location left out means "here", which is no guess.
         let takeoff = delay.with_command(MavCmd::NavTakeoff, None).unwrap();
         assert_eq!((takeoff.x, takeoff.y), (0, 0));
+
+        // A fallback off the globe is no location either, rather than one
+        // `degrees_e7` turns into latitude and longitude zero.
+        assert_eq!(
+            delay.with_command(MavCmd::NavWaypoint, Some(at(f64::NAN, 8.0, 80.0))),
+            None
+        );
+    }
+
+    /// Moving an item to a place off the globe leaves it where it was: the
+    /// wire's integer degrees cannot hold NaN (it would become 0, the "no
+    /// location" sentinel) or a coordinate past ±90/±180 (it would saturate).
+    #[test]
+    fn an_item_is_never_moved_off_the_globe() {
+        let mut item = MissionItem::waypoint(at(47.0, 8.0, 50.0));
+        for (lat, lon) in [
+            (f64::NAN, 8.0),
+            (47.0, f64::NAN),
+            (f64::INFINITY, 8.0),
+            (91.0, 8.0),
+            (47.0, -180.5),
+        ] {
+            assert!(!item.set_lat_lon(lat, lon), "({lat}, {lon})");
+            assert_eq!(item.position(), Some(at(47.0, 8.0, 50.0)), "({lat}, {lon})");
+        }
+        assert!(item.set_lat_lon(-90.0, 180.0));
+        assert_eq!(item.position(), Some(at(-90.0, 180.0, 50.0)));
+
+        // A new item is not placed there either; its altitude stays too.
+        let nowhere = MissionItem::new(MavCmd::NavLand, Some(at(f64::NAN, 8.0, 30.0)));
+        assert_eq!((nowhere.x, nowhere.y, nowhere.z), (0, 0, 0.0));
     }
 
     #[test]

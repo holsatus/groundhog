@@ -311,8 +311,8 @@ impl<M, F: Fn(Request) -> Option<M>> canvas::Program<M> for Overlay<F> {
 fn draw_target(frame: &mut Frame, picture: Rectangle, target: Target, shade: Shade) {
     let at = |point: ImagePoint| {
         Point::new(
-            picture.x + point.x * picture.width,
-            picture.y + point.y * picture.height,
+            picture.x + point.x() * picture.width,
+            picture.y + point.y() * picture.height,
         )
     };
     match target {
@@ -481,13 +481,13 @@ mod tests {
     }
 
     fn is_point(request: Option<Request>, x: f32, y: f32) -> bool {
-        matches!(request, Some(Request::Point(at)) if close(at.x, x) && close(at.y, y))
+        matches!(request, Some(Request::Point(at)) if close(at.x(), x) && close(at.y(), y))
     }
 
     fn is_rectangle(request: Option<Request>, from: (f32, f32), to: (f32, f32)) -> bool {
         matches!(request, Some(Request::Rectangle(rect))
-            if close(rect.top_left.x, from.0) && close(rect.top_left.y, from.1)
-                && close(rect.bottom_right.x, to.0) && close(rect.bottom_right.y, to.1))
+            if close(rect.top_left.x(), from.0) && close(rect.top_left.y(), from.1)
+                && close(rect.bottom_right.x(), to.0) && close(rect.bottom_right.y(), to.1))
     }
 
     #[test]

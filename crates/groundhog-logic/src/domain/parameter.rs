@@ -116,15 +116,17 @@ impl ParamDownload {
         self.outcome = None;
     }
 
-    /// Note that list index `index` of `count` arrived, refused or not.
+    /// Note that list index `index` of `count` arrived, refused or not. A
+    /// repeat of an index is not a new refusal: it carries the same type, so
+    /// it decodes as the first arrival did.
     fn note(&mut self, index: u16, count: u16, refused: bool) {
         if count == 0 || index >= count {
             return;
         }
 
-        self.received.insert(index);
+        let first = self.received.insert(index);
         self.expected = count;
-        if refused {
+        if first && refused {
             self.refuse_one();
         }
     }
@@ -795,6 +797,24 @@ mod tests {
 
         parameters.set_download(DownloadUpdate::Finish(RUN, DownloadOutcome::Complete));
         assert!(parameters.is_empty(), "the refused value is not stored");
+    }
+
+    /// A refused value sent again (as a re-request or a resend brings it) is
+    /// the same refusal, so the download never refuses more than it received.
+    #[test]
+    fn a_repeated_refused_value_counts_once() {
+        let mut parameters = Parameters::default();
+        parameters.set_download(DownloadUpdate::Start(RUN));
+
+        for _ in 0..2 {
+            parameters
+                .observe(ident(), 1.0, MavParamType::Uint64, 0, 1, None)
+                .expect_err("64-bit types are not representable");
+        }
+
+        let download = parameters.download();
+        assert_eq!(download.received(), 1);
+        assert_eq!(download.refused(), 1);
     }
 
     /// A value decoded bytewise only because the encoding was unknown is not

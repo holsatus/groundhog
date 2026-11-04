@@ -384,8 +384,10 @@ impl MissionEditor {
                 }
             }
             MessageKind::PlaceAt(position) => {
-                if draft.placing {
-                    let id = draft.mission.place_waypoint(position, default_altitude);
+                // A point off the globe places nothing.
+                if draft.placing
+                    && let Some(id) = draft.mission.place_waypoint(position, default_altitude)
+                {
                     draft.select(Some(id));
                 }
             }
@@ -432,7 +434,8 @@ impl MissionEditor {
             MessageKind::TogglePlacing => draft.placing = !draft.placing,
             MessageKind::Drag(item, position) | MessageKind::Drop(item, position) => {
                 draft.plan_mut().update(item, |current| {
-                    current.set_lat_lon(position.lat, position.lon)
+                    // Off the globe, the item stays where it was.
+                    current.set_lat_lon(position.lat, position.lon);
                 });
                 if draft.selected == Some(item) {
                     // Show the dragged position rather than stale typing.

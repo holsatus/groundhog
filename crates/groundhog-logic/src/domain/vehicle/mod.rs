@@ -428,12 +428,12 @@ impl Vehicle {
                 }
                 _ => false,
             },
-            CalibrationUpdate::ConfirmFailed { side } => match &mut self.calibration {
-                Some(session) => {
+            CalibrationUpdate::ConfirmFailed { run, side } => match &mut self.calibration {
+                Some(session) if session.is_run(run) => {
                     session.confirm_failed(side);
                     true
                 }
-                None => false,
+                _ => false,
             },
             CalibrationUpdate::Cancel => match &mut self.calibration {
                 Some(session) => {
@@ -1647,12 +1647,68 @@ mod tests {
         vehicle.update_calibration(
             t,
             CalibrationUpdate::ConfirmFailed {
+                run,
                 side: calibration::Side::Level,
             },
         );
         assert_eq!(
             vehicle.calibration.as_ref().unwrap().instruction,
             calibration::Instruction::Place(calibration::Side::Level)
+        );
+    }
+
+    /// A confirmation of an earlier run that fails only after a newer run has
+    /// confirmed the same side does not ask the operator again.
+    #[test]
+    fn a_failed_confirmation_of_an_earlier_run_is_ignored() {
+        let t = Instant::now();
+        let mut vehicle = vehicle();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let (old, new) = (calibration::RunId(1), calibration::RunId(2));
+        for run in [old, new] {
+            vehicle.update_calibration(
+                t,
+                CalibrationUpdate::Begin {
+                    kind: CalibrationKind::Accelerometer,
+                    run,
+                },
+            );
+        }
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Acknowledged {
+                run: new,
+                result: Ok(()),
+            },
+        );
+        vehicle.handle_message(
+            t,
+            1,
+            &DefaultDialect::CommandLong(messages::CommandLong {
+                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
+                param1: 1.0,
+                ..Default::default()
+            }),
+        );
+        let level = calibration::Side::Level;
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Confirmed {
+                run: new,
+                side: level,
+            },
+        );
+
+        assert!(!vehicle.update_calibration(
+            t,
+            CalibrationUpdate::ConfirmFailed {
+                run: old,
+                side: level,
+            },
+        ));
+        assert_eq!(
+            vehicle.calibration.as_ref().unwrap().instruction,
+            calibration::Instruction::Confirming(level)
         );
     }
 
