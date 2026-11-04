@@ -359,12 +359,14 @@ changes.
 A feature's `update` gets a `features::Context`, holding:
 
 - the snapshot;
-- the services;
+- the services, and the links (`LinkManager`);
 - the notices;
 - settings and the file-dialog directory.
 
 It requests anything else as an `Effect`: confirm, select a vehicle, move the
-map, remember a directory. Features never reach into each other or into the
+map, remember a directory, persist what it keeps in the configuration file
+(`Effect::Persist`). An `Effect` is the only way a feature asks the
+application for anything. Features never reach into each other or into the
 application.
 
 ### The workspace is three columns around the map

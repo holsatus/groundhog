@@ -30,7 +30,7 @@ use mavio::default_dialect::enums::MavSeverity;
 use crate::{
     config::{self, ConfigWriter, Configuration, Loaded, Settings},
     features::{
-        Context, Effect, MapContext,
+        Context, Effect, MapContext, Persisted,
         calibration::{self, CalibrationPanel},
         confirm::{self, Answer, Confirmation},
         link_panel::{self, LinkPanel},
@@ -57,6 +57,7 @@ struct Features {
     parameters: ParameterPanel,
     calibration: CalibrationPanel,
     video: VideoPanel,
+    links: LinkPanel,
 }
 
 pub struct Application {
@@ -79,7 +80,6 @@ pub struct Application {
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
     features: Features,
-    link_panel: LinkPanel,
     log_panel: LogPanel,
     /// How much of the window the platform's own chrome covers.
     insets: Insets,
@@ -230,8 +230,8 @@ impl Application {
                 parameters: ParameterPanel::default(),
                 calibration: CalibrationPanel::default(),
                 video,
+                links: LinkPanel::new(),
             },
-            link_panel: LinkPanel::new(),
             log_panel: LogPanel::new(),
             insets: platform::insets(),
             system_bars: None,
@@ -437,41 +437,13 @@ impl Application {
             Message::Calibration(message) => self.dispatch(Message::Calibration, |features, cx| {
                 features.calibration.update(message, cx)
             }),
-            Message::Links(message) => {
-                let (task, event) =
-                    self.link_panel
-                        .update(message, self.backend.links_mut(), &mut self.notices);
-
-                match event {
-                    Some(link_panel::Event::LinksChanged(links)) => {
-                        self.configuration.links = links;
-                        self.save_configuration();
-                    }
-                    Some(link_panel::Event::Confirm(confirmation)) => {
-                        self.confirmation = Some(confirmation.map(Message::Links));
-                    }
-                    None => {}
-                }
-                task.map(Message::Links)
-            }
+            Message::Links(message) => self.dispatch(Message::Links, |features, cx| {
+                features.links.update(message, cx)
+            }),
             Message::Video(message) => {
-                let mut event = None;
                 let task = self.dispatch(Message::Video, |features, cx| {
-                    let (task, emitted) = features.video.update(message, cx);
-                    event = emitted;
-                    task
+                    features.video.update(message, cx)
                 });
-                match event {
-                    Some(video::Event::Changed(settings)) => {
-                        self.configuration.video = settings;
-                        self.save_configuration();
-                    }
-                    Some(video::Event::RecordingFailed(reason)) => {
-                        self.notices
-                            .push(Notice::error("Could not record the video").detail(reason));
-                    }
-                    None => {}
-                }
                 Task::batch([task, self.sync_full_screen()])
             }
             Message::Logs(message) => {
@@ -516,9 +488,12 @@ impl Application {
         M: Send + 'static,
     {
         let fleet = self.fleet.clone();
+        // A handle of its own, so the links can be borrowed beside it.
+        let services = self.backend.fleet().clone();
         let mut context = Context::new(
             &fleet,
-            self.backend.fleet(),
+            &services,
+            self.backend.links_mut(),
             &mut self.notices,
             self.configuration.file_picker_path.as_deref(),
             &self.configuration.settings,
@@ -552,6 +527,13 @@ impl Application {
                 self.follow_selected();
             }
             Effect::RememberDirectory(path) => self.remember_directory(&path),
+            Effect::Persist(persisted) => {
+                match persisted {
+                    Persisted::Video(settings) => self.configuration.video = settings,
+                    Persisted::Links(links) => self.configuration.links = links,
+                }
+                self.save_configuration();
+            }
         }
     }
 
@@ -946,7 +928,8 @@ impl Application {
                 .map(Message::Mission)
                 .boxed(),
             layout::Panel::Links => self
-                .link_panel
+                .features
+                .links
                 .view(self.backend.links())
                 .map(Message::Links)
                 .boxed(),

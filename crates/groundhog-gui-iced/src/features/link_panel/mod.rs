@@ -5,7 +5,7 @@
 //! connection lifecycle are owned by the headless [`LinkManager`] in the
 //! services layer. The panel translates widget messages into manager intents,
 //! maps manager futures into [`Task`]s, and renders manager state. Persisting
-//! the link set is requested from the root through [`Event`].
+//! the link set is requested from the application as an [`Effect`].
 
 mod editor;
 
@@ -22,10 +22,7 @@ use groundhog_logic::{
     services::{self, LinkManager, LinkStats, LinkStatus, Saved},
 };
 
-use super::{
-    confirm::Confirmation,
-    notifications::{Notice, Notifications},
-};
+use super::{Context, Effect, Persisted, confirm::Confirmation, notifications::Notice};
 use crate::ui::{self, Icon, TextExt, Tone};
 
 pub struct LinkPanel {
@@ -57,16 +54,6 @@ pub enum Message {
     Delete(LinkId),
 }
 
-/// A request the root must satisfy, since it owns the configuration file
-/// and the confirmation dialog.
-#[derive(Debug)]
-pub enum Event {
-    /// The configured links changed and should be persisted.
-    LinksChanged(Vec<LinkConfig>),
-    /// Ask the operator before sending the message.
-    Confirm(Confirmation<Message>),
-}
-
 impl LinkPanel {
     pub fn new() -> Self {
         Self {
@@ -74,12 +61,7 @@ impl LinkPanel {
         }
     }
 
-    pub fn update(
-        &mut self,
-        message: Message,
-        manager: &mut LinkManager,
-        notices: &mut Notifications,
-    ) -> (Task<Message>, Option<Event>) {
+    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::ChangeName(name) => self.configurator.name = name,
             Message::SetHighLatency(high_latency) => {
@@ -111,13 +93,11 @@ impl LinkPanel {
             }
             Message::DetectSerialPorts => {
                 if !matches!(self.configurator.builder, LinkBuilder::Serial { .. }) {
-                    return (Task::none(), None);
+                    return Task::none();
                 }
 
-                return (
-                    Task::future(services::detect_serial_ports()).map(Message::SerialPortsDetected),
-                    None,
-                );
+                return Task::future(services::detect_serial_ports())
+                    .map(Message::SerialPortsDetected);
             }
             Message::SerialPortsDetected(result) => {
                 if let LinkBuilder::Serial {
@@ -127,7 +107,8 @@ impl LinkPanel {
                     match result {
                         Ok(ports) => *available_ports = ports,
                         Err(error) => {
-                            notices.push(Notice::error("Could not list serial ports").detail(error))
+                            cx.notices
+                                .push(Notice::error("Could not list serial ports").detail(error));
                         }
                     }
 
@@ -135,7 +116,7 @@ impl LinkPanel {
                 }
             }
             Message::EditLink(id) => {
-                if let Some((_, config, _)) = manager.entries().find(|(link, ..)| **link == id) {
+                if let Some((_, config, _)) = cx.links.entries().find(|(link, ..)| **link == id) {
                     self.configurator = LinkConfigurator::from_config(config);
                 }
             }
@@ -144,29 +125,29 @@ impl LinkPanel {
                 // keeping its id, and its connection unless the transport
                 // changed.
                 let name = config.name.trim().to_string();
-                match manager.save(config) {
+                match cx.links.save(config) {
                     Ok(saved) => {
                         if let Saved::Reconnected(_) = saved {
-                            notices.push(Notice::info(format!(
+                            cx.notices.push(Notice::info(format!(
                                 "Reconnecting {name} with the new settings"
                             )));
                         }
-                        return (Task::none(), Some(Event::LinksChanged(manager.configs())));
+                        persist(cx);
                     }
-                    Err(error) => {
-                        notices.push(Notice::warning("Could not save the link").detail(error))
-                    }
+                    Err(error) => cx
+                        .notices
+                        .push(Notice::warning("Could not save the link").detail(error)),
                 }
             }
             Message::Connect(id) => {
                 // The manager refuses a second supervisor on an active link.
-                manager.connect(&id);
+                cx.links.connect(&id);
             }
-            Message::Disconnect(id) => manager.disconnect(&id),
+            Message::Disconnect(id) => cx.links.disconnect(&id),
             Message::RequestDelete(id) => {
-                let Some((_, config, status)) = manager.entries().find(|(link, ..)| **link == id)
+                let Some((_, config, status)) = cx.links.entries().find(|(link, ..)| **link == id)
                 else {
-                    return (Task::none(), None);
+                    return Task::none();
                 };
                 let body = if status.is_active() {
                     "It is removed from the saved links, and its connection is closed."
@@ -179,16 +160,16 @@ impl LinkPanel {
                     Message::Delete(id),
                 )
                 .accept_label("Delete");
-                return (Task::none(), Some(Event::Confirm(confirmation)));
+                cx.confirm(confirmation);
             }
             Message::Delete(id) => {
-                if manager.remove(&id) {
-                    return (Task::none(), Some(Event::LinksChanged(manager.configs())));
+                if cx.links.remove(&id) {
+                    persist(cx);
                 }
             }
         }
 
-        (Task::none(), None)
+        Task::none()
     }
 
     /// The configured links with their controls, and the editor.
@@ -520,13 +501,20 @@ impl Default for LinkPanel {
     }
 }
 
+/// Have the application save the configured links, which just changed.
+fn persist(cx: &mut Context<Message>) {
+    let links = cx.links.configs();
+    cx.request(Effect::Persist(Persisted::Links(links)));
+}
+
 #[cfg(test)]
 mod tests {
-    use groundhog_logic::{Backend, BackendOptions, link::LinkBuild};
+    use groundhog_logic::link::LinkBuild;
 
     use std::net::SocketAddrV4;
 
     use super::*;
+    use crate::features::test_support::Env;
 
     fn config(name: &str) -> LinkConfig {
         LinkConfig {
@@ -541,95 +529,72 @@ mod tests {
         }
     }
 
-    fn panel() -> (LinkPanel, Backend, Notifications) {
-        let (backend, _events) = Backend::start(BackendOptions::default());
-        (LinkPanel::new(), backend, Notifications::default())
+    /// The links a panel's effects ask to persist, if they do.
+    fn persisted(effects: &[Effect<Message>]) -> Option<&Vec<LinkConfig>> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Persist(Persisted::Links(links)) => Some(links),
+            _ => None,
+        })
     }
 
     #[tokio::test]
-    async fn save_emits_links_changed() {
-        let (mut panel, mut backend, mut notices) = panel();
+    async fn saving_persists_the_links() {
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
 
-        let (_, event) = panel.update(
-            Message::Save(config("A")),
-            backend.links_mut(),
-            &mut notices,
-        );
-        let Some(Event::LinksChanged(links)) = event else {
-            panic!("Save should emit LinksChanged");
-        };
+        let effects = env.step(&mut panel, Message::Save(config("A")));
+        let links = persisted(&effects).expect("Save persists the links");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].name, "A");
 
-        let (_, event) = panel.update(
-            Message::ChangeName("B".to_string()),
-            backend.links_mut(),
-            &mut notices,
+        let effects = env.step(&mut panel, Message::ChangeName("B".to_string()));
+        assert!(
+            persisted(&effects).is_none(),
+            "draft edits must not persist"
         );
-        assert!(event.is_none(), "draft edits must not persist");
     }
 
     #[tokio::test]
-    async fn delete_emits_links_changed_and_unknown_is_a_noop() {
-        let (mut panel, mut backend, mut notices) = panel();
+    async fn deleting_persists_the_links_and_an_unknown_link_is_a_noop() {
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
+        env.step(&mut panel, Message::Save(config("A")));
+        let id = env.backend.links().entries().next().unwrap().0.clone();
 
-        drop(panel.update(
-            Message::Save(config("A")),
-            backend.links_mut(),
-            &mut notices,
-        ));
-        let id = backend.links().entries().next().unwrap().0.clone();
+        let effects = env.step(&mut panel, Message::Delete(LinkId::new("does-not-exist")));
+        assert!(effects.is_empty());
+        assert_eq!(env.backend.links().configs().len(), 1);
 
-        let (_, event) = panel.update(
-            Message::Delete(LinkId::new("does-not-exist")),
-            backend.links_mut(),
-            &mut notices,
-        );
-        assert!(event.is_none());
-        assert_eq!(backend.links().configs().len(), 1);
-
-        let (_, event) = panel.update(Message::Delete(id), backend.links_mut(), &mut notices);
-        let Some(Event::LinksChanged(links)) = event else {
-            panic!("Delete should emit LinksChanged");
-        };
+        let effects = env.step(&mut panel, Message::Delete(id));
+        let links = persisted(&effects).expect("Delete persists the links");
         assert!(links.is_empty());
     }
 
     #[tokio::test]
     async fn deleting_a_link_asks_first() {
-        let (mut panel, mut backend, mut notices) = panel();
-        drop(panel.update(
-            Message::Save(config("A")),
-            backend.links_mut(),
-            &mut notices,
-        ));
-        let id = backend.links().entries().next().unwrap().0.clone();
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
+        env.step(&mut panel, Message::Save(config("A")));
+        let id = env.backend.links().entries().next().unwrap().0.clone();
 
-        let (_, event) = panel.update(
-            Message::RequestDelete(id.clone()),
-            backend.links_mut(),
-            &mut notices,
-        );
+        let effects = env.step(&mut panel, Message::RequestDelete(id.clone()));
 
-        let Some(Event::Confirm(confirmation)) = event else {
-            panic!("expected a confirmation")
+        let [Effect::Confirm(confirmation)] = effects.as_slice() else {
+            panic!("expected a confirmation: {effects:?}")
         };
         assert!(matches!(&confirmation.accept, Message::Delete(link) if *link == id));
-        assert_eq!(backend.links().configs().len(), 1, "kept until accepted");
+        assert_eq!(
+            env.backend.links().configs().len(),
+            1,
+            "kept until accepted"
+        );
     }
 
     #[tokio::test]
     async fn editing_a_saved_link_loads_it_into_the_editor() {
-        let (mut panel, mut backend, mut notices) = panel();
-        drop(panel.update(
-            Message::Save(config("A")),
-            backend.links_mut(),
-            &mut notices,
-        ));
-        let id = backend.links().entries().next().unwrap().0.clone();
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
+        env.step(&mut panel, Message::Save(config("A")));
+        let id = env.backend.links().entries().next().unwrap().0.clone();
 
-        let (_, event) = panel.update(Message::EditLink(id), backend.links_mut(), &mut notices);
-        assert!(event.is_none(), "loading a link does not change the set");
+        let effects = env.step(&mut panel, Message::EditLink(id));
+        assert!(effects.is_empty(), "loading a link does not change the set");
         assert_eq!(panel.configurator.name, "A");
         assert!(matches!(
             panel.configurator.builder,
@@ -713,15 +678,11 @@ mod tests {
 
     #[tokio::test]
     async fn detect_serial_ports_outside_the_serial_editor_is_a_noop() {
-        let (mut panel, mut backend, mut notices) = panel();
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
 
         // The default draft is UDP, so the enumeration must not start.
-        let (task, event) = panel.update(
-            Message::DetectSerialPorts,
-            backend.links_mut(),
-            &mut notices,
-        );
+        let (task, effects) = env.update(&mut panel, Message::DetectSerialPorts);
         assert_eq!(task.units(), 0);
-        assert!(event.is_none());
+        assert!(effects.is_empty());
     }
 }

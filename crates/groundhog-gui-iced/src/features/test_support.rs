@@ -23,15 +23,20 @@ use mavio::{
 use super::{
     Context, Effect,
     calibration::{CalibrationPanel, Message as CalibrationMessage},
+    link_panel::{LinkPanel, Message as LinkMessage},
     mission::{Message as MissionMessage, MissionEditor},
     parameter_panel::{Message as ParameterMessage, ParameterPanel},
     vehicles::{Message as VehicleMessage, VehiclePanel},
+    video::{Message as VideoMessage, VideoPanel},
 };
 use crate::{config::Settings, features::notifications::Notifications};
 
 /// A synthetic fleet and everything a feature's `update` reads from.
 pub struct Env {
     pub fleet: Fleet,
+    /// A running backend, for its handle and its links. Its fleet is not
+    /// `fleet`: tests fold messages into `fleet` themselves.
+    pub backend: Backend,
     pub handle: FleetHandle,
     pub notices: Notifications,
     pub settings: Settings,
@@ -54,6 +59,7 @@ impl Env {
         Self {
             fleet: Fleet::default(),
             handle: backend.fleet().clone(),
+            backend,
             notices: Notifications::default(),
             settings: Settings::default(),
         }
@@ -89,21 +95,34 @@ impl Env {
     pub fn step<M, F: Feature<M>>(&mut self, feature: &mut F, message: M) -> Vec<Effect<M>> {
         run(self, feature, message)
     }
+
+    /// Run one message through `feature`'s `update`, returning the task it
+    /// returned and the effects it requested.
+    pub fn update<M, F: Feature<M>>(
+        &mut self,
+        feature: &mut F,
+        message: M,
+    ) -> (Task<M>, Vec<Effect<M>>) {
+        let snapshot = self.fleet.snapshot();
+        let mut cx = Context::new(
+            &snapshot,
+            &self.handle,
+            self.backend.links_mut(),
+            &mut self.notices,
+            None,
+            &self.settings,
+        );
+        let task = feature.update(message, &mut cx);
+        (task, cx.into_effects())
+    }
 }
 
 /// [`Env::step`] as a function, for a test module that wraps the message in
 /// one of its own.
 pub fn run<M, F: Feature<M>>(env: &mut Env, feature: &mut F, message: M) -> Vec<Effect<M>> {
-    let snapshot = env.fleet.snapshot();
-    let mut cx = Context::new(
-        &snapshot,
-        &env.handle,
-        &mut env.notices,
-        None,
-        &env.settings,
-    );
-    let _task = feature.update(message, &mut cx);
-    cx.into_effects()
+    let (task, effects) = env.update(feature, message);
+    drop(task);
+    effects
 }
 
 /// A panel whose `update` a test can drive through [`Env::step`].
@@ -148,5 +167,21 @@ impl Feature<VehicleMessage> for VehiclePanel {
         cx: &mut Context<VehicleMessage>,
     ) -> Task<VehicleMessage> {
         VehiclePanel::update(self, message, cx)
+    }
+}
+
+impl Feature<LinkMessage> for LinkPanel {
+    fn update(&mut self, message: LinkMessage, cx: &mut Context<LinkMessage>) -> Task<LinkMessage> {
+        LinkPanel::update(self, message, cx)
+    }
+}
+
+impl Feature<VideoMessage> for VideoPanel {
+    fn update(
+        &mut self,
+        message: VideoMessage,
+        cx: &mut Context<VideoMessage>,
+    ) -> Task<VideoMessage> {
+        VideoPanel::update(self, message, cx)
     }
 }

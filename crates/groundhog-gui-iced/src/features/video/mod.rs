@@ -14,7 +14,8 @@
 //! attempt failed is in the stream's details.
 //!
 //! The source and the low-latency switch are persisted by the application
-//! (see [`Event`]), and so is whether the stream is on. On is the
+//! (the panel asks with [`Effect::Persist`]), and so is whether the stream
+//! is on. On is the
 //! operator's choice; whether it is received is also the application's:
 //! a stream nothing can show is paused ([`VideoPanel::set_shown`]), so it
 //! never decodes, holds its port and wakes the interface unseen. It
@@ -57,7 +58,8 @@ use iced::{
 
 use self::tracking::{Overlay, Request, Shade};
 use super::{
-    Context,
+    Context, Effect, Persisted,
+    notifications::Notice,
     operations::{Activity, Finished, Operations, Settled},
 };
 use crate::{
@@ -112,14 +114,6 @@ impl Activity<TrackAction> for TrackKey {
 pub enum TrackAction {
     Track(Request),
     Stop,
-}
-
-/// What the application keeps of the panel.
-pub enum Event {
-    /// The settings to persist.
-    Changed(VideoSettings),
-    /// The stream cannot be recorded, and why.
-    RecordingFailed(String),
 }
 
 /// How long recording while armed goes on after the last vehicle disarms,
@@ -378,26 +372,22 @@ impl VideoPanel {
             .map(|receiving| receiving.receiver.slot())
     }
 
-    pub fn update(
-        &mut self,
-        message: Message,
-        cx: &mut Context<Message>,
-    ) -> (Task<Message>, Option<Event>) {
+    pub fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::EditSource(source) => {
                 self.source = source;
-                (Task::none(), None)
+                Task::none()
             }
             Message::LowLatency(low_latency) => {
                 self.settings.low_latency = low_latency;
                 // A running stream takes the new setting at once.
                 self.receiving = None;
                 let task = self.sync(Instant::now());
-                (task, Some(Event::Changed(self.settings.clone())))
+                self.persist(task, cx)
             }
             Message::Start => {
                 if Source::parse(&self.source).is_err() {
-                    return (Task::none(), None);
+                    return Task::none();
                 }
                 self.settings.uri = self.source.trim().to_string();
                 self.settings.enabled = true;
@@ -405,14 +395,14 @@ impl VideoPanel {
                 // A new source is a new receiver.
                 self.receiving = None;
                 let task = self.sync(Instant::now());
-                (task, Some(Event::Changed(self.settings.clone())))
+                self.persist(task, cx)
             }
             Message::Stop => {
                 self.full_screen = false;
                 self.settings.enabled = false;
                 self.record = false;
                 let task = self.sync(Instant::now());
-                (task, Some(Event::Changed(self.settings.clone())))
+                self.persist(task, cx)
             }
             Message::Record(record) => {
                 self.record = record;
@@ -421,42 +411,40 @@ impl VideoPanel {
                 if !record {
                     self.while_armed.dismissed = true;
                 }
-                (self.sync(Instant::now()), None)
+                self.sync(Instant::now())
             }
             Message::ToggleForm => {
                 self.form = !self.form;
-                (Task::none(), None)
+                Task::none()
             }
             Message::ToggleDetails => {
                 self.details = !self.details;
-                (Task::none(), None)
+                Task::none()
             }
             Message::FullScreen(full_screen) => {
                 self.full_screen = full_screen && self.receiving.is_some();
-                (Task::none(), None)
+                Task::none()
             }
             Message::Updated(id, state) => {
                 let Some(receiving) = self.receiving.as_mut().filter(|it| it.id == id) else {
-                    return (Task::none(), None);
+                    return Task::none();
                 };
                 match &state.status {
                     Status::Retrying { reason } => receiving.problem = Some(reason.clone()),
                     Status::Streaming { .. } => receiving.problem = None,
                     Status::Connecting | Status::Failed(_) => {}
                 }
-                let failed = match &state.recording {
-                    Recording::Failed(reason) if receiving.state.recording != state.recording => {
-                        Some(Event::RecordingFailed(reason.clone()))
-                    }
-                    _ => None,
-                };
+                if let Recording::Failed(reason) = &state.recording
+                    && receiving.state.recording != state.recording
+                {
+                    cx.notices
+                        .push(Notice::error("Could not record the video").detail(reason));
+                }
                 receiving.state = state;
-                (Task::none(), failed)
+                Task::none()
             }
-            Message::Track(key, request) => {
-                (self.do_tracking(key, TrackAction::Track(request), cx), None)
-            }
-            Message::StopTracking(key) => (self.do_tracking(key, TrackAction::Stop, cx), None),
+            Message::Track(key, request) => self.do_tracking(key, TrackAction::Track(request), cx),
+            Message::StopTracking(key) => self.do_tracking(key, TrackAction::Stop, cx),
             Message::Tracked(finished) => {
                 let Some(Settled {
                     key,
@@ -464,7 +452,7 @@ impl VideoPanel {
                     result,
                 }) = self.tracking.settle(finished, cx)
                 else {
-                    return (Task::none(), None);
+                    return Task::none();
                 };
                 self.asked = None;
                 // A failure was announced when it settled.
@@ -473,9 +461,15 @@ impl VideoPanel {
                     (TrackAction::Stop, Ok(())) => self.engaged = None,
                     (_, Err(_)) => {}
                 }
-                (Task::none(), None)
+                Task::none()
             }
         }
+    }
+
+    /// Have the application save the settings, which just changed.
+    fn persist(&self, task: Task<Message>, cx: &mut Context<Message>) -> Task<Message> {
+        cx.request(Effect::Persist(Persisted::Video(self.settings.clone())));
+        task
     }
 
     /// Ask the camera `key` for `action`, in place of what it was asked
@@ -914,20 +908,12 @@ mod tests {
         env: &mut Env,
         panel: &mut VideoPanel,
         message: Message,
-    ) -> (Task<Message>, Option<Event>) {
-        let snapshot = env.fleet.snapshot();
-        let mut cx = Context::new(
-            &snapshot,
-            &env.handle,
-            &mut env.notices,
-            None,
-            &env.settings,
-        );
-        panel.update(message, &mut cx)
+    ) -> (Task<Message>, Vec<Effect<Message>>) {
+        env.update(panel, message)
     }
 
     /// [`update_in`] with no vehicle, for what is the stream's alone.
-    fn update(panel: &mut VideoPanel, message: Message) -> (Task<Message>, Option<Event>) {
+    fn update(panel: &mut VideoPanel, message: Message) -> (Task<Message>, Vec<Effect<Message>>) {
         update_in(&mut Env::new(), panel, message)
     }
 
@@ -1103,10 +1089,16 @@ mod tests {
             ..state(Status::Connecting, 0)
         };
 
-        let (_, event) = update(&mut panel, Message::Updated(0, failed.clone()));
-        assert!(matches!(event, Some(Event::RecordingFailed(_))));
-        let (_, event) = update(&mut panel, Message::Updated(0, failed));
-        assert!(event.is_none());
+        let mut env = Env::new();
+        drop(update_in(
+            &mut env,
+            &mut panel,
+            Message::Updated(0, failed.clone()),
+        ));
+        drop(update_in(&mut env, &mut panel, Message::Updated(0, failed)));
+
+        let titles: Vec<_> = env.notices.history().map(|notice| &notice.title).collect();
+        assert_eq!(titles, ["Could not record the video"]);
     }
 
     /// Whether `panel`'s picture outside the panel shows `text`.
@@ -1216,7 +1208,7 @@ mod tests {
             panel: &mut VideoPanel,
             action: TrackAction,
             result: Result<()>,
-        ) -> Option<Event> {
+        ) -> Vec<Effect<Message>> {
             let message = match action {
                 TrackAction::Track(request) => Message::Track(KEY, request),
                 TrackAction::Stop => Message::StopTracking(KEY),
@@ -1288,9 +1280,9 @@ mod tests {
         }
     }
 
-    fn changed(event: Option<Event>) -> VideoSettings {
-        match event {
-            Some(Event::Changed(settings)) => settings,
+    fn changed(effects: Vec<Effect<Message>>) -> VideoSettings {
+        match effects.into_iter().next() {
+            Some(Effect::Persist(Persisted::Video(settings))) => settings,
             _ => panic!("the settings did not change"),
         }
     }
@@ -1306,9 +1298,9 @@ mod tests {
         let mut panel = panel(VideoSettings::default());
         drop(update(&mut panel, Message::EditSource("5600".to_string())));
 
-        let (_, event) = update(&mut panel, Message::Start);
+        let (_, effects) = update(&mut panel, Message::Start);
 
-        assert!(event.is_none());
+        assert!(effects.is_empty());
         assert!(panel.slot().is_none());
     }
 

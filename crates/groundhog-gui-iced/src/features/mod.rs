@@ -4,9 +4,9 @@
 //! operations) and nothing else. Vehicle state reaches it as an immutable
 //! [`FleetSnapshot`]; operations go through [`FleetHandle`]. Everything a
 //! feature wants the *application* to do — ask for confirmation, change the
-//! selected vehicle, move the map, remember a directory — it requests through
-//! its [`Context`] as an [`Effect`], so features never reach into each other or
-//! into the application's state.
+//! selected vehicle, move the map, remember a directory, persist what it
+//! holds — it requests through its [`Context`] as an [`Effect`], so features
+//! never reach into each other or into the application's state.
 
 pub mod calibration;
 pub mod confirm;
@@ -29,7 +29,8 @@ use iced::theme::Palette;
 use groundhog_logic::{
     SystemId,
     domain::{fleet::FleetSnapshot, geo::GeoPosition},
-    services::FleetHandle,
+    link::LinkConfig,
+    services::{FleetHandle, LinkManager},
 };
 
 use self::{confirm::Confirmation, notifications::Notifications};
@@ -47,6 +48,18 @@ pub enum Effect<M> {
     FollowVehicle(bool),
     /// Remember the directory of the last used file dialog.
     RememberDirectory(PathBuf),
+    /// Save what a feature keeps in the configuration file.
+    Persist(Persisted),
+}
+
+/// What a feature keeps in the configuration file, which the application
+/// owns and writes.
+#[derive(Debug, Clone)]
+pub enum Persisted {
+    /// The video's source and options.
+    Video(crate::config::VideoSettings),
+    /// The configured links.
+    Links(Vec<LinkConfig>),
 }
 
 impl<M> Effect<M> {
@@ -57,6 +70,7 @@ impl<M> Effect<M> {
             Effect::CenterMap(position) => Effect::CenterMap(position),
             Effect::FollowVehicle(follow) => Effect::FollowVehicle(follow),
             Effect::RememberDirectory(path) => Effect::RememberDirectory(path),
+            Effect::Persist(persisted) => Effect::Persist(persisted),
         }
     }
 }
@@ -66,6 +80,8 @@ pub struct Context<'a, M> {
     /// The fleet as last published.
     pub fleet: &'a FleetSnapshot,
     pub services: &'a FleetHandle,
+    /// The links, to connect, disconnect and configure.
+    pub links: &'a mut LinkManager,
     pub notices: &'a mut Notifications,
     /// Where file dialogs open.
     pub directory: Option<&'a Path>,
@@ -78,6 +94,7 @@ impl<'a, M> Context<'a, M> {
     pub fn new(
         fleet: &'a FleetSnapshot,
         services: &'a FleetHandle,
+        links: &'a mut LinkManager,
         notices: &'a mut Notifications,
         directory: Option<&'a Path>,
         settings: &'a crate::config::Settings,
@@ -85,6 +102,7 @@ impl<'a, M> Context<'a, M> {
         Self {
             fleet,
             services,
+            links,
             notices,
             directory,
             settings,
