@@ -190,7 +190,7 @@ impl Application {
             .map_or_else(Layout::new, Layout::from_workspace);
 
         // The video comes back on if it was on when the application closed,
-        // once something shows it (see `sync_video`, below).
+        // once something shows it (see `sync_panels`, below).
         let video = VideoPanel::new(
             configuration.video.clone(),
             config::data_dir().map(|directory| directory.join("videos")),
@@ -231,7 +231,7 @@ impl Application {
         }
 
         application.sync_system_bars();
-        let video_task = application.sync_video();
+        let video_task = application.sync_panels();
 
         let saved = stream::unfold(saved, |saved| async move {
             let mut saved = saved?;
@@ -302,8 +302,7 @@ impl Application {
             }
             Message::Fleet(update) => {
                 let task = self.on_fleet(update);
-                // Whether a vehicle is armed decides recording while armed.
-                Task::batch([task, self.sync_video()])
+                Task::batch([task, self.sync_full_screen()])
             }
             Message::FleetStopped => {
                 self.notices.push(
@@ -343,7 +342,7 @@ impl Application {
                 // The size can change the shell, and with it whether the
                 // video shows.
                 self.window = Some(size);
-                self.sync_video()
+                self.sync_panels()
             }
             Message::Back { captured } => {
                 let target = back_target(
@@ -383,7 +382,7 @@ impl Application {
                 if self.layout.update(message) {
                     self.configuration.workspace = Some(self.layout.workspace().clone());
                 }
-                self.sync_video()
+                self.sync_panels()
             }
             Message::Rail(panel) => {
                 // A plain click opens on the left; the modifiers stand in
@@ -417,7 +416,7 @@ impl Application {
             }
             Message::Settings(message) => {
                 self.on_settings(message);
-                self.sync_video()
+                self.sync_panels()
             }
             Message::Notifications(message) => {
                 self.notices.update(message);
@@ -436,8 +435,7 @@ impl Application {
             }
             Message::Tick(now) => {
                 self.notices.update(notifications::Message::Tick(now));
-                // A recording after disarming ends with time.
-                self.sync_video()
+                self.sync_panels()
             }
         }
     }
@@ -523,11 +521,13 @@ impl Application {
 
     fn on_fleet(&mut self, update: FleetUpdate) -> Task<Message> {
         self.fleet = update.snapshot;
-        let task = self.with_panels(|panels, env| panels.on_fleet(env));
 
+        // The fleet's own news first: the panels may tell of what follows
+        // from it (a recording that starts as a vehicle arms).
         for event in update.events {
             self.on_fleet_event(event);
         }
+        let task = self.with_panels(|panels, env| panels.on_fleet(env));
 
         self.follow_selected();
         task
@@ -687,43 +687,19 @@ impl Application {
         }
     }
 
-    /// Tells the video what decides whether it is received and recorded:
-    /// whether anything can show it (see [`video_shown`]), so a stream
-    /// nothing shows pauses instead of decoding unseen; whether a vehicle
-    /// is armed; and the setting to record while one is. A recording that
-    /// starts or stops on its own is announced.
-    fn sync_video(&mut self) -> Task<Message> {
-        let was_recording = self.panels.video.is_recording();
-        let armed = self
-            .fleet
-            .vehicles()
-            .any(|vehicle| vehicle.armed() == Some(true));
-        let now = Instant::now();
-
+    /// Tells the video whether anything can show it (see [`video_shown`]),
+    /// so a stream nothing shows pauses instead of decoding unseen, then
+    /// brings every panel up to date ([`Panel::on_tick`]): the settings or
+    /// the shell may have changed, or time passed.
+    ///
+    /// [`Panel::on_tick`]: crate::features::Panel::on_tick
+    fn sync_panels(&mut self) -> Task<Message> {
         self.panels
             .video
             .set_shown(video_shown(self.shell(), &self.layout));
-        self.panels
-            .video
-            .set_record_while_armed(self.configuration.settings.record_video_while_armed);
-        self.panels.video.observe_armed(armed, now);
-        let task = self.panels.video.sync(now);
-
-        match (was_recording, self.panels.video.is_recording()) {
-            (false, true) => {
-                let mut notice = Notice::info("Recording the video");
-                if let Some(directory) = self.panels.video.recordings() {
-                    notice = notice.detail(format!("Into {}", directory.display()));
-                }
-                self.notices.push(notice);
-            }
-            (true, false) => self
-                .notices
-                .push(Notice::info("Stopped recording the video")),
-            _ => {}
-        }
-
-        Task::batch([task.map(Message::from), self.sync_full_screen()])
+        let now = Instant::now();
+        let task = self.with_panels(|panels, env| panels.on_tick(now, env));
+        Task::batch([task, self.sync_full_screen()])
     }
 
     /// Puts the window in the mode the application and the video ask for,
@@ -910,12 +886,11 @@ impl Application {
             .links()
             .entries()
             .any(|(_, _, status)| status.is_active());
-        let refresh =
-            if self.notices.has_toasts() || active_links || self.panels.video.needs_ticks() {
-                iced::time::every(Duration::from_secs(1)).map(Message::Tick)
-            } else {
-                Subscription::none()
-            };
+        let refresh = if self.notices.has_toasts() || active_links || self.panels.wants_ticks() {
+            iced::time::every(Duration::from_secs(1)).map(Message::Tick)
+        } else {
+            Subscription::none()
+        };
 
         let modifiers = iced::event::listen_with(|event, _, _| match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {

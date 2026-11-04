@@ -369,6 +369,20 @@ impl Panel for VideoPanel {
     fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
         self.view_pane(cx.fleet, cx.selected)
     }
+
+    /// Whether a vehicle is armed decides recording while armed.
+    fn on_fleet(&mut self, cx: &mut Context<Message>) -> Task<Message> {
+        self.follow(Instant::now(), cx)
+    }
+
+    /// A recording after disarming ends on its own, with time.
+    fn wants_ticks(&self) -> bool {
+        self.while_armed.lingers()
+    }
+
+    fn on_tick(&mut self, now: Instant, cx: &mut Context<Message>) -> Task<Message> {
+        self.follow(now, cx)
+    }
 }
 
 impl VideoPanel {
@@ -400,19 +414,32 @@ impl VideoPanel {
     }
 
     /// Whether to record while a vehicle is armed (the setting).
-    pub fn set_record_while_armed(&mut self, enabled: bool) {
-        self.while_armed.enabled = enabled;
-    }
-
-    /// Whether a vehicle is armed, as of `now`.
-    pub fn observe_armed(&mut self, armed: bool, now: Instant) {
+    /// Follow the application as of `now`: record while a vehicle is armed,
+    /// when the settings ask for it, and tell the operator when a recording
+    /// starts or stops on its own.
+    fn follow(&mut self, now: Instant, cx: &mut Context<Message>) -> Task<Message> {
+        let was_recording = self.is_recording();
+        let armed = cx
+            .fleet
+            .vehicles()
+            .any(|vehicle| vehicle.armed() == Some(true));
+        self.while_armed.enabled = cx.settings.record_video_while_armed;
         self.while_armed.observe(armed, now);
-    }
+        let task = self.sync(now);
 
-    /// Whether the panel must be synced again later, without anything else
-    /// changing: a recording after disarming ends on its own.
-    pub fn needs_ticks(&self) -> bool {
-        self.while_armed.lingers()
+        match (was_recording, self.is_recording()) {
+            (false, true) => {
+                let mut notice = Notice::info("Recording the video");
+                if let Some(directory) = self.recordings() {
+                    notice = notice.detail(format!("Into {}", directory.display()));
+                }
+                cx.notices.push(notice);
+            }
+            (true, false) => cx.notices.push(Notice::info("Stopped recording the video")),
+            _ => {}
+        }
+
+        task
     }
 
     /// Bring the receiver in line with what is asked, as of `now`: receive
@@ -1029,24 +1056,89 @@ mod tests {
         assert!(!armed.wants(now));
     }
 
+    /// A copter at system 1, armed or not, folded into `env`'s fleet.
+    fn vehicle(env: &mut Env, armed: bool) {
+        let autopilot = groundhog_logic::MavlinkId {
+            system: 1,
+            component: 1,
+        };
+        env.observe_vehicle(autopilot, armed, 0);
+    }
+
+    /// The titles of the notices so far.
+    fn notices(env: &Env) -> Vec<&str> {
+        env.notices
+            .history()
+            .map(|notice| notice.title.as_str())
+            .collect()
+    }
+
+    /// With the setting on, arming records and says so; disarming keeps
+    /// recording a while, then stops on its own and says so too.
+    #[tokio::test]
+    async fn a_vehicle_armed_is_recorded_until_a_while_after_it_disarms() {
+        let mut env = Env::new();
+        env.settings.record_video_while_armed = true;
+        let mut panel = panel(on("test://"));
+        panel.recordings = recordings();
+
+        vehicle(&mut env, true);
+        drop(env.on_fleet(&mut panel));
+        assert!(panel.is_recording());
+        assert_eq!(notices(&env), ["Recording the video"]);
+
+        vehicle(&mut env, false);
+        drop(env.on_fleet(&mut panel));
+        assert!(panel.is_recording(), "the landing is kept");
+        assert!(panel.wants_ticks());
+
+        drop(env.on_tick(&mut panel, Instant::now() + AFTER_DISARM));
+        assert!(!panel.is_recording());
+        assert!(!panel.wants_ticks());
+        assert_eq!(
+            notices(&env),
+            ["Recording the video", "Stopped recording the video"]
+        );
+    }
+
+    /// Without the setting, arming records nothing.
+    #[tokio::test]
+    async fn arming_records_only_when_the_setting_asks() {
+        let mut env = Env::new();
+        let mut panel = panel(on("test://"));
+        panel.recordings = recordings();
+
+        vehicle(&mut env, true);
+        drop(env.on_fleet(&mut panel));
+
+        assert!(!panel.is_recording());
+        assert!(notices(&env).is_empty());
+    }
+
     /// Stopped by the operator, a recording while armed waits for the next
     /// arming.
     #[tokio::test]
     async fn a_stopped_recording_waits_for_the_next_arming() {
+        let mut env = Env::new();
+        env.settings.record_video_while_armed = true;
         let mut panel = panel(on("test://"));
         panel.recordings = recordings();
-        panel.set_record_while_armed(true);
-        let now = Instant::now();
-        panel.observe_armed(true, now);
-        drop(panel.sync(now));
+        vehicle(&mut env, true);
+        drop(env.on_fleet(&mut panel));
         assert!(panel.is_recording());
 
         drop(update(&mut panel, Message::Record(false)));
         assert!(!panel.is_recording(), "stopped while still armed");
+        drop(env.on_fleet(&mut panel));
+        assert!(
+            !panel.is_recording(),
+            "not again while the same arming lasts"
+        );
 
-        panel.observe_armed(false, now);
-        panel.observe_armed(true, now);
-        drop(panel.sync(now));
+        vehicle(&mut env, false);
+        drop(env.on_fleet(&mut panel));
+        vehicle(&mut env, true);
+        drop(env.on_fleet(&mut panel));
         assert!(panel.is_recording(), "armed again");
     }
 

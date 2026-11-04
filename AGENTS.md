@@ -373,7 +373,13 @@ A feature the operator opens is a `features::Panel`, one interface for all
 of them: `update` with a `Context`, `view` with a `ViewContext` (the
 application's state to read: the snapshot, the selected vehicle, whether
 the map follows it, the notices, the links), and optional hooks: `layers`
-to draw on the map, `on_fleet` for each snapshot. The application lists its
+to draw on the map, `on_fleet` for each snapshot, and `on_tick` when the
+settings or the shell change, or, while `wants_ticks`, as time passes. The
+video's recording while armed lives in those hooks: it reads the fleet and
+the setting from its `Context`, and announces a recording that starts or
+stops on its own. What the shells own about the video stays the
+application's: whether anything shows it, its full screen, its inset in
+the floating shell. The application lists its
 panels once, in `app/panels.rs`: a macro turns the list into the panels'
 message (`PanelMessage`, one variant each), their state (`Panels`), and the
 routing of messages, views, layers and snapshots, all statically typed. A
@@ -969,8 +975,8 @@ commands with a location), the file formats, and jump-target translation (for
 2. Create `features/<name>.rs` (or a directory) with its state and
    `Message`, and implement `features::Panel`: `update`, which gets a
    `Context`, and `view`, which gets a `ViewContext` and returns a
-   `ui::panel`. Override `layers` to draw on the map, and `on_fleet` to
-   follow each snapshot.
+   `ui::panel`. Override `layers` to draw on the map, `on_fleet` to follow
+   each snapshot, and `on_tick` (with `wants_ticks`) to act as time passes.
 3. List it in `app/panels.rs` (`Variant: field: Type`, the variant being its
    `layout::Panel`), and build it in `Application::boot`. Both shells show
    it, and its messages, map layers and snapshots reach it from there. Check

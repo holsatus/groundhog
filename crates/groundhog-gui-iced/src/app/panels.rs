@@ -7,7 +7,7 @@
 //! Adding a panel is a line here, beside its [`layout::Panel`] variant and
 //! its place in a [`shell::Destination`](crate::shell::Destination).
 
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use groundhog_logic::{
     domain::fleet::FleetSnapshot,
@@ -116,6 +116,24 @@ macro_rules! panels {
                 Task::batch([
                     $(env.run(&mut self.$field, PanelMessage::$variant, |panel, cx| {
                         panel.on_fleet(cx)
+                    }),)*
+                ])
+            }
+
+            /// Whether any panel must hear the time pass.
+            pub(super) fn wants_ticks(&self) -> bool {
+                false $(|| self.$field.wants_ticks())*
+            }
+
+            /// Bring every panel up to date as of `now`.
+            pub(super) fn on_tick(
+                &mut self,
+                now: Instant,
+                env: &mut PanelEnv<'_>,
+            ) -> Task<PanelMessage> {
+                Task::batch([
+                    $(env.run(&mut self.$field, PanelMessage::$variant, |panel, cx| {
+                        panel.on_tick(now, cx)
                     }),)*
                 ])
             }

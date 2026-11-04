@@ -29,6 +29,7 @@ pub mod video;
 use std::{
     fmt,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use iced::{Element, Task, theme::Palette};
@@ -66,6 +67,22 @@ pub trait Panel {
 
     /// The fleet published a new snapshot (`cx.fleet`).
     fn on_fleet(&mut self, _cx: &mut Context<'_, Self::Message>) -> Task<Self::Message> {
+        Task::none()
+    }
+
+    /// Whether the panel must hear [`Panel::on_tick`] as time passes, with
+    /// nothing else changing.
+    fn wants_ticks(&self) -> bool {
+        false
+    }
+
+    /// Time passed, or what the panel reads from the application changed
+    /// (the settings, the shell): bring the panel up to date as of `now`.
+    fn on_tick(
+        &mut self,
+        _now: Instant,
+        _cx: &mut Context<'_, Self::Message>,
+    ) -> Task<Self::Message> {
         Task::none()
     }
 }

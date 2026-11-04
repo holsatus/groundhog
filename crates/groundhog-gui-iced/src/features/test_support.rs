@@ -113,6 +113,14 @@ impl Env {
         effects
     }
 
+    /// Tell `panel` the time is `now`, as the application does while it
+    /// wants ticks. Returns the effects it requested.
+    pub fn on_tick<P: Panel>(&mut self, panel: &mut P, now: Instant) -> Vec<Effect<P::Message>> {
+        let (task, effects) = self.with_context(|cx| panel.on_tick(now, cx));
+        drop(task);
+        effects
+    }
+
     /// What a view of `fleet` reads, with `selected` shown.
     pub fn view_context<'a>(
         &'a self,
