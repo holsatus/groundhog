@@ -855,6 +855,83 @@ async fn a_registered_vehicle_is_bootstrapped() {
     assert_eq!(request.param1, 148.0, "AUTOPILOT_VERSION");
 }
 
+/// The whole bootstrap: capabilities, home, parameters, mission, then the
+/// (best-effort) camera request. Each step depends on the previous one
+/// finishing, so this also checks the order.
+#[tokio::test]
+async fn bootstrap_brings_a_new_vehicle_up_to_date() {
+    use mavio::default_dialect::messages::AutopilotVersion;
+
+    let mut harness = harness_with(RuntimeOptions { bootstrap: true });
+    harness.vehicle.heartbeat(MavAutopilot::Ardupilotmega).await;
+
+    let (mut asked_home, mut asked_parameters, mut asked_mission) = (false, false, false);
+    loop {
+        match harness.vehicle.recv().await {
+            DefaultDialect::CommandLong(request) if request.command == MavCmd::RequestMessage => {
+                match request.param1 as u32 {
+                    148 => harness.vehicle.send(&AutopilotVersion::default()).await,
+                    242 => {
+                        harness
+                            .vehicle
+                            .send(&HomePosition {
+                                latitude: 471_000_000,
+                                longitude: 81_000_000,
+                                altitude: 420_000,
+                                ..Default::default()
+                            })
+                            .await;
+                        asked_home = true;
+                    }
+                    // The camera is asked last; nothing after it matters here.
+                    259 => break,
+                    _ => {}
+                }
+            }
+            DefaultDialect::ParamRequestList(_) => {
+                harness
+                    .vehicle
+                    .send(&ParamValue {
+                        param_id: *Ident::from_str_truncated("PARAM_A").as_raw(),
+                        param_value: 1.0,
+                        param_type: MavParamType::Real32,
+                        param_index: 0,
+                        param_count: 1,
+                    })
+                    .await;
+                asked_parameters = true;
+            }
+            DefaultDialect::MissionRequestList(_) => {
+                harness
+                    .vehicle
+                    .send(&MissionCount {
+                        count: 0,
+                        mission_type: MavMissionType::Mission,
+                        ..Default::default()
+                    })
+                    .await;
+                asked_mission = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(asked_home && asked_parameters && asked_mission);
+    let fleet = until(&mut harness.updates, |fleet| {
+        fleet.vehicle(SYSTEM).is_some_and(|vehicle| {
+            vehicle.home().is_some()
+                && vehicle
+                    .parameters(VEHICLE.component)
+                    .is_some_and(|parameters| parameters.len() == 1)
+                && vehicle.mission.onboard.is_some()
+        })
+    })
+    .await;
+    let vehicle = fleet.vehicle(SYSTEM).unwrap();
+    assert_eq!(vehicle.home().expect("home downloaded").altitude_msl, 420.0);
+    assert_eq!(vehicle.mission.onboard.as_ref().unwrap().items.len(), 0);
+}
+
 /// The commands that change what the vehicle does: each is checked on the
 /// wire, since a wrong parameter here flies the aircraft differently.
 mod commands {
