@@ -8,7 +8,7 @@ use std::{
 
 use mav_param::{Ident, Value};
 use mavio::{
-    DefaultDialect, Frame,
+    DefaultDialect,
     default_dialect::{
         enums::{
             MavAutopilot, MavCmd, MavFrame, MavMissionResult, MavMissionType, MavModeFlag,
@@ -20,8 +20,8 @@ use mavio::{
             SysStatus, SystemTime,
         },
     },
-    prelude::{V2, Versionless},
-    protocol::{FrameBuilder, IntoPayload, MavLinkVersion, MessageSpec},
+    prelude::V2,
+    protocol::{FrameBuilder, IntoPayload, MavLinkVersion},
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -30,7 +30,7 @@ use crate::{
     SystemId,
     domain::fleet::Fleet,
     link::LinkId,
-    mavlink::io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
+    mavlink::io::{new_async_receiver, new_async_sender},
     wire::mission_item::RawMissionItem,
 };
 
@@ -39,109 +39,7 @@ const VEHICLE: MavlinkId = MavlinkId {
     component: 1,
 };
 
-struct MockVehicle {
-    rx: AsyncReceiver,
-    tx: AsyncSender,
-    sequence: u8,
-}
-
-impl MockVehicle {
-    /// Receive the next non-heartbeat message sent by the client. A frame
-    /// that does not decode fails the test: the client sent it corrupt.
-    async fn recv(&mut self) -> DefaultDialect {
-        loop {
-            let frame = self.rx.recv().await.expect("transport closed");
-            match frame.decode::<DefaultDialect>() {
-                Ok(DefaultDialect::Heartbeat(_)) => continue,
-                Ok(message) => return message,
-                Err(error) => panic!(
-                    "the client sent message {} undecodable: {error}",
-                    frame.message_id()
-                ),
-            }
-        }
-    }
-
-    async fn send<M: mavio::Message>(&mut self, message: &M) {
-        let frame = FrameBuilder::new()
-            .system_id(VEHICLE.system)
-            .component_id(VEHICLE.component)
-            .version(V2)
-            .sequence(self.sequence)
-            .message(message)
-            .unwrap()
-            .build()
-            .into_versionless();
-        self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(&frame).await.unwrap();
-    }
-
-    /// Sends `message` with payload byte `offset` replaced, as a newer
-    /// firmware whose enum value the bundled dialect does not know would.
-    async fn send_patched<M: mavio::Message>(&mut self, message: &M, offset: usize, value: u8) {
-        let payload = message.encode(MavLinkVersion::V2).expect("encodable");
-        let mut bytes = payload.bytes().to_vec();
-        if bytes.len() <= offset {
-            bytes.resize(offset + 1, 0);
-        }
-        bytes[offset] = value;
-
-        let frame = FrameBuilder::new()
-            .system_id(VEHICLE.system)
-            .component_id(VEHICLE.component)
-            .version(V2)
-            .sequence(self.sequence)
-            .message_id(payload.id())
-            .payload(&bytes)
-            .crc_extra(message.crc_extra())
-            .build()
-            .into_versionless();
-        self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(&frame).await.unwrap();
-    }
-
-    /// Sends a mission item whose command and frame the bundled dialect does
-    /// not know, built from the raw payload.
-    async fn send_raw(&mut self, message: &RawMissionItem) {
-        let payload = message.encode(MavLinkVersion::V2).expect("encodable");
-        let frame = FrameBuilder::new()
-            .system_id(VEHICLE.system)
-            .component_id(VEHICLE.component)
-            .version(V2)
-            .sequence(self.sequence)
-            .message_id(payload.id())
-            .payload(payload.bytes())
-            .crc_extra(message.crc_extra())
-            .build()
-            .into_versionless();
-        self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(&frame).await.unwrap();
-    }
-
-    /// The next frame from the GCS that is not a heartbeat, undecoded.
-    async fn recv_frame(&mut self) -> Frame<Versionless> {
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(5), self.rx.recv())
-                .await
-                .expect("the GCS sends something")
-                .expect("transport open");
-            if frame.message_id() != 0 {
-                return frame;
-            }
-        }
-    }
-
-    async fn ack(&mut self, command: MavCmd, result: MavResult) {
-        self.send(&CommandAck {
-            command,
-            result,
-            target_system: DEFAULT_GCS_ID.system,
-            target_component: DEFAULT_GCS_ID.component,
-            ..Default::default()
-        })
-        .await;
-    }
-}
+use crate::test_support::MockVehicle;
 
 fn setup() -> (MavlinkRouter, LinkGuard, MockVehicle) {
     let id = LinkId::new("dummy");
@@ -152,11 +50,11 @@ fn setup() -> (MavlinkRouter, LinkGuard, MockVehicle) {
     let (client, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
     let guard = client.attach_reader_writer(id, gcs_reader, gcs_writer, false);
 
-    let fake = MockVehicle {
-        rx: new_async_receiver(vehicle_reader),
-        tx: new_async_sender(vehicle_writer),
-        sequence: 0,
-    };
+    let fake = MockVehicle::strict(
+        new_async_receiver(vehicle_reader),
+        new_async_sender(vehicle_writer),
+        VEHICLE,
+    );
 
     (client, guard, fake)
 }

@@ -12,12 +12,12 @@ use mavio::{
             MavParamType, MavResult, MavType,
         },
         messages::{
-            CommandAck, CommandLong, Heartbeat, HomePosition, MissionAck, MissionCount,
-            MissionItemInt, MissionRequestInt, ParamValue,
+            CommandLong, Heartbeat, HomePosition, MissionAck, MissionCount, MissionItemInt,
+            MissionRequestInt, ParamValue,
         },
     },
     prelude::V2,
-    protocol::{FrameBuilder, MavLinkVersion},
+    protocol::FrameBuilder,
 };
 
 use super::{
@@ -34,8 +34,9 @@ use crate::{
     link::LinkId,
     mavlink::{
         DEFAULT_GCS_ID, LinkGuard, MavlinkRouter,
-        io::{AsyncReceiver, AsyncSender, new_async_receiver, new_async_sender},
+        io::{new_async_receiver, new_async_sender},
     },
+    test_support::MockVehicle,
 };
 
 const VEHICLE: MavlinkId = MavlinkId {
@@ -43,104 +44,6 @@ const VEHICLE: MavlinkId = MavlinkId {
     component: 1,
 };
 const SYSTEM: SystemId = SystemId(7);
-
-struct MockVehicle {
-    rx: AsyncReceiver,
-    tx: AsyncSender,
-    sequence: u8,
-}
-
-impl MockVehicle {
-    async fn send(&mut self, message: &dyn mavio::Message) {
-        self.send_as(VEHICLE.component, message).await;
-    }
-
-    /// Send `message` from another component of the vehicle.
-    async fn send_as(&mut self, component: u8, message: &dyn mavio::Message) {
-        let frame = FrameBuilder::new()
-            .system_id(VEHICLE.system)
-            .component_id(component)
-            .version(V2)
-            .sequence(self.sequence)
-            .message(message)
-            .unwrap()
-            .build()
-            .into_versionless();
-        self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(&frame).await.unwrap();
-    }
-
-    /// Sends `message` with payload byte `offset` replaced, as a newer
-    /// firmware whose enum value the bundled dialect does not know would.
-    async fn send_patched<M: mavio::Message>(&mut self, message: &M, offset: usize, value: u8) {
-        let payload = message.encode(MavLinkVersion::V2).expect("encodable");
-        let mut bytes = payload.bytes().to_vec();
-        if bytes.len() <= offset {
-            bytes.resize(offset + 1, 0);
-        }
-        bytes[offset] = value;
-
-        let frame = FrameBuilder::new()
-            .system_id(VEHICLE.system)
-            .component_id(VEHICLE.component)
-            .version(V2)
-            .sequence(self.sequence)
-            .message_id(payload.id())
-            .payload(&bytes)
-            .crc_extra(message.crc_extra())
-            .build()
-            .into_versionless();
-        self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(&frame).await.unwrap();
-    }
-
-    /// The next message from the GCS that is not a heartbeat.
-    async fn recv(&mut self) -> DefaultDialect {
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(5), self.rx.recv())
-                .await
-                .expect("the GCS sends something")
-                .expect("transport open");
-            match frame.decode::<DefaultDialect>() {
-                Ok(DefaultDialect::Heartbeat(_)) | Err(_) => continue,
-                Ok(message) => return message,
-            }
-        }
-    }
-
-    /// The next command from the GCS.
-    async fn command(&mut self) -> CommandLong {
-        match self.recv().await {
-            DefaultDialect::CommandLong(command) => command,
-            other => panic!("expected a command, got {other:?}"),
-        }
-    }
-
-    async fn ack(&mut self, command: MavCmd, result: MavResult) {
-        self.send(&CommandAck {
-            command,
-            result,
-            target_system: DEFAULT_GCS_ID.system,
-            target_component: DEFAULT_GCS_ID.component,
-            ..Default::default()
-        })
-        .await;
-    }
-
-    async fn heartbeat(&mut self, autopilot: MavAutopilot) {
-        self.heartbeat_of(autopilot, MavType::Quadrotor).await;
-    }
-
-    async fn heartbeat_of(&mut self, autopilot: MavAutopilot, type_: MavType) {
-        self.send(&Heartbeat {
-            type_,
-            autopilot,
-            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
-            ..Default::default()
-        })
-        .await;
-    }
-}
 
 struct Harness {
     fleet: FleetHandle,
@@ -167,11 +70,11 @@ fn harness_with(options: RuntimeOptions) -> Harness {
     Harness {
         fleet,
         updates,
-        vehicle: MockVehicle {
-            rx: new_async_receiver(vehicle_reader),
-            tx: new_async_sender(vehicle_writer),
-            sequence: 0,
-        },
+        vehicle: MockVehicle::new(
+            new_async_receiver(vehicle_reader),
+            new_async_sender(vehicle_writer),
+            VEHICLE,
+        ),
         _guard: guard,
         _router: router,
         _runtime: runtime,

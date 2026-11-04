@@ -163,9 +163,25 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::{link::LinkId, mavlink::DEFAULT_GCS_ID};
     use mavio::{dialects::minimal::messages::Heartbeat, prelude::V2, protocol::FrameBuilder};
+
+    static DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh temporary directory, so a crashed earlier run cannot make this
+    /// test's first file name `_2`.
+    fn temporary_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "groundhog-{name}-{}-{}",
+            std::process::id(),
+            DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
 
     #[test]
     fn stamps_are_utc_calendar_times() {
@@ -177,9 +193,7 @@ mod tests {
 
     #[test]
     fn recordings_in_the_same_second_get_their_own_files() {
-        let directory =
-            std::env::temp_dir().join(format!("groundhog-tlog-names-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = temporary_directory("tlog-names");
         let stamp = "2024-02-29_12-34-56";
 
         let (first, mut file) = create_new(&directory, stamp).unwrap();
@@ -194,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_frames_are_written_with_timestamps() {
-        let directory = std::env::temp_dir().join(format!("groundhog-tlog-{}", std::process::id()));
+        let directory = temporary_directory("tlog");
         let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
         let recorder = TlogRecorder::start(&router, &directory).unwrap();
         let path = recorder.path().to_path_buf();

@@ -28,6 +28,8 @@ mod mavlink;
 pub mod persist;
 pub mod services;
 pub mod storage;
+#[cfg(test)]
+mod test_support;
 mod wire;
 
 pub use address::{MavlinkId, SystemId};
