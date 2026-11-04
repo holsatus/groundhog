@@ -855,6 +855,238 @@ async fn a_registered_vehicle_is_bootstrapped() {
     assert_eq!(request.param1, 148.0, "AUTOPILOT_VERSION");
 }
 
+/// The commands that change what the vehicle does: each is checked on the
+/// wire, since a wrong parameter here flies the aircraft differently.
+mod commands {
+    use super::*;
+
+    /// The next command from the GCS, asserted to be `kind`.
+    async fn expect_command(harness: &mut Harness, kind: MavCmd) -> CommandLong {
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, kind);
+        command
+    }
+
+    /// Accept the command just received.
+    async fn accept(harness: &mut Harness, kind: MavCmd) {
+        harness.vehicle.ack(kind, MavResult::Accepted).await;
+    }
+
+    #[tokio::test]
+    async fn arming_and_disarming_send_the_commanded_state() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        let client = harness.fleet.vehicle(SYSTEM);
+
+        let arm = tokio::spawn({
+            let client = client.clone();
+            async move { client.arm(true).await }
+        });
+        let command = expect_command(&mut harness, MavCmd::ComponentArmDisarm).await;
+        assert_eq!(command.param1, 1.0, "arm");
+        assert_eq!(command.param2, 0.0, "never force past the arming checks");
+        accept(&mut harness, MavCmd::ComponentArmDisarm).await;
+        arm.await.unwrap().expect("armed");
+
+        let disarm = tokio::spawn(async move { client.arm(false).await });
+        let command = expect_command(&mut harness, MavCmd::ComponentArmDisarm).await;
+        assert_eq!(command.param1, 0.0, "disarm");
+        accept(&mut harness, MavCmd::ComponentArmDisarm).await;
+        disarm.await.unwrap().expect("disarmed");
+    }
+
+    #[tokio::test]
+    async fn an_ardupilot_mode_sends_its_custom_mode() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        let loiter = harness
+            .fleet
+            .snapshot()
+            .vehicle(SYSTEM)
+            .unwrap()
+            .modes()
+            .find(|mode| mode.name == "Loiter")
+            .expect("ArduPilot has LOITER");
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let change = tokio::spawn(async move { client.set_mode(loiter).await });
+        let command = expect_command(&mut harness, MavCmd::DoSetMode).await;
+        assert_eq!(
+            command.param1,
+            MavModeFlag::CUSTOM_MODE_ENABLED.bits() as f32,
+            "the custom mode flag"
+        );
+        assert_eq!(command.param2, loiter.custom_mode as f32);
+        assert_eq!(command.param3, 0.0, "ArduPilot has no sub mode");
+        accept(&mut harness, MavCmd::DoSetMode).await;
+        change.await.unwrap().expect("mode set");
+    }
+
+    #[tokio::test]
+    async fn a_px4_mode_splits_main_and_sub() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Px4).await;
+        let position = harness
+            .fleet
+            .snapshot()
+            .vehicle(SYSTEM)
+            .unwrap()
+            .modes()
+            .find(|mode| mode.name == "Position")
+            .expect("PX4 has Position");
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let change = tokio::spawn(async move { client.set_mode(position).await });
+        let command = expect_command(&mut harness, MavCmd::DoSetMode).await;
+        assert_eq!(
+            command.param1,
+            MavModeFlag::CUSTOM_MODE_ENABLED.bits() as f32
+        );
+        assert_eq!(command.param2, (position.custom_mode >> 16) as f32);
+        assert_eq!(command.param3, (position.custom_mode >> 24) as f32);
+        accept(&mut harness, MavCmd::DoSetMode).await;
+        change.await.unwrap().expect("mode set");
+    }
+
+    #[tokio::test]
+    async fn mission_start_pause_and_resume_send_their_commands() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let start = tokio::spawn(async move { client.start_mission().await });
+        expect_command(&mut harness, MavCmd::MissionStart).await;
+        accept(&mut harness, MavCmd::MissionStart).await;
+        start.await.unwrap().expect("started");
+
+        for (pause, param1) in [(true, 0.0), (false, 1.0)] {
+            let client = harness.fleet.vehicle(SYSTEM);
+            let task = tokio::spawn(async move { client.pause_mission(pause).await });
+            let command = expect_command(&mut harness, MavCmd::DoPauseContinue).await;
+            assert_eq!(command.param1, param1, "pause = {pause}");
+            accept(&mut harness, MavCmd::DoPauseContinue).await;
+            task.await.unwrap().expect("pause commanded");
+        }
+    }
+
+    /// The client takes a plan index; the vehicle counts wire sequences, which
+    /// differ by ArduPilot's home slot.
+    #[tokio::test]
+    async fn jumping_to_a_plan_item_uses_the_wire_sequence() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let jump = tokio::spawn(async move { client.set_current_mission_item(1).await });
+        let command = expect_command(&mut harness, MavCmd::DoSetMissionCurrent).await;
+        assert_eq!(
+            command.param1, 2.0,
+            "plan item 1 is wire sequence 2 after home"
+        );
+        accept(&mut harness, MavCmd::DoSetMissionCurrent).await;
+        jump.await.unwrap().expect("jumped");
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_jump_falls_back_to_the_legacy_message() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let jump = tokio::spawn(async move { client.set_current_mission_item(0).await });
+        let command = expect_command(&mut harness, MavCmd::DoSetMissionCurrent).await;
+        assert_eq!(command.param1, 1.0);
+        harness
+            .vehicle
+            .ack(MavCmd::DoSetMissionCurrent, MavResult::Unsupported)
+            .await;
+
+        let DefaultDialect::MissionSetCurrent(message) = harness.vehicle.recv().await else {
+            panic!("expected the legacy MISSION_SET_CURRENT")
+        };
+        assert_eq!(message.seq, 1);
+        jump.await
+            .unwrap()
+            .expect("the legacy message was accepted");
+    }
+
+    #[tokio::test]
+    async fn clearing_the_mission_empties_the_onboard_copy() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let clear = tokio::spawn(async move { client.clear_mission().await });
+
+        let DefaultDialect::MissionClearAll(message) = harness.vehicle.recv().await else {
+            panic!("expected MISSION_CLEAR_ALL")
+        };
+        assert_eq!(message.mission_type, MavMissionType::Mission);
+        harness
+            .vehicle
+            .send(&MissionAck {
+                type_: MavMissionResult::MavMissionAccepted,
+                mission_type: MavMissionType::Mission,
+                ..Default::default()
+            })
+            .await;
+        clear.await.unwrap().expect("cleared");
+
+        let fleet = until(&mut harness.updates, |fleet| {
+            fleet
+                .vehicle(SYSTEM)
+                .and_then(|vehicle| vehicle.mission.onboard.as_ref())
+                .is_some_and(|mission| mission.items.is_empty())
+        })
+        .await;
+        assert!(
+            fleet
+                .vehicle(SYSTEM)
+                .unwrap()
+                .mission
+                .onboard
+                .as_ref()
+                .unwrap()
+                .home
+                .is_none(),
+            "a cleared mission has no home either"
+        );
+    }
+
+    /// The parameter panel's write path: target component, C-cast value and
+    /// the echoed value the panel treats as the result.
+    #[tokio::test]
+    async fn setting_a_parameter_sends_the_encoded_value() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let ident = Ident::from_str_truncated("ARMING_CHECK");
+        let client = harness.fleet.vehicle(SYSTEM);
+        let set = tokio::spawn({
+            let ident = ident.clone();
+            async move { client.set_parameter(ident, Value::I32(1)).await }
+        });
+
+        let DefaultDialect::ParamSet(message) = harness.vehicle.recv().await else {
+            panic!("expected PARAM_SET")
+        };
+        assert_eq!(message.param_value, 1.0, "a C cast, not a bytewise copy");
+        assert_eq!(message.param_type, MavParamType::Int32);
+        harness
+            .vehicle
+            .send(&ParamValue {
+                param_id: message.param_id,
+                param_value: message.param_value,
+                param_type: message.param_type,
+                param_index: u16::MAX,
+                ..Default::default()
+            })
+            .await;
+
+        assert_eq!(set.await.unwrap().unwrap(), Value::I32(1));
+    }
+}
+
 mod camera {
     use mavio::default_dialect::{
         enums::{CameraCapFlags, CameraTrackingMode, CameraTrackingStatusFlags},
@@ -988,6 +1220,54 @@ mod camera {
         let command = harness.vehicle.command().await;
         assert_eq!(command.command, MavCmd::CameraStopTracking);
         assert_eq!(command.param1, 1.0);
+    }
+
+    /// Tracking a point: the camera gets the point, a clamped radius and asks
+    /// for its tracking reports.
+    #[tokio::test]
+    async fn tracking_a_point_sends_the_point_and_asks_for_reports() {
+        let mut harness = with_camera().await;
+
+        // Re-describe the same camera as point-capable; the later
+        // information wins.
+        harness
+            .vehicle
+            .send(&CameraInformation {
+                flags: CameraCapFlags::HAS_TRACKING_POINT,
+                camera_device_id: ATTACHED.device,
+                ..Default::default()
+            })
+            .await;
+        until(&mut harness.updates, |fleet| {
+            fleet
+                .vehicle(SYSTEM)
+                .and_then(|vehicle| vehicle.cameras.get(ATTACHED))
+                .is_some_and(|camera| camera.tracking.point)
+        })
+        .await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let point = ImagePoint { x: 0.25, y: 0.75 };
+        let tracking = tokio::spawn(async move { client.track_point(ATTACHED, point, 2.0).await });
+
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, MavCmd::CameraTrackPoint);
+        assert_eq!((command.param1, command.param2), (0.25, 0.75));
+        assert_eq!(command.param3, 1.0, "the radius is clamped to the picture");
+        assert_eq!(command.param4, f32::from(ATTACHED.device));
+        harness
+            .vehicle
+            .ack(MavCmd::CameraTrackPoint, MavResult::Accepted)
+            .await;
+
+        let command = harness.vehicle.command().await;
+        assert_eq!(command.command, MavCmd::SetMessageInterval);
+        harness
+            .vehicle
+            .ack(MavCmd::SetMessageInterval, MavResult::Accepted)
+            .await;
+
+        tracking.await.unwrap().expect("tracks the point");
     }
 
     /// A camera with a component of its own describes itself only when
@@ -1337,5 +1617,78 @@ mod calibration {
             session(fleet).is_some_and(|session| !session.is_running())
         })
         .await;
+    }
+
+    /// The operator's cancel: the session ends at once and the firmware's own
+    /// stop command goes out.
+    #[tokio::test]
+    async fn cancelling_stops_the_run_on_the_vehicle() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let start = tokio::spawn({
+            let client = client.clone();
+            async move { client.start_calibration(CalibrationKind::Compass).await }
+        });
+        assert_eq!(
+            harness.vehicle.command().await.command,
+            MavCmd::DoStartMagCal
+        );
+        harness
+            .vehicle
+            .ack(MavCmd::DoStartMagCal, MavResult::Accepted)
+            .await;
+        start.await.unwrap().expect("accepted");
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(Session::is_running)
+        })
+        .await;
+
+        let cancel = tokio::spawn(async move { client.cancel_calibration().await });
+        assert_eq!(
+            harness.vehicle.command().await.command,
+            MavCmd::DoCancelMagCal
+        );
+        harness
+            .vehicle
+            .ack(MavCmd::DoCancelMagCal, MavResult::Accepted)
+            .await;
+        cancel.await.unwrap().expect("cancel acknowledged");
+
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(|session| session.phase == Phase::Cancelled)
+        })
+        .await;
+    }
+
+    /// Forgetting a finished run clears it from the snapshot; nothing is sent.
+    #[tokio::test]
+    async fn dismissing_a_finished_calibration_forgets_it() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let start =
+            tokio::spawn(async move { client.start_calibration(CalibrationKind::Gyroscope).await });
+        assert_eq!(
+            harness.vehicle.command().await.command,
+            MavCmd::PreflightCalibration
+        );
+        harness
+            .vehicle
+            .ack(MavCmd::PreflightCalibration, MavResult::Accepted)
+            .await;
+        start
+            .await
+            .unwrap()
+            .expect("a gyro calibration completes with its ack");
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(|session| session.phase == Phase::Succeeded)
+        })
+        .await;
+
+        harness.fleet.vehicle(SYSTEM).dismiss_calibration();
+        until(&mut harness.updates, |fleet| session(fleet).is_none()).await;
     }
 }
