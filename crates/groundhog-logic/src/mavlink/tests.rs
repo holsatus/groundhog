@@ -1431,6 +1431,276 @@ async fn download_reports_progress_per_item() {
     assert_eq!(*seen.lock().unwrap(), vec![(0, 2), (1, 2), (2, 2)]);
 }
 
+#[tokio::test]
+async fn mission_clear_succeeds_on_an_accepted_ack() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+    });
+
+    let DefaultDialect::MissionClearAll(clear) = vehicle.recv().await else {
+        panic!("expected MISSION_CLEAR_ALL")
+    };
+    assert_eq!(clear.mission_type, MavMissionType::Mission);
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    task.await.unwrap().expect("cleared");
+}
+
+/// A clear is resent until acknowledged, and the retry carries the same
+/// mission type.
+#[tokio::test(start_paused = true)]
+async fn mission_clear_resends_until_acknowledged() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+    });
+
+    for _ in 0..2 {
+        let DefaultDialect::MissionClearAll(clear) = vehicle.recv().await else {
+            panic!("expected MISSION_CLEAR_ALL")
+        };
+        assert_eq!(clear.mission_type, MavMissionType::Mission);
+    }
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    task.await.unwrap().expect("cleared");
+}
+
+/// The vehicle drives an upload only after it has seen `MISSION_COUNT`; one
+/// that never answers is sent the count again, not a restart with an item.
+#[tokio::test(start_paused = true)]
+async fn mission_upload_resends_the_count_until_items_are_requested() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![wire_item(0, 11)];
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+
+    for _ in 0..2 {
+        let DefaultDialect::MissionCount(count) = vehicle.recv().await else {
+            panic!("expected MISSION_COUNT")
+        };
+        assert_eq!(count.count, 1);
+    }
+
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    let DefaultDialect::MissionItemInt(item) = vehicle.recv().await else {
+        panic!("expected MISSION_ITEM_INT")
+    };
+    assert_eq!(item.x, 11);
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            opaque_id: 3,
+            ..Default::default()
+        })
+        .await;
+
+    assert_eq!(task.await.unwrap().expect("uploaded"), 3);
+}
+
+/// A request for an item the transfer does not hold is a protocol error, not
+/// a reason to send whatever is at that index.
+#[tokio::test(start_paused = true)]
+async fn mission_upload_rejects_a_request_past_the_count() {
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![wire_item(0, 11)];
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &|_| {})
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(_) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    vehicle
+        .send(&MissionRequestInt {
+            seq: 1,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(MavError::MissionProtocol(_))
+    ));
+}
+
+/// A NACK while items are being served ends the download, and does not send
+/// a cancel for a transfer the vehicle has already ended itself.
+#[tokio::test(start_paused = true)]
+async fn mission_download_stops_on_a_nack_mid_transfer() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    vehicle
+        .send(&MissionCount {
+            count: 2,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(recv_request_int(&mut vehicle).await, 0);
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionDenied,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(MavError::MissionFailed(MavMissionResult::MavMissionDenied))
+    ));
+    let extra = tokio::time::timeout(Duration::from_millis(100), vehicle.recv()).await;
+    assert!(extra.is_err(), "no cancel after the vehicle ended it");
+}
+
+/// A lost `MISSION_COUNT` request is re-sent before giving up.
+#[tokio::test(start_paused = true)]
+async fn mission_download_retransmits_a_dropped_list_request() {
+    let (router, _guard, mut vehicle) = setup();
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .mission_download(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
+    });
+
+    recv_request_list(&mut vehicle).await;
+    recv_request_list(&mut vehicle).await;
+
+    vehicle
+        .send(&MissionCount {
+            count: 0,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    recv_ack(&mut vehicle).await;
+
+    let downloaded = task.await.unwrap().expect("an empty mission");
+    assert!(downloaded.items.is_empty());
+}
+
+/// The legacy jump message is a plain send: no ACK, the vehicle reports the
+/// new current item later.
+#[tokio::test]
+async fn mission_set_current_sends_the_legacy_message() {
+    let (router, _guard, mut vehicle) = setup();
+
+    router.mission_set_current(VEHICLE, 7).await.expect("sent");
+
+    let DefaultDialect::MissionSetCurrent(message) = vehicle.recv().await else {
+        panic!("expected MISSION_SET_CURRENT")
+    };
+    assert_eq!(message.seq, 7);
+    assert_eq!(message.target_system, VEHICLE.system);
+    assert_eq!(message.target_component, VEHICLE.component);
+}
+
+/// An upload reports the count, then each newly served item (not every
+/// re-request).
+#[tokio::test]
+async fn mission_upload_reports_progress_per_served_item() {
+    use std::sync::{Arc, Mutex};
+
+    let (router, _guard, mut vehicle) = setup();
+    let items = vec![wire_item(0, 11), wire_item(1, 22)];
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let items = items.clone();
+        let seen = seen.clone();
+        async move {
+            router
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &move |progress| {
+                    seen.lock().unwrap().push((progress.done, progress.total))
+                })
+                .await
+        }
+    });
+
+    let DefaultDialect::MissionCount(_) = vehicle.recv().await else {
+        panic!("expected MISSION_COUNT")
+    };
+    for seq in 0..2u16 {
+        vehicle
+            .send(&MissionRequestInt {
+                seq,
+                mission_type: MavMissionType::Mission,
+                ..Default::default()
+            })
+            .await;
+        let DefaultDialect::MissionItemInt(item) = vehicle.recv().await else {
+            panic!("expected MISSION_ITEM_INT")
+        };
+        assert_eq!(item.seq, seq);
+    }
+    vehicle
+        .send(&MissionAck {
+            type_: MavMissionResult::MavMissionAccepted,
+            mission_type: MavMissionType::Mission,
+            ..Default::default()
+        })
+        .await;
+    task.await.unwrap().unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![(0, 2), (1, 2), (2, 2)]);
+}
+
 // ----- frame replay harness -----
 
 /// Encode a message into a versionless v2 frame's bytes, as if sent by `vehicle`
