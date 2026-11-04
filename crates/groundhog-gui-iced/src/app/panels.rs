@@ -21,8 +21,8 @@ use crate::{
     features::{
         Context, Effect, MapContext, Panel, ViewContext, calibration::CalibrationPanel,
         link_panel::LinkPanel, log_panel::LogPanel, mission::MissionEditor,
-        notifications::Notifications, parameter_panel::ParameterPanel, vehicles::VehiclePanel,
-        video::VideoPanel,
+        notifications::Notifications, parameter_panel::ParameterPanel,
+        settings_panel::SettingsPanel, vehicles::VehiclePanel, video::VideoPanel,
     },
     layout,
     map::LayerSet,
@@ -176,6 +176,7 @@ panels! {
     Links: links: LinkPanel,
     Video: video: VideoPanel,
     Logs: logs: LogPanel,
+    Settings: settings: SettingsPanel,
 }
 
 #[cfg(test)]
@@ -183,15 +184,15 @@ mod tests {
     use super::*;
     use crate::shell::Destination;
 
-    /// Every panel the shells offer is listed once, apart from the
-    /// application's own (the map, the settings).
+    /// Every panel the shells offer is listed once, apart from the map,
+    /// which is the application's own.
     #[test]
     fn every_offered_panel_is_listed_once() {
         let offered: Vec<layout::Panel> = Destination::ALL
             .into_iter()
             .flat_map(Destination::panels)
             .copied()
-            .filter(|panel| !matches!(panel, layout::Panel::Map | layout::Panel::Settings))
+            .filter(|panel| *panel != layout::Panel::Map)
             .collect();
 
         let mut listed = Panels::LISTED.to_vec();

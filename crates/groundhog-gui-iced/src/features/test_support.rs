@@ -133,6 +133,9 @@ impl Env {
             following: false,
             notices: &self.notices,
             links: self.backend.links(),
+            settings: &self.settings,
+            recorder: None,
+            recordings: None,
         }
     }
 

@@ -40,7 +40,7 @@ use crate::{
         mission::MissionEditor,
         notifications::{self, Level, Notice, Notifications},
         parameter_panel::ParameterPanel,
-        settings_panel,
+        settings_panel::SettingsPanel,
         vehicles::VehiclePanel,
         video::{self, VideoPanel},
     },
@@ -75,9 +75,6 @@ pub struct Application {
     insets: Insets,
     /// The theme whose system-bar icons were requested, if any.
     system_bars: Option<bool>,
-    /// The scale the settings' slider is being dragged to, applied on
-    /// release.
-    scale_preview: Option<f32>,
     /// The window's full screen: the application's own (F11), apart from
     /// the video's.
     full_screen: FullScreen,
@@ -116,7 +113,6 @@ pub enum Message {
     Map(map::Message),
     /// A message to one of the panels.
     Panel(PanelMessage),
-    Settings(settings_panel::Message),
     Notifications(notifications::Message),
     Confirm(Answer),
 
@@ -217,10 +213,10 @@ impl Application {
                 links: LinkPanel::new(),
                 video,
                 logs: LogPanel::new(),
+                settings: SettingsPanel::default(),
             },
             insets: platform::insets(),
             system_bars: None,
-            scale_preview: None,
             full_screen: FullScreen::default(),
             floating: Floating::default(),
             window: None,
@@ -414,10 +410,6 @@ impl Application {
                 // The video's own full screen is the window's.
                 Task::batch([task, self.sync_full_screen()])
             }
-            Message::Settings(message) => {
-                self.on_settings(message);
-                self.sync_panels()
-            }
             Message::Notifications(message) => {
                 self.notices.update(message);
                 Task::none()
@@ -462,14 +454,16 @@ impl Application {
         let task = run(&mut self.panels, &mut env).map(Message::Panel);
         let effects = env.effects;
 
-        for effect in effects {
-            self.apply(effect.map(Message::Panel));
-        }
+        let applied: Vec<_> = effects
+            .into_iter()
+            .map(|effect| self.apply(effect.map(Message::Panel)))
+            .collect();
 
-        task
+        Task::batch([task].into_iter().chain(applied))
     }
 
-    fn apply(&mut self, effect: Effect<Message>) {
+    /// Do what a panel asked, returning any work it starts.
+    fn apply(&mut self, effect: Effect<Message>) -> Task<Message> {
         match effect {
             Effect::Confirm(confirmation) => self.confirmation = Some(confirmation),
             Effect::SelectVehicle(system) => {
@@ -494,7 +488,31 @@ impl Application {
                 }
                 self.save_configuration();
             }
+            Effect::Settings(settings) => return self.change_settings(settings),
         }
+        Task::none()
+    }
+
+    /// Take `settings` as the application's: persist them, and apply what
+    /// changed.
+    fn change_settings(&mut self, settings: Settings) -> Task<Message> {
+        let before = self.configuration.settings;
+        if settings == before {
+            return Task::none();
+        }
+        self.configuration.settings = settings;
+        self.save_configuration();
+
+        // Only a change of the setting: a recording that could not start is
+        // not retried (and its failure not announced again) on every other
+        // settings message, such as each step of a scale slider.
+        if settings.record_telemetry != before.record_telemetry {
+            self.sync_recording();
+        }
+        self.sync_system_bars();
+        // The panels may follow a setting (recording video while armed), and
+        // the shell may have changed.
+        self.sync_panels()
     }
 
     fn remember_directory(&mut self, path: &Path) {
@@ -628,53 +646,6 @@ impl Application {
         if let Some(notice) = notice {
             self.notices.push(notice);
         }
-    }
-
-    fn on_settings(&mut self, message: settings_panel::Message) {
-        let settings = &mut self.configuration.settings;
-        let before = *settings;
-
-        match message {
-            settings_panel::Message::Theme(mode) => settings.theme = mode,
-            settings_panel::Message::Shell(mode) => settings.shell = mode,
-            settings_panel::Message::TouchControls(touch) => settings.touch_controls = touch,
-            settings_panel::Message::PreviewScaleFactor(scale) => self.scale_preview = Some(scale),
-            settings_panel::Message::CommitScaleFactor => {
-                if let Some(scale) = self.scale_preview.take() {
-                    settings.scale_factor = scale;
-                }
-            }
-            settings_panel::Message::DefaultAltitude(altitude) => {
-                settings.default_waypoint_altitude_m = altitude;
-            }
-            settings_panel::Message::RecordTelemetry(record) => settings.record_telemetry = record,
-            settings_panel::Message::RecordVideoWhileArmed(record) => {
-                settings.record_video_while_armed = record;
-            }
-            settings_panel::Message::RestoreDefaults => {
-                self.confirmation = Some(
-                    Confirmation::new(
-                        "Restore the default settings?",
-                        "Every setting goes back to its default. Links and the panel layout are kept.",
-                        Message::Settings(settings_panel::Message::DefaultsConfirmed),
-                    )
-                    .accept_label("Restore"),
-                );
-            }
-            settings_panel::Message::DefaultsConfirmed => *settings = Settings::default(),
-        }
-
-        if self.configuration.settings != before {
-            self.save_configuration();
-        }
-
-        // Only a change of the setting: a recording that could not start is
-        // not retried (and its failure not announced again) on every other
-        // settings message, such as each step of a scale slider.
-        if self.configuration.settings.record_telemetry != before.record_telemetry {
-            self.sync_recording();
-        }
-        self.sync_system_bars();
     }
 
     /// Starts or stops recording to match the setting.
@@ -841,14 +812,6 @@ impl Application {
                 self.view_toasts(ui::space::M)
             ]
             .boxed(),
-            layout::Panel::Settings => settings_panel::view(
-                &self.configuration.settings,
-                self.scale_preview,
-                self.recorder.as_ref().map(TlogRecorder::path),
-                self.panels.video.recordings(),
-            )
-            .map(Message::Settings)
-            .boxed(),
             panel => match self.panels.view(panel, self.view_context()) {
                 Some(view) => view.map(Message::Panel).boxed(),
                 None => ui::empty(format!("{} is not available.", panel.title())).boxed(),
@@ -864,6 +827,9 @@ impl Application {
             following: self.map.is_following(),
             notices: &self.notices,
             links: self.backend.links(),
+            settings: &self.configuration.settings,
+            recorder: self.recorder.as_ref().map(TlogRecorder::path),
+            recordings: self.panels.video.recordings(),
         }
     }
 

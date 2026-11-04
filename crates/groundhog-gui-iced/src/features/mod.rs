@@ -100,6 +100,12 @@ pub struct ViewContext<'a> {
     pub notices: &'a Notifications,
     /// The links and their status.
     pub links: &'a LinkManager,
+    /// The application's settings.
+    pub settings: &'a crate::config::Settings,
+    /// The file telemetry is being recorded to, if any.
+    pub recorder: Option<&'a Path>,
+    /// Where videos are recorded to, if anywhere.
+    pub recordings: Option<&'a Path>,
 }
 
 /// Something a feature asks the application to do.
@@ -117,6 +123,8 @@ pub enum Effect<M> {
     RememberDirectory(PathBuf),
     /// Save what a feature keeps in the configuration file.
     Persist(Persisted),
+    /// Change the application's settings to these.
+    Settings(crate::config::Settings),
 }
 
 /// What a feature keeps in the configuration file, which the application
@@ -138,6 +146,7 @@ impl<M> Effect<M> {
             Effect::FollowVehicle(follow) => Effect::FollowVehicle(follow),
             Effect::RememberDirectory(path) => Effect::RememberDirectory(path),
             Effect::Persist(persisted) => Effect::Persist(persisted),
+            Effect::Settings(settings) => Effect::Settings(settings),
         }
     }
 }

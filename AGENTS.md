@@ -365,14 +365,17 @@ A feature's `update` gets a `features::Context`, holding:
 
 It requests anything else as an `Effect`: confirm, select a vehicle, move the
 map, remember a directory, persist what it keeps in the configuration file
-(`Effect::Persist`). An `Effect` is the only way a feature asks the
+(`Effect::Persist`), change the settings (`Effect::Settings`, which the
+application persists and applies). An `Effect` is the only way a feature
+asks the
 application for anything. Features never reach into each other or into the
 application.
 
 A feature the operator opens is a `features::Panel`, one interface for all
 of them: `update` with a `Context`, `view` with a `ViewContext` (the
 application's state to read: the snapshot, the selected vehicle, whether
-the map follows it, the notices, the links), and optional hooks: `layers`
+the map follows it, the notices, the links, the settings, where telemetry
+and videos are recorded), and optional hooks: `layers`
 to draw on the map, `on_fleet` for each snapshot, and `on_tick` when the
 settings or the shell change, or, while `wants_ticks`, as time passes. The
 video's recording while armed lives in those hooks: it reads the fleet and
@@ -987,7 +990,8 @@ commands with a location), the file formats, and jump-target translation (for
 
 Add a field to `config::Settings` (it is `#[serde(default)]`, so old
 configurations still load), a message and a control in
-`features/settings_panel.rs`, and apply it in `Application::on_settings`.
+`features/settings_panel.rs` (the panel asks for the new settings with
+`Effect::Settings`), and apply it in `Application::change_settings`.
 Configuration is persisted only through `ConfigWriter` (a
 `persist::SaveQueue`), which writes one save at a time, newest last, and
 replaces the file atomically. The file is the operator's whole setup, so its
