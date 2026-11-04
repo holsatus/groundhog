@@ -557,11 +557,15 @@ where
 /// blends with the border's opaque ring, never with the body, which shows
 /// nowhere past the border's inner edge.
 ///
-/// The border's straight edges are strips, each the pane's whole length;
-/// the corners' rings, drawn after them, cover their ends. So no piece is
-/// much larger than what it paints: a renderer that blends every pixel a
-/// quad covers, transparent or not (tiny-skia), would otherwise blend the
-/// whole pane to draw a border-only quad around it.
+/// The straight edges are built the same way, from strips each the pane's
+/// whole length: the border's, from the border's inner edge to
+/// [`OVERHANG`] past the pane, and over it the backdrop's, from the pane's
+/// edge out. The body's clip, snapped to the pixel grid, may reach part of a
+/// pixel past the pane, and the backdrop covers that part. The corners'
+/// rings, drawn after the strips, cover their ends. So no piece is much
+/// larger than what it paints: a renderer that blends every pixel a quad
+/// covers, transparent or not (tiny-skia), would otherwise blend the whole
+/// pane to draw a border-only quad around it.
 ///
 /// No piece is snapped to the pixel grid. A renderer that snaps quads
 /// (wgpu, with iced's `crisp` feature) rounds each of their edges on its
@@ -570,13 +574,21 @@ where
 /// and the arcs, measured from the rounded edges, would no longer meet the
 /// strips or share their centres. The corners' clips are snapped; where
 /// one cuts its square short, the arc lies a hundredth of a pixel from the
-/// pane's edge, over the strip.
+/// pane's edge, over the strips.
 struct Outline {
     bounds: Rectangle,
-    /// Top, right, bottom and left; none without a border.
-    edges: Option<([renderer::Quad; 4], Color)>,
+    /// The border's strips, top, right, bottom and left, and its colour;
+    /// none without a border.
+    border: Option<([renderer::Quad; 4], Color)>,
+    /// The backdrop's strips, over the border's, and its colour.
+    backdrop: ([renderer::Quad; 4], Color),
     corners: [Option<Corner>; 4],
 }
+
+/// How far an [`Outline`]'s strips reach past the pane: further than its
+/// body's clip, snapped to the pixel grid, can (half a physical pixel), with
+/// a pixel to blend in. The outline's own clip cuts the rest off.
+const OVERHANG: f32 = 2.0;
 
 /// A rounded corner of an [`Outline`].
 struct Corner {
@@ -613,17 +625,20 @@ impl Outline {
             snap: false,
             ..renderer::Quad::default()
         };
-        let edges = (width > 0.0).then(|| {
-            (
-                [
-                    strip(left, top, bounds.width, width),
-                    strip(right - width, top, width, bounds.height),
-                    strip(left, bottom - width, bounds.width, width),
-                    strip(left, top, width, bounds.height),
-                ],
-                border.color,
-            )
-        });
+        // Along each edge, from `inside` the pane to `OVERHANG` past it.
+        let strips = |inside: f32| {
+            let (start, depth) = (-OVERHANG, inside + OVERHANG);
+            let (across, down) = (
+                bounds.width + 2.0 * OVERHANG,
+                bounds.height + 2.0 * OVERHANG,
+            );
+            [
+                strip(left + start, top + start, across, depth),
+                strip(right - inside, top + start, depth, down),
+                strip(left + start, bottom - inside, across, depth),
+                strip(left + start, top + start, depth, down),
+            ]
+        };
 
         // A ring around `centre` out to `outer`, `width` wide, in `color`.
         let ring = |centre: Point, outer: f32, width: f32, color: Color| renderer::Quad {
@@ -660,7 +675,8 @@ impl Outline {
 
         Some(Self {
             bounds,
-            edges,
+            border: (width > 0.0).then(|| (strips(width), border.color)),
+            backdrop: (strips(0.0), backdrop),
             corners: [
                 corner(top_left, left, top, Vector::new(1.0, 1.0)),
                 corner(top_right, right, top, Vector::new(-1.0, 1.0)),
@@ -673,13 +689,13 @@ impl Outline {
     /// Draw the outline, in layers of its own over what is drawn so far:
     /// the strips, then each corner's rings, clipped to its square.
     fn draw<Renderer: core::Renderer>(self, renderer: &mut Renderer) {
-        if let Some((strips, color)) = self.edges {
-            renderer.with_layer(self.bounds, |renderer| {
+        renderer.with_layer(self.bounds, |renderer| {
+            for (strips, color) in self.border.into_iter().chain([self.backdrop]) {
                 for strip in strips {
                     renderer.fill_quad(strip, Background::Color(color));
                 }
-            });
-        }
+            }
+        });
 
         for corner in self.corners.into_iter().flatten() {
             renderer.with_layer(corner.square, |renderer| {
@@ -907,18 +923,24 @@ mod tests {
                     // In physical pixels.
                     let outside = outside_by(pane, RADIUS, centre) * scale;
 
-                    if outside > 0.0 {
-                        // The body is the only red; the window's grey
-                        // (around the pane, where its edge falls between
-                        // pixels) adds as much to every channel.
+                    // The border's band is a logical pixel wide. Within a
+                    // quarter of a physical pixel of its inner edge, where
+                    // the body blends in, tiny-skia's coverage is
+                    // approximate; beyond it, pixels the pane's edge crosses
+                    // included, the body must not show. It is the only red;
+                    // the window's grey (around the pane, where its edge
+                    // falls between pixels) adds as much to every channel.
+                    let inner = -scale;
+                    if outside > inner + 0.75 {
                         assert!(
                             colour.r - colour.g.min(colour.b) < 0.02,
                             "inset {inset}: the body shows at ({x}, {y}): {colour:?}"
                         );
-                    } else if (-(scale - 0.5)..=-0.5).contains(&outside) {
-                        // Wholly within the border's band (a pixel wide).
+                    }
+                    if (inner + 0.75..=-0.75).contains(&outside) {
+                        // Wholly within the border's band.
                         assert!(
-                            colour.g > 0.9 && colour.r < 0.1,
+                            colour.g > 0.8 && colour.r < 0.1,
                             "inset {inset}: the border breaks at ({x}, {y}): {colour:?}"
                         );
                     }
