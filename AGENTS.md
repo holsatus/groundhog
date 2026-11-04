@@ -752,9 +752,21 @@ rather than copying it.
 
 Run every vehicle operation through `features::operations::Operations`, keyed
 by what it is about. That gives busy state, cancellation (dropping the task
-cancels the transaction), progress reporting, and stale-result filtering: a
-result whose `Ticket` is no longer current is ignored. In the result handler,
-call `finish(&key, ticket)` first and drop the result if it returns `false`.
+cancels the transaction), progress reporting, stale-result filtering, and
+the failure notice.
+
+- The key type implements `Activity`: what a run does ("Arming", "Setting
+  RATE_P") and which vehicle it concerns, so every failure reads "{activity}
+  on {vehicle} failed", in every panel. A failure that announces itself
+  another way says so in `Activity::announces`.
+- What a run carries besides its key (the value an upload sets, whether
+  tracking starts or stops) is its context: `Operations<K, C>` keeps it
+  with the run (`start_with`), so messages stay small.
+- `start` takes the feature's `Finished` message variant; the result comes
+  back as an `operations::Finished<K, T>`. Hand it to `settle`, which drops
+  a stale result, announces a failure, and returns the rest as `Settled`:
+  handle the success, and whatever else a failure changes. Never word a
+  failure notice of your own.
 
 ### Safety defaults
 
@@ -789,7 +801,7 @@ hand to the feature come from a `Fleet` they fold messages into with
 `Fleet::observe`. The folding methods and `Fleet::test_begin_calibration` are
 public only under `groundhog-logic`'s `test-support` feature, which the
 frontend enables from its dev-dependency. To simulate an operation's
-result, take its ticket with `Operations::ticket_of` (test-only).
+result, build its message with `Operations::finished` (test-only).
 
 Tests must not touch the user's files. Write into a temporary directory, or
 point `XDG_CONFIG_HOME` and `XDG_DATA_HOME` somewhere else.
@@ -844,8 +856,9 @@ Render it before and after a change to the look, and compare.
    snapshot (`with_vehicle`), and map errors with `Error::from`. If the
    result changes what the vehicle holds, `report` it to the runtime.
 3. In the feature: add a request message, which may confirm first, and a
-   `Finished(key, Ticket, Result<..>)` message. Run the operation through
-   `Operations`, and push a `Notice` on failure.
+   `Finished(operations::Finished<Key, T>)` message. Name the operation in
+   the key's `Activity`, run it through `Operations`, and `settle` its
+   result.
 4. Test the client end to end in `services/tests.rs`, and the feature flow
    in its tests.
 
@@ -1058,5 +1071,5 @@ written by a newer build, saves nothing.
 | **Calibration run** | One start of a sensor calibration on a vehicle, identified by a `RunId`, followed until the operator dismisses it once finished. |
 | **Liveness** | Active, stale (no frame for 3 s) or lost (no frame for 10 s). |
 | **Revision** | A counter that changes whenever content changes; used as a cache key. |
-| **Operation / `Ticket`** | A tracked, cancellable task from the UI, and the identity of one run of it. |
+| **Operation / `Ticket`** | A tracked, cancellable task from the UI, and the identity of one run of it. An `Activity` names what a run does, for the notice when it fails. |
 | **Notice** | An operator notification: a toast, plus an entry in the log panel's history. |

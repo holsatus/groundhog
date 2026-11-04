@@ -11,7 +11,7 @@
 mod map;
 mod view;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
 
 use groundhog_logic::{
     SystemId,
@@ -23,7 +23,7 @@ use groundhog_logic::{
             OnboardMission, Refusal, SyncStatus, Verdict,
         },
     },
-    services::{Progress, Result},
+    services::Result,
     storage::mission::{WplMission, parse_wpl, write_wpl},
 };
 use iced::Task;
@@ -34,7 +34,7 @@ use super::{
     confirm::Confirmation,
     file_dialog,
     notifications::Notice,
-    operations::{Operations, Ticket},
+    operations::{Activity, Finished, Operations, ProgressReporter, Progressed, Settled},
 };
 
 /// Which draft: a vehicle's, or the offline plan (`None`).
@@ -72,6 +72,19 @@ impl Operation {
             self,
             Operation::Download | Operation::Upload | Operation::Clear
         )
+    }
+}
+
+/// An operation on one vehicle.
+type Key = (SystemId, Operation);
+
+impl Activity for Key {
+    fn activity(&self, (): &()) -> Cow<'static, str> {
+        self.1.describe().into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0
     }
 }
 
@@ -122,7 +135,7 @@ impl Draft {
 
 pub struct MissionEditor {
     drafts: BTreeMap<PlanKey, Draft>,
-    operations: Operations<(SystemId, Operation)>,
+    operations: Operations<Key>,
 }
 
 impl Default for MissionEditor {
@@ -168,8 +181,8 @@ pub enum MessageKind {
         confirmed: bool,
     },
     Cancel(Operation),
-    Progress(Operation, Ticket, Progress),
-    Finished(Operation, Ticket, Result<Option<OnboardMission>>),
+    Progress(Progressed<Key>),
+    Finished(Finished<Key, Option<OnboardMission>>),
 
     // Editing.
     AddWaypoint,
@@ -260,15 +273,12 @@ impl MissionEditor {
                 }
                 Task::none()
             }
-            MessageKind::Progress(operation, ticket, progress) => {
-                if let Some(system) = plan {
-                    self.operations
-                        .report(&(system, operation), ticket, progress);
-                }
+            MessageKind::Progress(progressed) => {
+                self.operations.report(progressed);
                 Task::none()
             }
-            MessageKind::Finished(operation, ticket, result) => {
-                self.finished(plan, operation, ticket, result, cx);
+            MessageKind::Finished(finished) => {
+                self.finished(finished, cx);
                 Task::none()
             }
             MessageKind::Select(item) => {
@@ -624,9 +634,9 @@ impl MissionEditor {
                 }
                 .map(|()| None)
             },
-            move |ticket, result| Message {
+            move |finished| Message {
                 plan: Some(system),
-                kind: MessageKind::Finished(operation, ticket, result),
+                kind: MessageKind::Finished(finished),
             },
         )
     }
@@ -658,9 +668,9 @@ impl MissionEditor {
         self.operations.start(
             (system, Operation::SetCurrent),
             async move { client.set_current_mission_item(index).await.map(|()| None) },
-            move |ticket, result| Message {
+            move |finished| Message {
                 plan,
-                kind: MessageKind::Finished(Operation::SetCurrent, ticket, result),
+                kind: MessageKind::Finished(finished),
             },
         )
     }
@@ -670,7 +680,7 @@ impl MissionEditor {
         &mut self,
         system: SystemId,
         operation: Operation,
-        run: impl FnOnce(super::operations::ProgressReporter) -> Fut,
+        run: impl FnOnce(ProgressReporter) -> Fut,
     ) -> Task<Message>
     where
         Fut: std::future::Future<Output = Result<Option<OnboardMission>>> + Send + 'static,
@@ -683,43 +693,33 @@ impl MissionEditor {
         self.operations.start_with_progress(
             (system, operation),
             run,
-            move |ticket, progress| Message {
+            move |progressed| Message {
                 plan,
-                kind: MessageKind::Progress(operation, ticket, progress),
+                kind: MessageKind::Progress(progressed),
             },
-            move |ticket, result| Message {
+            move |finished| Message {
                 plan,
-                kind: MessageKind::Finished(operation, ticket, result),
+                kind: MessageKind::Finished(finished),
             },
         )
     }
 
     fn finished(
         &mut self,
-        plan: PlanKey,
-        operation: Operation,
-        ticket: Ticket,
-        result: Result<Option<OnboardMission>>,
+        finished: Finished<Key, Option<OnboardMission>>,
         cx: &mut Context<Message>,
     ) {
-        let Some(system) = plan else { return };
-        if !self.operations.finish(&(system, operation), ticket) {
+        // A failure is announced and changes nothing else.
+        let Some(Settled {
+            key: (system, operation),
+            result: Ok(mission),
+            ..
+        }) = self.operations.settle(finished, cx)
+        else {
             return;
-        }
-
-        let mission = match result {
-            Ok(mission) => mission,
-            Err(error) => {
-                cx.notices.push(
-                    Notice::error(format!("{} failed", operation.describe()))
-                        .detail(error)
-                        .vehicle(system),
-                );
-                return;
-            }
         };
 
-        let draft = self.draft_mut(plan);
+        let draft = self.draft_mut(Some(system));
         match operation {
             Operation::Download | Operation::Upload => {
                 let mission = mission.unwrap_or_else(OnboardMission::empty);

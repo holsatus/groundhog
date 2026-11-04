@@ -7,6 +7,8 @@
 //! a start, a confirmation or a cancel is possible is the backend's to say
 //! (`Vehicle::calibration_controls`).
 
+use std::borrow::Cow;
+
 use groundhog_logic::{
     SystemId,
     domain::{
@@ -26,8 +28,7 @@ use iced::{
 use super::{
     Context,
     confirm::Confirmation,
-    notifications::Notice,
-    operations::{Operations, Ticket},
+    operations::{Activity, Finished, Operations},
 };
 use crate::ui::{self, Icon, TextExt, Tone};
 
@@ -44,6 +45,34 @@ pub enum Action {
 }
 
 type Key = (SystemId, Action);
+
+impl Activity for Key {
+    fn activity(&self, (): &()) -> Cow<'static, str> {
+        match self.1 {
+            Action::Start => "Starting the calibration",
+            Action::Confirm => "Confirming the orientation",
+            Action::Cancel => "Cancelling the calibration",
+            Action::Reboot => "Rebooting the autopilot",
+        }
+        .into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0
+    }
+
+    /// A refused or unanswered start ends the session, which announces
+    /// itself; only failures before there is a session are news.
+    fn announces(&self, (): &(), error: &Error) -> bool {
+        self.1 != Action::Start
+            || matches!(
+                error,
+                Error::CalibrationUnsupported
+                    | Error::CalibrationBlocked(_)
+                    | Error::UnknownVehicle
+            )
+    }
+}
 
 #[derive(Default)]
 pub struct CalibrationPanel {
@@ -62,7 +91,7 @@ pub enum Message {
     /// calibration that waits for it.
     RequestReboot(SystemId),
     Reboot(SystemId),
-    Finished(Key, Ticket, Result<()>),
+    Finished(Finished<Key, ()>),
 }
 
 impl CalibrationPanel {
@@ -101,12 +130,9 @@ impl CalibrationPanel {
                     async move { client.reboot().await },
                 );
             }
-            Message::Finished(key, ticket, result) => {
-                if self.operations.finish(&key, ticket)
-                    && let Err(error) = result
-                {
-                    notify(cx, key, error);
-                }
+            Message::Finished(finished) => {
+                // A failure is announced; the run shows in the snapshot.
+                self.operations.settle(finished, cx);
             }
         }
 
@@ -118,10 +144,7 @@ impl CalibrationPanel {
         key: Key,
         operation: impl Future<Output = Result<()>> + Send + 'static,
     ) -> Task<Message> {
-        self.operations
-            .start(key, operation, move |ticket, result| {
-                Message::Finished(key, ticket, result)
-            })
+        self.operations.start(key, operation, Message::Finished)
     }
 
     fn is_busy(&self, system: SystemId, action: Action) -> bool {
@@ -348,31 +371,6 @@ fn view_sides(session: &Session) -> impl Widget<Message> + '_ {
     });
 
     row(sides).spacing(ui::space::XS).wrap()
-}
-
-fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
-    let what = match action {
-        // A refused or unanswered start ends the session, which announces
-        // itself; only failures before there is a session are news.
-        Action::Start => match error {
-            Error::CalibrationUnsupported
-            | Error::CalibrationBlocked(_)
-            | Error::UnknownVehicle => "Starting the calibration",
-            _ => return,
-        },
-        Action::Confirm => "Confirming the orientation",
-        Action::Cancel => "Cancelling the calibration",
-        Action::Reboot => "Rebooting the autopilot",
-    };
-
-    cx.notices.push(
-        Notice::error(format!(
-            "{what} on {} failed",
-            cx.fleet.vehicle_name(system)
-        ))
-        .detail(error)
-        .vehicle(system),
-    );
 }
 
 #[cfg(test)]

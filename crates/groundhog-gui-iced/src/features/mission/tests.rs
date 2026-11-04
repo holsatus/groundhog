@@ -295,21 +295,19 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
         Some(A),
         MessageKind::Download { confirmed: true },
     );
-    let ticket = editor
-        .operations
-        .ticket_of(&(A, Operation::Download))
-        .unwrap();
-
     let mission = OnboardMission {
         items: vec![waypoint(5.0)],
         home: None,
         opaque_id: 3,
     };
+    let finished = editor
+        .operations
+        .finished(&(A, Operation::Download), Ok(Some(mission.clone())));
     step(
         &mut env,
         &mut editor,
         Some(A),
-        MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission.clone()))),
+        MessageKind::Finished(finished.clone()),
     );
     assert!(draft(&editor, Some(A)).plan().matches(&mission.items));
     assert!(!editor.transferring(A));
@@ -320,7 +318,7 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
         &mut env,
         &mut editor,
         Some(A),
-        MessageKind::Finished(Operation::Download, ticket, Ok(Some(mission))),
+        MessageKind::Finished(finished),
     );
     assert!(draft(&editor, Some(A)).plan().is_empty());
 }
@@ -400,24 +398,21 @@ async fn failures_are_shown_to_the_operator() {
         Some(A),
         MessageKind::Upload { confirmed: true },
     );
-    let ticket = editor
-        .operations
-        .ticket_of(&(A, Operation::Upload))
-        .unwrap();
+    let finished = editor.operations.finished(
+        &(A, Operation::Upload),
+        Err(groundhog_logic::services::Error::Timeout),
+    );
     step(
         &mut env,
         &mut editor,
         Some(A),
-        MessageKind::Finished(
-            Operation::Upload,
-            ticket,
-            Err(groundhog_logic::services::Error::Timeout),
-        ),
+        MessageKind::Finished(finished),
     );
 
     let notice = env.notices.history().last().expect("a notice");
     assert_eq!(notice.level, crate::features::notifications::Level::Error);
-    assert!(notice.title.contains("upload"), "{}", notice.title);
+    let name = env.fleet.snapshot().vehicle_name(A);
+    assert_eq!(notice.title, format!("Mission upload on {name} failed"));
 }
 
 #[tokio::test]

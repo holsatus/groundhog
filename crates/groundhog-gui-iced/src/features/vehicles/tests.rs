@@ -205,3 +205,23 @@ async fn a_copter_shows_its_throttle_but_no_airspeed() {
     assert!(!shows(&copter, "Airspeed (est.)"));
     assert!(!shows(&copter, "17.4 m/s"));
 }
+
+/// A failed command is announced, naming what failed and the vehicle.
+#[tokio::test]
+async fn a_failed_command_is_announced() {
+    let mut env = env(false);
+    let mut panel = VehiclePanel::default();
+    env.step(&mut panel, Message::Arm(A, true));
+    let finished = panel.commands.finished(
+        &(A, Command::Arm),
+        Err(groundhog_logic::services::Error::Timeout),
+    );
+
+    env.step(&mut panel, Message::Finished(finished));
+
+    let notice = env.notices.history().last().expect("a notice");
+    let name = env.fleet.snapshot().vehicle_name(A);
+    assert_eq!(notice.title, format!("Arming on {name} failed"));
+    assert_eq!(notice.system, Some(A));
+    assert!(!panel.commands.is_running(&(A, Command::Arm)));
+}

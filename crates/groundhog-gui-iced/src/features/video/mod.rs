@@ -37,6 +37,7 @@
 mod tracking;
 
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -47,7 +48,6 @@ use groundhog_logic::{
         fleet::FleetSnapshot,
         vehicle::camera::{CameraId, Tracking, TrackingSupport},
     },
-    services::{Error, Result},
 };
 use groundhog_video::{Config, FrameSlot, Receiver, Recording, Source, State, Status};
 use iced::{
@@ -58,8 +58,7 @@ use iced::{
 use self::tracking::{Overlay, Request, Shade};
 use super::{
     Context,
-    notifications::Notice,
-    operations::{Operations, Ticket},
+    operations::{Activity, Finished, Operations, Settled},
 };
 use crate::{
     config::VideoSettings,
@@ -87,11 +86,25 @@ pub enum Message {
     /// Have the camera track what a gesture picked.
     Track(TrackKey, Request),
     StopTracking(TrackKey),
-    Tracked(TrackKey, TrackAction, Ticket, Result<()>),
+    Tracked(Finished<TrackKey, ()>),
 }
 
 /// Which vehicle's camera tracking is about.
 pub type TrackKey = (SystemId, CameraId);
+
+impl Activity<TrackAction> for TrackKey {
+    fn activity(&self, action: &TrackAction) -> Cow<'static, str> {
+        match action {
+            TrackAction::Track(_) => "Starting tracking",
+            TrackAction::Stop => "Stopping tracking",
+        }
+        .into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0
+    }
+}
 
 /// What was asked of a camera, one at a time: a new request replaces the
 /// one before.
@@ -224,7 +237,7 @@ pub struct VideoPanel {
     while_armed: WhileArmed,
     /// The identity the next receiver gets.
     next: u64,
-    tracking: Operations<TrackKey>,
+    tracking: Operations<TrackKey, TrackAction>,
     /// What a camera was asked, while it has yet to answer.
     asked: Option<(TrackKey, TrackAction)>,
     /// The camera that accepted a track, until it is stopped: whether it
@@ -444,15 +457,21 @@ impl VideoPanel {
                 (self.do_tracking(key, TrackAction::Track(request), cx), None)
             }
             Message::StopTracking(key) => (self.do_tracking(key, TrackAction::Stop, cx), None),
-            Message::Tracked(key, action, ticket, result) => {
-                if !self.tracking.finish(&key, ticket) {
+            Message::Tracked(finished) => {
+                let Some(Settled {
+                    key,
+                    context: action,
+                    result,
+                }) = self.tracking.settle(finished, cx)
+                else {
                     return (Task::none(), None);
-                }
+                };
                 self.asked = None;
+                // A failure was announced when it settled.
                 match (action, result) {
                     (TrackAction::Track(_), Ok(())) => self.engaged = Some(key),
                     (TrackAction::Stop, Ok(())) => self.engaged = None,
-                    (_, Err(error)) => notify_tracking(cx, key, action, error),
+                    (_, Err(_)) => {}
                 }
                 (Task::none(), None)
             }
@@ -470,8 +489,9 @@ impl VideoPanel {
         let (system, camera) = key;
         let client = cx.services.vehicle(system);
         self.asked = Some((key, action));
-        self.tracking.start(
+        self.tracking.start_with(
             key,
+            action,
             async move {
                 match action {
                     TrackAction::Track(Request::Point(at)) => {
@@ -483,7 +503,7 @@ impl VideoPanel {
                     TrackAction::Stop => client.stop_tracking(camera).await,
                 }
             },
-            move |ticket, result| Message::Tracked(key, action, ticket, result),
+            Message::Tracked,
         )
     }
 
@@ -881,26 +901,6 @@ impl VideoPanel {
     }
 }
 
-fn notify_tracking(
-    cx: &mut Context<Message>,
-    (system, _): TrackKey,
-    action: TrackAction,
-    error: Error,
-) {
-    let what = match action {
-        TrackAction::Track(_) => "Starting of tracking",
-        TrackAction::Stop => "Stopping of tracking",
-    };
-    cx.notices.push(
-        Notice::error(format!(
-            "{what} on {} failed",
-            cx.fleet.vehicle_name(system)
-        ))
-        .detail(error)
-        .vehicle(system),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -1143,7 +1143,7 @@ mod tests {
         use groundhog_logic::{
             MavlinkId,
             domain::vehicle::camera::{ImagePoint, ImageRect},
-            services::Rejection,
+            services::{Error, Rejection, Result},
         };
         use mavio::{
             DefaultDialect,
@@ -1223,8 +1223,8 @@ mod tests {
             };
             drop(update_in(env, panel, message));
             assert!(panel.tracking.is_running(&KEY));
-            let ticket = panel.tracking.ticket_of(&KEY).expect("running");
-            update_in(env, panel, Message::Tracked(KEY, action, ticket, result)).1
+            let finished = panel.tracking.finished(&KEY, result);
+            update_in(env, panel, Message::Tracked(finished)).1
         }
 
         #[tokio::test]
@@ -1262,7 +1262,7 @@ mod tests {
             );
             let notice = env.notices.history().last().expect("a notice");
             assert!(
-                notice.title.starts_with("Starting of tracking on"),
+                notice.title.starts_with("Starting tracking on"),
                 "{}",
                 notice.title
             );
@@ -1279,19 +1279,10 @@ mod tests {
                 &mut panel,
                 Message::Track(KEY, rectangle()),
             ));
-            let first = panel.tracking.ticket_of(&KEY).expect("running");
+            let first = panel.tracking.finished(&KEY, Err(Error::Timeout));
             drop(update_in(&mut env, &mut panel, Message::StopTracking(KEY)));
 
-            drop(update_in(
-                &mut env,
-                &mut panel,
-                Message::Tracked(
-                    KEY,
-                    TrackAction::Track(rectangle()),
-                    first,
-                    Err(Error::Timeout),
-                ),
-            ));
+            drop(update_in(&mut env, &mut panel, Message::Tracked(first)));
             assert_eq!(env.notices.history().count(), 0, "stale: ignored");
             assert!(panel.tracking.is_running(&KEY), "the stop still runs");
         }

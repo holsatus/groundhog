@@ -6,7 +6,10 @@
 
 mod map;
 
-use std::time::{Duration, Instant};
+use std::{
+    borrow::Cow,
+    time::{Duration, Instant},
+};
 
 use groundhog_logic::{
     SystemId,
@@ -15,7 +18,6 @@ use groundhog_logic::{
         fleet::FleetSnapshot,
         vehicle::{Liveness, Vehicle},
     },
-    services::Result,
 };
 use iced::{
     Alignment, Element, Length, Task, Widget,
@@ -24,7 +26,9 @@ use iced::{
 use mavio::default_dialect::enums::{GpsFixType, MissionState};
 
 use super::{
-    Context, Effect, confirm::Confirmation, notifications::Notice, operations::Operations,
+    Context, Effect,
+    confirm::Confirmation,
+    operations::{Activity, Finished, Operations},
 };
 use crate::ui::{self, Icon, TextExt, Tone};
 
@@ -37,18 +41,23 @@ pub enum Command {
     Reboot,
 }
 
-impl Command {
-    fn verb(self) -> &'static str {
-        match self {
+type Key = (SystemId, Command);
+
+impl Activity for Key {
+    fn activity(&self, (): &()) -> Cow<'static, str> {
+        match self.1 {
             Command::Arm => "Arming",
             Command::Disarm => "Disarming",
             Command::SetMode => "Changing mode",
             Command::Reboot => "Rebooting",
         }
+        .into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0
     }
 }
-
-type Key = (SystemId, Command);
 
 #[derive(Default)]
 pub struct VehiclePanel {
@@ -77,7 +86,7 @@ pub enum Message {
     /// Ask for confirmation, then reboot the autopilot.
     RequestReboot(SystemId),
     Reboot(SystemId),
-    Finished(Key, super::operations::Ticket, Result<()>),
+    Finished(Finished<Key, ()>),
 }
 
 impl VehiclePanel {
@@ -121,7 +130,7 @@ impl VehiclePanel {
                 return self.commands.start(
                     (system, command),
                     async move { client.arm(arm).await },
-                    move |ticket, result| Message::Finished((system, command), ticket, result),
+                    Message::Finished,
                 );
             }
             Message::RequestMode(system, mode) => {
@@ -147,9 +156,7 @@ impl VehiclePanel {
                 return self.commands.start(
                     (system, Command::SetMode),
                     async move { client.set_mode(mode).await },
-                    move |ticket, result| {
-                        Message::Finished((system, Command::SetMode), ticket, result)
-                    },
+                    Message::Finished,
                 );
             }
             Message::RequestModeKind(system, kind) => {
@@ -176,9 +183,7 @@ impl VehiclePanel {
                 return self.commands.start(
                     (system, Command::SetMode),
                     async move { client.set_mode_kind(kind).await.map(|_| ()) },
-                    move |ticket, result| {
-                        Message::Finished((system, Command::SetMode), ticket, result)
-                    },
+                    Message::Finished,
                 );
             }
             Message::RequestReboot(system) => {
@@ -190,26 +195,12 @@ impl VehiclePanel {
                 return self.commands.start(
                     (system, Command::Reboot),
                     async move { client.reboot().await },
-                    move |ticket, result| {
-                        Message::Finished((system, Command::Reboot), ticket, result)
-                    },
+                    Message::Finished,
                 );
             }
-            Message::Finished(key, ticket, result) => {
-                if self.commands.finish(&key, ticket)
-                    && let Err(error) = result
-                {
-                    let (system, command) = key;
-                    cx.notices.push(
-                        Notice::error(format!(
-                            "{} {} failed",
-                            command.verb(),
-                            cx.fleet.vehicle_name(system)
-                        ))
-                        .detail(error)
-                        .vehicle(system),
-                    );
-                }
+            Message::Finished(finished) => {
+                // A failure is announced; a success shows in the snapshot.
+                self.commands.settle(finished, cx);
             }
         }
 

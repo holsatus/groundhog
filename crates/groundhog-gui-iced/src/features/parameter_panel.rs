@@ -11,7 +11,7 @@
 //! a value written with a guessed encoding may be stored as something else
 //! entirely.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
 
 use groundhog_logic::{
     MavlinkId, SystemId,
@@ -24,7 +24,6 @@ use groundhog_logic::{
         },
         vehicle::Vehicle,
     },
-    services::Result,
     storage::parameter::{ParamFileFormat, read_parameters, write_parameters},
 };
 use iced::{
@@ -36,7 +35,7 @@ use mav_param::{Ident, Value};
 use super::{
     Context, Effect, file_dialog,
     notifications::Notice,
-    operations::{Operations, Ticket},
+    operations::{Activity, Finished, Operations, Settled},
 };
 use crate::{
     ui::{
@@ -76,7 +75,33 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(n))
 }
 
+/// A parameter upload: the component and the parameter, carrying what it
+/// sets as its context.
 type UploadKey = (MavlinkId, Ident);
+
+impl Activity<Upload> for UploadKey {
+    fn activity(&self, _: &Upload) -> Cow<'static, str> {
+        format!("Setting {}", self.1.as_str()).into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0.system_id()
+    }
+}
+
+/// A download of a component's parameter list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Download(MavlinkId);
+
+impl Activity for Download {
+    fn activity(&self, (): &()) -> Cow<'static, str> {
+        "Parameter download".into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0.system_id()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -88,7 +113,7 @@ pub enum Message {
     Reload(MavlinkId),
     /// Stop a download this panel started.
     CancelReload(MavlinkId),
-    Reloaded(MavlinkId, Ticket, Result<DownloadOutcome>),
+    Reloaded(Finished<Download, DownloadOutcome>),
     /// The operator typed into a value field.
     Edit(MavlinkId, Ident, String),
     /// Discard a pending edit.
@@ -97,7 +122,7 @@ pub enum Message {
     ResetAll(MavlinkId),
     Upload(MavlinkId, Ident),
     UploadAll(MavlinkId),
-    Uploaded(UploadKey, Ticket, Upload, Result<Value>),
+    Uploaded(Finished<UploadKey, Value>),
     SaveDialog(MavlinkId),
     SaveTo(PathBuf, MavlinkId, ParamValues),
     Saved(PathBuf, std::result::Result<(), String>),
@@ -112,8 +137,8 @@ pub struct ParameterPanel {
     /// Pending edits, per component and parameter. Kept here (not in the
     /// fleet) so switching components or vehicles and back keeps them.
     edits: BTreeMap<MavlinkId, ParamEdits>,
-    uploads: Operations<UploadKey>,
-    reloads: Operations<MavlinkId>,
+    uploads: Operations<UploadKey, Upload>,
+    reloads: Operations<Download>,
     /// The component the operator chose to view, per vehicle.
     component: BTreeMap<SystemId, u8>,
 }
@@ -135,7 +160,7 @@ impl ParameterPanel {
     /// Whether `address`'s component is downloading its parameters: the panel
     /// started a reload, or the vehicle is being read by someone else.
     fn is_downloading(&self, address: MavlinkId, cx: &Context<Message>) -> bool {
-        self.reloads.is_running(&address)
+        self.reloads.is_running(&Download(address))
             || cx
                 .fleet
                 .parameters(address)
@@ -153,43 +178,51 @@ impl ParameterPanel {
             Message::Reload(address) => {
                 let client = cx.services.component(address);
                 return self.reloads.start(
-                    address,
+                    Download(address),
                     async move { client.fetch_parameters().await },
-                    move |ticket, result| Message::Reloaded(address, ticket, result),
+                    Message::Reloaded,
                 );
             }
             Message::CancelReload(address) => {
-                if self.reloads.cancel(&address) {
+                if self.reloads.cancel(&Download(address)) {
                     cx.notices
                         .push(Notice::info("Parameter download cancelled"));
                 }
             }
-            Message::Reloaded(address, ticket, result) => {
-                if self.reloads.finish(&address, ticket) {
-                    match result {
-                        Ok(DownloadOutcome::Complete) => {
-                            cx.notices.push(Notice::success("Parameter download complete"));
-                        }
-                        Ok(DownloadOutcome::Incomplete(progress)) => {
-                            cx.notices.push(
-                                Notice::warning("Parameter download incomplete").detail(format!(
+            Message::Reloaded(finished) => {
+                // A failed request is announced; the outcome of one that
+                // ran is told here.
+                let Some(Settled {
+                    key,
+                    result: Ok(outcome),
+                    ..
+                }) = self.reloads.settle(finished, cx)
+                else {
+                    return Task::none();
+                };
+                match outcome {
+                    DownloadOutcome::Complete => {
+                        cx.notices
+                            .push(Notice::success("Parameter download complete"));
+                    }
+                    DownloadOutcome::Incomplete(progress) => {
+                        cx.notices
+                            .push(Notice::warning("Parameter download incomplete").detail(
+                                format!(
                                     "Received {} of {} parameters",
                                     progress.done, progress.total
-                                )),
-                            );
-                        }
-                        Ok(DownloadOutcome::NoParameters) => cx.notices.push(
-                            Notice::info("No parameters were reported").detail(
-                                "The component may have none, or may not have answered the request.",
-                            ),
-                        ),
-                        Ok(DownloadOutcome::Cancelled) => {}
-                        Ok(DownloadOutcome::Failed(error)) => cx
-                            .notices
-                            .push(Notice::error("Parameter download failed").detail(error)),
-                        Err(error) => cx
-                            .notices
-                            .push(Notice::error("Parameter download failed").detail(error)),
+                                ),
+                            ));
+                    }
+                    DownloadOutcome::NoParameters => {
+                        cx.notices
+                            .push(Notice::info("No parameters were reported").detail(
+                            "The component may have none, or may not have answered the request.",
+                        ))
+                    }
+                    DownloadOutcome::Cancelled => {}
+                    DownloadOutcome::Failed(error) => {
+                        cx.notices.push(key.failure(&(), error, cx.fleet));
                     }
                 }
             }
@@ -247,21 +280,22 @@ impl ParameterPanel {
                         .map(|ident| self.upload(address, ident, cx)),
                 );
             }
-            Message::Uploaded(key, ticket, upload, result) => {
-                if !self.uploads.finish(&key, ticket) {
+            Message::Uploaded(finished) => {
+                let Some(Settled {
+                    key: (address, ident),
+                    context: upload,
+                    result,
+                }) = self.uploads.settle(finished, cx)
+                else {
                     return Task::none();
-                }
+                };
 
-                let (address, ident) = key;
                 let outcome = self
                     .edits
                     .get_mut(&address)
                     .and_then(|edits| edits.finish_upload(&ident, upload, result));
 
                 match outcome {
-                    Some(UploadOutcome::Failed(error)) => cx.notices.push(
-                        Notice::error(format!("Setting {} failed", ident.as_str())).detail(error),
-                    ),
                     Some(UploadOutcome::Rejected {
                         requested,
                         reported,
@@ -273,7 +307,8 @@ impl ParameterPanel {
                                 value_to_string(reported)
                             )),
                     ),
-                    Some(UploadOutcome::Set) | None => {}
+                    // A failure was announced when it settled.
+                    Some(UploadOutcome::Set | UploadOutcome::Failed(_)) | None => {}
                 }
             }
             Message::SaveDialog(address) => {
@@ -391,10 +426,12 @@ impl ParameterPanel {
         let client = cx.services.component(address);
         let key = (address, ident.clone());
 
-        self.uploads.start(
-            key.clone(),
-            async move { client.set_parameter(ident, upload.value).await },
-            move |ticket, result| Message::Uploaded(key, ticket, upload, result),
+        let value = upload.value;
+        self.uploads.start_with(
+            key,
+            upload,
+            async move { client.set_parameter(ident, value).await },
+            Message::Uploaded,
         )
     }
 
@@ -434,8 +471,8 @@ impl ParameterPanel {
         });
 
         let download = parameters.map(Parameters::download);
-        let downloading =
-            self.reloads.is_running(&address) || download.is_some_and(ParamDownload::is_running);
+        let downloading = self.reloads.is_running(&Download(address))
+            || download.is_some_and(ParamDownload::is_running);
         // What the operator changed (an upload in flight and text that does
         // not parse included), and what of it can be uploaded now.
         let edits = self.edits.get(&address);
@@ -551,7 +588,7 @@ impl ParameterPanel {
                 },
                 (expected > 0).then(|| (got as f32, f32::from(expected))),
                 self.reloads
-                    .is_running(&address)
+                    .is_running(&Download(address))
                     .then_some(Message::CancelReload(address)),
             )
         });

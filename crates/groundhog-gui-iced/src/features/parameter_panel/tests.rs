@@ -39,14 +39,6 @@ fn env(params: &[(&str, f32)]) -> Env {
     env
 }
 
-/// The upload of `name` in flight.
-fn in_flight(panel: &ParameterPanel, name: &str) -> Upload {
-    panel
-        .edit(ADDRESS, &ident(name))
-        .and_then(ParamEdit::upload)
-        .expect("an upload in flight")
-}
-
 /// A download owns the component's reply channel, so the panel refuses to
 /// start uploads into it.
 #[tokio::test]
@@ -59,7 +51,7 @@ async fn uploads_wait_for_a_parameter_download() {
         Message::Edit(ADDRESS, ident("GAIN"), "1.2".into()),
     );
     env.step(&mut panel, Message::Reload(ADDRESS));
-    assert!(panel.reloads.is_running(&ADDRESS));
+    assert!(panel.reloads.is_running(&Download(ADDRESS)));
 
     let key = (ADDRESS, ident("GAIN"));
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
@@ -120,12 +112,8 @@ async fn upload_results_fold_into_the_edit() {
     assert!(panel.edit(ADDRESS, &ident("GAIN")).unwrap().is_uploading());
 
     // The vehicle clamps the value: the edit stays, marked rejected.
-    let ticket = panel.uploads.ticket_of(&key).unwrap();
-    let upload = in_flight(&panel, "GAIN");
-    env.step(
-        &mut panel,
-        Message::Uploaded(key.clone(), ticket, upload, Ok(Value::F32(3.0))),
-    );
+    let finished = panel.uploads.finished(&key, Ok(Value::F32(3.0)));
+    env.step(&mut panel, Message::Uploaded(finished));
     assert_eq!(
         panel.edit(ADDRESS, &ident("GAIN")).unwrap().status,
         EditStatus::Rejected {
@@ -136,12 +124,8 @@ async fn upload_results_fold_into_the_edit() {
 
     // Retried and accepted: the edit is done.
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
-    let ticket = panel.uploads.ticket_of(&key).unwrap();
-    let upload = in_flight(&panel, "GAIN");
-    env.step(
-        &mut panel,
-        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
-    );
+    let finished = panel.uploads.finished(&key, Ok(Value::F32(5.0)));
+    env.step(&mut panel, Message::Uploaded(finished));
     assert!(panel.edit(ADDRESS, &ident("GAIN")).is_none());
 }
 
@@ -156,8 +140,7 @@ async fn editing_supersedes_an_upload_in_flight() {
         Message::Edit(ADDRESS, ident("GAIN"), "5".into()),
     );
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
-    let ticket = panel.uploads.ticket_of(&key).unwrap();
-    let upload = in_flight(&panel, "GAIN");
+    let finished = panel.uploads.finished(&key, Ok(Value::F32(5.0)));
 
     env.step(
         &mut panel,
@@ -166,10 +149,7 @@ async fn editing_supersedes_an_upload_in_flight() {
     assert!(!panel.uploads.is_running(&key), "the upload was cancelled");
 
     // The cancelled upload's late result is ignored.
-    env.step(
-        &mut panel,
-        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
-    );
+    env.step(&mut panel, Message::Uploaded(finished));
     let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
     assert_eq!(edit.value, Some(Value::F32(6.0)));
     assert_eq!(edit.status, EditStatus::Pending);
@@ -186,8 +166,7 @@ async fn loading_supersedes_an_upload_in_flight() {
         Message::Edit(ADDRESS, ident("GAIN"), "5".into()),
     );
     env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
-    let ticket = panel.uploads.ticket_of(&key).unwrap();
-    let upload = in_flight(&panel, "GAIN");
+    let finished = panel.uploads.finished(&key, Ok(Value::F32(5.0)));
 
     let loaded = [(ident("GAIN"), Value::F32(7.0))].into_iter().collect();
     let path = PathBuf::from("params.param");
@@ -195,10 +174,7 @@ async fn loading_supersedes_an_upload_in_flight() {
     assert!(!panel.uploads.is_running(&key), "the upload was cancelled");
 
     // The old upload's result, delivered anyway, leaves the loaded value.
-    env.step(
-        &mut panel,
-        Message::Uploaded(key, ticket, upload, Ok(Value::F32(5.0))),
-    );
+    env.step(&mut panel, Message::Uploaded(finished));
     let edit = panel.edit(ADDRESS, &ident("GAIN")).unwrap();
     assert_eq!(edit.value, Some(Value::F32(7.0)));
     assert_eq!(edit.status, EditStatus::Pending);
@@ -273,16 +249,15 @@ async fn a_cancelled_download_ignores_its_late_result() {
     let mut env = env(&[("GAIN", 1.0)]);
     let mut panel = ParameterPanel::default();
     env.step(&mut panel, Message::Reload(ADDRESS));
-    let ticket = panel.reloads.ticket_of(&ADDRESS).unwrap();
+    let finished = panel
+        .reloads
+        .finished(&Download(ADDRESS), Ok(DownloadOutcome::Complete));
 
     env.step(&mut panel, Message::CancelReload(ADDRESS));
-    assert!(!panel.reloads.is_running(&ADDRESS));
+    assert!(!panel.reloads.is_running(&Download(ADDRESS)));
     assert_eq!(env.notices.history().last().unwrap().level, Level::Info);
 
-    env.step(
-        &mut panel,
-        Message::Reloaded(ADDRESS, ticket, Ok(DownloadOutcome::Complete)),
-    );
+    env.step(&mut panel, Message::Reloaded(finished));
     assert_eq!(
         env.notices.history().last().unwrap().level,
         Level::Info,
@@ -339,4 +314,48 @@ async fn an_incomplete_set_shows_no_download_once_it_stops() {
         simulator.find("1 of 2").is_ok(),
         "the header counts what is missing"
     );
+}
+
+/// A failed upload is announced once, and leaves the edit marked failed to
+/// try again.
+#[tokio::test]
+async fn a_failed_upload_is_announced_and_kept() {
+    let mut env = env(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+    let key = (ADDRESS, ident("GAIN"));
+    env.step(
+        &mut panel,
+        Message::Edit(ADDRESS, ident("GAIN"), "5".into()),
+    );
+    env.step(&mut panel, Message::Upload(ADDRESS, ident("GAIN")));
+
+    let finished = panel
+        .uploads
+        .finished(&key, Err(groundhog_logic::services::Error::Timeout));
+    env.step(&mut panel, Message::Uploaded(finished));
+
+    assert!(matches!(
+        panel.edit(ADDRESS, &ident("GAIN")).unwrap().status,
+        EditStatus::Failed(_)
+    ));
+    let name = env.fleet.snapshot().vehicle_name(ADDRESS.system_id());
+    let titles: Vec<_> = env.notices.history().map(|notice| &notice.title).collect();
+    assert_eq!(titles, [&format!("Setting GAIN on {name} failed")]);
+}
+
+/// A download that ran but failed is worded like one that could not run.
+#[tokio::test]
+async fn a_failed_download_is_announced_like_any_failure() {
+    let mut env = env(&[("GAIN", 1.0)]);
+    let mut panel = ParameterPanel::default();
+    env.step(&mut panel, Message::Reload(ADDRESS));
+
+    let outcome = DownloadOutcome::Failed("the link dropped".into());
+    let finished = panel.reloads.finished(&Download(ADDRESS), Ok(outcome));
+    env.step(&mut panel, Message::Reloaded(finished));
+
+    let notice = env.notices.history().last().expect("a notice");
+    let name = env.fleet.snapshot().vehicle_name(ADDRESS.system_id());
+    assert_eq!(notice.title, format!("Parameter download on {name} failed"));
+    assert_eq!(notice.detail.as_deref(), Some("the link dropped"));
 }

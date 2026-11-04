@@ -72,11 +72,8 @@ async fn a_whole_accelerometer_run_walks_through_every_side() {
         Message::Start(A, CalibrationKind::Accelerometer),
     );
     assert!(panel.operations.is_running(&(A, Action::Start)));
-    let ticket = panel.operations.ticket_of(&(A, Action::Start)).unwrap();
-    env.step(
-        &mut panel,
-        Message::Finished((A, Action::Start), ticket, Ok(())),
-    );
+    let finished = panel.operations.finished(&(A, Action::Start), Ok(()));
+    env.step(&mut panel, Message::Finished(finished));
 
     // The service reports the run to the fleet runtime; the harness has no
     // runtime, so begin it as the service would.
@@ -100,11 +97,8 @@ async fn a_whole_accelerometer_run_walks_through_every_side() {
 
         env.step(&mut panel, Message::Confirm(A));
         assert!(panel.operations.is_running(&(A, Action::Confirm)));
-        let ticket = panel.operations.ticket_of(&(A, Action::Confirm)).unwrap();
-        env.step(
-            &mut panel,
-            Message::Finished((A, Action::Confirm), ticket, Ok(())),
-        );
+        let finished = panel.operations.finished(&(A, Action::Confirm), Ok(()));
+        env.step(&mut panel, Message::Finished(finished));
     }
 
     position(&mut env, SUCCESS);
@@ -177,5 +171,33 @@ async fn a_calibration_that_waits_for_a_reboot_offers_one() {
     assert!(
         !shows(&panel, &env, "Reboot now"),
         "the calibration is applied"
+    );
+}
+
+/// A start that fails after the session began is told by the session; one
+/// refused before there is a session is announced.
+#[tokio::test]
+async fn only_a_start_refused_before_the_session_is_announced() {
+    let mut env = env();
+    let mut panel = CalibrationPanel::default();
+    let start = Message::Start(A, CalibrationKind::Gyroscope);
+
+    env.step(&mut panel, start.clone());
+    let finished = panel
+        .operations
+        .finished(&(A, Action::Start), Err(Error::Timeout));
+    env.step(&mut panel, Message::Finished(finished));
+    assert_eq!(env.notices.history().count(), 0, "the session says it");
+
+    env.step(&mut panel, start);
+    let blocked =
+        Error::CalibrationBlocked(groundhog_logic::domain::calibration::StartBlocked::NotDisarmed);
+    let finished = panel.operations.finished(&(A, Action::Start), Err(blocked));
+    env.step(&mut panel, Message::Finished(finished));
+    let notice = env.notices.history().last().expect("announced");
+    let name = env.fleet.snapshot().vehicle_name(A);
+    assert_eq!(
+        notice.title,
+        format!("Starting the calibration on {name} failed")
     );
 }
