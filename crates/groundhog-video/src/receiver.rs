@@ -18,7 +18,7 @@ use tokio::sync::watch;
 
 use crate::{
     Colour, Config, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range, Recording, State, Status,
-    record::Branch,
+    record::{Branch, Tap},
     source::{self, Source},
 };
 
@@ -117,6 +117,8 @@ struct Supervisor {
 /// One attempt's recording.
 #[derive(Default)]
 struct Recorder {
+    /// Where an RTP stream's packets are copied into the branch.
+    tap: Option<Tap>,
     branch: Option<Branch>,
     /// The stream could not be recorded; not tried again until the next
     /// attempt, or until recording is asked for anew.
@@ -223,7 +225,7 @@ impl Supervisor {
             log::info!("Video: recording into {}", path.display());
             set_recording(&state, Recording::Writing(path.to_path_buf()));
         };
-        match Branch::attach(pipeline, &directory, started) {
+        match Branch::attach(pipeline, recorder.tap.as_ref(), &directory, started) {
             Ok(Some(branch)) => {
                 recorder.branch = Some(branch);
                 self.set_recording(Recording::Waiting);
@@ -258,11 +260,14 @@ impl Supervisor {
         };
 
         let running = Running::default();
-        if let Err(reason) = self.wire(&pipeline, &running) {
+        let mut recorder = Recorder {
+            tap: matches!(source, Source::Rtp { .. } | Source::Rtsp { .. }).then(Tap::default),
+            ..Recorder::default()
+        };
+        if let Err(reason) = self.wire(&pipeline, &running, recorder.tap.as_ref()) {
             return Ended::Failed(reason);
         }
 
-        let mut recorder = Recorder::default();
         let ended = if pipeline.set_state(gst::State::Playing).is_err() {
             Ended::Retry("The stream could not be opened".to_string())
         } else {
@@ -288,8 +293,14 @@ impl Supervisor {
         ended
     }
 
-    /// Connect the pipeline's elements to the slot and the state.
-    fn wire(&self, pipeline: &gst::Pipeline, running: &Running) -> Result<(), String> {
+    /// Connect the pipeline's elements to the slot and the state, and its
+    /// packets, as they arrive, to `tap`.
+    fn wire(
+        &self,
+        pipeline: &gst::Pipeline,
+        running: &Running,
+        tap: Option<&Tap>,
+    ) -> Result<(), String> {
         let sink = pipeline
             .by_name(source::SINK)
             .and_then(|sink| sink.downcast::<gst_app::AppSink>().ok())
@@ -310,6 +321,35 @@ impl Supervisor {
                     .unwrap_or(false);
                 Some(video.to_value())
             });
+
+            // The packets are tapped where they enter the jitter buffer of
+            // the first stream set up. A session that reconnects gets a
+            // new jitter buffer, tapped in place of the old.
+            if let Some(tap) = tap.cloned() {
+                let first = Arc::new(OnceLock::new());
+                rtsp.connect("new-manager", false, move |values| {
+                    let manager = values.get(1)?.get::<gst::Element>().ok()?;
+                    let (tap, first) = (tap.clone(), first.clone());
+                    manager.connect("new-jitterbuffer", false, move |values| {
+                        let jitterbuffer = values.get(1)?.get::<gst::Element>().ok()?;
+                        let session = values.get(2)?.get::<u32>().ok()?;
+                        if *first.get_or_init(|| session) == session
+                            && let Some(pad) = jitterbuffer.static_pad("sink")
+                        {
+                            tap.install(&pad);
+                        }
+                        None
+                    });
+                    None
+                });
+            }
+        }
+        if let Some(tap) = tap
+            && let Some(pad) = pipeline
+                .by_name(source::PACKETS)
+                .and_then(|source| source.static_pad("src"))
+        {
+            tap.install(&pad);
         }
 
         // Where a parsebin finds the stream, its video goes on to the tee;
@@ -731,12 +771,11 @@ mod tests {
         directory
     }
 
-    /// What a recorded file holds: its first frame's flags and timestamp,
-    /// how many frames, and the date it says it starts at.
+    /// What a recorded file holds: its first frame's flags, every frame's
+    /// timestamp, and the date it says it starts at.
     struct Recorded {
         first_is_keyframe: bool,
-        first_pts: Option<gst::ClockTime>,
-        frames: usize,
+        timestamps: Vec<Option<gst::ClockTime>>,
         date: Option<gst::DateTime>,
     }
 
@@ -758,17 +797,15 @@ mod tests {
 
         let mut recorded = Recorded {
             first_is_keyframe: false,
-            first_pts: None,
-            frames: 0,
+            timestamps: Vec::new(),
             date: None,
         };
         while let Some(sample) = out.try_pull_sample(gst::ClockTime::from_seconds(2)) {
             let buffer = sample.buffer().expect("a buffer");
-            if recorded.frames == 0 {
+            if recorded.timestamps.is_empty() {
                 recorded.first_is_keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-                recorded.first_pts = buffer.pts();
             }
-            recorded.frames += 1;
+            recorded.timestamps.push(buffer.pts());
         }
         let bus = reader.bus().expect("a bus");
         while let Some(message) = bus.pop() {
@@ -782,12 +819,12 @@ mod tests {
         recorded
     }
 
-    /// Record `uri` (fed by a running sender) for a while, stop, and
-    /// return the one file written, checked to start on a keyframe at zero
-    /// and to say when it began.
-    fn record_a_while(uri: &str, test: &str) -> Recorded {
+    /// Receive as `config` asks (from a running sender), record for a
+    /// while, stop, and return the one file written, checked to start on
+    /// a keyframe at zero and to say when it began.
+    fn record_a_while(config: Config, test: &str) -> Recorded {
         let directory = recordings(test);
-        let receiver = Receiver::start(Config::new(uri));
+        let receiver = Receiver::start(config);
         receiver.record(Some(directory.clone()));
 
         let state = until(&receiver, Duration::from_secs(10), |state| {
@@ -812,14 +849,13 @@ mod tests {
 
         let recorded = read_recording(&path);
         assert!(recorded.first_is_keyframe, "the file starts on a keyframe");
+        let first = recorded.timestamps.first().copied().flatten();
         assert!(
-            recorded
-                .first_pts
-                .is_some_and(|pts| pts < gst::ClockTime::from_mseconds(100)),
-            "the file starts at zero: {:?}",
-            recorded.first_pts
+            first.is_some_and(|pts| pts < gst::ClockTime::from_mseconds(100)),
+            "the file starts at zero: {first:?}"
         );
-        assert!(recorded.frames >= 10, "{} frames", recorded.frames);
+        let frames = recorded.timestamps.len();
+        assert!(frames >= 10, "{frames} frames");
 
         // Its date is when its first frame arrived: within the recording.
         let date = recorded.date.as_ref().expect("the file has a date");
@@ -861,9 +897,109 @@ mod tests {
             &format!("rtph264pay config-interval=1 ! udpsink host=127.0.0.1 port={port}"),
         );
 
-        record_a_while(&format!("udp://127.0.0.1:{port}"), "rtp");
+        record_a_while(Config::new(format!("udp://127.0.0.1:{port}")), "rtp");
 
         let _ = sender.set_state(gst::State::Null);
+    }
+
+    /// A radio link that stalls and then delivers what it held, in order:
+    /// every `every`, the packets that arrive for `stall` are held back.
+    /// It forwards to `to` from a port of its own until dropped.
+    struct StallingLink {
+        port: u16,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl StallingLink {
+        fn new(to: u16, every: Duration, stall: Duration) -> Self {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a socket");
+            socket
+                .set_read_timeout(Some(Duration::from_millis(1)))
+                .expect("a read timeout");
+            let port = socket.local_addr().expect("an address").port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopped = stop.clone();
+            thread::spawn(move || {
+                let started = Instant::now();
+                let mut held = std::collections::VecDeque::new();
+                let mut packet = vec![0; 65536];
+                while !stopped.load(Ordering::Relaxed) {
+                    if let Ok(length) = socket.recv(&mut packet) {
+                        held.push_back(packet[..length].to_vec());
+                    }
+                    let phase = started.elapsed().as_nanos() % every.as_nanos();
+                    if phase >= stall.as_nanos() {
+                        for packet in held.drain(..) {
+                            drop(socket.send_to(&packet, ("127.0.0.1", to)));
+                        }
+                    }
+                }
+            });
+            Self { port, stop }
+        }
+    }
+
+    impl Drop for StallingLink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Over a link that stalls, the picture shows frames as they come (in
+    /// bursts, at low latency) or drops what comes late (with its jitter
+    /// buffer); the recording waits for them, and keeps every frame at the
+    /// camera's pace.
+    #[test]
+    fn a_stalling_link_is_recorded_at_the_cameras_pace() {
+        let Some(encoder) = h264_encoder().filter(|_| {
+            gstreamer_has(&[
+                "rtph264pay",
+                "rtph264depay",
+                "rtpjitterbuffer",
+                "h264parse",
+                "matroskamux",
+                "matroskademux",
+            ])
+        }) else {
+            eprintln!(
+                "skipped: no H.264 encoder, or GStreamer's RTP or Matroska plugins are missing"
+            );
+            return;
+        };
+
+        for low_latency in [true, false] {
+            let port = free_port();
+            let link =
+                StallingLink::new(port, Duration::from_millis(500), Duration::from_millis(200));
+            let sender = sender(
+                encoder,
+                &format!(
+                    "rtph264pay config-interval=1 ! udpsink host=127.0.0.1 port={}",
+                    link.port
+                ),
+            );
+
+            let config = Config {
+                low_latency,
+                ..Config::new(format!("udp://127.0.0.1:{port}"))
+            };
+            let recorded = record_a_while(config, "stalling");
+            let _ = sender.set_state(gst::State::Null);
+
+            // The sender makes 30 frames a second.
+            let steps = recorded
+                .timestamps
+                .windows(2)
+                .map(|pair| match pair {
+                    [Some(earlier), Some(later)] => later.saturating_sub(*earlier).mseconds(),
+                    _ => panic!("a frame without a timestamp"),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                steps.iter().all(|step| (25..=42).contains(step)),
+                "low latency {low_latency}: steps between frames {steps:?} ms"
+            );
+        }
     }
 
     /// An MPEG-TS stream, found by the parsebin, is shown and recorded.
@@ -889,7 +1025,7 @@ mod tests {
             &format!("h264parse ! mpegtsmux ! udpsink host=127.0.0.1 port={port}"),
         );
 
-        record_a_while(&format!("mpegts://127.0.0.1:{port}"), "mpegts");
+        record_a_while(Config::new(format!("mpegts://127.0.0.1:{port}")), "mpegts");
 
         let _ = sender.set_state(gst::State::Null);
     }
@@ -943,7 +1079,11 @@ mod tests {
         assert_ne!(files[0], files[1]);
         for file in &files {
             let recorded = read_recording(file);
-            assert!(recorded.frames > 0, "{} is empty", file.display());
+            assert!(
+                !recorded.timestamps.is_empty(),
+                "{} is empty",
+                file.display()
+            );
         }
         drop(receiver);
         drop(std::fs::remove_dir_all(&directory));

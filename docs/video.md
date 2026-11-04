@@ -220,13 +220,24 @@ until the desktop video works.
    shows it in the map's corner, a tap swapping the two. The source, the
    switch and whether the stream was on are kept in the configuration.
 4. **Android**, by the route chosen then.
-5. **Recording** (done). Every pipeline but the test pattern's is split
-   where the stream is still compressed: `parsebin` (or, for RTP, the
-   depayloader and parser) into a `tee`, then `decodebin3`. A recording
-   is a branch added to the tee while the stream plays (`record.rs`): a
-   leaky queue, the codec's parser, `matroskamux offset-to-zero=true` and
-   a `filesink`, passing nothing before a keyframe. Nothing is decoded or
-   encoded again. Matroska because a file cut off by a crash still plays,
+5. **Recording** (done). A recording is a branch added to the pipeline
+   while the stream plays (`record.rs`), ending in the codec's parser,
+   `matroskamux offset-to-zero=true` and a `filesink`, and passing
+   nothing before a keyframe and no frame without a timestamp. Nothing is
+   decoded or encoded again. An RTP stream (`udp://`, RTSP) is recorded
+   from its packets as they arrive: a pad probe (on the `udpsrc`, or on
+   the jitter buffer `rtspsrc` makes for the first stream) copies them
+   into the branch's `appsrc`, stamped with their arrival, then a
+   jitter buffer of the recording's own (`latency` 2 s, `mode=none`) and
+   the depayloader. The picture's jitter buffer drops what comes late,
+   or there is none and its frames are stamped with when they arrived;
+   either way a file recorded after it lost frames on a lossy link and
+   played back the link's jitter. The recording's own waits for late
+   packets and stamps frames from the camera's RTP clock, and a restart of
+   the stream's timestamps upstream (an RTSP session reconnecting) cannot
+   reach the file. Any other stream (MPEG-TS) is recorded from the `tee`
+   where it is still compressed (after `parsebin`, before `decodebin3`)
+   through a leaky queue. Matroska because a file cut off by a crash still plays,
    where an MP4 does not. A file per stretch of video: a lost stream
    finishes its file, and the next keyframe after reconnecting starts
    another (a camera may come back at another resolution, which no file

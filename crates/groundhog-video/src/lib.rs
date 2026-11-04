@@ -21,7 +21,9 @@
 //! It also records the stream, as it arrives, into Matroska files
 //! ([`Receiver::record`]): the compressed stream is written as it is, never
 //! decoded and encoded again, a file per stretch of video between
-//! reconnections. Each file starts at a keyframe, at time zero, and carries
+//! reconnections. An RTP stream is recorded through a jitter buffer of
+//! its own, longer than the picture's, so a file keeps the packets a
+//! lossy link delivers late and plays at the camera's pace. Each file starts at a keyframe, at time zero, and carries
 //! the wall-clock time that keyframe arrived (Matroska's `DateUTC`), so a
 //! frame's arrival is the file's date plus its timestamp: the same clock a
 //! telemetry log stamps its frames with.

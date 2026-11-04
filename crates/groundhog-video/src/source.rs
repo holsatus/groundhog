@@ -135,6 +135,11 @@ pub(crate) const SINK: &str = "sink";
 #[cfg(not(target_os = "android"))]
 pub(crate) const RTSP_SOURCE: &str = "source";
 
+/// The `udpsrc` an RTP pipeline receives its packets with, which a
+/// recording taps (see `record::Tap`).
+#[cfg(not(target_os = "android"))]
+pub(crate) const PACKETS: &str = "packets";
+
 /// Where the stream is still compressed, between the parser and the
 /// decoder: a `tee`, which a recording branches off. Every pipeline but the
 /// test pattern's has one.
@@ -198,7 +203,7 @@ pub(crate) fn pipeline_description(source: &Source, config: &crate::Config) -> S
                 String::new()
             };
             format!(
-                "udpsrc address={address} port={port} buffer-size={UDP_BUFFER_BYTES} \
+                "udpsrc name={PACKETS} address={address} port={port} buffer-size={UDP_BUFFER_BYTES} \
                  caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name={encoding}\" \
                  ! {jitter}{depay} ! {parse} config-interval=-1 ! {decode}"
             )
