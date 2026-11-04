@@ -3,11 +3,13 @@
 //! Not a regression test: it renders the whole window and every panel, with
 //! a synthetic vehicle, so a change to the look can be inspected before and
 //! after. Run it with an output directory and a configuration directory of
-//! its own (the application loads and saves its configuration at boot):
+//! its own (the application loads and saves its configuration at boot), on
+//! the GPU renderer the application uses (tests use the CPU's; see
+//! `.cargo/config.toml`):
 //!
 //! ```sh
 //! GROUNDHOG_GALLERY=/tmp/gallery XDG_CONFIG_HOME=/tmp/gallery/config \
-//!     XDG_DATA_HOME=/tmp/gallery/data \
+//!     XDG_DATA_HOME=/tmp/gallery/data ICED_TEST_BACKEND=wgpu \
 //!     cargo test -p groundhog-gui-iced gallery -- --ignored
 //! ```
 //!

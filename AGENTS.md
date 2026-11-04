@@ -722,15 +722,23 @@ whole `Application::view()` to PNG with `snapshot(..).matches_image(path)`.
 renderer suffix such as `-wgpu`); otherwise it compares against the existing
 one. Delete old snapshots before re-rendering.
 
+Tests render on the CPU (tiny-skia): `.cargo/config.toml` sets
+`ICED_TEST_BACKEND`. On wgpu every `Simulator` creates a Vulkan instance,
+and the Vulkan loader crashes (a segfault that ends the whole test run)
+when one thread creates or destroys an instance while another queries it.
+Do not run widget tests on wgpu in parallel.
+
 To *look at* the interface, render the gallery: every panel, the whole
 window in the tiled shell, and a phone in the floating shell in both
 orientations, light and dark, with a synthetic vehicle (`app/gallery.rs`).
 It is
-an ignored test that needs its own configuration directory:
+an ignored test that needs its own configuration directory, and renders
+on wgpu, as the application does:
 
 ```sh
 GROUNDHOG_GALLERY=/tmp/gallery XDG_CONFIG_HOME=/tmp/gallery/config \
-    XDG_DATA_HOME=/tmp/gallery/data cargo test -p groundhog-gui-iced gallery -- --ignored
+    XDG_DATA_HOME=/tmp/gallery/data ICED_TEST_BACKEND=wgpu \
+    cargo test -p groundhog-gui-iced gallery -- --ignored
 ```
 
 Render it before and after a change to the look, and compare.
