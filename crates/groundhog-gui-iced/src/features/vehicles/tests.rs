@@ -2,6 +2,13 @@
 //! driven through a [`Context`] over a synthetic fleet.
 
 use groundhog_logic::MavlinkId;
+use mavio::{
+    DefaultDialect,
+    default_dialect::{
+        enums::{MavAutopilot, MavModeFlag, MavType},
+        messages::{Heartbeat, SysStatus, VfrHud},
+    },
+};
 
 use super::*;
 use crate::features::test_support::Env;
@@ -109,4 +116,92 @@ async fn choosing_the_current_mode_does_nothing() {
 
     assert!(effects.is_empty());
     assert!(!changing_mode(&panel));
+}
+
+#[tokio::test]
+async fn a_reboot_is_sent_only_once_confirmed() {
+    let mut env = env(false);
+    let mut panel = VehiclePanel::default();
+
+    let effects = env.step(&mut panel, Message::RequestReboot(A));
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Confirm(confirmation)]
+            if matches!(confirmation.accept, Message::Reboot(A))),
+        "a confirmation that leads to the reboot"
+    );
+    assert!(!panel.commands.is_running(&(A, Command::Reboot)));
+
+    env.step(&mut panel, Message::Reboot(A));
+    assert!(panel.commands.is_running(&(A, Command::Reboot)));
+}
+
+/// Whether the panel of the vehicle at `ADDRESS` shows `text`.
+fn shows(env: &Env, text: &str) -> bool {
+    let panel = VehiclePanel::default();
+    let snapshot = env.fleet.snapshot();
+    let mut simulator = iced_test::Simulator::new(panel.view(&snapshot, Some(A), false));
+    simulator.find(text).is_ok()
+}
+
+/// A vehicle of `type_` that reported its airspeed and throttle, and has an
+/// airspeed sensor in use or not.
+fn reporting(type_: MavType, sensor: bool) -> Env {
+    use mavio::default_dialect::enums::MavSysStatusSensor as F;
+
+    let mut env = Env::new();
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::Heartbeat(Heartbeat {
+            type_,
+            autopilot: MavAutopilot::Ardupilotmega,
+            base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+            ..Default::default()
+        }),
+    );
+    let sensors = if sensor {
+        F::DIFFERENTIAL_PRESSURE
+    } else {
+        F::empty()
+    };
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::SysStatus(SysStatus {
+            onboard_control_sensors_present: sensors,
+            onboard_control_sensors_enabled: sensors,
+            onboard_control_sensors_health: sensors,
+            ..Default::default()
+        }),
+    );
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::VfrHud(VfrHud {
+            airspeed: 17.4,
+            throttle: 64,
+            ..Default::default()
+        }),
+    );
+    env
+}
+
+#[tokio::test]
+async fn a_plane_shows_its_airspeed_and_whether_it_is_estimated() {
+    let measured = reporting(MavType::FixedWing, true);
+    assert!(shows(&measured, "Airspeed"));
+    assert!(shows(&measured, "17.4 m/s"));
+    assert!(shows(&measured, "64 %"), "the throttle");
+
+    let estimated = reporting(MavType::FixedWing, false);
+    assert!(shows(&estimated, "Airspeed (est.)"));
+    assert!(shows(&estimated, "17.4 m/s"));
+}
+
+#[tokio::test]
+async fn a_copter_shows_its_throttle_but_no_airspeed() {
+    // Without a sensor, whose health badge would read "Airspeed".
+    let copter = reporting(MavType::Quadrotor, false);
+    assert!(shows(&copter, "64 %"));
+    assert!(!shows(&copter, "Airspeed"));
+    assert!(!shows(&copter, "Airspeed (est.)"));
+    assert!(!shows(&copter, "17.4 m/s"));
 }

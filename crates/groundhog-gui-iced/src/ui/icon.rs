@@ -107,6 +107,8 @@ icons! {
     Video => "video.svg",
     /// Stop a stream.
     Stop => "square.svg",
+    /// Reboot the autopilot.
+    Reboot => "power.svg",
     /// Open a menu of what does not fit.
     More => "ellipsis-vertical.svg",
     /// The destination for setting a vehicle up.

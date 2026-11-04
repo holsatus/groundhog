@@ -46,6 +46,15 @@ const TRACKING_REPORT_INTERVAL: Duration = Duration::from_millis(100);
 /// some calibrations (ArduPilot's gyroscope and level) before acknowledging.
 const CALIBRATION_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a reboot may take to be acknowledged. An autopilot answers before
+/// it goes down, but the answer may be lost as it does.
+const REBOOT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long an unanswered reboot may take to show: the autopilot going down,
+/// starting, and reporting its boot time again, perhaps over a link that
+/// reconnects (a USB port that comes and goes with it).
+const REBOOT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// How long a calibration step confirmation may take to be acknowledged.
 const CALIBRATION_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -605,6 +614,59 @@ impl VehicleClient {
     /// [`Error::Timeout`] / [`Error::NoLink`].
     pub async fn arm(&self, arm: bool) -> Result<()> {
         self.run(commands::arm_disarm(arm, false)).await
+    }
+
+    /// Reboot the autopilot. Returns once the vehicle accepted the reboot,
+    /// or, if its answer was lost to the reboot itself, once it is seen
+    /// starting again ([`FleetEvent::Rebooted`] announces that either way).
+    ///
+    /// The command is sent once: a copy resent because the answer was lost
+    /// would reach the freshly started autopilot and reboot it again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotDisarmed`] unless the vehicle is known to be disarmed
+    /// ([`Vehicle::can_reboot`]), [`Error::UnknownVehicle`] if it left the
+    /// fleet, [`Error::Rejected`] if it refuses, [`Error::Timeout`] if it
+    /// neither answered nor rebooted, or [`Error::NoLink`].
+    ///
+    /// [`FleetEvent::Rebooted`]: crate::domain::fleet::FleetEvent::Rebooted
+    pub async fn reboot(&self) -> Result<()> {
+        let (target, can_reboot, boots) = self.with_vehicle(|vehicle| {
+            (vehicle.target(), vehicle.can_reboot(), vehicle.boot_count())
+        })?;
+        if !can_reboot {
+            return Err(Error::NotDisarmed);
+        }
+
+        let result = self
+            .fleet
+            .router()
+            .command(target, commands::reboot_autopilot())
+            .timeout(REBOOT_ACK_TIMEOUT)
+            .retries(0)
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(MavError::Timeout) => {
+                let system = self.system;
+                let rebooted = self
+                    .fleet
+                    .wait_until(REBOOT_TIMEOUT, |fleet| {
+                        fleet
+                            .vehicle(system)
+                            .is_some_and(|vehicle| vehicle.boot_count() != boots)
+                    })
+                    .await;
+                if rebooted {
+                    Ok(())
+                } else {
+                    Err(Error::Timeout)
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Command a flight mode.

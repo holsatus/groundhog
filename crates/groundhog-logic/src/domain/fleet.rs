@@ -281,6 +281,10 @@ impl Fleet {
             events.push(FleetEvent::Rebooted(id));
             // A reboot ends the run on the vehicle too, so nothing is sent.
             let _ = vehicle.end_calibration("the autopilot rebooted");
+            // And applies what a finished one waited for.
+            if let Some(session) = vehicle.calibration.as_mut() {
+                session.needs_reboot = false;
+            }
         }
 
         if had_heartbeat {
@@ -824,7 +828,7 @@ mod tests {
 #[cfg(test)]
 mod calibration_tests {
     use super::*;
-    use crate::domain::calibration::{CalibrationKind, Outcome, RunId, Session, Side};
+    use crate::domain::calibration::{CalibrationKind, Outcome, Phase, RunId, Session, Side};
     use mavio::default_dialect::{
         enums::{MagCalStatus, MavCmd, MavModeFlag, MavType},
         messages,
@@ -1158,6 +1162,40 @@ mod calibration_tests {
         assert!(events.contains(&FleetEvent::Rebooted(A)));
         assert!(!running(&fleet));
         assert!(fleet.tick(at).cancels.is_empty());
+    }
+
+    /// A compass calibration applies only after a reboot; once the autopilot
+    /// has rebooted, the finished run no longer waits for one.
+    #[test]
+    fn a_reboot_applies_a_calibration_that_waited_for_it() {
+        let mut fleet = Fleet::default();
+        let at = Instant::now();
+        register(&mut fleet, at);
+        start_kind(&mut fleet, at, CalibrationKind::Compass);
+        fleet.observe(source(), at, Some(&mag_progress(0, 10)));
+        fleet.observe(
+            source(),
+            at,
+            Some(&DefaultDialect::MagCalReport(messages::MagCalReport {
+                compass_id: 0,
+                cal_status: MagCalStatus::MagCalSuccess,
+                ..Default::default()
+            })),
+        );
+        let session = |fleet: &Fleet| {
+            fleet
+                .vehicle(A)
+                .and_then(|vehicle| vehicle.calibration.clone())
+                .expect("the finished run is kept")
+        };
+        assert_eq!(session(&fleet).phase, Phase::Succeeded);
+        assert!(session(&fleet).needs_reboot);
+
+        fleet.observe(source(), at, Some(&attitude(50_000)));
+        fleet.observe(source(), at, Some(&attitude(1_000)));
+
+        assert_eq!(session(&fleet).phase, Phase::Succeeded, "still a success");
+        assert!(!session(&fleet).needs_reboot);
     }
 
     /// A calibration that succeeded is announced once; losing the vehicle

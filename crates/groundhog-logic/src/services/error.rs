@@ -37,6 +37,8 @@ pub enum Error {
     CalibrationUnsupported,
     #[error("no calibration is waiting for that")]
     NotCalibrating,
+    #[error("the vehicle is not known to be disarmed")]
+    NotDisarmed,
     #[error("the camera has not said it can track that")]
     TrackingUnsupported,
     #[error("the tracking radius is not a number")]

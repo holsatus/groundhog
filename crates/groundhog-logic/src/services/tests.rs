@@ -12,8 +12,8 @@ use mavio::{
             MavParamType, MavResult, MavType,
         },
         messages::{
-            CommandLong, Heartbeat, HomePosition, MissionAck, MissionCount, MissionItemInt,
-            MissionRequestInt, ParamValue,
+            Attitude, CommandLong, Heartbeat, HomePosition, MissionAck, MissionCount,
+            MissionItemInt, MissionRequestInt, ParamValue,
         },
     },
     prelude::V2,
@@ -30,6 +30,7 @@ use crate::{
         fleet::{FleetEvent, FleetSnapshot},
         mission::{MissionItem, Position},
         parameter::DownloadOutcome,
+        vehicle::Vehicle,
     },
     link::LinkId,
     mavlink::{
@@ -850,6 +851,123 @@ mod commands {
     /// Accept the command just received.
     async fn accept(harness: &mut Harness, kind: MavCmd) {
         harness.vehicle.ack(kind, MavResult::Accepted).await;
+    }
+
+    /// Start a reboot of the vehicle and receive its command.
+    async fn start_reboot(
+        harness: &mut Harness,
+    ) -> (
+        CommandLong,
+        tokio::task::JoinHandle<super::super::Result<()>>,
+    ) {
+        let client = harness.fleet.vehicle(SYSTEM);
+        let reboot = tokio::spawn(async move { client.reboot().await });
+        let command = expect_command(harness, MavCmd::PreflightRebootShutdown).await;
+        (command, reboot)
+    }
+
+    /// Nothing more reaches the vehicle for a while: the reboot is not
+    /// resent.
+    async fn expect_silence(harness: &mut Harness) {
+        let next = tokio::time::timeout(Duration::from_secs(30), harness.vehicle.recv()).await;
+        assert!(next.is_err(), "nothing more is sent: {next:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reboot_restarts_only_the_autopilot() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let (command, reboot) = start_reboot(&mut harness).await;
+        assert_eq!(command.param1, 1.0, "reboot the autopilot");
+        assert_eq!(command.param2, 0.0, "leave the onboard computer alone");
+        assert_eq!(command.param3, 0.0, "leave the other components alone");
+        accept(&mut harness, MavCmd::PreflightRebootShutdown).await;
+
+        reboot.await.unwrap().expect("accepted");
+        expect_silence(&mut harness).await;
+    }
+
+    /// The autopilot went down before its answer got out: seeing it start
+    /// again is the answer, and the command must not be resent, or the
+    /// freshly started autopilot would reboot a second time.
+    #[tokio::test(start_paused = true)]
+    async fn a_reboot_whose_answer_is_lost_succeeds_once_the_vehicle_restarts() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        harness
+            .vehicle
+            .send(&Attitude {
+                time_boot_ms: 600_000,
+                ..Default::default()
+            })
+            .await;
+
+        let (_, reboot) = start_reboot(&mut harness).await;
+        harness
+            .vehicle
+            .send(&Attitude {
+                time_boot_ms: 1_500,
+                ..Default::default()
+            })
+            .await;
+
+        reboot.await.unwrap().expect("the vehicle restarted");
+        expect_silence(&mut harness).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reboot_that_neither_answers_nor_happens_times_out() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let (_, reboot) = start_reboot(&mut harness).await;
+        expect_silence(&mut harness).await;
+
+        assert_eq!(reboot.await.unwrap(), Err(Error::Timeout));
+    }
+
+    #[tokio::test]
+    async fn a_refused_reboot_says_why() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let (_, reboot) = start_reboot(&mut harness).await;
+        harness
+            .vehicle
+            .ack(
+                MavCmd::PreflightRebootShutdown,
+                MavResult::TemporarilyRejected,
+            )
+            .await;
+
+        assert_eq!(
+            reboot.await.unwrap(),
+            Err(Error::Rejected(Rejection::TemporarilyRejected))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vehicle_not_known_to_be_disarmed_is_not_rebooted() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        harness
+            .vehicle
+            .send(&Heartbeat {
+                type_: MavType::Quadrotor,
+                autopilot: MavAutopilot::Ardupilotmega,
+                base_mode: MavModeFlag::CUSTOM_MODE_ENABLED | MavModeFlag::SAFETY_ARMED,
+                ..Default::default()
+            })
+            .await;
+        until(&mut harness.updates, |fleet| {
+            fleet.vehicle(SYSTEM).and_then(Vehicle::armed) == Some(true)
+        })
+        .await;
+
+        let result = harness.fleet.vehicle(SYSTEM).reboot().await;
+
+        assert_eq!(result, Err(Error::NotDisarmed));
     }
 
     #[tokio::test]

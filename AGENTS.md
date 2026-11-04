@@ -479,7 +479,8 @@ history. `services::Error` keeps the *reason* (`Rejection::TemporarilyRejected`,
 
 Commands that change what a vehicle does ask the operator first through a
 `Confirmation`: arming, starting a mission, jumping to an item, clearing the
-vehicle's mission, and changing its mode (returning and landing included).
+vehicle's mission, rebooting its autopilot, and changing its mode (returning
+and landing included).
 A mode change asks while the vehicle is armed or its armed state is
 unknown, wherever it comes from (the mode picker or a quick button); a
 disarmed vehicle does not act on its mode until it is armed, and arming
@@ -966,7 +967,7 @@ written by a newer build, saves nothing.
   codec `wire::mission_item` instead.
 - **Groundhog does not request telemetry streams.** It shows what the
   autopilot sends by default: `SYS_STATUS` (battery, sensor health),
-  `GPS_RAW_INT`, positions, attitude. A value that stays "–" may simply not
+  `GPS_RAW_INT`, positions, attitude, `VFR_HUD` (airspeed, throttle). A value that stays "–" may simply not
   be streamed; on ArduPilot the `SR*_` parameters set the rates. Do not
   assume a message arrives because the dialect has it. The exceptions ask
   for what the operator just started: a camera that begins tracking is
@@ -975,7 +976,11 @@ written by a newer build, saves nothing.
 - **Never resend calibration commands.** Firmwares do not deduplicate them: a
   resent start restarts or repeats the calibration, and a resent ArduPilot
   orientation confirmation is refused once measuring has begun.
-  `VehicleClient` sends them with `retries(0)` and a long timeout.
+  `VehicleClient` sends them with `retries(0)` and a long timeout. The
+  same goes for a reboot: the autopilot may go down before its ACK gets
+  out, and a resent copy would reboot the freshly started one again, so
+  `VehicleClient::reboot` sends it once and takes the vehicle starting
+  again (`FleetEvent::Rebooted`) as the answer when the ACK is lost.
 - **A late ACK can answer the next transaction.** MAVLink ACKs carry no
   transaction id, so when a command is resent because its first ACK was late,
   the vehicle answers both copies and the second answer can complete the next

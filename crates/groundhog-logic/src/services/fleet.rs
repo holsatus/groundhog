@@ -39,9 +39,20 @@ impl FleetHandle {
     /// Wait until `system` appears in a published snapshot, for at most
     /// `timeout`. Returns whether it did.
     pub async fn wait_for(&self, system: SystemId, timeout: std::time::Duration) -> bool {
+        self.wait_until(timeout, |fleet| fleet.contains(system))
+            .await
+    }
+
+    /// Wait until a published snapshot, the current one included, satisfies
+    /// `done`, for at most `timeout`. Returns whether one did.
+    pub(super) async fn wait_until(
+        &self,
+        timeout: std::time::Duration,
+        done: impl FnMut(&Arc<FleetSnapshot>) -> bool,
+    ) -> bool {
         let mut snapshot = self.snapshot.clone();
-        let appeared = snapshot.wait_for(|fleet| fleet.contains(system));
-        matches!(tokio::time::timeout(timeout, appeared).await, Ok(Ok(_)))
+        let reached = snapshot.wait_for(done);
+        matches!(tokio::time::timeout(timeout, reached).await, Ok(Ok(_)))
     }
 
     /// A client for the vehicle `system`, addressing its autopilot.

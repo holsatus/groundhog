@@ -34,6 +34,7 @@ pub enum Command {
     Arm,
     Disarm,
     SetMode,
+    Reboot,
 }
 
 impl Command {
@@ -42,6 +43,7 @@ impl Command {
             Command::Arm => "Arming",
             Command::Disarm => "Disarming",
             Command::SetMode => "Changing mode",
+            Command::Reboot => "Rebooting",
         }
     }
 }
@@ -72,6 +74,9 @@ pub enum Message {
     /// first while it may be flying.
     RequestModeKind(SystemId, ModeKind),
     ModeKind(SystemId, ModeKind),
+    /// Ask for confirmation, then reboot the autopilot.
+    RequestReboot(SystemId),
+    Reboot(SystemId),
     Finished(Key, super::operations::Ticket, Result<()>),
 }
 
@@ -173,6 +178,20 @@ impl VehiclePanel {
                     async move { client.set_mode_kind(kind).await.map(|_| ()) },
                     move |ticket, result| {
                         Message::Finished((system, Command::SetMode), ticket, result)
+                    },
+                );
+            }
+            Message::RequestReboot(system) => {
+                let name = cx.fleet.vehicle_name(system);
+                cx.confirm(Confirmation::reboot(&name, Message::Reboot(system)));
+            }
+            Message::Reboot(system) => {
+                let client = cx.services.vehicle(system);
+                return self.commands.start(
+                    (system, Command::Reboot),
+                    async move { client.reboot().await },
+                    move |ticket, result| {
+                        Message::Finished((system, Command::Reboot), ticket, result)
                     },
                 );
             }
@@ -296,6 +315,21 @@ impl VehiclePanel {
                     .hint("Show the vehicle on the map")
                     .on_press(Message::Locate(system))
                     .boxed(),
+                ui::icon_button(Icon::Reboot)
+                    .hint(if busy(Command::Reboot) {
+                        "Rebooting…"
+                    } else if vehicle.can_reboot() {
+                        "Reboot the autopilot"
+                    } else {
+                        "Disarm the vehicle to reboot it"
+                    })
+                    .busy(busy(Command::Reboot), "")
+                    .on_press_maybe(
+                        vehicle
+                            .can_reboot()
+                            .then_some(Message::RequestReboot(system)),
+                    )
+                    .boxed(),
             ],
         ])
     }
@@ -371,19 +405,45 @@ fn view_telemetry(vehicle: &Vehicle) -> impl Widget<Message> + '_ {
         // Adding zero turns a negative zero into a positive one, so a
         // level vehicle does not read as sinking.
         .map_or_else(unknown, |climb| format!("{:+.1} m/s", climb + 0.0));
+    let throttle = vehicle
+        .hud
+        .throttle
+        .map_or_else(unknown, |percent| format!("{percent} %"));
     let speed = vehicle
         .position
         .ground_speed()
         .map_or_else(unknown, |speed| format!("{speed:.1} m/s"));
 
-    stats([
-        ui::stat("Roll", ui::text(roll)),
-        ui::stat("Pitch", ui::text(pitch)),
-        ui::stat("Heading", ui::text(yaw)),
-        ui::stat("Altitude", ui::text(altitude)),
-        ui::stat("Climb", ui::text(climb)),
-        ui::stat("Speed", ui::text(speed)),
-    ])
+    // Only a winged vehicle shows its airspeed, beside its ground speed; one
+    // without a sensor in use only estimates it, and says so.
+    let airspeed = vehicle.class().has_wings().then(|| {
+        let (label, value) = match vehicle.airspeed() {
+            None => ("Airspeed", ui::text(unknown())),
+            Some(airspeed) if airspeed.measured => {
+                ("Airspeed", ui::text(format!("{:.1} m/s", airspeed.speed)))
+            }
+            Some(airspeed) => (
+                "Airspeed (est.)",
+                ui::text(format!("{:.1} m/s", airspeed.speed)).tone(Tone::Muted),
+            ),
+        };
+        ui::stat(label, value)
+    });
+
+    stats(
+        [
+            Some(ui::stat("Roll", ui::text(roll))),
+            Some(ui::stat("Pitch", ui::text(pitch))),
+            Some(ui::stat("Heading", ui::text(yaw))),
+            Some(ui::stat("Altitude", ui::text(altitude))),
+            Some(ui::stat("Climb", ui::text(climb))),
+            Some(ui::stat("Throttle", ui::text(throttle))),
+            Some(ui::stat("Speed", ui::text(speed))),
+            airspeed,
+        ]
+        .into_iter()
+        .flatten(),
+    )
 }
 
 /// The battery, GPS, link and pre-arm checks, and the sensors as badges.

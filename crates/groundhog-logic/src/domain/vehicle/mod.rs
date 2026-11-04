@@ -25,6 +25,7 @@ pub mod camera;
 pub mod class;
 pub mod health;
 pub mod home;
+pub mod hud;
 pub mod identity;
 pub mod mission;
 pub mod position;
@@ -33,9 +34,17 @@ pub mod status;
 pub use self::status::StatusText;
 
 use self::{
-    attitude::AttitudeState, battery::Battery, camera::Cameras, class::VehicleClass,
-    health::Health, home::Home, identity::Identity, mission::VehicleMission,
-    position::PositionTrack, status::StatusLog,
+    attitude::AttitudeState,
+    battery::Battery,
+    camera::Cameras,
+    class::VehicleClass,
+    health::{Health, Sensor},
+    home::Home,
+    hud::Hud,
+    identity::Identity,
+    mission::VehicleMission,
+    position::PositionTrack,
+    status::StatusLog,
 };
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -68,6 +77,16 @@ const CALIBRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// How far an autopilot's `time_boot_ms` must step backwards to mean a
 /// reboot, rather than frames arriving out of order.
 const BOOT_REWIND_MS: u32 = 2_000;
+
+/// A winged vehicle's speed through the air.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Airspeed {
+    /// Metres per second.
+    pub speed: f32,
+    /// Whether an airspeed sensor in use measured it; otherwise the
+    /// autopilot estimated it from its ground speed and wind.
+    pub measured: bool,
+}
 
 /// How recently a vehicle has been heard from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -165,6 +184,7 @@ pub struct Vehicle {
     pub position: Arc<PositionTrack>,
     pub battery: Battery,
     pub health: Health,
+    pub hud: Hud,
     pub status: Arc<StatusLog>,
     home_position: Option<Home>,
     pub mission: VehicleMission,
@@ -303,6 +323,28 @@ impl Vehicle {
     }
 
     /// Whether the vehicle reports itself as armed, if it has sent a heartbeat.
+    /// Whether the vehicle may be told to reboot: only while it is known to
+    /// be disarmed, as a reboot stops everything it is doing.
+    pub fn can_reboot(&self) -> bool {
+        self.armed() == Some(false)
+    }
+
+    /// The airspeed of a vehicle that flies on wings, and whether a sensor
+    /// measured it. `None` for other vehicles: theirs is only ever estimated
+    /// from the ground speed, which tells the operator nothing more.
+    pub fn airspeed(&self) -> Option<Airspeed> {
+        if !self.class().has_wings() {
+            return None;
+        }
+        let speed = self.hud.airspeed?;
+        let measured = self
+            .health
+            .sensors()
+            .iter()
+            .any(|status| status.sensor == Sensor::Airspeed && status.enabled);
+        Some(Airspeed { speed, measured })
+    }
+
     pub fn armed(&self) -> Option<bool> {
         self.identity.is_armed()
     }
@@ -703,6 +745,9 @@ impl Vehicle {
             }
             DefaultDialect::BatteryStatus(message) if self.is_authoritative(component) => {
                 self.battery.observe_battery_status(message);
+            }
+            DefaultDialect::VfrHud(message) if self.is_authoritative(component) => {
+                self.hud.observe_vfr_hud(message);
             }
             DefaultDialect::Attitude(message) if self.is_authoritative(component) => {
                 self.observe_boot_time(message.time_boot_ms);
@@ -1321,6 +1366,110 @@ mod tests {
         vehicle.handle_message(t, 1, &report(0, 100_000_000));
         assert_eq!(vehicle.location(), Some(GeoPosition::new(0.0, 10.0)));
         assert_eq!(vehicle.position.trail.len(), 1);
+    }
+
+    /// A vehicle of `type_`, heartbeating `base_mode`.
+    fn vehicle_of(type_: MavType, base_mode: MavModeFlag) -> Vehicle {
+        let mut vehicle = vehicle();
+        vehicle.handle_message(
+            Instant::now(),
+            1,
+            &DefaultDialect::Heartbeat(messages::Heartbeat {
+                type_,
+                autopilot: MavAutopilot::Ardupilotmega,
+                base_mode,
+                ..Default::default()
+            }),
+        );
+        vehicle
+    }
+
+    fn vfr_hud(airspeed: f32) -> DefaultDialect {
+        DefaultDialect::VfrHud(messages::VfrHud {
+            airspeed,
+            throttle: 40,
+            ..Default::default()
+        })
+    }
+
+    /// `SYS_STATUS` with an airspeed sensor present, and enabled or not.
+    fn airspeed_sensor(enabled: bool) -> DefaultDialect {
+        use mavio::default_dialect::enums::MavSysStatusSensor as F;
+        let present = F::DIFFERENTIAL_PRESSURE;
+        DefaultDialect::SysStatus(messages::SysStatus {
+            onboard_control_sensors_present: present,
+            onboard_control_sensors_enabled: if enabled { present } else { F::empty() },
+            onboard_control_sensors_health: present,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_plane_reports_airspeed_and_says_whether_it_was_measured() {
+        let t = Instant::now();
+        let mut plane = vehicle_of(MavType::FixedWing, MavModeFlag::empty());
+        assert_eq!(plane.airspeed(), None, "nothing reported yet");
+
+        plane.handle_message(t, 1, &vfr_hud(17.0));
+        assert_eq!(
+            plane.airspeed(),
+            Some(Airspeed {
+                speed: 17.0,
+                measured: false
+            }),
+            "estimated while no sensor is reported"
+        );
+
+        plane.handle_message(t, 1, &airspeed_sensor(false));
+        assert_eq!(
+            plane.airspeed().map(|airspeed| airspeed.measured),
+            Some(false),
+            "a sensor that is not in use measures nothing"
+        );
+
+        plane.handle_message(t, 1, &airspeed_sensor(true));
+        assert_eq!(
+            plane.airspeed().map(|airspeed| airspeed.measured),
+            Some(true)
+        );
+        assert_eq!(plane.hud.throttle, Some(40));
+    }
+
+    #[test]
+    fn only_winged_vehicles_report_airspeed() {
+        let t = Instant::now();
+        for (type_, winged) in [
+            (MavType::FixedWing, true),
+            (MavType::VtolTiltrotor, true),
+            (MavType::Quadrotor, false),
+            (MavType::GroundRover, false),
+        ] {
+            let mut vehicle = vehicle_of(type_, MavModeFlag::empty());
+            vehicle.handle_message(t, 1, &vfr_hud(12.0));
+            assert_eq!(vehicle.airspeed().is_some(), winged, "{type_:?}");
+            assert_eq!(vehicle.hud.throttle, Some(40), "{type_:?} has a throttle");
+        }
+    }
+
+    #[test]
+    fn a_peripheral_does_not_report_the_vehicles_airspeed() {
+        let mut plane = vehicle_of(MavType::FixedWing, MavModeFlag::empty());
+        plane.handle_message(Instant::now(), 154, &vfr_hud(30.0));
+        assert_eq!(plane.hud, Hud::default());
+    }
+
+    #[test]
+    fn only_a_vehicle_known_to_be_disarmed_may_reboot() {
+        assert!(!vehicle().can_reboot(), "arming unknown");
+
+        let disarmed = vehicle_of(MavType::Quadrotor, MavModeFlag::CUSTOM_MODE_ENABLED);
+        assert!(disarmed.can_reboot());
+
+        let armed = vehicle_of(
+            MavType::Quadrotor,
+            MavModeFlag::CUSTOM_MODE_ENABLED | MavModeFlag::SAFETY_ARMED,
+        );
+        assert!(!armed.can_reboot());
     }
 
     /// Before ArduPilot has a fix, its home slot reads back as all zeros.

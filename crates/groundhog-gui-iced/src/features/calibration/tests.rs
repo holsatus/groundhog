@@ -103,3 +103,67 @@ async fn a_whole_accelerometer_run_walks_through_every_side() {
         "nothing left to confirm"
     );
 }
+
+/// A compass run on ArduPilot applies only after a reboot: the panel offers
+/// one, asks before sending it, and stops offering it once the autopilot has
+/// rebooted.
+#[tokio::test]
+async fn a_calibration_that_waits_for_a_reboot_offers_one() {
+    use mavio::default_dialect::{
+        enums::MagCalStatus,
+        messages::{Attitude, MagCalProgress, MagCalReport},
+    };
+
+    let mut env = env();
+    let mut panel = CalibrationPanel::default();
+    env.fleet
+        .test_begin_calibration(A, CalibrationKind::Compass, Instant::now());
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::MagCalProgress(MagCalProgress {
+            compass_id: 0,
+            completion_pct: 10,
+            cal_status: MagCalStatus::MagCalRunningStepOne,
+            ..Default::default()
+        }),
+    );
+    env.observe(
+        ADDRESS,
+        &DefaultDialect::MagCalReport(MagCalReport {
+            compass_id: 0,
+            cal_status: MagCalStatus::MagCalSuccess,
+            ..Default::default()
+        }),
+    );
+    assert!(shows(&panel, &env, "Done"));
+    assert!(shows(&panel, &env, "Reboot now"));
+
+    let effects = env.step(&mut panel, Message::RequestReboot(A));
+    assert!(
+        matches!(effects.as_slice(), [crate::features::Effect::Confirm(confirmation)]
+            if matches!(confirmation.accept, Message::Reboot(A))),
+        "a confirmation that leads to the reboot"
+    );
+    assert!(
+        !panel.operations.is_running(&(A, Action::Reboot)),
+        "nothing is sent before it is accepted"
+    );
+
+    env.step(&mut panel, Message::Reboot(A));
+    assert!(panel.operations.is_running(&(A, Action::Reboot)));
+
+    for time_boot_ms in [600_000, 1_500] {
+        env.observe(
+            ADDRESS,
+            &DefaultDialect::Attitude(Attitude {
+                time_boot_ms,
+                ..Default::default()
+            }),
+        );
+    }
+    assert!(shows(&panel, &env, "Done"), "the run still succeeded");
+    assert!(
+        !shows(&panel, &env, "Reboot now"),
+        "the calibration is applied"
+    );
+}

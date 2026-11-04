@@ -21,6 +21,7 @@ use iced::{
 
 use super::{
     Context,
+    confirm::Confirmation,
     notifications::Notice,
     operations::{Operations, Ticket},
 };
@@ -35,6 +36,7 @@ pub enum Action {
     Start,
     Confirm,
     Cancel,
+    Reboot,
 }
 
 type Key = (SystemId, Action);
@@ -52,6 +54,10 @@ pub enum Message {
     Cancel(SystemId),
     /// Clear a finished calibration.
     Dismiss(SystemId),
+    /// Ask for confirmation, then reboot the autopilot to apply a
+    /// calibration that waits for it.
+    RequestReboot(SystemId),
+    Reboot(SystemId),
     Finished(Key, Ticket, Result<()>),
 }
 
@@ -80,6 +86,17 @@ impl CalibrationPanel {
                 });
             }
             Message::Dismiss(system) => cx.services.vehicle(system).dismiss_calibration(),
+            Message::RequestReboot(system) => {
+                let name = cx.fleet.vehicle_name(system);
+                cx.confirm(Confirmation::reboot(&name, Message::Reboot(system)));
+            }
+            Message::Reboot(system) => {
+                let client = cx.services.vehicle(system);
+                return self.run(
+                    (system, Action::Reboot),
+                    async move { client.reboot().await },
+                );
+            }
             Message::Finished(key, ticket, result) => {
                 if self.operations.finish(&key, ticket)
                     && let Err(error) = result
@@ -256,9 +273,24 @@ impl CalibrationPanel {
 
         if session.needs_reboot && session.phase == Phase::Succeeded {
             card = card.push(
-                ui::text("Reboot the autopilot to apply the new calibration.")
-                    .tone(Tone::Warning)
-                    .boxed(),
+                row![
+                    ui::text("Reboot the autopilot to apply the new calibration.")
+                        .tone(Tone::Warning)
+                        .width(Length::Fill),
+                    ui::button("Reboot now")
+                        .icon(Icon::Reboot)
+                        .primary()
+                        .busy(self.is_busy(system, Action::Reboot), "Rebooting…")
+                        .on_press_maybe(
+                            vehicle
+                                .can_reboot()
+                                .then_some(Message::RequestReboot(system))
+                        )
+                        .boxed(),
+                ]
+                .spacing(ui::space::M)
+                .align_y(Alignment::Center)
+                .boxed(),
             );
         }
 
@@ -330,6 +362,7 @@ fn notify(cx: &mut Context<Message>, (system, action): Key, error: Error) {
         },
         Action::Confirm => "Confirming the orientation",
         Action::Cancel => "Cancelling the calibration",
+        Action::Reboot => "Rebooting the autopilot",
     };
 
     cx.notices.push(

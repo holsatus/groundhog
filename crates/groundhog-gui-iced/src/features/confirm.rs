@@ -1,9 +1,9 @@
 //! Confirmation of consequential actions.
 //!
 //! Commands that change what a vehicle does (arming, starting a mission,
-//! jumping to an item, clearing its mission, changing its mode in flight)
-//! are never sent on a single click, nor are destructive changes to what is
-//! stored (deleting a saved link). The feature asks for a [`Confirmation`];
+//! jumping to an item, clearing its mission, rebooting its autopilot,
+//! changing its mode in flight) are never sent on a single click, nor are
+//! destructive changes to what is stored (deleting a saved link). The feature asks for a [`Confirmation`];
 //! the application shows it as a modal dialog and dispatches the
 //! confirmation's message only if the operator accepts.
 
@@ -31,6 +31,18 @@ impl<M> Confirmation<M> {
             danger: false,
             accept,
         }
+    }
+
+    /// Ask before rebooting the autopilot of the vehicle called `name`;
+    /// every panel that offers a reboot asks alike.
+    pub fn reboot(name: &str, accept: M) -> Self {
+        Self::new(
+            format!("Reboot {name}?"),
+            "The autopilot restarts, and the vehicle is out of contact until it is back.",
+            accept,
+        )
+        .accept_label("Reboot")
+        .danger()
     }
 
     pub fn accept_label(mut self, label: &'static str) -> Self {

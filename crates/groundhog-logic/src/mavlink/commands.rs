@@ -111,6 +111,17 @@ pub(crate) fn arm_disarm(arm: bool, force: bool) -> Command {
     .into()
 }
 
+/// `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`: reboot the autopilot, leaving the
+/// onboard computer, cameras and other components alone.
+pub(crate) fn reboot_autopilot() -> Command {
+    CommandLong {
+        command: MavCmd::PreflightRebootShutdown,
+        param1: 1.0,
+        ..Default::default()
+    }
+    .into()
+}
+
 /// `MAV_CMD_DO_SET_MODE` with the given base mode, custom mode and sub mode.
 pub(crate) fn set_mode(base_mode: f32, custom_mode: f32, custom_sub_mode: f32) -> Command {
     CommandLong {
