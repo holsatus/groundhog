@@ -119,8 +119,82 @@ mod tests {
             MavType::Coaxial,
             MavType::Helicopter,
             MavType::Dodecarotor,
+            MavType::Decarotor,
+            MavType::GenericMultirotor,
         ] {
             assert_eq!(VehicleClass::of(frame), VehicleClass::Copter, "{frame:?}");
+        }
+    }
+
+    #[test]
+    fn winged_frames_keep_their_class() {
+        for frame in [
+            MavType::FixedWing,
+            MavType::FlappingWing,
+            MavType::Kite,
+            MavType::Parafoil,
+        ] {
+            assert_eq!(
+                VehicleClass::of(frame),
+                VehicleClass::FixedWing,
+                "{frame:?}"
+            );
+        }
+
+        for frame in [
+            MavType::VtolTailsitterDuorotor,
+            MavType::VtolTailsitterQuadrotor,
+            MavType::VtolTiltrotor,
+            MavType::VtolFixedrotor,
+            MavType::VtolTailsitter,
+            MavType::VtolTiltwing,
+            MavType::VtolReserved5,
+            MavType::VtolGyrodyne,
+        ] {
+            assert_eq!(VehicleClass::of(frame), VehicleClass::Vtol, "{frame:?}");
+        }
+    }
+
+    #[test]
+    fn ground_and_sea_frames_keep_their_class() {
+        assert_eq!(VehicleClass::of(MavType::GroundRover), VehicleClass::Rover);
+        assert_eq!(
+            VehicleClass::of(MavType::GroundQuadruped),
+            VehicleClass::Rover
+        );
+        assert_eq!(VehicleClass::of(MavType::SurfaceBoat), VehicleClass::Boat);
+        assert_eq!(
+            VehicleClass::of(MavType::Submarine),
+            VehicleClass::Submarine
+        );
+        assert_eq!(VehicleClass::of(MavType::Airship), VehicleClass::Airship);
+        assert_eq!(
+            VehicleClass::of(MavType::FreeBalloon),
+            VehicleClass::Airship
+        );
+        assert_eq!(
+            VehicleClass::of(MavType::AntennaTracker),
+            VehicleClass::AntennaTracker
+        );
+        assert_eq!(VehicleClass::of(MavType::Rocket), VehicleClass::Other);
+    }
+
+    #[test]
+    fn every_class_names_itself_and_knows_whether_it_has_wings() {
+        for (class, name, wings) in [
+            (VehicleClass::Copter, "Copter", false),
+            (VehicleClass::FixedWing, "Plane", true),
+            (VehicleClass::Vtol, "VTOL", true),
+            (VehicleClass::Rover, "Rover", false),
+            (VehicleClass::Boat, "Boat", false),
+            (VehicleClass::Submarine, "Submarine", false),
+            (VehicleClass::Airship, "Airship", false),
+            (VehicleClass::AntennaTracker, "Antenna tracker", false),
+            (VehicleClass::Other, "Vehicle", false),
+            (VehicleClass::NotAVehicle, "Component", false),
+        ] {
+            assert_eq!(class.name(), name);
+            assert_eq!(class.has_wings(), wings, "{class:?}");
         }
     }
 
