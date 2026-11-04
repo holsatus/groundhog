@@ -16,14 +16,16 @@ mod desktop;
 pub use awake::keep_awake;
 #[cfg(not(target_os = "android"))]
 pub use desktop::{
-    config_dir, data_dir, init_logging, insets, insets_subscription, leave, set_system_bars,
+    cache_dir, config_dir, data_dir, init_logging, insets, insets_subscription, leave,
+    set_system_bars,
 };
 
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
 pub use android::{
-    config_dir, data_dir, insets, insets_subscription, keep_awake, leave, set_system_bars,
+    cache_dir, config_dir, data_dir, insets, insets_subscription, keep_awake, leave,
+    set_system_bars,
 };
 
 /// The application's identity on a Linux desktop: the Wayland app ID (and

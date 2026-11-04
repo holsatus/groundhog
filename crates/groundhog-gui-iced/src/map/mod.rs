@@ -23,6 +23,8 @@ pub use layer::{
 };
 pub use view::{MapFrame, MapView};
 
+use std::path::PathBuf;
+
 use iced::{Color, Length, Padding, Point, Task, Theme, Widget, widget::canvas::Canvas};
 use slippery::{CacheMessage, MapWidget, Projector, TileCache, Viewpoint, Zoom, location};
 
@@ -65,20 +67,27 @@ pub enum Message {
     Cache(CacheMessage),
 }
 
-impl Default for Map {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// How much disk the stored tiles may take before the least recently used
+/// are removed.
+const TILE_CACHE_BYTES: u64 = 256 << 20;
 
 impl Map {
-    pub fn new() -> Self {
+    /// A map whose tiles are kept in `tile_dir`, so they survive restarts and
+    /// show without a network connection. Without one, tiles are kept in
+    /// memory only.
+    pub fn new(tile_dir: Option<PathBuf>) -> Self {
+        let tile_cache = TileCache::new(slippery::sources::OpenStreetMap);
+        let tile_cache = match tile_dir {
+            Some(dir) => tile_cache.with_disk_cache(dir, TILE_CACHE_BYTES),
+            None => tile_cache,
+        };
+
         Self {
             viewpoint: Viewpoint {
                 position: location::paris().as_mercator(),
                 zoom: Zoom::try_from(8.0).expect("a valid zoom"),
             },
-            tile_cache: TileCache::new(slippery::sources::OpenStreetMap),
+            tile_cache,
             follow: false,
         }
     }
@@ -208,7 +217,7 @@ mod tests {
 
     /// Hover `at`, then deliver `event`; the event's status.
     fn after_hovering(draggable: bool, at: Point, event: mouse::Event) -> Status {
-        let map = Map::new();
+        let map = Map::new(None);
         let mut layers = LayerSet::new();
         layers.push(CentreHandle { draggable });
         let mut simulator = iced_test::Simulator::new(map.view(

@@ -56,7 +56,7 @@ it can be a version behind the toolchain the workspace is developed with.
 
 Nothing else is needed: file dialogs go through the desktop portal, which
 grants access to the file chosen, and keeping the screen on is a portal
-request too. Configuration and logs live in
+request too. Configuration, logs and stored map tiles live in
 `~/.var/app/org.holsatus.Groundhog/`, apart from a native build's.
 
 Serial adapters still need the user in the group that owns them

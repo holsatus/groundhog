@@ -23,6 +23,14 @@ pub fn data_dir() -> Option<PathBuf> {
         .map(|dirs| dirs.data_dir().to_path_buf())
 }
 
+/// Where files the application can fetch again (map tiles) are kept. The
+/// platform may clear it; nothing in it is the operator's.
+pub fn cache_dir() -> Option<PathBuf> {
+    PROJECT_DIRS
+        .as_ref()
+        .map(|dirs| dirs.cache_dir().to_path_buf())
+}
+
 /// Initialises logging to stderr.
 pub fn init_logging() {
     env_logger::Builder::new()

@@ -1261,7 +1261,11 @@ mod tests {
                 Err(Error::Rejected(Rejection::Denied)),
             );
             let notice = env.notices.history().last().expect("a notice");
-            assert!(notice.title.starts_with("Tracking on"), "{}", notice.title);
+            assert!(
+                notice.title.starts_with("Starting of tracking on"),
+                "{}",
+                notice.title
+            );
             assert!(!shows(&panel, &env, "Tracking"));
         }
 

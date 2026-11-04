@@ -213,7 +213,7 @@ impl Application {
 
         let mut application = Application {
             layout,
-            map: Map::new(),
+            map: Map::new(platform::cache_dir().map(|directory| directory.join("tiles"))),
             configuration,
             config_writer,
             backend,

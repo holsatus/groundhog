@@ -26,7 +26,7 @@ use std::{
 use android_activity::AndroidApp;
 use jni::{
     JavaVM,
-    objects::{JObject, JValue},
+    objects::{JObject, JString, JValue},
 };
 use log::LevelFilter;
 
@@ -111,6 +111,44 @@ pub fn config_dir() -> Option<PathBuf> {
 /// Where application data (telemetry logs) is kept.
 pub fn data_dir() -> Option<PathBuf> {
     APP.get()?.internal_data_path().map(|dir| dir.join("data"))
+}
+
+/// Where files the application can fetch again (map tiles) are kept: the
+/// app's cache directory, which the system may clear when storage runs low.
+///
+/// `NativeActivity` passes only the data paths, so this asks
+/// `Context.getCacheDir()` once, and remembers the answer.
+pub fn cache_dir() -> Option<PathBuf> {
+    static CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    CACHE_DIR
+        .get_or_init(|| {
+            let app = APP.get()?;
+            read_cache_dir(app)
+                .inspect_err(|error| log::warn!("Could not find the cache directory: {error}"))
+                .ok()
+        })
+        .clone()
+}
+
+/// Calls `Context.getCacheDir().getAbsolutePath()`.
+fn read_cache_dir(app: &AndroidApp) -> jni::errors::Result<PathBuf> {
+    // SAFETY: the VM and activity belong to the app that `android_main`
+    // received, and outlive the call.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+
+    env.with_local_frame(4, |env| {
+        let dir = env
+            .call_method(&activity, "getCacheDir", "()Ljava/io/File;", &[])?
+            .l()?;
+        let path = env
+            .call_method(&dir, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let path: String = env.get_string(&JString::from(path))?.into();
+        Ok(PathBuf::from(path))
+    })
 }
 
 /// The window insets in logical pixels, as last read.
