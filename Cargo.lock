@@ -2004,6 +2004,7 @@ dependencies = [
  "gstreamer-video",
  "log",
  "tokio",
+ "zbus",
 ]
 
 [[package]]

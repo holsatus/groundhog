@@ -12,6 +12,11 @@
 //! | `test://` | Scrolling colour bars, to check the video path (and its colours) without a camera |
 //!
 //! An empty address listens on every interface.
+//!
+//! A host may be a name. On Linux, a `.local` name (multicast DNS, as
+//! cameras announce themselves) is looked up through Avahi before each
+//! attempt, which works inside a Flatpak too (see `mdns.rs`); any other
+//! name is resolved by GStreamer.
 
 /// A video codec carried over RTP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

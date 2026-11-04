@@ -73,6 +73,7 @@ pub fn init(app: AndroidApp) {
                     .filter_level(LevelFilter::Error)
                     .filter_module("groundhog_logic", LevelFilter::Debug)
                     .filter_module("groundhog_gui_iced", LevelFilter::Debug)
+                    .filter_module("groundhog_video", LevelFilter::Debug)
                     .build(),
             ),
     );

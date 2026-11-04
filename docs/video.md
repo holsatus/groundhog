@@ -27,6 +27,13 @@ source ─► tee ─┬─► queue (leaky) ─► decodebin3 ─► video sink
 | `mpegts://` | `udpsrc` and `tsdemux` |
 | `tcp://` | `tcpclientsrc`, MPEG-TS |
 
+A host may be a name. On Linux, a `.local` name (multicast DNS, as
+cameras and companion computers announce themselves) is looked up through
+Avahi before each attempt (`groundhog-video`'s `mdns.rs`): a Flatpak's
+runtime cannot resolve such names itself, so asking Avahi on the system
+bus gives the sandbox the answer the host gets. Any other name is left to
+GStreamer, which asks the system's resolver.
+
 UDP on port 5600 is QGroundControl's default; that is what companion
 computers and most "RTP over UDP" camera setups send to.
 

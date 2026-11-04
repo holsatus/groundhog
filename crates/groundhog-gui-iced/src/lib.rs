@@ -29,12 +29,26 @@ fn application()
             line_height: iced::widget::text::LineHeight::Relative(ui::style::LINE_HEIGHT),
             ..iced::Settings::default()
         })
+        .window(window())
         .subscription(Application::subscription)
         .scale_factor(Application::scale_factor)
         .title(Application::title)
         .theme(Application::theme)
         // The application decides when to leave: after saving what is unsaved.
         .exit_on_close_request(false)
+}
+
+/// The main window: iced's defaults, named after the application on Linux,
+/// so the desktop can match it to the `.desktop` file's name and icon.
+fn window() -> iced::window::Settings {
+    iced::window::Settings {
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: platform::APP_ID.to_owned(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// Runs the desktop application.

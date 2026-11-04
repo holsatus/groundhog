@@ -59,6 +59,10 @@ The frontend also runs on Android: `android/build.sh` builds a debug APK
 (see `docs/android-port.md` for the toolchain and the iced fork it needs).
 Logs then go to `adb logcat -s groundhog`.
 
+On Linux it ships as a Flatpak: `flatpak/build.sh` builds and installs one
+for the current user (see `flatpak/README.md` for its permissions and the
+application ID the desktop knows it by).
+
 ---
 
 ## The architecture
@@ -148,7 +152,7 @@ are shared by all.
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
-| video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame` | GStreamer, `tokio::sync` | know about vehicles or the frontend |
+| video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame`; finding `.local` cameras through Avahi | GStreamer, `tokio::sync`, `zbus` on Linux | know about vehicles or the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and

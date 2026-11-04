@@ -23,6 +23,10 @@ mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a
 mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-ardupilotmega", "tokio"] }
 tokio = "1.51.1"
 serde = "1.0.228"
+# D-Bus on Linux: keeping the screen on (the frontend) and finding `.local`
+# cameras through Avahi (the video crate). iced already builds zbus 5 for its
+# theme detection, so this adds no crates.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 # The iced fork carries the Android shell support (an `android_main`
 # entry point, surface recreation on resume, system fonts and an `arboard`

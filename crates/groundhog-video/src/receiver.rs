@@ -242,6 +242,16 @@ impl Supervisor {
     /// One run of the pipeline, from opening the stream until it fails,
     /// stalls or is stopped.
     fn attempt(&self, source: &Source) -> Ended {
+        // A `.local` host is looked up again on every attempt: a camera's
+        // address can change while it is away.
+        #[cfg(target_os = "linux")]
+        let resolved = match crate::mdns::resolve(source) {
+            Ok(resolved) => resolved,
+            Err(reason) => return Ended::Retry(reason),
+        };
+        #[cfg(target_os = "linux")]
+        let source = &resolved;
+
         let description = source::pipeline_description(source, &self.config);
         log::debug!("Video pipeline: {description}");
 

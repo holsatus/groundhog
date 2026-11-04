@@ -29,6 +29,7 @@ pub fn init_logging() {
         .filter_level(log::LevelFilter::Error)
         .filter_module("groundhog_logic", log::LevelFilter::Debug)
         .filter_module("groundhog_gui_iced", log::LevelFilter::Debug)
+        .filter_module("groundhog_video", log::LevelFilter::Debug)
         .init();
 }
 

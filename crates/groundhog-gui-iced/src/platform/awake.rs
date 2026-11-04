@@ -22,8 +22,9 @@
 //! Failing to keep the session awake is logged, since the application works
 //! without it.
 //!
-//! This module uses nothing of the rest of the frontend, so it can be checked
-//! on its own for the platforms CI does not build.
+//! On Windows and macOS this module uses nothing of the rest of the
+//! frontend, so it can be checked on its own for the platforms CI does not
+//! build.
 
 /// Why the session is kept awake, where the desktop shows it to the user.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -120,6 +121,7 @@ mod linux {
     use zbus::{blocking::Connection, zvariant::Value};
 
     use super::REASON;
+    use crate::platform::APP_ID;
 
     /// The session-bus connection that holds the inhibition, for the life of
     /// the process.
@@ -166,11 +168,21 @@ mod linux {
         Err(refusals.join("; "))
     }
 
-    /// `org.freedesktop.portal.Inhibit.Inhibit`.
+    /// `org.freedesktop.portal.Inhibit.Inhibit`, after naming the
+    /// application to the portal.
     ///
     /// No parent window: the identifier only places a dialog the portal
     /// might show, and an inhibition needs none.
     fn portal(connection: &Connection) -> zbus::Result<()> {
+        // The desktop shows the name with the inhibition ("Groundhog is
+        // blocking sleep"). Only an application installed on the host, with
+        // its `.desktop` file, can register; a Flatpak is known by its ID
+        // already, and one run from a build tree stays nameless. Either
+        // way the inhibition goes ahead.
+        if let Err(error) = register(connection) {
+            log::debug!("The desktop portal does not know this application: {error}");
+        }
+
         let options = HashMap::from([("reason", Value::from(REASON))]);
 
         connection.call_method(
@@ -179,6 +191,20 @@ mod linux {
             Some("org.freedesktop.portal.Inhibit"),
             "Inhibit",
             &("", SUSPEND_AND_IDLE, options),
+        )?;
+        Ok(())
+    }
+
+    /// `org.freedesktop.host.portal.Registry.Register`: tells the portal
+    /// which application this is. It must come before any other portal call
+    /// on the connection.
+    fn register(connection: &Connection) -> zbus::Result<()> {
+        connection.call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.host.portal.Registry"),
+            "Register",
+            &(APP_ID, HashMap::<&str, Value<'_>>::new()),
         )?;
         Ok(())
     }
@@ -194,13 +220,14 @@ mod linux {
             "/org/gnome/SessionManager",
             Some("org.gnome.SessionManager"),
             "Inhibit",
-            &("Groundhog", 0_u32, REASON, SUSPEND_AND_IDLE),
+            &(APP_ID, 0_u32, REASON, SUSPEND_AND_IDLE),
         )?;
         Ok(())
     }
 
-    /// `org.freedesktop.ScreenSaver.Inhibit`: idling only, though some
-    /// desktops (KDE) also hold off suspending for it.
+    /// `org.freedesktop.ScreenSaver.Inhibit`: idling (blanking and locking
+    /// the screen) only; KDE, for one, still suspends. It takes a name to
+    /// show rather than an application ID.
     fn screen_saver(connection: &Connection) -> zbus::Result<()> {
         connection.call_method(
             Some("org.freedesktop.ScreenSaver"),
@@ -230,7 +257,7 @@ mod linux {
             zvariant::{OwnedObjectPath, OwnedValue},
         };
 
-        use super::{REASON, SUSPEND_AND_IDLE, inhibit};
+        use super::{APP_ID, REASON, SUSPEND_AND_IDLE, inhibit};
 
         /// What the mocks were asked, in order.
         type Calls = Arc<Mutex<Vec<String>>>;
@@ -256,15 +283,24 @@ mod linux {
             }
         }
 
+        struct Registry(Calls);
+
+        #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
+        impl Registry {
+            fn register(&self, app_id: &str, _options: HashMap<String, OwnedValue>) {
+                self.0.lock().unwrap().push(format!("register {app_id}"));
+            }
+        }
+
         struct GnomeSession(Calls);
 
         #[zbus::interface(name = "org.gnome.SessionManager")]
         impl GnomeSession {
-            fn inhibit(&self, _app_id: &str, _toplevel_xid: u32, reason: &str, flags: u32) -> u32 {
+            fn inhibit(&self, app_id: &str, _toplevel_xid: u32, reason: &str, flags: u32) -> u32 {
                 self.0
                     .lock()
                     .unwrap()
-                    .push(format!("gnome {flags} {reason}"));
+                    .push(format!("gnome {app_id} {flags} {reason}"));
                 1
             }
         }
@@ -292,6 +328,9 @@ mod linux {
         #[derive(Clone, Copy)]
         struct Desktop {
             portal: bool,
+            /// Whether the portal can name a host application (a newer
+            /// portal, and an installed `.desktop` file).
+            registry: bool,
             gnome: bool,
             screen_saver: bool,
         }
@@ -316,6 +355,11 @@ mod linux {
                 if offers.portal {
                     builder = builder
                         .serve_at("/org/freedesktop/portal/desktop", Portal(served.clone()))
+                        .unwrap();
+                }
+                if offers.registry {
+                    builder = builder
+                        .serve_at("/org/freedesktop/portal/desktop", Registry(served.clone()))
                         .unwrap();
                 }
                 if offers.gnome {
@@ -345,9 +389,29 @@ mod linux {
         }
 
         #[test]
-        fn the_portal_is_asked_first_for_idling_and_suspend() {
+        fn the_portal_is_told_who_asks_then_asked_first_for_idling_and_suspend() {
             let (client, _server, made) = desktop(Desktop {
                 portal: true,
+                registry: true,
+                gnome: true,
+                screen_saver: true,
+            });
+
+            assert_eq!(inhibit(&client), Ok("desktop portal"));
+            assert_eq!(
+                calls(&made),
+                [
+                    format!("register {APP_ID}"),
+                    format!("portal {SUSPEND_AND_IDLE} Some({REASON:?})"),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_portal_that_cannot_name_the_application_still_inhibits() {
+            let (client, _server, made) = desktop(Desktop {
+                portal: true,
+                registry: false,
                 gnome: true,
                 screen_saver: true,
             });
@@ -363,18 +427,23 @@ mod linux {
         fn gnome_without_a_portal_is_asked_directly() {
             let (client, _server, made) = desktop(Desktop {
                 portal: false,
+                registry: false,
                 gnome: true,
                 screen_saver: true,
             });
 
             assert_eq!(inhibit(&client), Ok("GNOME session"));
-            assert_eq!(calls(&made), [format!("gnome {SUSPEND_AND_IDLE} {REASON}")]);
+            assert_eq!(
+                calls(&made),
+                [format!("gnome {APP_ID} {SUSPEND_AND_IDLE} {REASON}")]
+            );
         }
 
         #[test]
         fn the_screen_saver_is_the_last_resort() {
             let (client, _server, made) = desktop(Desktop {
                 portal: false,
+                registry: false,
                 gnome: false,
                 screen_saver: true,
             });
@@ -387,6 +456,7 @@ mod linux {
         fn a_desktop_with_none_says_why_for_each() {
             let (client, _server, _) = desktop(Desktop {
                 portal: false,
+                registry: false,
                 gnome: false,
                 screen_saver: false,
             });

@@ -16,3 +16,12 @@ tokio = { workspace = true, features = ["sync"] }
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
+
+# A `.local` camera is looked up through Avahi on the system bus (see
+# `src/mdns.rs`).
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
+# The lookup's tests talk to a mock Avahi over a socket pair, not the bus.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }

@@ -33,6 +33,8 @@
 #![warn(unreachable_pub)]
 
 mod frame;
+#[cfg(target_os = "linux")]
+mod mdns;
 #[cfg(not(target_os = "android"))]
 mod record;
 mod source;

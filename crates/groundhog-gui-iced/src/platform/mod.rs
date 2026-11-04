@@ -26,6 +26,14 @@ pub use android::{
     config_dir, data_dir, insets, insets_subscription, keep_awake, leave, set_system_bars,
 };
 
+/// The application's identity on a Linux desktop: the Wayland app ID (and
+/// X11 class) of its window, the name of its `.desktop` file, the Flatpak's
+/// ID, and what it registers with the desktop portal. The desktop matches
+/// them to show the application's name and icon, so all of them must agree
+/// (see `flatpak/`).
+#[cfg(target_os = "linux")]
+pub const APP_ID: &str = "org.holsatus.Groundhog";
+
 /// Whether the platform is a touch screen: no hover, and fingers rather
 /// than a pointer, so the interface floats over the map by default and
 /// shows no tooltips.

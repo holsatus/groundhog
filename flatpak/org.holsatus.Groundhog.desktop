@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Groundhog
+GenericName=Ground Control Station
+Comment=Monitor and command MAVLink vehicles
+Exec=groundhog
+Icon=org.holsatus.Groundhog
+Terminal=false
+Categories=Science;Engineering;
+Keywords=GCS;MAVLink;ArduPilot;PX4;drone;UAV;telemetry;
+StartupWMClass=org.holsatus.Groundhog

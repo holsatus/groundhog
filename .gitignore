@@ -1,3 +1,4 @@
 /target
 /android/out
 /android/debug.keystore
+/flatpak/out
