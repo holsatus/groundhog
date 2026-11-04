@@ -29,6 +29,7 @@ use mavio::{
 };
 
 use super::vehicle::{StatusText, class::VehicleClass};
+use crate::MavlinkId;
 
 /// A calibration an operator can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -318,6 +319,10 @@ pub struct Session {
     /// previous run just after a new one starts; results are only trusted
     /// once this is set.
     observed: bool,
+    /// The compasses this run calibrates, as the union of the `cal_mask` of
+    /// its progress reports. A compass whose progress never arrives is still
+    /// part of the run, and its report is the only sign it finished.
+    pub(crate) expected_compasses: u8,
     /// The run this session follows.
     run: RunId,
 }
@@ -335,6 +340,7 @@ impl Session {
             needs_reboot: false,
             completes_on_ack,
             observed: false,
+            expected_compasses: 0,
             run,
         }
     }
@@ -472,7 +478,11 @@ pub trait CalibrationProtocol: Send + Sync + 'static {
     }
 
     /// Fold the vehicle's feedback into a session that is not finished.
-    fn observe(&self, session: &mut Session, feedback: Feedback<'_>);
+    ///
+    /// Returns whether the feedback belonged to this run, whether or not it
+    /// changed the session: repeated progress counts, so a run that the
+    /// vehicle is still working on does not time out.
+    fn observe(&self, session: &mut Session, feedback: Feedback<'_>) -> bool;
 
     /// The calibrations a vehicle of `class` can run, in display order.
     fn kinds(&self, class: VehicleClass) -> Vec<CalibrationKind> {
@@ -504,6 +514,22 @@ pub(crate) enum CalibrationUpdate {
     Cancel,
     /// The operator is done looking at a finished session.
     Dismiss,
+}
+
+/// A run that Groundhog ended itself, and what it must tell the vehicle.
+#[derive(Debug, Clone)]
+pub(crate) struct EndedRun {
+    /// The command that stops the run on the vehicle, when its firmware has
+    /// one.
+    pub(crate) cancel: Option<CalibrationCancel>,
+}
+
+/// A firmware's command that stops a calibration on the vehicle.
+#[derive(Debug, Clone)]
+pub(crate) struct CalibrationCancel {
+    pub(crate) target: MavlinkId,
+    pub(crate) command: CommandLong,
+    pub(crate) retries: u8,
 }
 
 /// `MAV_CMD_PREFLIGHT_CALIBRATION` with `params` as its seven parameters.

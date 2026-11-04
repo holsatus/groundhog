@@ -28,7 +28,7 @@ Phase 1 of the first review (packages 1–7) is done and removed; packages
 | 29 | [Panic-free mission references](#wp29--panic-free-mission-references) | MISSION-12, MISSION-13, MISSION-14, MISSION-15, MISSION-16 | P0 | — | Done |
 | 30 | [Only intact frames reach the router](#wp30--only-intact-frames-reach-the-router) | PROTO-7 | P1 | — | Done |
 | 31 | [Parameter downloads and edits in order](#wp31--parameter-downloads-and-edits-in-order) | PARAM-11, PARAM-12, PARAM-13, PARAM-15 | P1 | — | Done |
-| 32 | [Calibration ends on both sides](#wp32--calibration-ends-on-both-sides) | CAL-10, CAL-11, CAL-12, CAL-13 | P1 | — | Todo |
+| 32 | [Calibration ends on both sides](#wp32--calibration-ends-on-both-sides) | CAL-10, CAL-11, CAL-12, CAL-13 | P1 | — | Done |
 | 33 | [Command transaction timing](#wp33--command-transaction-timing) | PROTO-8, PROTO-9, PROTO-11, PROTO-12 | P1 | — | Todo |
 | 34 | [Mission transfers known to the runtime](#wp34--mission-transfers-known-to-the-runtime) | MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) | P1 | — | Todo |
 | 8 | [Shared feature test harness](#wp8--shared-feature-test-harness) | API-10 | P3 (enabler) | — | Done |
@@ -234,7 +234,7 @@ in the runtime's tolerant decoder.
   nothing; `I32(1 << 24)` is sent.
 
 ### WP32 · Calibration ends on both sides
-**Closes:** CAL-10, CAL-11, CAL-12, CAL-13 · **Status:** Todo
+**Closes:** CAL-10, CAL-11, CAL-12, CAL-13 · **Status:** Done
 
 - **Liveness, not change** (CAL-10, part 1): `CalibrationProtocol::observe`
   returns `bool`: whether the feedback belonged to the running session,
@@ -244,22 +244,34 @@ in the runtime's tolerant decoder.
   - ArduPilot: an `ACCELCAL_VEHICLE_POS`; a `MAG_CAL_PROGRESS` or
     `MAG_CAL_REPORT` for a compass in the run (the reports that
     `observe_compass_report` already rejects as from an earlier run do not
-    count); a calibration status text.
+    count). Not its status texts: they are still noted in the session's log,
+    but `mentions_calibration` matches any text with "compass", "mag", "gyro"
+    and the like, and ArduPilot repeats pre-arm failures ("PreArm: Compass
+    not calibrated") about every 30 s while disarmed, which would keep a
+    stalled run alive forever. ArduPilot's runs report through those
+    messages, so the texts add no liveness.
   - PX4: any `[cal]` text, repeats included. The note log still drops
     repeats.
   - `CALIBRATION_TIMEOUT` stays 60 s; rewrite its doc to "the vehicle said
     nothing about the calibration for this long".
-- **Tell the vehicle** (CAL-10, part 2): `Vehicle::end_calibration(reason)`
-  returns `Option<EndedRun>` instead of `bool`, with `EndedRun { cancel:
-  Option<CommandLong> }`. `cancel` is `protocol.cancel(session)`, computed
-  before the session is failed. `Fleet::tick` returns a crate-private `Tick
-  { events, cancels: Vec<(MavlinkId, CommandLong, u8 /* retries */)> }`, and
-  collects a cancel for the timeout and for loss of contact. The cancel for
-  loss is best effort: the vehicle may come back still calibrating. A reboot
-  ends the run on the vehicle's side, so `Fleet::observe` sends none. The
-  runtime spawns each cancel as `router.command(target,
-  cancel).retries(retries)`, logging a failure at warn. Use the task set
-  from WP36 if it has landed, else a bare `tokio::spawn`.
+- **Tell the vehicle** (CAL-10, part 2):
+  - `Vehicle::end_calibration(reason)` returns `Option<EndedRun>` instead of
+    `bool` (`None`: no run was going), with a crate-private `EndedRun {
+    cancel: Option<CalibrationCancel> }` and `CalibrationCancel { target:
+    MavlinkId, command: CommandLong, retries: u8 }`. Its fields come from the
+    protocol, read before the session is failed: `protocol.cancel(session)`,
+    `protocol.cancel_retries()`, and `vehicle.target()`.
+  - `Fleet::tick` returns a crate-private `Tick { events: Vec<FleetEvent>,
+    cancels: Vec<CalibrationCancel> }`, and collects the cancel of a run it
+    ends by timeout or by loss of contact. The cancel for loss is best
+    effort: the vehicle may come back still calibrating, and a send that
+    finds no link just fails. A reboot ends the run on the vehicle's side, so
+    `Fleet::observe` keeps discarding its result. Update the existing `tick`
+    tests mechanically (`.events`).
+  - The runtime (`services/runtime.rs`, the liveness branch) spawns each
+    cancel as `router.command(target, command).retries(retries)` and logs a
+    failure at warn. Use the task set from WP36 if it has landed, else a bare
+    `tokio::spawn`.
 - **One announcement** (CAL-11): in `Fleet::tick`'s `Lost` branch, emit
   `calibration_finished` only when `end_calibration` returned `Some`.
 - **Confirming holds** (CAL-12): in `calibration/ardupilot.rs`
@@ -267,24 +279,42 @@ in the runtime's tolerant decoder.
   `Instruction::Confirming(side)` and the requested position is the same
   `side`, change nothing; return true (it is feedback for the run). A
   different side, success or failure proceed as today.
-- **All compasses** (CAL-13): the session's ArduPilot state keeps
-  `expected_compasses: u8`, the union of every `cal_mask` seen in the run's
-  `MAG_CAL_PROGRESS` and `MAG_CAL_REPORT`. The run finishes only when every
-  bit in it has a final report. Keep the existing rule (every compass seen
-  has reported) as a lower bound, for firmware that sends a zero mask.
+- **All compasses** (CAL-13), in `calibration/ardupilot.rs`:
+  - `Session` keeps a crate-private `expected_compasses: u8`, the union of
+    `cal_mask` from this run's `MAG_CAL_PROGRESS` only. Reports are left
+    out: ArduPilot repeats the last run's reports, so their masks can be
+    stale.
+  - `observe_compass_report` accepts a report for a compass that has shown
+    progress (as today), *or* whose bit is in `expected_compasses` once
+    `session.observed` is set; such a compass gets its entry then. Its
+    progress may have been lost on a saturated link, while its report is
+    this run's.
+  - The run finishes only when every compass in `expected_compasses` and
+    every compass with an entry has a final status. A zero mask (firmware
+    that does not fill it) reduces this to today's rule.
 
-**Tests** (`domain/calibration/tests.rs` and `fleet.rs`):
+**Tests** (`domain/calibration/tests.rs` and `fleet.rs`, plus one in
+`services/tests.rs`):
 - 62 s of identical `MAG_CAL_PROGRESS` (87 %) at 1 Hz: still running. Then
-  61 s of silence: `CalibrationFinished(Failed)`, and `Tick::cancels` holds
-  `DO_CANCEL_MAG_CAL` for the vehicle. In `services/tests.rs`, the mock
-  receives it.
+  61 s of silence about the calibration, with heartbeats still arriving (a
+  vehicle silent for 10 s is `Lost`, which ends the run first): failed with
+  "the calibration made no progress", and `Tick::cancels` holds
+  `DO_CANCEL_MAG_CAL` for the vehicle. The same with PX4's identical
+  `[cal] progress` texts.
+- In `services/tests.rs` (module `calibration`), an ArduPilot compass run
+  whose mock keeps heartbeating but stops reporting: the mock receives
+  `DO_CANCEL_MAG_CAL` after the timeout.
+- Loss of contact during a compass run also yields a cancel in
+  `Tick::cancels`; a reboot does not.
 - A gyro calibration that succeeded, then the vehicle goes `Lost`: no second
   `CalibrationFinished`.
 - `Place(Level)`, `Confirmed(Level)`, then `ACCELCAL_VEHICLE_POS(Level)`: the
   instruction stays `Confirming(Level)`, and `calibration_controls().confirm`
   is false.
 - Progress for compass 0 with `cal_mask = 0b11`, then a success report for
-  compass 0: still running; a report for compass 1 finishes it.
+  compass 0: still running; a report for compass 1 (which never sent
+  progress) finishes it. A report for compass 2, outside the mask and
+  never seen, is ignored.
 
 ### WP33 · Command transaction timing
 **Closes:** PROTO-8, PROTO-9, PROTO-11, PROTO-12 · **Status:** Todo ·

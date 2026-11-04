@@ -122,36 +122,49 @@ impl CalibrationProtocol for ArduPilotCalibration {
         }
     }
 
-    fn observe(&self, session: &mut Session, feedback: Feedback<'_>) {
+    fn observe(&self, session: &mut Session, feedback: Feedback<'_>) -> bool {
         match feedback {
             Feedback::Text(text) => {
+                // ArduPilot reports its runs through `ACCELCAL_VEHICLE_POS`
+                // and the `MAG_CAL_*` messages; a status text only joins the
+                // log. In particular "PreArm: Compass not calibrated" repeats
+                // while disarmed and must not keep a stalled run alive.
                 if mentions_calibration(&text.text) {
                     session.note(&text.text);
                 }
+                false
             }
             Feedback::Message(DefaultDialect::CommandLong(command))
                 if command.command == MavCmd::AccelcalVehiclePos
                     && session.kind == CalibrationKind::Accelerometer =>
             {
-                observe_position(session, command.param1);
+                observe_position(session, command.param1)
             }
             Feedback::Message(DefaultDialect::MagCalProgress(progress))
                 if session.kind == CalibrationKind::Compass =>
             {
                 observe_compass_progress(session, progress);
+                true
             }
             Feedback::Message(DefaultDialect::MagCalReport(report))
                 if session.kind == CalibrationKind::Compass =>
             {
-                observe_compass_report(session, report);
+                observe_compass_report(session, report)
             }
-            Feedback::Message(_) => {}
+            Feedback::Message(_) => false,
         }
     }
 }
 
-fn observe_position(session: &mut Session, position: f32) {
+fn observe_position(session: &mut Session, position: f32) -> bool {
     if let Some(side) = side_at(position) {
+        // The vehicle repeats its request until the confirmation arrives. A
+        // repeat for the side being confirmed is that same request, not a new
+        // step: it must not take the session back to asking for the side
+        // again, while the vehicle is already measuring it.
+        if session.instruction == Instruction::Confirming(side) {
+            return true;
+        }
         session.observe_running();
         // The vehicle asks for the sides in order; asking for this one means
         // every earlier one is done.
@@ -168,10 +181,14 @@ fn observe_position(session: &mut Session, position: f32) {
     } else if session.observed && position == POSITION_FAILED {
         session.fail("the vehicle rejected the measurements; try again, holding it still");
     }
+    true
 }
 
 fn observe_compass_progress(session: &mut Session, progress: &MagCalProgress) {
     session.observe_running();
+    // Every progress report names the whole run, so the compasses whose own
+    // progress is lost on a busy link are still known to be calibrating.
+    session.expected_compasses |= progress.cal_mask;
     let entry = compass(session, progress.compass_id);
     entry.completion = progress.completion_pct.min(100);
     entry.status = CompassStatus::Running;
@@ -184,30 +201,45 @@ fn observe_compass_progress(session: &mut Session, progress: &MagCalProgress) {
         .min();
 }
 
-fn observe_compass_report(session: &mut Session, report: &MagCalReport) {
-    // Reports repeat until the next run, so one for a compass this run has
-    // not shown progress for is from an earlier run.
-    let Some(entry) = session
+fn observe_compass_report(session: &mut Session, report: &MagCalReport) -> bool {
+    // Reports repeat until the next run. One for a compass this run has shown
+    // progress for belongs to it; so does one whose bit this run's progress
+    // named, even if that compass's own progress was lost on the way.
+    let seen = session
         .compasses
-        .iter_mut()
-        .find(|compass| compass.id == report.compass_id)
-    else {
-        return;
-    };
+        .iter()
+        .any(|compass| compass.id == report.compass_id);
+    let expected = session.observed
+        && report.compass_id < 8
+        && session.expected_compasses & (1 << report.compass_id) != 0;
+    if !seen && !expected {
+        return false;
+    }
 
+    let entry = compass(session, report.compass_id);
     entry.status = compass_status(report.cal_status);
     if entry.status == CompassStatus::Running {
-        return;
+        return true;
     }
     entry.completion = 100;
     entry.fitness = Some(report.fitness);
 
-    if session
+    // Every compass in the run must report, including one whose progress was
+    // never seen. A zero mask (a firmware that does not fill it) leaves only
+    // the compasses with an entry.
+    let every_entry_done = session
         .compasses
         .iter()
-        .any(|compass| compass.status == CompassStatus::Running)
-    {
-        return;
+        .all(|compass| compass.status != CompassStatus::Running);
+    let every_expected_done = (0..8u8).all(|id| {
+        session.expected_compasses & (1 << id) == 0
+            || session
+                .compasses
+                .iter()
+                .any(|compass| compass.id == id && compass.status != CompassStatus::Running)
+    });
+    if !every_entry_done || !every_expected_done {
+        return true;
     }
 
     let failed = session
@@ -225,6 +257,7 @@ fn observe_compass_report(session: &mut Session, report: &MagCalReport) {
             session.succeed();
         }
     }
+    true
 }
 
 /// The session's entry for compass `id`, added if new.

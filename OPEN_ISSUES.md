@@ -31,7 +31,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [CAL-10](#cal-10--the-no-progress-timeout-ends-runs-that-are-alive-and-leaves-them-running) — the timeout fails a live compass run, which then saves anyway |
 | **P1** | [PROTO-8](#proto-8--one-in_progress-cuts-the-callers-timeout-to-five-seconds) — one `IN_PROGRESS` cuts a 10 s timeout to 5 s and cancels the command |
 | **P1** | [MISSION-17](#mission-17--our-own-upload-is-announced-as-changed-elsewhere) — every upload to PX4 / ArduPilot 4.5+ warns "changed elsewhere" |
 
@@ -338,60 +337,6 @@ app toasts it) while `status()` says disconnected; 26 of 200 runs.
 **Fix:** the supervisor is the only publisher (see WP13).
 
 ## Firmware & calibration
-
-### CAL-10 · The no-progress timeout ends runs that are alive, and leaves them running
-**P1** · Effort M · From R-1104
-
-The timer resets only when the `Session` value changes
-(`vehicle/mod.rs` `observe_calibration`). ArduPilot's `MAG_CAL_PROGRESS`
-often repeats the same percentage for a minute while the operator looks for
-new orientations, and PX4 repeats identical `[cal]` texts (which `note`
-drops), so a live run fails after 60 s with "the calibration made no
-progress". Nothing tells the vehicle: `end_calibration` sends no
-`DO_CANCEL_MAG_CAL`, and with autosave on, ArduPilot later saves offsets from
-a run the operator was told had failed.
-
-**Fix:** the timer means "the vehicle said nothing about the calibration for
-60 s": it resets on any feedback the protocol accepts as belonging to the
-run, changed or not. When Groundhog ends a running session (timeout, loss of
-contact), it also sends the firmware's cancel, best effort. 60 s stays.
-
-**Test:** 62 s of identical `MAG_CAL_PROGRESS` at 1 Hz: still running. 61 s of
-silence: failed, and the mock receives `DO_CANCEL_MAG_CAL`.
-
-### CAL-11 · Losing a vehicle re-announces a finished calibration
-**P2** · Effort S · From R-1104
-
-On `Lost`, `Fleet::tick` calls `end_calibration` and ignores its result, then
-emits `calibration_finished` for any undismissed finished session
-(`fleet.rs:306-309`). A calibration that succeeded an hour ago is announced
-again when the vehicle powers off. Emit only when `end_calibration` ended a
-running session.
-
-### CAL-12 · A late orientation request re-offers Confirm
-**P2** · Effort S · From R-1104
-
-`Confirmed` sets `Instruction::Confirming(side)` before the command is sent;
-ArduPilot repeats `ACCELCAL_VEHICLE_POS(side)` at 1 Hz until it receives
-it, and `observe_position` (`calibration/ardupilot.rs:153`) sets
-`Place(side)` again. With 100–300 ms of round trip that hits a good share of
-confirmations: the panel asks for the side again and offers Confirm while the
-vehicle measures; a second press is refused.
-
-**Fix:** a request for the side being confirmed does not change the
-instruction; only a request for another side, or success/failure, does.
-
-### CAL-13 · Compass completion ignores `cal_mask`
-**P2** · Effort S · From R-1104
-
-The run counts as done when every compass that *sent progress* has reported
-(`calibration/ardupilot.rs:173-227`). On a saturated radio a compass's
-progress may never arrive, and the run succeeds (and asks for a reboot) while
-it is still calibrating. Every `MAG_CAL_PROGRESS`/`MAG_CAL_REPORT` carries
-`cal_mask`, the compasses in the run.
-
-**Fix:** keep the union of `cal_mask` seen in the run; finish only when every
-compass in it has a final report.
 
 ### CAL-14 · PX4 sub-modes outside AUTO are dropped
 **P2** · Effort S · From R-1104

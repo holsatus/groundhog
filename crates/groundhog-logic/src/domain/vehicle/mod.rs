@@ -61,7 +61,8 @@ use crate::{
     wire::{self, param::ParamEncoding},
 };
 
-/// How long a calibration may make no progress before it is failed.
+/// How long the vehicle may say nothing about a calibration before it is
+/// failed.
 const CALIBRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How far an autopilot's `time_boot_ms` must step backwards to mean a
@@ -486,16 +487,31 @@ impl Vehicle {
         }
     }
 
-    /// End the running calibration, if any, with `reason`. Reports whether
-    /// one was running.
-    pub(crate) fn end_calibration(&mut self, reason: impl Into<String>) -> bool {
-        match &mut self.calibration {
-            Some(session) if session.is_running() => {
-                session.fail(reason);
-                true
-            }
-            _ => false,
+    /// End the running calibration, if any, with `reason`, and report what
+    /// the vehicle must be told about it. `None` when no run was going.
+    pub(crate) fn end_calibration(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Option<calibration::EndedRun> {
+        let target = self.target();
+        let protocol = self.firmware().calibration();
+        let session = self.calibration.as_mut()?;
+        if !session.is_running() {
+            return None;
         }
+
+        // Read the cancel before failing the session: the protocol decides it
+        // from the run that is ending.
+        let cancel = protocol.and_then(|protocol| {
+            let command = protocol.cancel(session)?;
+            Some(calibration::CalibrationCancel {
+                target,
+                command,
+                retries: protocol.cancel_retries(),
+            })
+        });
+        session.fail(reason);
+        Some(calibration::EndedRun { cancel })
     }
 
     /// Whether the running calibration has made no progress for too long,
@@ -532,7 +548,7 @@ impl Vehicle {
     }
 
     /// Fold the autopilot's feedback into a running calibration, noting when
-    /// it advanced.
+    /// the vehicle last said something about it.
     fn observe_calibration(&mut self, time: Instant, feedback: Feedback<'_>) {
         let protocol = self.firmware().calibration();
         let Some(protocol) = protocol else {
@@ -546,9 +562,10 @@ impl Vehicle {
             return;
         }
 
-        let before = session.clone();
-        protocol.observe(session, feedback);
-        if *session != before {
+        // Any feedback that belongs to the run keeps it alive, even when it
+        // repeats what the session already shows: a vehicle can spend a
+        // minute on the same percentage while the operator turns it.
+        if protocol.observe(session, feedback) {
             self.calibration_progress_at = Some(time);
         }
     }
@@ -1401,6 +1418,55 @@ mod tests {
             CalibrationControls::default(),
             "a finished run has no controls"
         );
+    }
+
+    /// ArduPilot repeats its orientation request until the confirmation
+    /// arrives; the repeat must not offer Confirm again while it measures.
+    #[test]
+    fn a_repeated_orientation_request_does_not_re_offer_confirmation() {
+        let t = Instant::now();
+        let mut vehicle = vehicle();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+        let run = calibration::RunId(1);
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Begin {
+                kind: CalibrationKind::Accelerometer,
+                run,
+            },
+        );
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Acknowledged {
+                run,
+                result: Ok(()),
+            },
+        );
+        let position = |param1| {
+            DefaultDialect::CommandLong(messages::CommandLong {
+                command: mavio::default_dialect::enums::MavCmd::AccelcalVehiclePos,
+                param1,
+                ..Default::default()
+            })
+        };
+        vehicle.handle_message(t, 1, &position(1.0));
+        assert!(vehicle.calibration_controls().confirm);
+
+        vehicle.update_calibration(
+            t,
+            CalibrationUpdate::Confirmed {
+                run,
+                side: calibration::Side::Level,
+            },
+        );
+        assert!(!vehicle.calibration_controls().confirm);
+
+        vehicle.handle_message(t, 1, &position(1.0));
+        assert_eq!(
+            vehicle.calibration.as_ref().unwrap().instruction,
+            calibration::Instruction::Confirming(calibration::Side::Level)
+        );
+        assert!(!vehicle.calibration_controls().confirm);
     }
 
     /// What a run reports lands on that run only: a start abandoned after a

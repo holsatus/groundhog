@@ -1277,4 +1277,65 @@ mod calibration {
         assert!(matches!(&session.phase, Phase::Failed(reason) if reason.starts_with("compass 1")));
         assert_eq!(session.compasses[0].fitness, Some(120.0));
     }
+
+    /// The vehicle keeps heartbeating but stops reporting its compass run:
+    /// after the timeout Groundhog tells it to stop, so autosave cannot keep
+    /// offsets from a run the operator was told had failed.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_compass_run_is_cancelled_on_the_vehicle() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let start =
+            tokio::spawn(async move { client.start_calibration(CalibrationKind::Compass).await });
+        assert_eq!(
+            harness.vehicle.command().await.command,
+            MavCmd::DoStartMagCal
+        );
+        harness
+            .vehicle
+            .ack(MavCmd::DoStartMagCal, MavResult::Accepted)
+            .await;
+        start.await.unwrap().expect("accepted");
+
+        harness
+            .vehicle
+            .send(&MagCalProgress {
+                compass_id: 0,
+                cal_mask: 0b1,
+                completion_pct: 10,
+                cal_status: MagCalStatus::MagCalRunningStepOne,
+                ..Default::default()
+            })
+            .await;
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(|session| session.progress == Some(10))
+        })
+        .await;
+
+        // Heartbeats keep the vehicle alive while it says nothing about the
+        // calibration.
+        for _ in 0..62 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            harness.vehicle.heartbeat(MavAutopilot::Ardupilotmega).await;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let cancel = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let command = harness.vehicle.command().await;
+                if command.command == MavCmd::DoCancelMagCal {
+                    break command;
+                }
+            }
+        })
+        .await
+        .expect("the vehicle is told to cancel the calibration");
+        assert_eq!(cancel.command, MavCmd::DoCancelMagCal);
+        until(&mut harness.updates, |fleet| {
+            session(fleet).is_some_and(|session| !session.is_running())
+        })
+        .await;
+    }
 }

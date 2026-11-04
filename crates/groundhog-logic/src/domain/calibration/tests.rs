@@ -36,18 +36,22 @@ fn airspeed_is_offered_only_to_winged_vehicles() {
     }
 }
 
-fn text(protocol: &dyn CalibrationProtocol, session: &mut Session, text: &str) {
+fn text(protocol: &dyn CalibrationProtocol, session: &mut Session, text: &str) -> bool {
     let text = StatusText {
         component: 1,
         at: Instant::now(),
         severity: MavSeverity::Info,
         text: text.to_string(),
     };
-    protocol.observe(session, Feedback::Text(&text));
+    protocol.observe(session, Feedback::Text(&text))
 }
 
-fn message(protocol: &dyn CalibrationProtocol, session: &mut Session, message: DefaultDialect) {
-    protocol.observe(session, Feedback::Message(&message));
+fn message(
+    protocol: &dyn CalibrationProtocol,
+    session: &mut Session,
+    message: DefaultDialect,
+) -> bool {
+    protocol.observe(session, Feedback::Message(&message))
 }
 
 fn accelcal_position(position: f32) -> DefaultDialect {
@@ -215,6 +219,58 @@ fn ardupilot_compass_succeeds_once_every_compass_reports() {
     assert_eq!(session.phase, Phase::Succeeded);
     assert!(session.needs_reboot);
     assert_eq!(session.compasses[1].fitness, Some(8.5));
+}
+
+/// Every progress report names the whole run. A compass whose own progress
+/// was lost on a busy link is still part of it, and only its report finishes
+/// the run.
+#[test]
+fn ardupilot_compass_waits_for_every_masked_compass() {
+    let protocol = ArduPilotCalibration;
+    let mut session = session(&protocol, CalibrationKind::Compass);
+    session.acknowledged(Ok(()));
+
+    let progress = |compass_id, cal_mask| {
+        DefaultDialect::MagCalProgress(MagCalProgress {
+            compass_id,
+            cal_mask,
+            completion_pct: 50,
+            cal_status: MagCalStatus::MagCalRunningStepOne,
+            ..Default::default()
+        })
+    };
+
+    message(&protocol, &mut session, progress(0, 0b11));
+    message(
+        &protocol,
+        &mut session,
+        mag_report(0, MagCalStatus::MagCalSuccess),
+    );
+    assert_eq!(
+        session.phase,
+        Phase::Running,
+        "compass 1 is still in the run"
+    );
+
+    // A compass outside the mask that never sent progress is from an earlier
+    // run.
+    assert!(
+        !message(
+            &protocol,
+            &mut session,
+            mag_report(2, MagCalStatus::MagCalSuccess),
+        ),
+        "not this run's feedback"
+    );
+    assert_eq!(session.phase, Phase::Running);
+
+    message(
+        &protocol,
+        &mut session,
+        mag_report(1, MagCalStatus::MagCalSuccess),
+    );
+    assert_eq!(session.phase, Phase::Succeeded);
+    assert!(session.needs_reboot);
 }
 
 #[test]
@@ -421,6 +477,26 @@ fn a_sent_confirmation_waits_for_the_vehicle() {
     session.confirmed(Side::Level);
     message(&protocol, &mut session, accelcal_position(2.0));
     assert_eq!(session.instruction, Instruction::Place(Side::Left));
+}
+
+/// ArduPilot repeats its orientation request every second until the
+/// confirmation arrives. A repeat for the side being confirmed is that same
+/// request, not a new step: it must not offer Confirm again.
+#[test]
+fn a_repeated_orientation_request_keeps_the_confirmation() {
+    let protocol = ArduPilotCalibration;
+    let mut session = session(&protocol, CalibrationKind::Accelerometer);
+    session.acknowledged(Ok(()));
+    message(&protocol, &mut session, accelcal_position(1.0));
+    session.confirmed(Side::Level);
+    assert_eq!(session.instruction, Instruction::Confirming(Side::Level));
+
+    assert!(
+        message(&protocol, &mut session, accelcal_position(1.0)),
+        "the repeat belongs to the run"
+    );
+    assert_eq!(session.instruction, Instruction::Confirming(Side::Level));
+    assert_eq!(protocol.confirm(&session), None, "not asked again");
 }
 
 /// The cancel caption is the firmware's (and the kind's) to word: some kinds

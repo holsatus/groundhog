@@ -63,15 +63,22 @@ impl CalibrationProtocol for Px4Calibration {
         1
     }
 
-    fn observe(&self, session: &mut Session, feedback: Feedback<'_>) {
+    fn observe(&self, session: &mut Session, feedback: Feedback<'_>) -> bool {
         let Feedback::Text(text) = feedback else {
-            return;
+            return false;
         };
 
         match text.text.strip_prefix(PREFIX) {
-            Some(narration) => observe_narration(session, narration.trim()),
-            None if mentions_calibration(&text.text) => session.note(&text.text),
-            None => {}
+            Some(narration) => {
+                observe_narration(session, narration.trim());
+                // Every narration is this run's, repeats included.
+                true
+            }
+            None if mentions_calibration(&text.text) => {
+                session.note(&text.text);
+                false
+            }
+            None => false,
         }
     }
 }

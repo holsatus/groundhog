@@ -162,9 +162,28 @@ async fn run(
             }
 
             now = liveness.tick() => {
-                let events = fleet.tick(now.into_std());
-                dirty |= !events.is_empty();
-                pending.extend(events);
+                let tick = fleet.tick(now.into_std());
+                dirty |= !tick.events.is_empty();
+                pending.extend(tick.events);
+
+                // A run Groundhog ended itself must also be stopped on the
+                // vehicle, best effort: a lost vehicle may have no link left
+                // to hear it, and it may come back still calibrating.
+                for cancel in tick.cancels {
+                    let router = handle.router().clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = router
+                            .command(cancel.target, cancel.command)
+                            .retries(cancel.retries)
+                            .await
+                        {
+                            log::warn!(
+                                "Calibration cancel on {:?} failed: {error}",
+                                cancel.target
+                            );
+                        }
+                    });
+                }
             }
 
             input = inputs.recv() => match input {
