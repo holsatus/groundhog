@@ -445,9 +445,12 @@ A rounded container clips its background, not its content, so a body
 that paints its whole rectangle (the map's tiles, a video) would show past
 a pane's corners. The tiled shell's pane grid therefore paints each
 pane's corners in the workspace's colour over its body
-(`pane_grid::Style::corners`): one quad per pane, in the layer that
-already re-strokes its border, so nothing needs caching, and no panel
-needs to know where it is shown. Over the map no colour is known to lie
+(`pane_grid::Style::corners`), and its border over that, from small
+quads (`Outline` in `widget/pane_grid/content.rs`): a strip per edge and
+rings per corner, clipped to the corner. Nothing needs caching, no panel
+needs to know where it is shown, and no quad covers the whole pane, which
+the CPU renderer (tiny-skia) would blend pixel by pixel even where it is
+transparent. Over the map no colour is known to lie
 behind a corner, so there content keeps within its corners itself, or the
 corners are square (the inset in the floating shell's corner).
 

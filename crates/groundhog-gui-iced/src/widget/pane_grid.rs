@@ -36,10 +36,11 @@
 //   - `Axis::split` never gives a side a negative length, nor overflows: where
 //     the region cannot hold both minimum sizes, it splits at the ratio
 //   - `Style::corners` paints the backdrop over a pane's corners, outside its
-//     rounded outline, after its body (`Content::draw`, `corner_mask`), so a
-//     body that paints its whole rectangle keeps to the pane's shape; the pane's
-//     border is then drawn over it alone, and neither is snapped to the pixel
-//     grid
+//     rounded outline, after its body (`Content::draw`, `Outline`), so a body
+//     that paints its whole rectangle keeps to the pane's shape; the border is
+//     then drawn over the body alone, from pieces: a strip per edge and a ring
+//     per corner, clipped to the corner, under the backdrop's; none of these
+//     is snapped to the pixel grid
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the

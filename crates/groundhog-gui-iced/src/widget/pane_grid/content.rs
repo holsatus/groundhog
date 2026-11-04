@@ -199,7 +199,7 @@ where
 
     /// Draws the [`Content`] with the provided [`Renderer`] and [`Layout`],
     /// and, given `corners`, paints that colour over the pane's corners,
-    /// outside its rounded outline (see [`corner_mask`]).
+    /// outside its rounded outline (see [`Outline`]).
     ///
     /// [`Renderer`]: core::Renderer
     #[allow(
@@ -220,12 +220,12 @@ where
     ) {
         let bounds = layout.bounds();
         let surface = theme.style(&self.class);
-        let mask = corners.and_then(|backdrop| corner_mask(bounds, surface.border, backdrop));
+        let outline = corners.and_then(|backdrop| Outline::new(bounds, surface.border, backdrop));
 
-        // With a mask, the border is drawn only over the contents, unsnapped
-        // as the mask is (see `corner_mask`): drawn here too, snapped, it
-        // would show beside that one.
-        if mask.is_some() {
+        // With an outline, the border is drawn only over the contents, in
+        // pieces (see `Outline`): drawn here too, snapped, it would show
+        // beside those.
+        if outline.is_some() {
             let border = Border {
                 width: 0.0,
                 ..surface.border
@@ -281,25 +281,20 @@ where
         // otherwise hide the top of the border, and a body that paints its
         // whole rectangle (the map, a video) its corners; and a body that
         // clips itself (a scrollable, the map canvas) pushes its own renderer
-        // layer, so these need a layer of their own, created here, after
+        // layer, so these need layers of their own, created here, after
         // those, to stay on top.
-        if mask.is_some() || surface.border.width > 0.0 {
+        if let Some(outline) = outline {
+            outline.draw(renderer);
+        } else if surface.border.width > 0.0 {
             renderer.with_layer(bounds, |renderer| {
-                if let Some(mask) = mask {
-                    renderer.fill_quad(mask, Background::Color(Color::TRANSPARENT));
-                }
-                if surface.border.width > 0.0 {
-                    let outline = renderer::Quad {
+                renderer.fill_quad(
+                    renderer::Quad {
                         bounds,
                         border: surface.border,
                         ..renderer::Quad::default()
-                    };
-                    let outline = renderer::Quad {
-                        snap: outline.snap && mask.is_none(),
-                        ..outline
-                    };
-                    renderer.fill_quad(outline, Background::Color(Color::TRANSPARENT));
-                }
+                    },
+                    Background::Color(Color::TRANSPARENT),
+                );
             });
         }
     }
@@ -545,61 +540,156 @@ where
     }
 }
 
-/// A quad that paints `backdrop` over the corners of a pane at `bounds`
-/// outside its `border`'s rounded outline, once clipped to `bounds`; `None`
-/// for a pane without rounded corners.
+/// The outline of a pane with rounded corners, drawn over its body: its
+/// border, and the backdrop over the corners outside it.
 ///
 /// A rounded container clips its background, not its content, so a body
-/// that paints its whole rectangle would show past the corners. The quad is
-/// all border: both renderers draw a border as the band between the quad's
-/// rounded outline and that outline drawn `width` further in, with each
-/// radius `width` smaller. Grown by `reach` on every side, with each radius
-/// `reach` larger and a border `reach` wide, the band's inner edge would be
-/// exactly the pane's outline. Its outer edge clears the pane's corner while
-/// `reach` exceeds `(√2 − 1) · radius` and a pixel of anti-aliasing: the
-/// corner lies `√2 · radius` from the arc's centre. `reach` is the largest
-/// radius, which leaves room to spare.
+/// that paints its whole rectangle would show past the corners. A quad
+/// cannot be concave, but a ring can be: a round quad that is all border.
+/// Both renderers draw a border as the band between the quad's outline and
+/// that outline drawn `width` further in, so a round quad around a corner's
+/// arc centre, of twice the corner's radius, paints a ring out to twice the
+/// radius. That clears the pane's corner, which lies `√2` radii from the
+/// centre, with room for anti-aliasing; clipped to the corner's square, the
+/// ring is exactly the part of the square past its inner edge. Each corner
+/// takes two: the border's, from the border's inner edge outwards, and over
+/// it the backdrop's, from the arc outwards. The backdrop's inner edge then
+/// blends with the border's opaque ring, never with the body, which shows
+/// nowhere past the border's inner edge.
 ///
-/// The band reaches half the pane's border further in, under the border,
-/// which is drawn over it. Were the band to end where the border begins,
-/// each would cover about half of every pixel the outline crosses, and a
-/// quarter of the body would show through between them: a faint line along
-/// the outside of every rounded corner, and of every edge that falls
-/// between pixels (at a fractional scale factor).
+/// The border's straight edges are strips, each the pane's whole length;
+/// the corners' rings, drawn after them, cover their ends. So no piece is
+/// much larger than what it paints: a renderer that blends every pixel a
+/// quad covers, transparent or not (tiny-skia), would otherwise blend the
+/// whole pane to draw a border-only quad around it.
 ///
-/// The quad is not snapped to the pixel grid, nor is the border drawn with
-/// it. A renderer that snaps quads (wgpu, with iced's `crisp` feature)
-/// rounds each of their edges on its own; the mask's lie `reach` from the
-/// pane's, a fraction of a pixel at most scale factors, so the two would
-/// round apart, and the arcs, measured from the rounded edges, would no
-/// longer share their centres. Up to a pixel of the band's overlap with the
-/// border would be lost, and the body would show through again.
-fn corner_mask(bounds: Rectangle, border: Border, backdrop: Color) -> Option<renderer::Quad> {
-    let radius = border.radius;
-    let reach = radius
-        .top_left
-        .max(radius.top_right)
-        .max(radius.bottom_right)
-        .max(radius.bottom_left);
-    if reach <= 0.0 {
-        return None;
+/// No piece is snapped to the pixel grid. A renderer that snaps quads
+/// (wgpu, with iced's `crisp` feature) rounds each of their edges on its
+/// own; a ring's lie two radii from the pane's corner, a fraction of a pixel
+/// at most scale factors, so the rings and the strips would round apart,
+/// and the arcs, measured from the rounded edges, would no longer meet the
+/// strips or share their centres. The corners' clips are snapped; where
+/// one cuts its square short, the arc lies a hundredth of a pixel from the
+/// pane's edge, over the strip.
+struct Outline {
+    bounds: Rectangle,
+    /// Top, right, bottom and left; none without a border.
+    edges: Option<([renderer::Quad; 4], Color)>,
+    corners: [Option<Corner>; 4],
+}
+
+/// A rounded corner of an [`Outline`].
+struct Corner {
+    /// The square the corner rounds, which its rings are clipped to.
+    square: Rectangle,
+    /// The border's ring, under the backdrop's; none without a border.
+    border: Option<renderer::Quad>,
+    backdrop: renderer::Quad,
+}
+
+impl Outline {
+    /// The outline of a pane at `bounds` with `border`, `backdrop` past its
+    /// corners; `None` for a pane without rounded corners.
+    fn new(bounds: Rectangle, border: Border, backdrop: Color) -> Option<Self> {
+        let Radius {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        } = border.radius;
+        if [top_left, top_right, bottom_right, bottom_left]
+            .iter()
+            .all(|radius| *radius <= 0.0)
+        {
+            return None;
+        }
+
+        let (left, top) = (bounds.x, bounds.y);
+        let (right, bottom) = (left + bounds.width, top + bounds.height);
+        let width = border.width;
+
+        let strip = |x: f32, y: f32, w: f32, h: f32| renderer::Quad {
+            bounds: Rectangle::new(Point::new(x, y), Size::new(w, h)),
+            snap: false,
+            ..renderer::Quad::default()
+        };
+        let edges = (width > 0.0).then(|| {
+            (
+                [
+                    strip(left, top, bounds.width, width),
+                    strip(right - width, top, width, bounds.height),
+                    strip(left, bottom - width, bounds.width, width),
+                    strip(left, top, width, bounds.height),
+                ],
+                border.color,
+            )
+        });
+
+        // A ring around `centre` out to `outer`, `width` wide, in `color`.
+        let ring = |centre: Point, outer: f32, width: f32, color: Color| renderer::Quad {
+            bounds: Rectangle::new(
+                centre - Vector::new(outer, outer),
+                Size::new(2.0 * outer, 2.0 * outer),
+            ),
+            border: Border {
+                color,
+                width,
+                radius: outer.into(),
+            },
+            snap: false,
+            ..renderer::Quad::default()
+        };
+        // The corner of the pane at `(x, y)`, its arc's centre `inward` of it.
+        let corner = |radius: f32, x: f32, y: f32, inward: Vector| {
+            (radius > 0.0).then(|| {
+                let centre = Point::new(x + inward.x * radius, y + inward.y * radius);
+                let outer = 2.0 * radius;
+                Corner {
+                    square: Rectangle::new(
+                        Point::new(x.min(centre.x), y.min(centre.y)),
+                        Size::new(radius, radius),
+                    ),
+                    border: (width > 0.0).then(|| {
+                        let inner = (radius - width).max(0.0);
+                        ring(centre, outer, outer - inner, border.color)
+                    }),
+                    backdrop: ring(centre, outer, outer - radius, backdrop),
+                }
+            })
+        };
+
+        Some(Self {
+            bounds,
+            edges,
+            corners: [
+                corner(top_left, left, top, Vector::new(1.0, 1.0)),
+                corner(top_right, right, top, Vector::new(-1.0, 1.0)),
+                corner(bottom_right, right, bottom, Vector::new(-1.0, -1.0)),
+                corner(bottom_left, left, bottom, Vector::new(1.0, -1.0)),
+            ],
+        })
     }
 
-    Some(renderer::Quad {
-        bounds: bounds.expand(reach),
-        border: Border {
-            color: backdrop,
-            width: reach + border.width / 2.0,
-            radius: Radius {
-                top_left: radius.top_left + reach,
-                top_right: radius.top_right + reach,
-                bottom_right: radius.bottom_right + reach,
-                bottom_left: radius.bottom_left + reach,
-            },
-        },
-        snap: false,
-        ..renderer::Quad::default()
-    })
+    /// Draw the outline, in layers of its own over what is drawn so far:
+    /// the strips, then each corner's rings, clipped to its square.
+    fn draw<Renderer: core::Renderer>(self, renderer: &mut Renderer) {
+        if let Some((strips, color)) = self.edges {
+            renderer.with_layer(self.bounds, |renderer| {
+                for strip in strips {
+                    renderer.fill_quad(strip, Background::Color(color));
+                }
+            });
+        }
+
+        for corner in self.corners.into_iter().flatten() {
+            renderer.with_layer(corner.square, |renderer| {
+                if let Some(ring) = corner.border {
+                    renderer.fill_quad(ring, Background::Color(Color::TRANSPARENT));
+                }
+                renderer.fill_quad(corner.backdrop, Background::Color(Color::TRANSPARENT));
+            });
+        }
+    }
 }
 
 impl<Message, T, W, Theme, Renderer> Draggable for &Content<'_, Message, T, W, Theme, Renderer>
@@ -760,9 +850,21 @@ mod tests {
         assert_near(pixel(5, 5), BODY);
         assert_near(pixel(right - 5, bottom - 5), BODY);
         assert_near(pixel(SIZE.width / 2, SIZE.height / 2), BODY);
-        // The straight edges keep their border.
+        // The straight edges keep their border, and so do the arcs: the
+        // physical pixel 7 is centred 3.75 from the edges, 11.67 from the
+        // arc's centre, within the border's band from 11 to 12.
         assert_near(pixel(0, SIZE.height / 2), BORDER);
         assert_near(pixel(SIZE.width / 2, bottom), BORDER);
+        assert_eq!(rendered.scale, 2);
+        let (right, bottom) = (SIZE.width * 2 - 1, SIZE.height * 2 - 1);
+        for (x, y) in [
+            (7, 7),
+            (right - 7, 7),
+            (7, bottom - 7),
+            (right - 7, bottom - 7),
+        ] {
+            assert_near(rendered.physical(x, y), BORDER);
+        }
     }
 
     #[test]
@@ -773,11 +875,12 @@ mod tests {
     /// Where the pane's edges fall between pixels, as at a fractional scale
     /// factor, the pixels the outline crosses are covered in part by the
     /// border and in part by the backdrop, and the body must not show
-    /// through between them. A renderer that snaps quads to the pixel grid
-    /// rounds each of their edges on its own, so the corners must stay clear
-    /// whatever the rounding does: the insets put the pane's edges at
-    /// various fractions of a pixel, and the radius makes the distance from
-    /// the pane's edge to the corner mask's (`corner_mask`) a fraction too.
+    /// through between them, nor through the border where its pieces meet
+    /// (`Outline`). A renderer that snaps quads to the pixel grid rounds
+    /// each of their edges on its own, so this must hold whatever the
+    /// rounding does: the insets put the pane's edges at various fractions
+    /// of a pixel, and the radius makes the distance from the pane's edge to
+    /// its corners' rings a fraction too.
     #[test]
     fn nothing_of_the_body_shows_past_the_outline() {
         const RADIUS: f32 = 12.05;
@@ -793,19 +896,30 @@ mod tests {
             );
             let scale = rendered.scale as f32;
 
-            // The pixels of the pane's rectangle that lie past its corners:
-            // the rest is the window's, which the pane does not draw.
             for y in 0..rendered.height {
                 for x in 0..rendered.width {
                     let centre = Point::new((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
-                    if pane.contains(centre) && outside_by(pane, RADIUS, centre) > 0.0 {
+                    if !pane.contains(centre) {
+                        // The window's, which the pane does not draw.
+                        continue;
+                    }
+                    let colour = rendered.physical(x, y);
+                    // In physical pixels.
+                    let outside = outside_by(pane, RADIUS, centre) * scale;
+
+                    if outside > 0.0 {
                         // The body is the only red; the window's grey
                         // (around the pane, where its edge falls between
                         // pixels) adds as much to every channel.
-                        let colour = rendered.physical(x, y);
                         assert!(
                             colour.r - colour.g.min(colour.b) < 0.02,
                             "inset {inset}: the body shows at ({x}, {y}): {colour:?}"
+                        );
+                    } else if (-(scale - 0.5)..=-0.5).contains(&outside) {
+                        // Wholly within the border's band (a pixel wide).
+                        assert!(
+                            colour.g > 0.9 && colour.r < 0.1,
+                            "inset {inset}: the border breaks at ({x}, {y}): {colour:?}"
                         );
                     }
                 }
