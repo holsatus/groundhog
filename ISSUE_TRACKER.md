@@ -26,8 +26,8 @@ Phase 1 of the first review (packages 1–7) is done and removed; packages
 | # | Package | Closes | Priority | After | Status |
 |---|---|---|---|---|---|
 | 29 | [Panic-free mission references](#wp29--panic-free-mission-references) | MISSION-12, MISSION-13, MISSION-14, MISSION-15, MISSION-16 | P0 | — | Done |
-| 30 | [Only intact frames reach the router](#wp30--only-intact-frames-reach-the-router) | PROTO-7 | P1 | — | Todo |
-| 31 | [Parameter downloads and edits in order](#wp31--parameter-downloads-and-edits-in-order) | PARAM-11, PARAM-12, PARAM-13, PARAM-15 | P1 | — | Todo |
+| 30 | [Only intact frames reach the router](#wp30--only-intact-frames-reach-the-router) | PROTO-7 | P1 | — | Done |
+| 31 | [Parameter downloads and edits in order](#wp31--parameter-downloads-and-edits-in-order) | PARAM-11, PARAM-12, PARAM-13, PARAM-15 | P1 | — | Done |
 | 32 | [Calibration ends on both sides](#wp32--calibration-ends-on-both-sides) | CAL-10, CAL-11, CAL-12, CAL-13 | P1 | — | Todo |
 | 33 | [Command transaction timing](#wp33--command-transaction-timing) | PROTO-8, PROTO-9, PROTO-11, PROTO-12 | P1 | — | Todo |
 | 34 | [Mission transfers known to the runtime](#wp34--mission-transfers-known-to-the-runtime) | MISSION-17, MISSION-18, MISSION-19, API-20 (transfer progress) | P1 | — | Todo |
@@ -144,7 +144,7 @@ narrow every editor value before checking it.
 - A plan of exactly `max_items()` encodes, and one more is `PlanTooLong`.
 
 ### WP30 · Only intact frames reach the router
-**Closes:** PROTO-7 · **Status:** Todo
+**Closes:** PROTO-7 · **Status:** Done
 
 The owner asked whether duplicate suppression should commit only after
 "parsing and CRC-checking" the packet. A checksum check is what is needed;
@@ -153,11 +153,16 @@ enum value is intact, and must still suppress its duplicates. Decoding stays
 in the runtime's tolerant decoder.
 
 - Move the `is_corrupt` check into the start of
-  `MavlinkRouter::handle_frame`, so unit tests reach it: a corrupt frame
-  returns `None` before `dispatch` (no suppression entry, no route refresh,
-  no ACK routing, no recorder tap, no event). Keep counting it in
-  `parse_errors` in the reader (`router.rs:727-735`), and keep updating
-  `last_rx`: bytes are arriving, so the link is alive.
+  `MavlinkRouter::handle_frame`, so unit tests reach it, and check each frame
+  once: `handle_frame` returns `Result<Option<Event>, Corrupt>` (a unit
+  `struct Corrupt`). A corrupt frame returns `Err(Corrupt)` before
+  `dispatch`: no suppression entry, no route refresh, no ACK routing, no
+  transaction or recorder filter (the tlog recorder is a filter, so corrupt
+  frames are no longer recorded), no event. The reader counts `Err` in
+  `parse_errors` and `Ok` in `rx_frames` (`router.rs:727-745`), and keeps
+  updating `last_rx` for both: bytes are arriving, so the link is alive.
+  Existing tests that call `handle_frame` change mechanically
+  (`.expect("intact")`).
 - Frames of messages outside the dialect cannot be checked
   (`validate_checksum` has no CRC_EXTRA for them) and pass as today; say so
   where `is_corrupt` is defined.
@@ -174,7 +179,7 @@ in the runtime's tolerant decoder.
 - A corrupt frame registers no pending ACK delivery.
 
 ### WP31 · Parameter downloads and edits in order
-**Closes:** PARAM-11, PARAM-12, PARAM-13, PARAM-15 · **Status:** Todo
+**Closes:** PARAM-11, PARAM-12, PARAM-13, PARAM-15 · **Status:** Done
 
 - **Start under the lock** (PARAM-11): `MavlinkRouter::param_list` takes a
   third argument, `on_started: impl FnOnce() + Send`, and calls it right after
@@ -186,26 +191,40 @@ in the runtime's tolerant decoder.
   reports `Cancelled` only if started. `finish` reports `Start` first if the
   flag is unset, which should not happen, then the outcome. A download
   dropped while queued then leaves no trace in the snapshot.
-- **Re-decode or drop** (PARAM-12): in `Parameters::set_encoding`, a parameter
-  whose raw form the new decoder refuses is removed from the map and counted
-  in the download's refused count. This is what the fold does for a value
-  refused on arrival; reuse its counter rather than adding one.
+- **Re-decode or drop** (PARAM-12): in `Parameters::set_encoding`
+  (`domain/parameter.rs`), a parameter whose raw form the new decoder
+  refuses is removed from the map, just as the fold does not store a value
+  refused on arrival in `Parameters::observe` (use `retain`). If the removed
+  value was stamped with the current download generation, it also counts in
+  `ParamDownload::refused` (add a private `ParamDownload::refuse_one` for
+  it), so `received - refused` stays the number stored from that download. A
+  value from an older generation is only removed.
 - **Loads clear stale edits** (PARAM-13): in `ParamEdits::load`, a loaded
   value equal to the reported value removes an existing edit for that ident
-  unless the edit is uploading. Count it with the unchanged values in the
-  `LoadSummary`.
-- **C-cast range** (PARAM-15): `value_into_c_cast` returns `Option` (or
-  `Result`). For `I32` and `U32` it refuses a value whose `as f32` does not
-  convert back to the same integer. `param_set` maps the refusal to
-  `MavError` → `Error::ParamEncoding`, which `set_parameter` already
-  documents.
+  unless its status is `EditStatus::Uploading` (that upload's result settles
+  it). `LoadSummary` is unchanged: it counts neither equal values nor
+  removed edits today.
+- **C-cast range** (PARAM-15), `wire/param.rs`: `value_into_c_cast` returns
+  `Option<(f32, MavParamType)>`. For `I32` and `U32` it is `None` when `v as
+  f32` does not convert back to the same integer (above 2²⁴ some do, some do
+  not). `ParamEncoding::encode` returns `Option` too (bytewise is always
+  `Some`). `param_set` turns `None` into `MavError::ParamEncoding` before
+  taking any lock or sending; the services layer already maps that to
+  `Error::ParamEncoding`, which `set_parameter` documents. The other
+  `encode` callers are tests; update them mechanically.
 
 **Tests:**
-- PARAM-11, in `services/tests.rs`: A downloads index 0 of 2; B is started
-  and queued (`received()` still 1 in the snapshot, and no second `Start`
-  seen); A receives index 1 and completes. Both parameters are in the
-  snapshot, and the outcome is `Complete`. Dropping B while queued leaves
-  `Complete`.
+- PARAM-11, in `services/tests.rs` (helpers: `start_download`,
+  `param_value`, `until`, `parameters`). A queued download sends nothing and,
+  after the fix, shows nothing in the snapshot, so there is no state to wait
+  on: spawn it, then give it time to be queued with a short real sleep
+  (e.g. 50 ms) before going on.
+  - A is started and receives index 0 of 2. B is spawned and queued. A
+    receives index 1 and completes. Both parameters are in the snapshot and
+    the outcome is `Complete`; before the fix the first one is gone.
+  - A is started and receives index 0 of 2. B is spawned, queued, and
+    aborted (`JoinHandle::abort`). A completes. The outcome is `Complete`,
+    with both values, and no `Cancelled` from B reaches the snapshot.
 - PARAM-12: a C-cast `UINT8` with raw `-1.0`, folded while the encoding is
   unknown, then the encoding set to C-cast: the parameter is gone and counted
   as refused.

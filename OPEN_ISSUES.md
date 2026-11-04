@@ -31,8 +31,6 @@ modules, `L` a design or multi-subsystem change.
 
 | | Issue |
 |---|---|
-| **P1** | [PROTO-7](#proto-7--a-corrupt-frame-suppresses-its-intact-copy) — a corrupt copy hides the intact one and takes the route |
-| **P1** | [PARAM-11](#param-11--overlapping-downloads-delete-parameters-and-report-complete) — a queued download truncates the list that completes first |
 | **P1** | [CAL-10](#cal-10--the-no-progress-timeout-ends-runs-that-are-alive-and-leaves-them-running) — the timeout fails a live compass run, which then saves anyway |
 | **P1** | [PROTO-8](#proto-8--one-in_progress-cuts-the-callers-timeout-to-five-seconds) — one `IN_PROGRESS` cuts a 10 s timeout to 5 s and cancels the command |
 | **P1** | [MISSION-17](#mission-17--our-own-upload-is-announced-as-changed-elsewhere) — every upload to PX4 / ArduPilot 4.5+ warns "changed elsewhere" |
@@ -75,26 +73,6 @@ link lost while `route()` can still `try_send` into a cancelled writer and
 return success for a frame never sent.
 
 **Fix:** remove first, then cancel, or have `closed()` await teardown.
-
-### PROTO-7 · A corrupt frame suppresses its intact copy
-**P1** · Effort S · From R-1104
-
-mavio's parser does not verify checksums, so corrupt frames arrive as `Ok`.
-The reader counts them as parse errors but still calls `handle_frame`
-(`router.rs:727-745`), and `dispatch` enters them in duplicate suppression and
-refreshes the route (`router.rs:560-593`). The suppression key
-`(sequence, message id, checksum)` uses the *transmitted* checksum, which a
-payload bit-flip does not change. With a noisy fast radio and a clean LTE
-link, a garbled `COMMAND_ACK` on the radio makes the intact LTE copy a
-"duplicate": the ACK is lost and the radio becomes the command route. A
-`retries(0)` command (calibration start) then times out while the vehicle runs it.
-
-**Fix:** a frame for which `is_corrupt` is true goes no further than its
-counter: no suppression entry, no route refresh, no dispatch. Frames of
-messages outside the dialect cannot be checked and pass as today.
-
-**Test:** a corrupt copy on link A followed by the intact copy on link B: the
-intact copy is dispatched and B is the route.
 
 ### PROTO-8 · One `IN_PROGRESS` cuts the caller's timeout to five seconds
 **P1** · Effort S · From R-1104
@@ -281,48 +259,6 @@ the `debug` feature is on. Use a summary `Debug` as `FleetUpdate` does.
 `link_panel/mod.rs:112-119` spawns `detect_serial_ports` with no busy flag, so
 repeated actions can race. Put it behind `Operations` or a small busy guard.
 
-### PARAM-11 · Overlapping downloads delete parameters and report Complete
-**P1** · Effort S · From R-1104
-
-`fetch_parameters` reports `DownloadUpdate::Start` (`vehicle.rs:242`) before
-`param_list` takes the channel lock (`mavlink/param.rs:148`). `Start` bumps
-the download generation, and a `Complete` keeps only values of the current
-generation (`parameter.rs:243-257`). So: download A runs and has values;
-download B is requested, reports `Start` at once, and queues on the lock;
-A completes and deletes every value it received before B started. The
-snapshot says `Complete` with a partial list, and stays that way if B is then
-cancelled. Bootstrap leaves seconds for this: it requests
-`AUTOPILOT_VERSION` and `HOME_POSITION` before its download, while the
-panel's Reload is still enabled.
-
-**Fix:** report `Start` only once the channel lock is held.
-
-**Test:** in `services/tests.rs`: a download receives index 0 of 2; a second
-`fetch_parameters` is queued; the first completes with index 1: both values
-are in the snapshot.
-
-### PARAM-12 · A value decoded under the wrong encoding survives
-**P2** · Effort S · From R-1104
-
-`set_encoding` keeps a parameter's old value when the new decoder refuses its
-raw form (`parameter.rs:229-240`). A C-cast `UINT8` sentinel of `-1.0`,
-decoded bytewise as `U8(0)` before the capabilities arrived, stays `U8(0)`
-once C-cast is known: shown, saved to files and used as an edit base,
-against WP5's rule that a refused value is not presented.
-
-**Fix:** treat it as the fold treats a value refused on arrival: drop it from
-the map and count it as refused in the download.
-
-### PARAM-13 · Loading a file leaves a stale edit behind
-**P2** · Effort S · From R-1104
-
-`ParamEdits::load` skips a loaded value equal to the reported one
-(`parameter.rs:479-492`) but leaves an existing edit for that parameter. Typed
-`GAIN = 5` (vehicle has 1), then a file with `GAIN = 1`: Upload still sends 5.
-
-**Fix:** a loaded value equal to the reported value removes any edit that is
-not uploading.
-
 ### PARAM-14 · The INI reader accepts inf and NaN
 **P2** · Effort S · From R-1104
 
@@ -330,18 +266,6 @@ not uploading.
 INI reader does not (`:268-276`), so `f32 = inf` loads as an uploadable
 value. Part of PARAM-5's one policy; listed apart because it lets a
 non-finite value reach a vehicle.
-
-### PARAM-15 · C-cast integers above 2²⁴ cannot round-trip
-**P3** · Effort S · From R-1104 · *by reading*
-
-`value_into_c_cast` sends `i32::MAX` as `2147483648.0` (`wire/param.rs:115-121`),
-which `value_from_c_cast` refuses as out of range (`:91-103`), so `param_set`
-fails even when the vehicle stored it. More generally, C-cast cannot carry an
-integer `f32` does not represent exactly.
-
-**Fix:** `value_into_c_cast` refuses an `I32`/`U32` whose `as f32` does not
-convert back to the same integer, with `Error::ParamEncoding`, which
-`set_parameter` already documents for "cannot be represented".
 
 ## Links & transports
 
