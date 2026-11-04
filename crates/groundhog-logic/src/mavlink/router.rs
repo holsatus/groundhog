@@ -175,7 +175,8 @@ impl Outbound {
 }
 
 /// Whether `frame`'s checksum does not match its message, as known to the
-/// dialect. Messages outside the dialect cannot be checked, and pass.
+/// dialect. A message outside the dialect has no CRC extra to check it
+/// against, so its frames pass.
 fn is_corrupt(frame: &Frame<Versionless>) -> bool {
     matches!(
         frame.validate_checksum::<mavio::DefaultDialect>(),
@@ -184,6 +185,10 @@ fn is_corrupt(frame: &Frame<Versionless>) -> bool {
         ))
     )
 }
+
+/// A frame whose checksum does not match its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Corrupt;
 
 /// Traffic counters of one link attachment.
 #[derive(Debug, Default)]
@@ -541,21 +546,34 @@ impl MavlinkRouter {
         })
     }
 
-    /// Process one inbound frame from `link`: route bookkeeping, duplicate
-    /// suppression, ACK routing and transaction filters. Returns the event for
-    /// the consumer, or `None` for a duplicate.
-    fn handle_frame(&self, link: &LinkId, frame: Frame<Versionless>) -> Option<Event> {
+    /// Process one inbound frame from `link`.
+    ///
+    /// Returns `Err(Corrupt)` for a frame whose checksum does not match its
+    /// message, before any bookkeeping: it neither suppresses its intact copy
+    /// nor refreshes a route nor reaches a transaction. Otherwise performs
+    /// route bookkeeping, duplicate suppression, ACK routing and transaction
+    /// filters, returning the event for the consumer or `None` for a
+    /// duplicate.
+    fn handle_frame(
+        &self,
+        link: &LinkId,
+        frame: Frame<Versionless>,
+    ) -> Result<Option<Event>, Corrupt> {
+        if is_corrupt(&frame) {
+            return Err(Corrupt);
+        }
+
         let source = MavlinkId {
             system: frame.system_id(),
             component: frame.component_id(),
         };
 
-        self.dispatch(InboundMessage {
+        Ok(self.dispatch(InboundMessage {
             source_link: link.clone(),
             source_mav: source,
             received_at: Instant::now(),
             frame,
-        })
+        }))
     }
 
     fn dispatch(&self, inbound: InboundMessage) -> Option<Event> {
@@ -723,25 +741,29 @@ impl MavlinkRouter {
                         match receiver.recv().await {
                             Ok(frame) => {
                                 consecutive_errors = 0;
-                                // A frame whose checksum does not match its
-                                // message was corrupted in transit. It is still
-                                // routed (decoding refuses it later), but it
-                                // counts as a parse error, not a good frame.
-                                let counter = if is_corrupt(&frame) {
-                                    &counters.parse_errors
-                                } else {
-                                    &counters.rx_frames
-                                };
-                                counter.fetch_add(1, Ordering::Relaxed);
                                 let millis = router.inner.epoch.elapsed().as_millis() as u64;
                                 counters.last_rx.store(millis + 1, Ordering::Relaxed);
 
-                                if let Some(event) = router.handle_frame(&id, frame) {
-                                    // Lossless: wait for room rather than drop.
-                                    // A closed channel means nobody consumes
-                                    // events any more, which is not an error
-                                    // for the transactions.
-                                    drop(router.inner.events.send(event).await);
+                                match router.handle_frame(&id, frame) {
+                                    Ok(event) => {
+                                        counters.rx_frames.fetch_add(1, Ordering::Relaxed);
+                                        if let Some(event) = event {
+                                            // Lossless: wait for room rather than
+                                            // drop. A closed channel means
+                                            // nobody consumes events any more,
+                                            // which is not an error for the
+                                            // transactions.
+                                            drop(router.inner.events.send(event).await);
+                                        }
+                                    }
+                                    Err(Corrupt) => {
+                                        // A frame whose checksum does not
+                                        // match its message was corrupted in
+                                        // transit. Count it and drop it: it
+                                        // must not suppress its intact copy or
+                                        // become the route.
+                                        counters.parse_errors.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -841,7 +863,11 @@ mod tests {
     use mavio::dialects::minimal::messages::Heartbeat;
     use mavio::{
         DefaultDialect,
-        default_dialect::{enums::MavMissionResult, messages::Attitude, messages::MissionAck},
+        default_dialect::{
+            enums::{MavMissionResult, MavResult},
+            messages::Attitude,
+            messages::MissionAck,
+        },
     };
 
     /// A link whose queues are drained by the returned receivers (or not, if
@@ -887,6 +913,30 @@ mod tests {
             .unwrap()
             .build()
             .into_versionless()
+    }
+
+    /// The same packet, corrupted in transit: flip `byte` after serializing,
+    /// so the checksum no longer matches but the transmitted key does. `byte`
+    /// is an offset into the whole frame; the payload starts at byte 10.
+    async fn corrupt_frame(
+        source: MavlinkId,
+        sequence: u8,
+        message: &dyn mavio::Message,
+        byte: usize,
+    ) -> Frame<Versionless> {
+        let frame = frame_from(source, sequence, message);
+        let mut bytes = [0u8; 300];
+        let length = frame.serialize(&mut bytes).expect("the frame fits");
+        let mut corrupt = bytes[..length].to_vec();
+        corrupt[byte] ^= 0xff;
+
+        let mut receiver = new_async_receiver(std::io::Cursor::new(corrupt));
+        let frame = receiver
+            .recv()
+            .await
+            .expect("the corrupt frame still parses");
+        assert!(is_corrupt(&frame), "the test frame must fail its checksum");
+        frame
     }
 
     #[test]
@@ -998,8 +1048,12 @@ mod tests {
 
         // The same packet heard on two links: delivered to consumers exactly
         // once.
-        let first = router.handle_frame(&link_a, frame_from(SOURCE, 7, &Heartbeat::default()));
-        let second = router.handle_frame(&link_b, frame_from(SOURCE, 7, &Heartbeat::default()));
+        let first = router
+            .handle_frame(&link_a, frame_from(SOURCE, 7, &Heartbeat::default()))
+            .expect("intact");
+        let second = router
+            .handle_frame(&link_b, frame_from(SOURCE, 7, &Heartbeat::default()))
+            .expect("intact");
 
         assert!(
             matches!(first, Some(Event::Message(_))),
@@ -1016,17 +1070,19 @@ mod tests {
         assert!(
             router
                 .handle_frame(&link_a, frame_from(SOURCE, 8, &Heartbeat::default()))
+                .expect("intact")
                 .is_some()
         );
 
         // Window semantics: after another 192 distinct sequences the ring has
         // evicted the original one, so it may be delivered again.
         for seq in 9..=200u8 {
-            router.handle_frame(&link_b, frame_from(SOURCE, seq, &Heartbeat::default()));
+            drop(router.handle_frame(&link_b, frame_from(SOURCE, seq, &Heartbeat::default())));
         }
         assert!(
             router
                 .handle_frame(&link_a, frame_from(SOURCE, 7, &Heartbeat::default()))
+                .expect("intact")
                 .is_some(),
             "an evicted sequence passes again"
         );
@@ -1054,6 +1110,7 @@ mod tests {
             delivered += usize::from(
                 router
                     .handle_frame(&radio, frame_from(SOURCE, i as u8, &heartbeat))
+                    .expect("intact")
                     .is_some(),
             );
             delivered += usize::from(
@@ -1062,6 +1119,7 @@ mod tests {
                         &lte,
                         frame_from(SOURCE, (i as u8).wrapping_add(37), &attitude),
                     )
+                    .expect("intact")
                     .is_some(),
             );
         }
@@ -1077,16 +1135,28 @@ mod tests {
         let (fast, slow) = (LinkId::new("fast"), LinkId::new("slow"));
 
         for seq in 0..20u8 {
-            router.handle_frame(&fast, frame_from(SOURCE, seq, &Heartbeat::default()));
+            drop(
+                router
+                    .handle_frame(&fast, frame_from(SOURCE, seq, &Heartbeat::default()))
+                    .expect("intact"),
+            );
             std::thread::sleep(Duration::from_millis(1));
-            router.handle_frame(&slow, frame_from(SOURCE, seq, &Heartbeat::default()));
+            drop(
+                router
+                    .handle_frame(&slow, frame_from(SOURCE, seq, &Heartbeat::default()))
+                    .expect("intact"),
+            );
         }
         assert_eq!(router.best_link_for(SOURCE), Some(fast.clone()));
 
         // When the fast link goes quiet, the slow one's copies become first
         // copies, and it takes over.
         std::thread::sleep(Duration::from_millis(1));
-        router.handle_frame(&slow, frame_from(SOURCE, 100, &Heartbeat::default()));
+        drop(
+            router
+                .handle_frame(&slow, frame_from(SOURCE, 100, &Heartbeat::default()))
+                .expect("intact"),
+        );
         assert_eq!(router.best_link_for(SOURCE), Some(slow));
     }
 
@@ -1100,13 +1170,16 @@ mod tests {
 
         for seq in 0..20u8 {
             let frame = frame_from(SOURCE, seq, &Heartbeat::default());
-            assert!(router.handle_frame(&live, frame).is_some());
+            assert!(router.handle_frame(&live, frame).expect("intact").is_some());
         }
         std::thread::sleep(Duration::from_millis(1));
         for seq in 0..20u8 {
             let frame = frame_from(SOURCE, seq, &Heartbeat::default());
             assert!(
-                router.handle_frame(&lagging, frame).is_none(),
+                router
+                    .handle_frame(&lagging, frame)
+                    .expect("intact")
+                    .is_none(),
                 "copy {seq} of the backlog reached consumers"
             );
         }
@@ -1225,6 +1298,78 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "{stats:?}");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A corrupt copy must not enter duplicate suppression or become the
+    /// route: the intact copy that follows is still a first copy.
+    #[tokio::test]
+    async fn a_corrupt_frame_does_not_hide_its_intact_copy_or_take_the_route() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (radio, lte) = (LinkId::new("radio"), LinkId::new("lte"));
+
+        // Non-zero fields keep the payload bytes we flip from being
+        // truncated away.
+        let ack = CommandAck {
+            command: MavCmd::NavWaypoint,
+            result: MavResult::Accepted,
+            progress: 42,
+            result_param2: 7,
+            ..Default::default()
+        };
+
+        let corrupt = corrupt_frame(SOURCE, 7, &ack, 10).await;
+        assert!(matches!(router.handle_frame(&radio, corrupt), Err(Corrupt)));
+
+        let intact = frame_from(SOURCE, 7, &ack);
+        assert!(
+            matches!(
+                router.handle_frame(&lte, intact),
+                Ok(Some(Event::Message(_)))
+            ),
+            "the intact copy is not a duplicate of the corrupt one"
+        );
+        assert_eq!(
+            router.best_link_for(SOURCE),
+            Some(lte),
+            "only the link that delivered an intact frame is a route"
+        );
+    }
+
+    /// A corrupt COMMAND_ACK never reaches a waiting transaction; the intact
+    /// copy still does.
+    #[tokio::test]
+    async fn a_corrupt_command_ack_reaches_no_transaction() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let (radio, lte) = (LinkId::new("radio"), LinkId::new("lte"));
+
+        let ack = CommandAck {
+            command: MavCmd::NavWaypoint,
+            result: MavResult::Accepted,
+            progress: 42,
+            result_param2: 7,
+            ..Default::default()
+        };
+
+        let (tx, mut pending) = mpsc::unbounded_channel();
+        router.insert_pending(SOURCE, MavCmd::NavWaypoint, tx);
+
+        // Flip progress, not the command: this corrupt ACK still names the
+        // command the transaction waits for, so only the checksum keeps it
+        // away.
+        let corrupt = corrupt_frame(SOURCE, 9, &ack, 13).await;
+        assert!(matches!(router.handle_frame(&radio, corrupt), Err(Corrupt)));
+        assert!(
+            pending.try_recv().is_err(),
+            "a corrupt ACK must not reach the waiting command"
+        );
+
+        let intact = frame_from(SOURCE, 9, &ack);
+        assert!(matches!(
+            router.handle_frame(&lte, intact),
+            Ok(Some(Event::Message(_)))
+        ));
+        let delivered = pending.try_recv().expect("the intact ACK is routed");
+        assert_eq!(delivered.command, MavCmd::NavWaypoint);
     }
 
     #[tokio::test]

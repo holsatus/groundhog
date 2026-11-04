@@ -241,7 +241,9 @@ Duplicates (the same packet heard on two links) are identified by
 `(sequence, message id, checksum)`, not by sequence alone: autopilots keep one
 sequence counter *per channel*, so different packets on two links share
 sequence numbers all the time. Routes are refreshed only by the first copy of
-a packet, so commands take the faster link.
+a packet, so commands take the faster link. Only frames whose checksum verifies
+take part in duplicate suppression and routing; a corrupt frame is counted and
+dropped, and is not recorded.
 
 ### Transactions: listen first, serialize per resource, drop means cancel
 
