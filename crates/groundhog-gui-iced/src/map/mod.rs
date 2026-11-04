@@ -39,7 +39,8 @@ pub struct Map {
 /// How the map sits in the window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Placement {
-    /// In a pane: rounded corners and a border, and nothing over it.
+    /// In a pane, with nothing over it. The pane grid draws the pane's
+    /// corners and border over the map.
     Pane,
     /// Running to the window's edges, with `covered` of each edge hidden
     /// under what floats over the map.
@@ -131,20 +132,7 @@ impl Map {
         theme: &Theme,
         placement: Placement,
     ) -> impl Widget<M> + use<'a, M, F> {
-        let palette = theme.palette();
-        layers.push(Chrome {
-            id: LayerId::new("map.tint"),
-            z_index: i32::MIN,
-            kind: ChromeKind::Tint(palette.background.base.color.scale_alpha(0.3)),
-        });
-        if placement == Placement::Pane {
-            let (background, border) = crate::ui::frame::colours(theme);
-            layers.push(Chrome {
-                id: LayerId::new("map.frame"),
-                z_index: i32::MAX,
-                kind: ChromeKind::Frame { background, border },
-            });
-        }
+        layers.push(Tint(theme.palette().background.base.color.scale_alpha(0.3)));
 
         let tiles = MapWidget::new(&self.tile_cache, Message::Cache, self.viewpoint)
             .on_update(Message::Projector);
@@ -163,52 +151,28 @@ impl Map {
     }
 }
 
-/// The map's own decoration, drawn as ordinary layers.
-struct Chrome {
-    id: LayerId,
-    z_index: i32,
-    kind: ChromeKind,
-}
+/// A wash over the tiles, so overlays stand out: the map's own decoration,
+/// drawn as an ordinary layer, beneath every other.
+struct Tint(Color);
 
-enum ChromeKind {
-    /// A wash over the tiles, so overlays stand out.
-    Tint(Color),
-    /// The pane's rounded corners and border: the map paints opaque tiles
-    /// across its whole pane, which a rounded container cannot clip.
-    Frame { background: Color, border: Color },
-}
-
-impl<M> MapLayer<M> for Chrome {
+impl<M> MapLayer<M> for Tint {
     fn id(&self) -> LayerId {
-        self.id
+        LayerId::new("map.tint")
     }
 
     fn z_index(&self) -> i32 {
-        self.z_index
+        i32::MIN
     }
 
     fn revision(&self) -> Option<u64> {
-        // Only the view (size) and the theme change these, and the engine
-        // keys every cache on both.
+        // Only the view (size) and the theme change it, and the engine keys
+        // every cache on both.
         Some(0)
     }
 
     fn draw(&self, frame: &mut MapFrame<'_>, _interaction: Interaction) {
         let size = frame.view().size();
-        let frame = frame.frame();
-
-        match self.kind {
-            ChromeKind::Tint(color) => frame.fill_rectangle(Point::ORIGIN, size, color),
-            ChromeKind::Frame { background, border } => {
-                crate::ui::frame::draw(
-                    frame,
-                    size,
-                    crate::ui::frame::Edges::All,
-                    background,
-                    border,
-                );
-            }
-        }
+        frame.frame().fill_rectangle(Point::ORIGIN, size, self.0);
     }
 }
 

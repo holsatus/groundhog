@@ -1963,6 +1963,7 @@ dependencies = [
  "log",
  "mav-param",
  "mavio",
+ "png",
  "rfd",
  "ron",
  "serde",

@@ -8,8 +8,10 @@
 //! The workspace is a set of floating panes separated by gaps of the window
 //! background. A regular pane is a single rounded, bordered surface: its header
 //! and body are transparent, so they share one colour, and a `rule` divides
-//! them. The map cannot work this way — it paints opaque tiles across its whole
-//! pane — so it draws its own frame instead (see `map::Map::view`).
+//! them. A rounded container clips its background, not its content, so the
+//! pane grid paints each pane's corners in the window background over its
+//! body ([`pane_grid`]): a body that paints its whole rectangle (the map's
+//! tiles, a video) keeps to the pane's shape too.
 
 use iced::{
     Border, Color, Shadow, Theme, Vector,
@@ -284,10 +286,13 @@ pub fn title_bar(focused: bool) -> impl Fn(&Theme) -> container::Style {
 }
 
 /// The pane grid: its defaults, with drop highlights rounded like the
-/// panes they stand for.
+/// panes they stand for, and the panes' corners painted in the
+/// [`workspace`] they sit on, so a body that paints its whole rectangle (the
+/// map, a video) keeps to the pane's shape.
 pub fn pane_grid(theme: &Theme) -> crate::widget::pane_grid::Style {
     let mut style = crate::widget::pane_grid::default(theme);
     style.hovered_region.border.radius = PANE_RADIUS.into();
+    style.corners = Some(theme.palette().background.base.color);
     // The panes float on the workspace's backdrop, so this veil fades a
     // dragged pane into it.
     style.picked_pane = theme.palette().background.base.color.scale_alpha(0.6);
@@ -619,14 +624,11 @@ pub fn veil(_theme: &Theme) -> container::Style {
     }
 }
 
-/// A pane's body that is a picture: [`screen`], its lower corners rounded
-/// as the pane's are.
+/// A pane's body that is a picture: [`screen`], square, as the pane rounds
+/// its corners over it.
 pub fn picture(theme: &Theme) -> container::Style {
     container::Style {
-        border: Border {
-            radius: Radius::default().bottom(PANE_RADIUS),
-            ..Border::default()
-        },
+        border: Border::default(),
         ..screen(theme)
     }
 }

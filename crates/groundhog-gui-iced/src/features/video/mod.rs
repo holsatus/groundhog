@@ -440,7 +440,9 @@ impl VideoPanel {
                 receiving.state = state;
                 (Task::none(), failed)
             }
-            Message::Track(key, request) => (self.do_tracking(key, TrackAction::Track(request), cx), None),
+            Message::Track(key, request) => {
+                (self.do_tracking(key, TrackAction::Track(request), cx), None)
+            }
             Message::StopTracking(key) => (self.do_tracking(key, TrackAction::Stop, cx), None),
             Message::Tracked(key, action, ticket, result) => {
                 if !self.tracking.finish(&key, ticket) {

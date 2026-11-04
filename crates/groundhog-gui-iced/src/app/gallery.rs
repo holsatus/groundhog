@@ -24,7 +24,12 @@
     reason = "the harness discards the tasks it produces; it drives state, not work"
 )]
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    cell::Cell,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
 
 use groundhog_logic::{
     MavlinkId, SystemId,
@@ -53,6 +58,7 @@ use crate::{
     features::mission::MessageKind,
     shell::{Destination, ShellMode},
     ui::{style, theme::ThemeMode},
+    widget::pane_grid::{self, PaneGrid},
 };
 
 const SYSTEM: SystemId = SystemId(1);
@@ -199,7 +205,19 @@ fn fleet() -> Fleet {
 
 /// The video panel as a pane.
 fn video_pane(app: &Application) -> impl Widget<Message> + '_ {
-    iced::widget::container(app.pane_body(layout::Panel::Video)).style(style::pane)
+    as_pane(app.pane_body(layout::Panel::Video))
+}
+
+/// `body` as the tiled shell shows a pane: alone in a pane grid, which
+/// paints the pane's corners over it (`style::pane_grid`).
+fn as_pane(body: Element<'_, Message>) -> impl Widget<Message> + '_ {
+    static ONE: LazyLock<pane_grid::State<()>> = LazyLock::new(|| pane_grid::State::new(()).0);
+
+    let body = Cell::new(Some(body));
+    PaneGrid::new(&ONE, move |_, (), _| {
+        pane_grid::Content::new(body.take().expect("the grid has one pane")).style(style::pane)
+    })
+    .style(style::pane_grid)
 }
 
 /// Every panel but the map, in the order the destinations list them.
@@ -381,7 +399,7 @@ async fn gallery() {
                 &name,
                 Size::new(560.0, 820.0),
                 &theme,
-                iced::widget::container(app.pane_body(panel)).style(style::pane),
+                as_pane(app.pane_body(panel)),
             );
 
             // As a phone's sheet shows it: narrow, with touch-sized controls.
@@ -391,7 +409,7 @@ async fn gallery() {
                 &name,
                 Size::new(380.0, 820.0),
                 &theme,
-                iced::widget::container(app.pane_body(panel)).style(style::pane),
+                as_pane(app.pane_body(panel)),
             );
             ui::set_density(ui::Density::Pointer);
         }
@@ -592,7 +610,7 @@ async fn gallery() {
         "panel-links-overwrite-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        iced::widget::container(app.pane_body(layout::Panel::Links)).style(style::pane),
+        as_pane(app.pane_body(layout::Panel::Links)),
     );
 
     // The link connected. (Its details are in a tooltip, which shows only
@@ -608,7 +626,7 @@ async fn gallery() {
         "panel-links-connected-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        iced::widget::container(app.pane_body(layout::Panel::Links)).style(style::pane),
+        as_pane(app.pane_body(layout::Panel::Links)),
     );
 
     // The floating shell on a phone, with the system bars over the map: in

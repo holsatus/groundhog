@@ -111,13 +111,13 @@ impl Application {
     fn view_panes(&self) -> impl Widget<Message> + '_ {
         let sized = |size| Message::Layout(layout::Message::Sized(size));
         let mut grid = PaneGrid::new(self.layout.panes(), |pane, panel, is_maximized| {
-            // The map paints opaque tiles across its whole pane, which a rounded
-            // container cannot clip; it draws its own frame instead (see
-            // `map::Map::view`), and has no title bar to grab, so it cannot be
-            // moved or closed.
+            // The map has no title bar to grab, so it cannot be moved or
+            // closed. Its tiles paint the whole pane, and the grid paints the
+            // pane's corners over them (`style::pane_grid`).
             if panel.is_fixed() {
                 let empty = Space::new().height(Length::Fixed(0.0)).boxed();
                 return pane_grid::Content::new(self.pane_body(*panel))
+                    .style(style::pane)
                     .title_bar(pane_grid::TitleBar::new(empty).padding(0));
             }
 

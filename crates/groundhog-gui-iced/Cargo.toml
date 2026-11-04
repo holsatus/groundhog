@@ -68,3 +68,6 @@ groundhog-logic = { path = "../groundhog-logic", features = ["test-support"] }
 # Headless widget tests (event propagation through composed widgets). Same bare
 # git source as `iced`, so it shares the revision pinned by Cargo.lock.
 iced_test = { git = "https://github.com/iced-rs/iced" }
+# Reads back a rendered snapshot's pixels; the version `iced_test` writes them
+# with.
+png = "0.18"

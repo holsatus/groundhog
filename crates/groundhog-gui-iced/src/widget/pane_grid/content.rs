@@ -5,8 +5,9 @@ use iced::advanced::overlay;
 use iced::advanced::renderer;
 use iced::advanced::widget::{self, Tree, Void};
 use iced::advanced::{self as core, Layout, Shell, Widget};
+use iced::border::Radius;
 use iced::widget::container;
-use iced::{Background, Color, Element, Event, Point, Rectangle, Size, Vector};
+use iced::{Background, Border, Color, Element, Event, Point, Rectangle, Size, Vector};
 
 /// The content of a [`Pane`].
 ///
@@ -196,12 +197,14 @@ where
         true
     }
 
-    /// Draws the [`Content`] with the provided [`Renderer`] and [`Layout`].
+    /// Draws the [`Content`] with the provided [`Renderer`] and [`Layout`],
+    /// and, given `corners`, paints that colour over the pane's corners,
+    /// outside its rounded outline (see [`corner_mask`]).
     ///
     /// [`Renderer`]: core::Renderer
     #[allow(
         clippy::too_many_arguments,
-        reason = "a public signature kept identical to upstream"
+        reason = "a public signature kept close to upstream"
     )]
     pub fn draw(
         &self,
@@ -213,11 +216,24 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
         resizing: bool,
+        corners: Option<Color>,
     ) {
         let bounds = layout.bounds();
         let surface = theme.style(&self.class);
+        let mask = corners.and_then(|backdrop| corner_mask(bounds, surface.border, backdrop));
 
-        container::draw_background(renderer, &surface, bounds);
+        // With a mask, the border is drawn only over the contents, unsnapped
+        // as the mask is (see `corner_mask`): drawn here too, snapped, it
+        // would show beside that one.
+        if mask.is_some() {
+            let border = Border {
+                width: 0.0,
+                ..surface.border
+            };
+            container::draw_background(renderer, &container::Style { border, ..surface }, bounds);
+        } else {
+            container::draw_background(renderer, &surface, bounds);
+        }
 
         if let Some(title_bar) = &self.title_bar {
             let mut children = layout.iter(&tree.children);
@@ -260,21 +276,30 @@ where
             );
         }
 
-        // Re-stroke the pane outline over the contents. The surface is drawn
-        // first, so a shaded header (drawn last) would otherwise hide the top of
-        // the border; and a body that clips itself (a scrollable, or the map
-        // canvas) pushes its own renderer layer, so the stroke needs a layer of
-        // its own — created here, after those — to stay on top.
-        if surface.border.width > 0.0 {
+        // Paint the corners and re-stroke the pane outline over the contents.
+        // The surface is drawn first, so a shaded header (drawn last) would
+        // otherwise hide the top of the border, and a body that paints its
+        // whole rectangle (the map, a video) its corners; and a body that
+        // clips itself (a scrollable, the map canvas) pushes its own renderer
+        // layer, so these need a layer of their own, created here, after
+        // those, to stay on top.
+        if mask.is_some() || surface.border.width > 0.0 {
             renderer.with_layer(bounds, |renderer| {
-                renderer.fill_quad(
-                    renderer::Quad {
+                if let Some(mask) = mask {
+                    renderer.fill_quad(mask, Background::Color(Color::TRANSPARENT));
+                }
+                if surface.border.width > 0.0 {
+                    let outline = renderer::Quad {
                         bounds,
                         border: surface.border,
                         ..renderer::Quad::default()
-                    },
-                    Background::Color(Color::TRANSPARENT),
-                );
+                    };
+                    let outline = renderer::Quad {
+                        snap: outline.snap && mask.is_none(),
+                        ..outline
+                    };
+                    renderer.fill_quad(outline, Background::Color(Color::TRANSPARENT));
+                }
             });
         }
     }
@@ -520,6 +545,63 @@ where
     }
 }
 
+/// A quad that paints `backdrop` over the corners of a pane at `bounds`
+/// outside its `border`'s rounded outline, once clipped to `bounds`; `None`
+/// for a pane without rounded corners.
+///
+/// A rounded container clips its background, not its content, so a body
+/// that paints its whole rectangle would show past the corners. The quad is
+/// all border: both renderers draw a border as the band between the quad's
+/// rounded outline and that outline drawn `width` further in, with each
+/// radius `width` smaller. Grown by `reach` on every side, with each radius
+/// `reach` larger and a border `reach` wide, the band's inner edge would be
+/// exactly the pane's outline. Its outer edge clears the pane's corner while
+/// `reach` exceeds `(√2 − 1) · radius` and a pixel of anti-aliasing: the
+/// corner lies `√2 · radius` from the arc's centre. `reach` is the largest
+/// radius, which leaves room to spare.
+///
+/// The band reaches half the pane's border further in, under the border,
+/// which is drawn over it. Were the band to end where the border begins,
+/// each would cover about half of every pixel the outline crosses, and a
+/// quarter of the body would show through between them: a faint line along
+/// the outside of every rounded corner, and of every edge that falls
+/// between pixels (at a fractional scale factor).
+///
+/// The quad is not snapped to the pixel grid, nor is the border drawn with
+/// it. A renderer that snaps quads (wgpu, with iced's `crisp` feature)
+/// rounds each of their edges on its own; the mask's lie `reach` from the
+/// pane's, a fraction of a pixel at most scale factors, so the two would
+/// round apart, and the arcs, measured from the rounded edges, would no
+/// longer share their centres. Up to a pixel of the band's overlap with the
+/// border would be lost, and the body would show through again.
+fn corner_mask(bounds: Rectangle, border: Border, backdrop: Color) -> Option<renderer::Quad> {
+    let radius = border.radius;
+    let reach = radius
+        .top_left
+        .max(radius.top_right)
+        .max(radius.bottom_right)
+        .max(radius.bottom_left);
+    if reach <= 0.0 {
+        return None;
+    }
+
+    Some(renderer::Quad {
+        bounds: bounds.expand(reach),
+        border: Border {
+            color: backdrop,
+            width: reach + border.width / 2.0,
+            radius: Radius {
+                top_left: radius.top_left + reach,
+                top_right: radius.top_right + reach,
+                bottom_right: radius.bottom_right + reach,
+                bottom_left: radius.bottom_left + reach,
+            },
+        },
+        snap: false,
+        ..renderer::Quad::default()
+    })
+}
+
 impl<Message, T, W, Theme, Renderer> Draggable for &Content<'_, Message, T, W, Theme, Renderer>
 where
     Theme: container::Catalog,
@@ -543,6 +625,193 @@ mod tests {
     use iced::widget::text;
 
     type Pane<'a> = Content<'a, (), Void, iced::widget::Text<'a>>;
+
+    const BODY: Color = Color::from_rgb(1.0, 0.0, 0.0);
+    const BACKDROP: Color = Color::from_rgb(0.0, 0.0, 1.0);
+    const BORDER: Color = Color::from_rgb(0.0, 1.0, 0.0);
+    const RADIUS: f32 = 12.0;
+    const SIZE: Size<u32> = Size::new(100, 80);
+
+    /// A rendered grid, in physical pixels at the simulator's scale factor.
+    struct Rendered {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        scale: u32,
+    }
+
+    impl Rendered {
+        /// The colour of the physical pixel `(x, y)`.
+        fn physical(&self, x: u32, y: u32) -> Color {
+            let at = ((y * self.width + x) * 4) as usize;
+            Color::from_rgba8(
+                self.rgba[at],
+                self.rgba[at + 1],
+                self.rgba[at + 2],
+                f32::from(self.rgba[at + 3]) / 255.0,
+            )
+        }
+
+        /// The colour at the logical pixel `(x, y)`.
+        fn at(&self, x: u32, y: u32) -> Color {
+            self.physical(x * self.scale, y * self.scale)
+        }
+    }
+
+    /// A grid of one pane with corners of `radius`, `corners` painted,
+    /// `inset` from the window's edges, rendered. The pane's body paints its
+    /// whole rectangle, clipped to it, as the map's tiles do.
+    fn render(corners: Option<Color>, radius: f32, inset: f32) -> Rendered {
+        let (state, _) = super::super::State::new(());
+        let grid = super::super::PaneGrid::new(&state, move |_, (), _| {
+            let fill = container(iced::widget::Space::new())
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .style(|_| container::Style::default().background(BODY));
+            let body = container(fill)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .clip(true);
+            Content::new(body).style(move |_| container::Style {
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: radius.into(),
+                },
+                ..container::Style::default()
+            })
+        })
+        .style(move |theme| super::super::Style {
+            corners,
+            ..super::super::default(theme)
+        });
+
+        let mut simulator: iced_test::Simulator<'_, ()> = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            Size::new(SIZE.width as f32, SIZE.height as f32),
+            container(grid).padding(inset),
+        );
+        let snapshot = simulator.snapshot(&iced::Theme::Dark).unwrap();
+
+        // The snapshot's pixels are read back from the PNG it writes.
+        let directory = std::env::temp_dir().join(format!(
+            "groundhog-pane-corners-{}-{}-{radius}-{inset}",
+            std::process::id(),
+            corners.is_some()
+        ));
+        drop(std::fs::remove_dir_all(&directory));
+        assert!(snapshot.matches_image(directory.join("pane.png")).unwrap());
+        let written = std::fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(&written).unwrap(),
+        ))
+        .read_info()
+        .unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut rgba).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        let scale = info.width / SIZE.width;
+        assert_eq!(info.height, SIZE.height * scale);
+        Rendered {
+            rgba,
+            width: info.width,
+            height: info.height,
+            scale,
+        }
+    }
+
+    /// How far `point` lies outside the outline of `bounds` with corners
+    /// of `radius`; negative inside.
+    fn outside_by(bounds: Rectangle, radius: f32, point: Point) -> f32 {
+        let centre = bounds.center();
+        let x = (point.x - centre.x).abs() - (bounds.width / 2.0 - radius);
+        let y = (point.y - centre.y).abs() - (bounds.height / 2.0 - radius);
+        x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0) - radius
+    }
+
+    #[track_caller]
+    fn assert_near(actual: Color, expected: Color) {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.02;
+        assert!(
+            close(actual.r, expected.r)
+                && close(actual.g, expected.g)
+                && close(actual.b, expected.b),
+            "{actual:?} is not {expected:?}"
+        );
+    }
+
+    #[test]
+    fn the_backdrop_covers_a_body_past_the_rounded_corners() {
+        let rendered = render(Some(BACKDROP), RADIUS, 0.0);
+        let pixel = |x, y| rendered.at(x, y);
+        let (right, bottom) = (SIZE.width - 1, SIZE.height - 1);
+
+        // Outside the arc, at every corner.
+        for (x, y) in [(0, 0), (1, 1), (right, 0), (0, bottom), (right, bottom)] {
+            assert_near(pixel(x, y), BACKDROP);
+        }
+        // Inside it, the body.
+        assert_near(pixel(5, 5), BODY);
+        assert_near(pixel(right - 5, bottom - 5), BODY);
+        assert_near(pixel(SIZE.width / 2, SIZE.height / 2), BODY);
+        // The straight edges keep their border.
+        assert_near(pixel(0, SIZE.height / 2), BORDER);
+        assert_near(pixel(SIZE.width / 2, bottom), BORDER);
+    }
+
+    #[test]
+    fn without_corners_the_body_shows_past_them() {
+        assert_near(render(None, RADIUS, 0.0).at(1, 1), BODY);
+    }
+
+    /// Where the pane's edges fall between pixels, as at a fractional scale
+    /// factor, the pixels the outline crosses are covered in part by the
+    /// border and in part by the backdrop, and the body must not show
+    /// through between them. A renderer that snaps quads to the pixel grid
+    /// rounds each of their edges on its own, so the corners must stay clear
+    /// whatever the rounding does: the insets put the pane's edges at
+    /// various fractions of a pixel, and the radius makes the distance from
+    /// the pane's edge to the corner mask's (`corner_mask`) a fraction too.
+    #[test]
+    fn nothing_of_the_body_shows_past_the_outline() {
+        const RADIUS: f32 = 12.05;
+
+        for inset in [10.0, 10.1, 10.275, 10.3, 10.45, 10.6, 10.8] {
+            let rendered = render(Some(BACKDROP), RADIUS, inset);
+            let pane = Rectangle::new(
+                Point::new(inset, inset),
+                Size::new(
+                    SIZE.width as f32 - 2.0 * inset,
+                    SIZE.height as f32 - 2.0 * inset,
+                ),
+            );
+            let scale = rendered.scale as f32;
+
+            // The pixels of the pane's rectangle that lie past its corners:
+            // the rest is the window's, which the pane does not draw.
+            for y in 0..rendered.height {
+                for x in 0..rendered.width {
+                    let centre = Point::new((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
+                    if pane.contains(centre) && outside_by(pane, RADIUS, centre) > 0.0 {
+                        // The body is the only red; the window's grey
+                        // (around the pane, where its edge falls between
+                        // pixels) adds as much to every channel.
+                        let colour = rendered.physical(x, y);
+                        assert!(
+                            colour.r - colour.g.min(colour.b) < 0.02,
+                            "inset {inset}: the body shows at ({x}, {y}): {colour:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_preview_keeps_its_own_tree_through_a_diff() {

@@ -441,6 +441,16 @@ on the desktop) are given to the shells rather than padding the window:
 the tiled shell keeps its panes clear of them, and the floating shell lets
 only the map run under them.
 
+A rounded container clips its background, not its content, so a body
+that paints its whole rectangle (the map's tiles, a video) would show past
+a pane's corners. The tiled shell's pane grid therefore paints each
+pane's corners in the workspace's colour over its body
+(`pane_grid::Style::corners`): one quad per pane, in the layer that
+already re-strokes its border, so nothing needs caching, and no panel
+needs to know where it is shown. Over the map no colour is known to lie
+behind a corner, so there content keeps within its corners itself, or the
+corners are square (the inset in the floating shell's corner).
+
 Whatever floats over the map is a `widget::surface`, which captures the
 presses (and wheel) that land on it. The map follows a finger by the
 finger's own position, not the cursor, so without one a press on a sheet's
@@ -630,8 +640,9 @@ so the look is decided in one place:
   edge-to-edge rules), `ui::section`, `ui::field` (a form row), `ui::stat`
   and `ui::stats` (read-outs in columns), and `ui::list_row` (striped)
   cover the shared arrangements. A panel whose body is a picture (the
-  video) uses `ui::picture`, edge to edge, the pane's lower corners and
-  border drawn over it (`ui::frame`, which the map's frame uses too), with
+  video) uses `ui::picture`, edge to edge and square (the pane grid
+  rounds the pane over it; see
+  [Two shells](#two-shells-over-the-same-panels)), with
   what it needs floating over it in `ui::floating` cards rather than
   around it, and `ui::veil` dimming a picture that stopped. Inputs come from `ui` too (`text_input`,
   `pick_list`, `checkbox` and `unlabelled_checkbox`, `slider`), so they
@@ -830,7 +841,6 @@ Then add `layers.plugin(&self.features.fence, context, Message::Fence)` in
 | 20 | vehicle icons (clickable) |
 | 30 | mission markers (draggable) |
 | 100 | attitude HUD (screen-anchored, clickable) |
-| `i32::MAX` | pane frame (engine) |
 
 Higher layers are hit-tested first. Use `Anchor::Screen` for handles fixed to
 the overlay rather than to the map.

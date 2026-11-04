@@ -8,15 +8,14 @@
 use iced::{
     Alignment, Element, Length, Widget,
     widget::{
-        Column, Container, ProgressBar, Row, Rule, Stack, Text, column, container, progress_bar,
-        row, row::Wrapping, rule, stack, text::IntoFragment, tooltip::Position,
+        Column, Container, ProgressBar, Row, Rule, Text, column, container, progress_bar, row,
+        row::Wrapping, rule, text::IntoFragment, tooltip::Position,
     },
 };
 
 use super::{
     super::widget::adaptive::{Adaptive, form_row, grid},
     button::button,
-    frame,
     icon::{self, Icon},
     style::{self, ButtonKind, Tone, size, space},
     text::{TextExt, caption, text},
@@ -179,11 +178,11 @@ pub fn floating<'a, M: 'a, W: Widget<M> + 'a>(content: W) -> Container<'a, W> {
 }
 
 /// A pane's body that is a picture (a video), with whatever floats over it:
-/// edge to edge, black around the picture, the pane's lower corners and
-/// border drawn over it ([`frame::below_title`]): a picture paints its
-/// whole rectangle, which a rounded container cannot clip.
-pub fn picture<'a, M: 'a>(content: impl Widget<M> + 'a) -> Container<'a, Stack<Element<'a, M>>> {
-    container(stack![content, frame::below_title()])
+/// edge to edge, black around the picture, and square. A picture paints its
+/// whole rectangle, which a rounded container cannot clip, so the pane grid
+/// paints the pane's corners over it (`pane_grid::Style::corners`).
+pub fn picture<'a, W>(content: W) -> Container<'a, W> {
+    container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::picture)

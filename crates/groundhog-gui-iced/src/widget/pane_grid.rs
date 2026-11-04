@@ -35,6 +35,11 @@
 //     (`Node::neighbours`, `Node::seams`)
 //   - `Axis::split` never gives a side a negative length, nor overflows: where
 //     the region cannot hold both minimum sizes, it splits at the ratio
+//   - `Style::corners` paints the backdrop over a pane's corners, outside its
+//     rounded outline, after its body (`Content::draw`, `corner_mask`), so a
+//     body that paints its whole rectangle keeps to the pane's shape; the pane's
+//     border is then drawn over it alone, and neither is snapped to the pixel
+//     grid
 //
 // Re-vendoring: copy the upstream `iced_widget/src/pane_grid.rs` and
 // `iced_widget/src/pane_grid/` tree at the target iced revision, then re-apply the
@@ -1101,6 +1106,7 @@ where
                         pane_cursor,
                         viewport,
                         resizing,
+                        style.corners,
                     );
 
                     // Once its preview is dragged away, the pane fades, so
@@ -1147,6 +1153,7 @@ where
                         pane_cursor,
                         viewport,
                         resizing,
+                        style.corners,
                     );
                 }
             }
@@ -1394,6 +1401,8 @@ where
                     mouse::Cursor::Unavailable,
                     &Rectangle::INFINITE,
                     false,
+                    // It floats over the other panes, not the backdrop.
+                    None,
                 );
             });
         });
@@ -1984,6 +1993,11 @@ pub struct Style {
     /// [`Content::preview`]): the grid's backdrop, partly transparent,
     /// fades the pane into it.
     pub picked_pane: Color,
+    /// What the panes sit on, painted over the corners outside their
+    /// rounded outline (see [`Content::draw`]), so a body that paints its
+    /// whole rectangle (a map, a video) keeps to the pane's shape. `None`
+    /// leaves each body to keep within its corners itself.
+    pub corners: Option<Color>,
 }
 
 /// The appearance of a highlight of the [`PaneGrid`].
@@ -2061,5 +2075,6 @@ pub fn default(theme: &Theme) -> Style {
             width: 2.0,
         },
         picked_pane: palette.background.base.color.scale_alpha(0.6),
+        corners: None,
     }
 }
