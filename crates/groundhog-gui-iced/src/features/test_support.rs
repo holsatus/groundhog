@@ -147,7 +147,7 @@ impl Env {
         let mut cx = Context::new(
             &snapshot,
             &self.handle,
-            self.backend.links_mut(),
+            self.backend.links(),
             &mut self.notices,
             None,
             &self.settings,

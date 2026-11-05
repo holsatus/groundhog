@@ -3,9 +3,10 @@
 //! This is a thin adapter. The editor draft ([`LinkConfigurator`]) and the
 //! connect/disconnect buttons are view state; the links themselves and their
 //! connection lifecycle are owned by the headless [`LinkManager`] in the
-//! services layer. The panel translates widget messages into manager intents,
-//! maps manager futures into [`Task`]s, and renders manager state. Persisting
-//! the link set is requested from the application as an [`Effect`].
+//! services layer. The panel reads the manager and renders its state; a
+//! change to the links (save, connect, disconnect, delete) it asks of the
+//! application as an [`Effect::Link`], which makes it, announces what came
+//! of it and saves the link set.
 
 mod editor;
 
@@ -19,11 +20,11 @@ use iced::{
 pub use editor::{BAUDRATES, LinkBuilder, LinkConfigurator, LinkField, LinkVariant};
 use groundhog_logic::{
     link::{LinkConfig, LinkId},
-    services::{self, LinkManager, LinkStats, LinkStatus, Saved},
+    services::{self, LinkManager, LinkStats, LinkStatus},
 };
 
 use super::{
-    Context, Effect, Panel, Persisted, ViewContext, confirm::Confirmation, notifications::Notice,
+    Context, Effect, LinkRequest, Panel, ViewContext, confirm::Confirmation, notifications::Notice,
 };
 use crate::ui::{self, Icon, TextExt, Tone};
 
@@ -118,30 +119,9 @@ impl Panel for LinkPanel {
                     self.configurator = LinkConfigurator::from_config(config);
                 }
             }
-            Message::Save(config) => {
-                // Saving a link with an existing name updates it in place,
-                // keeping its id, and its connection unless the transport
-                // changed.
-                let name = config.name.trim().to_string();
-                match cx.links.save(config) {
-                    Ok(saved) => {
-                        if let Saved::Reconnected(_) = saved {
-                            cx.notices.push(Notice::info(format!(
-                                "Reconnecting {name} with the new settings"
-                            )));
-                        }
-                        persist(cx);
-                    }
-                    Err(error) => cx
-                        .notices
-                        .push(Notice::warning("Could not save the link").detail(error)),
-                }
-            }
-            Message::Connect(id) => {
-                // The manager refuses a second supervisor on an active link.
-                cx.links.connect(&id);
-            }
-            Message::Disconnect(id) => cx.links.disconnect(&id),
+            Message::Save(config) => cx.request(Effect::Link(LinkRequest::Save(config))),
+            Message::Connect(id) => cx.request(Effect::Link(LinkRequest::Connect(id))),
+            Message::Disconnect(id) => cx.request(Effect::Link(LinkRequest::Disconnect(id))),
             Message::RequestDelete(id) => {
                 let Some((_, config, status)) = cx.links.entries().find(|(link, ..)| **link == id)
                 else {
@@ -160,11 +140,7 @@ impl Panel for LinkPanel {
                 .accept_label("Delete");
                 cx.confirm(confirmation);
             }
-            Message::Delete(id) => {
-                if cx.links.remove(&id) {
-                    persist(cx);
-                }
-            }
+            Message::Delete(id) => cx.request(Effect::Link(LinkRequest::Delete(id))),
         }
 
         Task::none()
@@ -511,12 +487,6 @@ impl Default for LinkPanel {
     }
 }
 
-/// Have the application save the configured links, which just changed.
-fn persist(cx: &mut Context<Message>) {
-    let links = cx.links.configs();
-    cx.request(Effect::Persist(Persisted::Links(links)));
-}
-
 #[cfg(test)]
 mod tests {
     use groundhog_logic::link::LinkBuild;
@@ -539,50 +509,65 @@ mod tests {
         }
     }
 
-    /// The links a panel's effects ask to persist, if they do.
-    fn persisted(effects: &[Effect<Message>]) -> Option<&Vec<LinkConfig>> {
-        effects.iter().find_map(|effect| match effect {
-            Effect::Persist(Persisted::Links(links)) => Some(links),
+    /// The change to the links `effects` ask for, if they ask for one.
+    fn requested(effects: &[Effect<Message>]) -> Option<&LinkRequest> {
+        match effects {
+            [Effect::Link(request)] => Some(request),
             _ => None,
-        })
+        }
+    }
+
+    /// `env` with the link `name` saved, and its id.
+    fn saved(env: &mut Env, name: &str) -> LinkId {
+        env.backend
+            .links_mut()
+            .save(config(name))
+            .expect("a named link saves")
+            .id()
+            .clone()
+    }
+
+    /// The panel changes no link itself: it asks the application.
+    #[tokio::test]
+    async fn changes_to_the_links_are_asked_of_the_application() {
+        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
+        let id = saved(&mut env, "A");
+
+        let effects = env.step(&mut panel, Message::Save(config("B")));
+        assert!(matches!(
+            requested(&effects),
+            Some(LinkRequest::Save(config)) if config.name == "B"
+        ));
+        let effects = env.step(&mut panel, Message::Connect(id.clone()));
+        assert!(matches!(requested(&effects), Some(LinkRequest::Connect(link)) if *link == id));
+        let effects = env.step(&mut panel, Message::Disconnect(id.clone()));
+        assert!(matches!(requested(&effects), Some(LinkRequest::Disconnect(link)) if *link == id));
+        let effects = env.step(&mut panel, Message::Delete(id.clone()));
+        assert!(matches!(requested(&effects), Some(LinkRequest::Delete(link)) if *link == id));
+
+        let names: Vec<_> = env
+            .backend
+            .links()
+            .entries()
+            .map(|(_, config, _)| config.name.clone())
+            .collect();
+        assert_eq!(names, ["A"], "unchanged");
+        assert!(!env.backend.links().status(&id).is_active());
     }
 
     #[tokio::test]
-    async fn saving_persists_the_links() {
+    async fn editing_the_draft_asks_for_nothing() {
         let (mut env, mut panel) = (Env::new(), LinkPanel::new());
-
-        let effects = env.step(&mut panel, Message::Save(config("A")));
-        let links = persisted(&effects).expect("Save persists the links");
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].name, "A");
 
         let effects = env.step(&mut panel, Message::ChangeName("B".to_string()));
-        assert!(
-            persisted(&effects).is_none(),
-            "draft edits must not persist"
-        );
-    }
 
-    #[tokio::test]
-    async fn deleting_persists_the_links_and_an_unknown_link_is_a_noop() {
-        let (mut env, mut panel) = (Env::new(), LinkPanel::new());
-        env.step(&mut panel, Message::Save(config("A")));
-        let id = env.backend.links().entries().next().unwrap().0.clone();
-
-        let effects = env.step(&mut panel, Message::Delete(LinkId::new("does-not-exist")));
-        assert!(effects.is_empty());
-        assert_eq!(env.backend.links().configs().len(), 1);
-
-        let effects = env.step(&mut panel, Message::Delete(id));
-        let links = persisted(&effects).expect("Delete persists the links");
-        assert!(links.is_empty());
+        assert!(effects.is_empty(), "draft edits must not persist");
     }
 
     #[tokio::test]
     async fn deleting_a_link_asks_first() {
         let (mut env, mut panel) = (Env::new(), LinkPanel::new());
-        env.step(&mut panel, Message::Save(config("A")));
-        let id = env.backend.links().entries().next().unwrap().0.clone();
+        let id = saved(&mut env, "A");
 
         let effects = env.step(&mut panel, Message::RequestDelete(id.clone()));
 
@@ -590,18 +575,12 @@ mod tests {
             panic!("expected a confirmation: {effects:?}")
         };
         assert!(matches!(&confirmation.accept, Message::Delete(link) if *link == id));
-        assert_eq!(
-            env.backend.links().configs().len(),
-            1,
-            "kept until accepted"
-        );
     }
 
     #[tokio::test]
     async fn editing_a_saved_link_loads_it_into_the_editor() {
         let (mut env, mut panel) = (Env::new(), LinkPanel::new());
-        env.step(&mut panel, Message::Save(config("A")));
-        let id = env.backend.links().entries().next().unwrap().0.clone();
+        let id = saved(&mut env, "A");
 
         let effects = env.step(&mut panel, Message::EditLink(id));
         assert!(effects.is_empty(), "loading a link does not change the set");

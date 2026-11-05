@@ -359,17 +359,22 @@ changes.
 A feature's `update` gets a `features::Context`, holding:
 
 - the snapshot;
-- the services, and the links (`LinkManager`);
+- the services, and the links to read (`&LinkManager`);
 - the notices;
 - settings and the file-dialog directory.
 
 It requests anything else as an `Effect`: confirm, select a vehicle, move the
 map, remember a directory, persist what it keeps in the configuration file
 (`Effect::Persist`), change the settings (`Effect::Settings`, which the
-application persists and applies). An `Effect` is the only way a feature
-asks the
-application for anything. Features never reach into each other or into the
-application.
+application persists and applies), change a link (`Effect::Link`: save,
+connect, disconnect or delete, which the application makes, announces and
+persists). An `Effect` is the only way a feature asks the application for
+anything. Features never reach into each other or into the application.
+
+*Why links are read-only to features:* every panel gets a `Context`, also
+in the hooks that run with each snapshot and tick. Only the application
+holds the `LinkManager` mutably, so no panel's mistake can drop the
+connection to a vehicle in flight.
 
 A feature the operator opens is a `features::Panel`, one interface for all
 of them: `update` with a `Context`, `view` with a `ViewContext` (the

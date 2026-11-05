@@ -5,8 +5,9 @@
 //! [`FleetSnapshot`]; operations go through [`FleetHandle`]. Everything a
 //! feature wants the *application* to do — ask for confirmation, change the
 //! selected vehicle, move the map, remember a directory, persist what it
-//! holds — it requests through its [`Context`] as an [`Effect`], so features
-//! never reach into each other or into the application's state.
+//! holds, change a link — it requests through its [`Context`] as an
+//! [`Effect`], so features never reach into each other or into the
+//! application's state.
 //!
 //! A feature the operator opens is a [`Panel`]: one interface for its
 //! messages, its view, and what it draws on the map. The application lists
@@ -37,7 +38,7 @@ use iced::{Element, Task, theme::Palette};
 use groundhog_logic::{
     SystemId,
     domain::{fleet::FleetSnapshot, geo::GeoPosition},
-    link::LinkConfig,
+    link::{LinkConfig, LinkId},
     services::{FleetHandle, LinkManager},
 };
 
@@ -125,6 +126,21 @@ pub enum Effect<M> {
     Persist(Persisted),
     /// Change the application's settings to these.
     Settings(crate::config::Settings),
+    /// Change the links. The application makes the change, tells the
+    /// operator what came of it, and saves the links if they changed.
+    Link(LinkRequest),
+}
+
+/// A change to the links, which only the application makes: a panel reads
+/// the links, but a mistake in one cannot drop a vehicle's connection.
+#[derive(Debug, Clone)]
+pub enum LinkRequest {
+    /// Add this link, or update the one of the same name.
+    Save(LinkConfig),
+    Connect(LinkId),
+    Disconnect(LinkId),
+    /// Remove a link, dropping any live connection with it.
+    Delete(LinkId),
 }
 
 /// What a feature keeps in the configuration file, which the application
@@ -133,8 +149,6 @@ pub enum Effect<M> {
 pub enum Persisted {
     /// The video's source and options.
     Video(crate::config::VideoSettings),
-    /// The configured links.
-    Links(Vec<LinkConfig>),
 }
 
 impl<M> Effect<M> {
@@ -147,6 +161,7 @@ impl<M> Effect<M> {
             Effect::RememberDirectory(path) => Effect::RememberDirectory(path),
             Effect::Persist(persisted) => Effect::Persist(persisted),
             Effect::Settings(settings) => Effect::Settings(settings),
+            Effect::Link(request) => Effect::Link(request),
         }
     }
 }
@@ -156,8 +171,9 @@ pub struct Context<'a, M> {
     /// The fleet as last published.
     pub fleet: &'a FleetSnapshot,
     pub services: &'a FleetHandle,
-    /// The links, to connect, disconnect and configure.
-    pub links: &'a mut LinkManager,
+    /// The links and their status. A change is asked with
+    /// [`Effect::Link`].
+    pub links: &'a LinkManager,
     pub notices: &'a mut Notifications,
     /// Where file dialogs open.
     pub directory: Option<&'a Path>,
@@ -170,7 +186,7 @@ impl<'a, M> Context<'a, M> {
     pub fn new(
         fleet: &'a FleetSnapshot,
         services: &'a FleetHandle,
-        links: &'a mut LinkManager,
+        links: &'a LinkManager,
         notices: &'a mut Notifications,
         directory: Option<&'a Path>,
         settings: &'a crate::config::Settings,

@@ -389,7 +389,7 @@ mod tests {
         let mut cx = Context::<()>::new(
             &snapshot,
             &env.handle,
-            env.backend.links_mut(),
+            env.backend.links(),
             &mut env.notices,
             None,
             &env.settings,

@@ -19,7 +19,7 @@ use groundhog_logic::{
         fleet::{FleetEvent, FleetSnapshot},
         vehicle::{Liveness, status},
     },
-    services::{FleetUpdate, LinkEvent, LinkStatus, TlogRecorder},
+    services::{FleetUpdate, LinkEvent, LinkManager, LinkStatus, Saved, TlogRecorder},
 };
 use iced::{
     Element, Length, Size, Subscription, Task, Theme, Widget, keyboard,
@@ -32,7 +32,7 @@ use self::panels::{PanelEnv, PanelMessage, Panels};
 use crate::{
     config::{self, ConfigWriter, Configuration, Loaded, Settings},
     features::{
-        Effect, MapContext, Persisted, ViewContext,
+        Effect, LinkRequest, MapContext, Persisted, ViewContext,
         calibration::CalibrationPanel,
         confirm::{self, Answer, Confirmation},
         link_panel::LinkPanel,
@@ -439,12 +439,10 @@ impl Application {
         run: impl FnOnce(&mut Panels, &mut PanelEnv<'_>) -> Task<PanelMessage>,
     ) -> Task<Message> {
         let fleet = self.fleet.clone();
-        // A handle of its own, so the links can be borrowed beside it.
-        let services = self.backend.fleet().clone();
         let mut env = PanelEnv {
             fleet: &fleet,
-            services: &services,
-            links: self.backend.links_mut(),
+            services: self.backend.fleet(),
+            links: self.backend.links(),
             notices: &mut self.notices,
             directory: self.configuration.file_picker_path.as_deref(),
             settings: &self.configuration.settings,
@@ -484,11 +482,16 @@ impl Application {
             Effect::Persist(persisted) => {
                 match persisted {
                     Persisted::Video(settings) => self.configuration.video = settings,
-                    Persisted::Links(links) => self.configuration.links = links,
                 }
                 self.save_configuration();
             }
             Effect::Settings(settings) => return self.change_settings(settings),
+            Effect::Link(request) => {
+                if change_links(self.backend.links_mut(), request, &mut self.notices) {
+                    self.configuration.links = self.backend.links().configs();
+                    self.save_configuration();
+                }
+            }
         }
         Task::none()
     }
@@ -975,6 +978,47 @@ fn back_target(
     }
 }
 
+/// Make the change to `links` a panel asked for, and tell the operator
+/// what came of it. Returns whether the configured links changed, to be
+/// saved; connecting and disconnecting change only what runs.
+fn change_links(
+    links: &mut LinkManager,
+    request: LinkRequest,
+    notices: &mut Notifications,
+) -> bool {
+    match request {
+        LinkRequest::Save(config) => {
+            let name = config.name.trim().to_string();
+            match links.save(config) {
+                Ok(saved) => {
+                    // Keeping its id, and its connection unless the
+                    // transport changed.
+                    if let Saved::Reconnected(_) = saved {
+                        notices.push(Notice::info(format!(
+                            "Reconnecting {name} with the new settings"
+                        )));
+                    }
+                    true
+                }
+                Err(error) => {
+                    notices.push(Notice::warning("Could not save the link").detail(error));
+                    false
+                }
+            }
+        }
+        LinkRequest::Connect(id) => {
+            // The manager refuses a second supervisor on an active link.
+            links.connect(&id);
+            false
+        }
+        LinkRequest::Disconnect(id) => {
+            links.disconnect(&id);
+            false
+        }
+        LinkRequest::Delete(id) => links.remove(&id),
+    }
+}
+
 /// Whether anything can show the video: the floating shell always can
 /// (the map's corner, or the whole screen, with a tap), the tiled shell
 /// while the Video pane is open.
@@ -1080,5 +1124,115 @@ mod tests {
         assert_eq!(full_screen.sync(true), None);
         // ...and leaving the video leaves the application full screen.
         assert_eq!(full_screen.sync(false), None);
+    }
+
+    /// What the application makes of the panels' changes to the links.
+    mod links {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        use groundhog_logic::{
+            Backend, BackendOptions,
+            link::{LinkBuild, LinkConfig, LinkId},
+        };
+
+        use super::super::{LinkRequest, Notifications, change_links};
+
+        fn config(name: &str) -> LinkConfig {
+            LinkConfig {
+                name: name.to_string(),
+                auto_connect: false,
+                high_latency: false,
+                auto_reconnect: true,
+                build: LinkBuild::Udp {
+                    // Any free port: a test may connect it.
+                    sock_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+                    peer: None,
+                },
+            }
+        }
+
+        fn titles(notices: &Notifications) -> Vec<&str> {
+            notices
+                .history()
+                .map(|notice| notice.title.as_str())
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn saving_and_deleting_change_the_saved_links() {
+            let (mut backend, _events) = Backend::start(BackendOptions::default());
+            let mut notices = Notifications::default();
+
+            let saved = change_links(
+                backend.links_mut(),
+                LinkRequest::Save(config("A")),
+                &mut notices,
+            );
+            assert!(saved);
+            let id = backend.links().entries().next().expect("saved").0.clone();
+
+            let unknown = LinkRequest::Delete(LinkId::new("does-not-exist"));
+            assert!(!change_links(backend.links_mut(), unknown, &mut notices));
+            assert_eq!(backend.links().configs().len(), 1);
+
+            let deleted = change_links(backend.links_mut(), LinkRequest::Delete(id), &mut notices);
+            assert!(deleted);
+            assert!(backend.links().configs().is_empty());
+            assert!(titles(&notices).is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_link_without_a_name_is_not_saved() {
+            let (mut backend, _events) = Backend::start(BackendOptions::default());
+            let mut notices = Notifications::default();
+
+            let saved = change_links(
+                backend.links_mut(),
+                LinkRequest::Save(config("  ")),
+                &mut notices,
+            );
+
+            assert!(!saved);
+            assert!(backend.links().configs().is_empty());
+            assert_eq!(titles(&notices), ["Could not save the link"]);
+        }
+
+        /// Connecting and disconnecting change what runs, not what is
+        /// saved; a new transport for a running link reconnects it, and
+        /// says so.
+        #[tokio::test]
+        async fn connecting_runs_a_link_without_changing_what_is_saved() {
+            let (mut backend, _events) = Backend::start(BackendOptions::default());
+            let mut notices = Notifications::default();
+            let links = backend.links_mut();
+            change_links(links, LinkRequest::Save(config("A")), &mut notices);
+            let id = links.entries().next().expect("saved").0.clone();
+
+            assert!(!change_links(
+                links,
+                LinkRequest::Connect(id.clone()),
+                &mut notices
+            ));
+            assert!(links.status(&id).is_active());
+
+            let high_latency = LinkConfig {
+                high_latency: true,
+                ..config("A")
+            };
+            assert!(change_links(
+                links,
+                LinkRequest::Save(high_latency),
+                &mut notices
+            ));
+            assert!(links.status(&id).is_active(), "reconnected");
+            assert_eq!(titles(&notices), ["Reconnecting A with the new settings"]);
+
+            assert!(!change_links(
+                links,
+                LinkRequest::Disconnect(id.clone()),
+                &mut notices
+            ));
+            assert!(!links.status(&id).is_active());
+        }
     }
 }
