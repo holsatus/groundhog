@@ -3252,7 +3252,6 @@ dependencies = [
 [[package]]
 name = "mavio"
 version = "0.5.10"
-source = "git+https://gitlab.com/peterkrull/mavio?rev=0ad2f7d769fbdeffd88cce9ed45fe3402c991578#0ad2f7d769fbdeffd88cce9ed45fe3402c991578"
 dependencies = [
  "bitflags 2.13.2",
  "crc-any",

@@ -20,7 +20,7 @@ log = "0.4.29"
 # Mirrors iced's own feature set so it stays the same crate and version.
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 mav-param = { git = "https://github.com/holsatus/mav-param", rev = "04034d9a0c3a8115bd1a9ac2779685184c954ee6" }
-mavio = { git = "https://gitlab.com/peterkrull/mavio", rev = "0ad2f7d769fbdeffd88cce9ed45fe3402c991578", features = ["dlct-ardupilotmega", "tokio"] }
+mavio = { path = "../mavio/mavio", features = ["dlct-ardupilotmega", "tokio"] }
 tokio = "1.51.1"
 serde = "1.0.228"
 # D-Bus on Linux: keeping the screen on (the frontend) and finding `.local`

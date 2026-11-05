@@ -20,17 +20,15 @@ impl mavio::io::AsyncWrite<std::io::Error> for BoxedWriter {
     }
 }
 
-/// Alias for the versionless boxed async reader for type erasure
-pub(crate) type AsyncReceiver = mavio::io::AsyncReceiver<
-    std::io::Error,
-    BoxedReader,
-    mavio::prelude::Versionless,
-    mavio::protocol::FrameParser<mavio::prelude::Versionless>,
->;
+/// Alias for the versionless boxed async reader for type erasure. It keeps
+/// the frame it is parsing between reads, so a read error or a cancelled
+/// `recv` loses no bytes.
+pub(crate) type AsyncReceiver =
+    mavio::io::AsyncReceiver<std::io::Error, BoxedReader, mavio::prelude::Versionless>;
 
 /// Construct a new [`AsyncReceiver`]
 pub(crate) fn new_async_receiver<R: DynAsyncReader + 'static>(reader: R) -> AsyncReceiver {
-    mavio::io::AsyncReceiver::new(BoxedReader(Box::new(reader))).make_stateful()
+    mavio::io::AsyncReceiver::new(BoxedReader(Box::new(reader)))
 }
 
 /// Alias for the versionless boxed async writer for type erasure

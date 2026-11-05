@@ -1300,6 +1300,72 @@ mod tests {
         }
     }
 
+    /// Serves a script of reads, then waits forever, as a quiet link does.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl tokio::io::AsyncRead for Scripted {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let Some(next) = self.0.front_mut() else {
+                return std::task::Poll::Pending;
+            };
+            let bytes = match next {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let error = self.0.pop_front().unwrap().unwrap_err();
+                    return std::task::Poll::Ready(Err(error));
+                }
+            };
+            let count = bytes.len().min(buf.remaining());
+            buf.put_slice(&bytes[..count]);
+            bytes.drain(..count);
+            if bytes.is_empty() {
+                self.0.pop_front();
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A read fails part way through the longest frame there is (signed,
+    /// 255 bytes of payload). The frames after it still arrive: the parser
+    /// drops the broken frame rather than keep a count past its buffer's end.
+    #[tokio::test]
+    async fn frames_after_a_read_error_in_a_long_frame_arrive() {
+        let (router, _events) = MavlinkRouter::new(DEFAULT_GCS_ID);
+        let id = LinkId::new("link");
+
+        let mut broken = vec![0xFD, 255, 0x01, 0, 0, 1, 1, 0, 0, 0];
+        broken.extend([0x11; 265]);
+        let mut script = std::collections::VecDeque::from([
+            Ok(broken),
+            Err(std::io::ErrorKind::TimedOut.into()),
+        ]);
+        for sequence in 0..5 {
+            let frame = frame_from(SOURCE, sequence, &Heartbeat::default());
+            let mut bytes = [0u8; 300];
+            let length = frame.serialize(&mut bytes).unwrap();
+            script.push_back(Ok(bytes[..length].to_vec()));
+        }
+
+        let (_peer, gcs) = tokio::io::duplex(4096);
+        let (_, writer) = tokio::io::split(gcs);
+        let _guard = router.attach_reader_writer(id.clone(), Scripted(script), writer, false);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let stats = router.link_stats(&id).expect("attached");
+            if stats.rx_frames == 5 {
+                assert_eq!(stats.read_errors, 1);
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{stats:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// A corrupt copy must not enter duplicate suppression or become the
     /// route: the intact copy that follows is still a first copy.
     #[tokio::test]

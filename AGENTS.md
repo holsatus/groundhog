@@ -1134,13 +1134,6 @@ written by a newer build, saves nothing.
   `cargo clippy --workspace` skips them entirely — including most of the crate's
   `unsafe`. `android/lint.sh` (a CI job) is what lints them; a change to that
   module is unverified until it passes.
-- **mavio rejects untruncated MAVLink 2 frames with trailing zero bytes.**
-  `Frame::from_header_and_slice` (mavio `protocol/frame.rs`) builds the
-  received payload with `Payload::new`, which trims trailing zeros. The header
-  and checksum still describe the untrimmed payload, so `decode` fails with a
-  checksum error, and re-serializing writes a corrupt frame. ArduPilot and PX4
-  truncate when sending, so this rarely shows, but test tools that build frames
-  by hand must truncate too.
 - **The dialect is `ardupilotmega`**, a superset of `common` (mavio's
   `dlct-ardupilotmega` feature). mavio generates it from MAVLink definitions
   older than current firmware, so some enums lack recent values. A message
