@@ -2,7 +2,7 @@
 //!
 //! An [`Operations`] set owns the abort handle of every operation it started,
 //! keyed by what the operation is about (a vehicle and an operation kind, a
-//! parameter, ...). That gives each feature, for free:
+//! parameter, ...). That gives each panel, for free:
 //! - "is this running?" per key, to disable buttons and show spinners;
 //! - cancellation: [`Operations::cancel`] aborts the task, which drops the
 //!   transaction's future and lets the middleware clean up (release locks,
@@ -12,9 +12,9 @@
 //!   superseded is dropped by [`Operations::settle`];
 //! - the operator hears of every failure: [`Operations::settle`] pushes a
 //!   notice worded from the key's [`Activity`], the same way in every
-//!   feature.
+//!   panel.
 //!
-//! A feature routes the [`Finished`] (and [`Progressed`]) messages its
+//! A panel routes the [`Finished`] (and [`Progressed`]) messages its
 //! operations end with back into its set, and handles what [`Settled`] says:
 //! the success value, and whatever a failure changes besides the notice.
 
@@ -113,7 +113,7 @@ struct Running<C> {
     progress: Option<Progress>,
 }
 
-/// The operations a feature has in flight, by key.
+/// The operations a panel has in flight, by key.
 pub struct Operations<K, C = ()> {
     running: BTreeMap<K, Running<C>>,
     next_ticket: u64,
@@ -130,7 +130,7 @@ impl<K, C> Default for Operations<K, C> {
 
 impl<K: Ord + Clone + Send + 'static> Operations<K> {
     /// Start `future` under `key`, replacing (and aborting) any operation
-    /// already running under it. `done` wraps its result in the feature's
+    /// already running under it. `done` wraps its result in the panel's
     /// message, to be handed to [`Operations::settle`].
     pub fn start<T, M>(
         &mut self,
@@ -147,7 +147,7 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
 
     /// Start an operation that reports progress. `operation` receives the
     /// [`ProgressReporter`] sink; `progress` wraps each report in the
-    /// feature's message, to be handed to [`Operations::report`].
+    /// panel's message, to be handed to [`Operations::report`].
     pub fn start_with_progress<T, M, Fut>(
         &mut self,
         key: K,
@@ -344,7 +344,7 @@ mod tests {
     use groundhog_logic::MavlinkId;
 
     use super::*;
-    use crate::features::test_support::Env;
+    use crate::panels::test_support::Env;
 
     const SYSTEM: SystemId = SystemId(1);
 
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(
             env.notices.history().count(),
             0,
-            "a success is the feature's to tell"
+            "a success is the panel's to tell"
         );
     }
 

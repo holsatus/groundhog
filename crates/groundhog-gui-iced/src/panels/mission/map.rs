@@ -10,19 +10,19 @@ use groundhog_logic::domain::{
 use iced::widget::canvas::{LineCap, LineDash, Stroke, Style};
 use mavio::default_dialect::enums::MavCmd;
 
-use super::{Draft, Message, MessageKind, MissionEditor, PlanKey};
+use super::{Draft, Message, MessageKind, MissionPanel, PlanKey};
 use crate::{
-    features::MapContext,
     map::{
         Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer, MapView,
     },
+    panels::MapContext,
     ui::style,
 };
 
 /// Screen-space hit radius of an item marker.
 const MARKER_HIT_RADIUS: f32 = 12.0;
 
-impl MissionEditor {
+impl MissionPanel {
     /// The displayed plan's route and markers.
     pub(super) fn map_layers<'a>(
         &'a self,

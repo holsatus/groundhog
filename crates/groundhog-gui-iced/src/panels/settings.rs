@@ -16,7 +16,7 @@ use iced::{
 use super::{Context, Effect, Panel, ViewContext, confirm::Confirmation};
 use crate::{
     config::Settings,
-    features::video,
+    panels::video,
     shell::ShellMode,
     ui::{self, TextExt, Tone, theme::ThemeMode},
 };
@@ -208,7 +208,7 @@ fn slider_with_value<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::test_support::Env;
+    use crate::panels::test_support::Env;
 
     /// The settings a panel's effects ask for, if any.
     fn requested(effects: &[Effect<Message>]) -> Option<Settings> {

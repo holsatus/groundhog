@@ -1,4 +1,4 @@
-//! The link feature: editing link configurations and starting/stopping links.
+//! The link panel: editing link configurations and starting/stopping links.
 //!
 //! This is a thin adapter. The editor draft ([`LinkConfigurator`]) and the
 //! connect/disconnect buttons are view state; the links themselves and their
@@ -494,7 +494,7 @@ mod tests {
     use std::net::SocketAddrV4;
 
     use super::*;
-    use crate::features::test_support::Env;
+    use crate::panels::test_support::Env;
 
     fn config(name: &str) -> LinkConfig {
         LinkConfig {

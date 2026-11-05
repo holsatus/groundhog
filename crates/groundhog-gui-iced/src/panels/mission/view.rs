@@ -20,7 +20,7 @@ use iced::{
 };
 use mavio::default_dialect::enums::MavCmd;
 
-use super::{Draft, Message, MessageKind, MissionEditor, Operation, PlanKey, SyncStatus};
+use super::{Draft, Message, MessageKind, MissionPanel, Operation, PlanKey, SyncStatus};
 use crate::{
     ui::{self, Icon, TextExt, Tone, style::ButtonKind},
     widget::virtualized::virtual_list,
@@ -53,7 +53,7 @@ impl fmt::Display for Choice {
     }
 }
 
-impl MissionEditor {
+impl MissionPanel {
     /// The panel, in the order a mission is worked: how the plan stands
     /// against the vehicle (and its files), the vehicle's and the plan's
     /// actions, a transfer under way, then the items and the one selected.

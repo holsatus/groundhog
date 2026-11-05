@@ -1,4 +1,4 @@
-//! The mission feature: planning flight plans and transferring them.
+//! The mission panel: planning flight plans and transferring them.
 //!
 //! The editor keeps one [`MissionDraft`] per vehicle, plus an offline draft
 //! for planning with no vehicle selected; the draft decides when it follows
@@ -134,12 +134,12 @@ impl Draft {
     }
 }
 
-pub struct MissionEditor {
+pub struct MissionPanel {
     drafts: BTreeMap<PlanKey, Draft>,
     operations: Operations<Key>,
 }
 
-impl Default for MissionEditor {
+impl Default for MissionPanel {
     fn default() -> Self {
         let mut drafts = BTreeMap::new();
         drafts.insert(None, Draft::new(None));
@@ -215,7 +215,7 @@ pub enum MessageKind {
     LoadedConfirmed(PathBuf, WplMission),
 }
 
-impl Panel for MissionEditor {
+impl Panel for MissionPanel {
     type Message = Message;
 
     fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
@@ -359,7 +359,7 @@ impl Panel for MissionEditor {
     }
 }
 
-impl MissionEditor {
+impl MissionPanel {
     /// The draft the UI shows for `selected`.
     fn displayed(&self, selected: Option<SystemId>) -> Option<&Draft> {
         self.drafts.get(&selected)

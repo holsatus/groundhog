@@ -52,11 +52,12 @@ const ASSUMED_SIZE: Size = Size::new(1600.0, 900.0);
 ///
 /// The variant names are the on-disk identity of a pane: they are pinned with
 /// explicit serde renames so renaming a Rust variant cannot silently invalidate
-/// saved layouts.
+/// saved layouts, and so is the enum's own name, which it had before.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-pub enum Panel {
+#[serde(rename = "Panel")]
+pub enum PaneKind {
     #[serde(rename = "Map")]
     Map,
     #[serde(rename = "Vehicles")]
@@ -77,33 +78,33 @@ pub enum Panel {
     Video,
 }
 
-impl Panel {
+impl PaneKind {
     pub fn title(self) -> &'static str {
         match self {
-            Panel::Map => "Map",
-            Panel::Vehicles => "Vehicles",
-            Panel::Mission => "Mission",
-            Panel::Parameters => "Parameters",
-            Panel::Calibration => "Calibration",
-            Panel::Links => "Links",
-            Panel::Logs => "Log",
-            Panel::Settings => "Settings",
-            Panel::Video => "Video",
+            PaneKind::Map => "Map",
+            PaneKind::Vehicles => "Vehicles",
+            PaneKind::Mission => "Mission",
+            PaneKind::Parameters => "Parameters",
+            PaneKind::Calibration => "Calibration",
+            PaneKind::Links => "Links",
+            PaneKind::Logs => "Log",
+            PaneKind::Settings => "Settings",
+            PaneKind::Video => "Video",
         }
     }
 
     /// The panel's icon on the rail.
     pub fn icon(self) -> Icon {
         match self {
-            Panel::Map => Icon::Map,
-            Panel::Vehicles => Icon::Vehicle,
-            Panel::Mission => Icon::Mission,
-            Panel::Parameters => Icon::Parameters,
-            Panel::Calibration => Icon::Calibration,
-            Panel::Links => Icon::Links,
-            Panel::Logs => Icon::Log,
-            Panel::Settings => Icon::Settings,
-            Panel::Video => Icon::Video,
+            PaneKind::Map => Icon::Map,
+            PaneKind::Vehicles => Icon::Vehicle,
+            PaneKind::Mission => Icon::Mission,
+            PaneKind::Parameters => Icon::Parameters,
+            PaneKind::Calibration => Icon::Calibration,
+            PaneKind::Links => Icon::Links,
+            PaneKind::Logs => Icon::Log,
+            PaneKind::Settings => Icon::Settings,
+            PaneKind::Video => Icon::Video,
         }
     }
 
@@ -111,21 +112,21 @@ impl Panel {
     /// others (the floating shell's Setup and More pages).
     pub fn summary(self) -> &'static str {
         match self {
-            Panel::Map => "The vehicles and the mission, on a map",
-            Panel::Vehicles => "The selected vehicle: its state, commands and read-outs",
-            Panel::Mission => "The mission: its items, and transfers to the vehicle",
-            Panel::Parameters => "Read and change what the autopilot stores",
-            Panel::Calibration => "Calibrate the accelerometer, compass and other sensors",
-            Panel::Links => "Connections to vehicles",
-            Panel::Logs => "Status messages from the vehicles, and notices",
-            Panel::Settings => "Appearance, planning and recording",
-            Panel::Video => "The camera's stream, and where it comes from",
+            PaneKind::Map => "The vehicles and the mission, on a map",
+            PaneKind::Vehicles => "The selected vehicle: its state, commands and read-outs",
+            PaneKind::Mission => "The mission: its items, and transfers to the vehicle",
+            PaneKind::Parameters => "Read and change what the autopilot stores",
+            PaneKind::Calibration => "Calibrate the accelerometer, compass and other sensors",
+            PaneKind::Links => "Connections to vehicles",
+            PaneKind::Logs => "Status messages from the vehicles, and notices",
+            PaneKind::Settings => "Appearance, planning and recording",
+            PaneKind::Video => "The camera's stream, and where it comes from",
         }
     }
 
     /// Fixed panels cannot be dragged or closed.
     pub fn is_fixed(self) -> bool {
-        matches!(self, Panel::Map)
+        matches!(self, PaneKind::Map)
     }
 }
 
@@ -155,7 +156,7 @@ pub struct Stack {
     /// The panes and their shares of the stack's length, relative to each
     /// other. A panel this build does not know is dropped on loading.
     #[serde(default, deserialize_with = "known_panes")]
-    pub panes: Vec<(Panel, f32)>,
+    pub panes: Vec<(PaneKind, f32)>,
 }
 
 fn default_stack_size() -> f32 {
@@ -167,20 +168,20 @@ fn default_stack_size() -> f32 {
 /// not make the whole configuration unreadable.
 fn known_panes<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<(Panel, f32)>, D::Error> {
+) -> Result<Vec<(PaneKind, f32)>, D::Error> {
     use serde::Deserialize;
 
-    let panes = Vec::<(KnownPanel, f32)>::deserialize(deserializer)?;
+    let panes = Vec::<(KnownPaneKind, f32)>::deserialize(deserializer)?;
     Ok(panes
         .into_iter()
-        .filter_map(|(KnownPanel(panel), share)| Some((panel?, share)))
+        .filter_map(|(KnownPaneKind(panel), share)| Some((panel?, share)))
         .collect())
 }
 
 /// A panel as saved: `None` for a name this build does not know.
-struct KnownPanel(Option<Panel>);
+struct KnownPaneKind(Option<PaneKind>);
 
-impl<'de> serde::Deserialize<'de> for KnownPanel {
+impl<'de> serde::Deserialize<'de> for KnownPaneKind {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::{EnumAccess, IntoDeserializer, VariantAccess, Visitor, value};
 
@@ -222,7 +223,7 @@ impl<'de> serde::Deserialize<'de> for KnownPanel {
         let name = deserializer.deserialize_enum("Panel", &[], Variant)?;
         let deserializer: value::StrDeserializer<'_, value::Error> =
             name.as_str().into_deserializer();
-        Ok(KnownPanel(Panel::deserialize(deserializer).ok()))
+        Ok(KnownPaneKind(PaneKind::deserialize(deserializer).ok()))
     }
 }
 
@@ -234,19 +235,19 @@ impl Stack {
         }
     }
 
-    fn position(&self, panel: Panel) -> Option<usize> {
+    fn position(&self, panel: PaneKind) -> Option<usize> {
         self.panes.iter().position(|(kept, _)| *kept == panel)
     }
 
     /// Insert `panel` beside the pane at `index`, before or `after` it,
     /// taking half of that pane's share; the others keep theirs.
-    fn split(&mut self, index: usize, panel: Panel, after: bool) {
+    fn split(&mut self, index: usize, panel: PaneKind, after: bool) {
         split_share(&mut self.panes, index, panel, after);
     }
 
     /// Insert `panel` at `index` with `1/(n + 1)` of the stack, where `n` is
     /// how many panes it held; the others keep their proportions.
-    fn insert(&mut self, index: usize, panel: Panel) {
+    fn insert(&mut self, index: usize, panel: PaneKind) {
         insert_even(&mut self.panes, index, panel);
     }
 }
@@ -279,7 +280,7 @@ fn insert_even<T>(entries: &mut Vec<(T, f32)>, index: usize, item: T) {
 /// place a dragged pane would take.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tile {
-    Panel(Panel),
+    Panel(PaneKind),
     Ghost,
 }
 
@@ -443,7 +444,7 @@ impl Default for Workspace {
         Self {
             left: Stack {
                 size: 360.0,
-                panes: vec![(Panel::Vehicles, 1.0)],
+                panes: vec![(PaneKind::Vehicles, 1.0)],
             },
             middle: Stack::empty(260.0),
             right: Stack::empty(360.0),
@@ -469,17 +470,17 @@ impl Workspace {
     }
 
     /// Where `panel` is: its slot and its index there.
-    fn find(&self, panel: Panel) -> Option<(Slot, usize)> {
+    fn find(&self, panel: PaneKind) -> Option<(Slot, usize)> {
         Slot::ALL
             .into_iter()
             .find_map(|slot| Some((slot, self.stack(slot).position(panel)?)))
     }
 
-    fn contains(&self, panel: Panel) -> bool {
-        panel == Panel::Map || self.find(panel).is_some()
+    fn contains(&self, panel: PaneKind) -> bool {
+        panel == PaneKind::Map || self.find(panel).is_some()
     }
 
-    fn remove(&mut self, panel: Panel) -> bool {
+    fn remove(&mut self, panel: PaneKind) -> bool {
         match self.find(panel) {
             Some((slot, index)) => {
                 self.stack_mut(slot).panes.remove(index);
@@ -491,7 +492,7 @@ impl Workspace {
 
     /// Move `panel` to `destination`, or open it there if it is closed.
     /// Returns whether anything changed.
-    fn place(&mut self, panel: Panel, destination: Destination) -> bool {
+    fn place(&mut self, panel: PaneKind, destination: Destination) -> bool {
         if panel.is_fixed() {
             return false;
         }
@@ -551,7 +552,7 @@ impl Workspace {
         for slot in Slot::ALL {
             let stack = self.stack_mut(slot);
             stack.panes.retain(|(panel, _)| {
-                let fresh = *panel != Panel::Map && !seen.contains(panel);
+                let fresh = *panel != PaneKind::Map && !seen.contains(panel);
                 seen.push(*panel);
                 fresh
             });
@@ -594,14 +595,14 @@ impl Workspace {
     }
 
     /// The pane grid's arrangement in a grid of `size`; see [`arrange`].
-    fn configuration(&self, size: Size) -> Configuration<Panel> {
+    fn configuration(&self, size: Size) -> Configuration<PaneKind> {
         arrange(
             [
                 (&self.left.panes, self.left.size),
                 (&self.middle.panes, self.middle.size),
                 (&self.right.panes, self.right.size),
             ],
-            Panel::Map,
+            PaneKind::Map,
             size,
         )
     }
@@ -614,7 +615,7 @@ impl Workspace {
     /// one) stays as the operator chose it unless its own divider is
     /// dragged. What is stored is what [`arrange`] will draw: the map keeps
     /// [`MIN_MAP`], so the divider stops where the map would get less.
-    fn resize(&mut self, seam: Seam, regions: &BTreeMap<Panel, Rectangle>, size: Size) {
+    fn resize(&mut self, seam: Seam, regions: &BTreeMap<PaneKind, Rectangle>, size: Size) {
         let first = |stack: &Stack| regions.get(&stack.panes.first()?.0).copied();
 
         match seam {
@@ -691,13 +692,13 @@ enum Seam {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Destination {
     /// Beside a pane, before or `after` it, splitting that pane's share.
-    Split { neighbour: Panel, after: bool },
+    Split { neighbour: PaneKind, after: bool },
     /// On the divider after a pane, taking an even share of its stack.
-    Between(Panel),
+    Between(PaneKind),
     /// At the end of a stack, taking an even share.
     End(Slot),
     /// In a pane's place, which takes the dragged pane's place in turn.
-    Swap(Panel),
+    Swap(PaneKind),
 }
 
 #[derive(Debug, Clone)]
@@ -706,10 +707,10 @@ pub enum Message {
     Dragged(pane_grid::DragEvent),
     /// A panel dragged from outside the grid (a rail button) was dropped on
     /// `Target`: it opens there, or moves there if it is open.
-    Placed(Panel, Target),
+    Placed(PaneKind, Target),
     Resized(pane_grid::ResizeEvent),
     /// Open the panel at the end of `slot`, or close it if it is open.
-    Toggle(Panel, Slot),
+    Toggle(PaneKind, Slot),
     Close(pane_grid::Pane),
     Maximize(pane_grid::Pane),
     Restore,
@@ -738,7 +739,7 @@ impl Message {
 
 pub struct Layout {
     workspace: Workspace,
-    panes: pane_grid::State<Panel>,
+    panes: pane_grid::State<PaneKind>,
     /// The grid's size, once measured.
     size: Option<Size>,
     focus: Option<pane_grid::Pane>,
@@ -755,7 +756,7 @@ impl Layout {
     pub fn from_workspace(workspace: Workspace) -> Self {
         let mut layout = Self {
             workspace: workspace.sanitized(),
-            panes: pane_grid::State::new(Panel::Map).0,
+            panes: pane_grid::State::new(PaneKind::Map).0,
             size: None,
             focus: None,
             dirty: false,
@@ -765,7 +766,7 @@ impl Layout {
         layout
     }
 
-    pub fn panes(&self) -> &pane_grid::State<Panel> {
+    pub fn panes(&self) -> &pane_grid::State<PaneKind> {
         &self.panes
     }
 
@@ -796,11 +797,11 @@ impl Layout {
     }
 
     /// Whether a panel is currently present in the grid.
-    pub fn is_open(&self, panel: Panel) -> bool {
+    pub fn is_open(&self, panel: PaneKind) -> bool {
         self.workspace.contains(panel)
     }
 
-    fn pane_of(&self, panel: Panel) -> Option<pane_grid::Pane> {
+    fn pane_of(&self, panel: PaneKind) -> Option<pane_grid::Pane> {
         self.panes
             .iter()
             .find(|(_, p)| **p == panel)
@@ -916,7 +917,7 @@ impl Layout {
     /// Open `panel` at the end of `slot`, or, if that stack is full, of the
     /// first other with room (the right column, the left, the row). Nothing
     /// opens where no stack has room ([`Layout::has_room`]).
-    fn open(&mut self, panel: Panel, slot: Slot) {
+    fn open(&mut self, panel: PaneKind, slot: Slot) {
         if panel.is_fixed() || self.is_open(panel) {
             return;
         }
@@ -930,7 +931,7 @@ impl Layout {
 
     /// The workspace with `panel` opened at the end of `slot` or the first
     /// other stack with room for it.
-    fn opened(&self, panel: Panel, slot: Slot) -> Option<Workspace> {
+    fn opened(&self, panel: PaneKind, slot: Slot) -> Option<Workspace> {
         let size = self.size.unwrap_or(ASSUMED_SIZE);
         [slot, Slot::Right, Slot::Left, Slot::Middle]
             .into_iter()
@@ -943,12 +944,12 @@ impl Layout {
     }
 
     /// Whether `panel` is open, or some stack has room to open it in.
-    pub fn has_room(&self, panel: Panel) -> bool {
+    pub fn has_room(&self, panel: PaneKind) -> bool {
         self.is_open(panel) || panel.is_fixed() || self.opened(panel, Slot::Left).is_some()
     }
 
     /// Close `panel`, unless it is fixed.
-    fn close(&mut self, panel: Panel) {
+    fn close(&mut self, panel: PaneKind) {
         if !panel.is_fixed() && self.workspace.remove(panel) {
             self.arrange();
         }
@@ -961,9 +962,9 @@ impl Layout {
             Target::Edge(_) => return None,
             Target::Between(before, _) => Destination::Between(*self.panes.get(before)?),
             Target::Pane(pane, region) => match (*self.panes.get(pane)?, region) {
-                (Panel::Map, Region::Edge(Edge::Left)) => Destination::End(Slot::Left),
-                (Panel::Map, Region::Edge(Edge::Right)) => Destination::End(Slot::Right),
-                (Panel::Map, _) => Destination::End(Slot::Middle),
+                (PaneKind::Map, Region::Edge(Edge::Left)) => Destination::End(Slot::Left),
+                (PaneKind::Map, Region::Edge(Edge::Right)) => Destination::End(Slot::Right),
+                (PaneKind::Map, _) => Destination::End(Slot::Middle),
                 (other, Region::Center) => Destination::Swap(other),
                 (neighbour, Region::Edge(edge)) => Destination::Split {
                     neighbour,
@@ -1010,7 +1011,7 @@ impl Layout {
     /// middle of a pane splits it like the rest of its half.
     pub fn incoming_hint(
         &self,
-        panel: Panel,
+        panel: PaneKind,
         cursor: Point,
         regions: &BTreeMap<pane_grid::Pane, Rectangle>,
     ) -> Option<DropHint> {
@@ -1019,7 +1020,7 @@ impl Layout {
 
     fn hint_for(
         &self,
-        dragging: Panel,
+        dragging: PaneKind,
         cursor: Point,
         regions: &BTreeMap<pane_grid::Pane, Rectangle>,
     ) -> Option<DropHint> {
@@ -1165,7 +1166,7 @@ impl Layout {
                 (middle, workspace.middle.size),
                 (right, workspace.right.size),
             ],
-            Tile::Panel(Panel::Map),
+            Tile::Panel(PaneKind::Map),
             size,
         ));
         let area = laid_out
@@ -1181,7 +1182,7 @@ impl Layout {
     /// The grid's drop target under `cursor`; see [`Layout::drop_hint`].
     fn drop_target_at(
         &self,
-        dragging: Panel,
+        dragging: PaneKind,
         cursor: Point,
         regions: &BTreeMap<pane_grid::Pane, Rectangle>,
     ) -> Option<Target> {
@@ -1232,7 +1233,7 @@ impl Layout {
             (cursor.y - region.y) / region.height,
         );
 
-        let region = if *self.panes.get(pane)? == Panel::Map {
+        let region = if *self.panes.get(pane)? == PaneKind::Map {
             // The map opens a stack only while it is empty: a stack with
             // panes is joined beside them. (A stack holding just the dragged
             // pane is not empty either: dropping it there again would change
@@ -1274,7 +1275,7 @@ impl Layout {
     }
 
     /// Move `panel` to `destination`, if the stack it joins has room.
-    fn move_to(&mut self, panel: Panel, destination: Destination) {
+    fn move_to(&mut self, panel: PaneKind, destination: Destination) {
         let mut moved = self.workspace.clone();
         let size = self.size.unwrap_or(ASSUMED_SIZE);
         if moved.place(panel, destination) && self.workspace.room_for(&moved, size) {
@@ -1299,7 +1300,7 @@ mod tests {
     }
 
     /// Where each panel is drawn, at the layout's size.
-    fn regions(layout: &Layout) -> BTreeMap<Panel, Rectangle> {
+    fn regions(layout: &Layout) -> BTreeMap<PaneKind, Rectangle> {
         layout
             .panes
             .layout()
@@ -1329,7 +1330,7 @@ mod tests {
         }));
     }
 
-    fn panels(stack: &Stack) -> Vec<Panel> {
+    fn panels(stack: &Stack) -> Vec<PaneKind> {
         stack.panes.iter().map(|(panel, _)| *panel).collect()
     }
 
@@ -1345,7 +1346,7 @@ mod tests {
     /// A grid short enough that a column holds three panes of [`MIN_PANE`].
     const SHORT: Size = Size::new(1200.0, 400.0);
 
-    fn stack_of(panels: &[Panel]) -> Stack {
+    fn stack_of(panels: &[PaneKind]) -> Stack {
         Stack {
             size: 300.0,
             panes: panels.iter().map(|panel| (*panel, 1.0)).collect(),
@@ -1356,12 +1357,12 @@ mod tests {
     fn crowded_regions_are_never_negative() {
         let workspace = Workspace {
             left: stack_of(&[
-                Panel::Vehicles,
-                Panel::Mission,
-                Panel::Parameters,
-                Panel::Calibration,
-                Panel::Links,
-                Panel::Logs,
+                PaneKind::Vehicles,
+                PaneKind::Mission,
+                PaneKind::Parameters,
+                PaneKind::Calibration,
+                PaneKind::Links,
+                PaneKind::Logs,
             ]),
             ..Workspace::default()
         };
@@ -1381,7 +1382,7 @@ mod tests {
 
     #[test]
     fn a_full_stack_takes_no_more_panes() {
-        let full = [Panel::Vehicles, Panel::Mission, Panel::Parameters];
+        let full = [PaneKind::Vehicles, PaneKind::Mission, PaneKind::Parameters];
         assert_eq!(capacity(SHORT.height), full.len());
         let layout = layout_at(
             Workspace {
@@ -1398,23 +1399,23 @@ mod tests {
             .pane_regions(SPACING, MIN_PANE, SHORT)
             .into_iter()
             .collect();
-        let bottom = regions[&layout.pane_of(Panel::Parameters).unwrap()];
+        let bottom = regions[&layout.pane_of(PaneKind::Parameters).unwrap()];
         let cursor = Point::new(
             bottom.x + bottom.width / 2.0,
             bottom.y + bottom.height * 0.9,
         );
         assert!(
             layout
-                .incoming_hint(Panel::Logs, cursor, &regions)
+                .incoming_hint(PaneKind::Logs, cursor, &regions)
                 .is_none()
         );
 
         // A pane already in the stack still moves within it.
-        let top = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let top = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
         let swap = Point::new(top.x + top.width / 2.0, top.y + top.height / 2.0);
         assert!(
             layout
-                .drop_hint(layout.pane_of(Panel::Mission).unwrap(), swap, &regions)
+                .drop_hint(layout.pane_of(PaneKind::Mission).unwrap(), swap, &regions)
                 .is_some()
         );
     }
@@ -1423,17 +1424,17 @@ mod tests {
     fn a_rail_click_into_a_full_stack_opens_in_the_next_with_room() {
         let mut layout = layout_at(
             Workspace {
-                left: stack_of(&[Panel::Vehicles, Panel::Mission, Panel::Parameters]),
+                left: stack_of(&[PaneKind::Vehicles, PaneKind::Mission, PaneKind::Parameters]),
                 ..Workspace::default()
             },
             SHORT,
         );
-        assert!(layout.has_room(Panel::Logs));
+        assert!(layout.has_room(PaneKind::Logs));
 
-        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Left));
 
         assert_eq!(layout.workspace.left.panes.len(), 3, "still full");
-        assert_eq!(panels(&layout.workspace.right), [Panel::Logs]);
+        assert_eq!(panels(&layout.workspace.right), [PaneKind::Logs]);
     }
 
     #[test]
@@ -1441,24 +1442,24 @@ mod tests {
         let size = Size::new(700.0, 900.0);
         let mut layout = layout_at(
             Workspace {
-                left: stack_of(&[Panel::Vehicles]),
-                right: stack_of(&[Panel::Settings]),
+                left: stack_of(&[PaneKind::Vehicles]),
+                right: stack_of(&[PaneKind::Settings]),
                 ..Workspace::default()
             },
             size,
         );
         assert!(layout.workspace.widths(size).scaled);
-        let right = regions(&layout)[&Panel::Settings];
+        let right = regions(&layout)[&PaneKind::Settings];
 
         drag(&mut layout, Seam::Column(Slot::Left), 200.0);
 
         let regions = regions(&layout);
-        assert!(close_to(regions[&Panel::Vehicles].width, 200.0));
+        assert!(close_to(regions[&PaneKind::Vehicles].width, 200.0));
         assert!(
-            close_to(regions[&Panel::Settings].x, right.x)
-                && close_to(regions[&Panel::Settings].width, right.width),
+            close_to(regions[&PaneKind::Settings].x, right.x)
+                && close_to(regions[&PaneKind::Settings].width, right.width),
             "the other column stays put: {right:?} became {:?}",
-            regions[&Panel::Settings]
+            regions[&PaneKind::Settings]
         );
         assert!(close_to(layout.workspace.left.size, 200.0));
         assert!(close_to(layout.workspace.right.size, right.width));
@@ -1468,7 +1469,7 @@ mod tests {
     fn the_row_keeps_the_height_it_was_last_dragged_to() {
         let mut layout = layout_at(
             Workspace {
-                middle: stack_of(&[Panel::Logs]),
+                middle: stack_of(&[PaneKind::Logs]),
                 ..Workspace::default()
             },
             SIZE,
@@ -1478,18 +1479,18 @@ mod tests {
         // where the map keeps its least.
         drag(&mut layout, Seam::Row, MIN_PANE);
         assert!(close_to(layout.workspace.middle.size, max_row(SIZE)));
-        assert!(close_to(regions(&layout)[&Panel::Map].height, MIN_MAP));
+        assert!(close_to(regions(&layout)[&PaneKind::Map].height, MIN_MAP));
 
         // Then down again: the row is what was dragged last.
         drag(&mut layout, Seam::Row, SIZE.height - 300.0 - SPACING);
         assert!(close_to(layout.workspace.middle.size, 300.0));
 
         // Rearranging, or emptying the row and filling it again, keeps it.
-        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
-        assert!(close_to(regions(&layout)[&Panel::Logs].height, 300.0));
-        layout.update(Message::Toggle(Panel::Logs, Slot::Middle));
-        layout.update(Message::Toggle(Panel::Links, Slot::Middle));
-        assert!(close_to(regions(&layout)[&Panel::Links].height, 300.0));
+        layout.update(Message::Toggle(PaneKind::Mission, Slot::Left));
+        assert!(close_to(regions(&layout)[&PaneKind::Logs].height, 300.0));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Middle));
+        layout.update(Message::Toggle(PaneKind::Links, Slot::Middle));
+        assert!(close_to(regions(&layout)[&PaneKind::Links].height, 300.0));
     }
 
     #[test]
@@ -1498,12 +1499,12 @@ mod tests {
 
         // Over the map, which keeps its least.
         drag(&mut layout, Seam::Column(Slot::Left), SIZE.width - MIN_PANE);
-        assert!(close_to(regions(&layout)[&Panel::Map].width, MIN_MAP));
+        assert!(close_to(regions(&layout)[&PaneKind::Map].width, MIN_MAP));
 
         drag(&mut layout, Seam::Column(Slot::Left), 500.0);
         assert!(close_to(layout.workspace.left.size, 500.0));
-        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
-        assert!(close_to(regions(&layout)[&Panel::Vehicles].width, 500.0));
+        layout.update(Message::Toggle(PaneKind::Mission, Slot::Left));
+        assert!(close_to(regions(&layout)[&PaneKind::Vehicles].width, 500.0));
     }
 
     #[test]
@@ -1511,17 +1512,17 @@ mod tests {
         let short = Size::new(1600.0, 600.0);
         let mut layout = layout_at(
             Workspace {
-                left: stack_of(&[Panel::Vehicles, Panel::Mission]),
+                left: stack_of(&[PaneKind::Vehicles, PaneKind::Mission]),
                 middle: Stack {
                     size: 500.0,
-                    panes: vec![(Panel::Logs, 1.0)],
+                    panes: vec![(PaneKind::Logs, 1.0)],
                 },
                 ..Workspace::default()
             },
             short,
         );
         assert!(
-            regions(&layout)[&Panel::Logs].height < 500.0,
+            regions(&layout)[&PaneKind::Logs].height < 500.0,
             "the row is squeezed"
         );
 
@@ -1537,20 +1538,20 @@ mod tests {
 
         assert_eq!(layout.workspace.middle.size, 500.0, "not the row's divider");
         layout.update(Message::Sized(SIZE));
-        assert!(close_to(regions(&layout)[&Panel::Logs].height, 500.0));
+        assert!(close_to(regions(&layout)[&PaneKind::Logs].height, 500.0));
     }
 
     #[test]
     fn a_divider_in_a_stack_trades_between_its_two_panes() {
         let mut layout = layout_at(
             Workspace {
-                left: stack_of(&[Panel::Vehicles, Panel::Mission, Panel::Parameters]),
+                left: stack_of(&[PaneKind::Vehicles, PaneKind::Mission, PaneKind::Parameters]),
                 ..Workspace::default()
             },
             SIZE,
         );
         let before = regions(&layout);
-        let height = |regions: &BTreeMap<Panel, Rectangle>, panel| regions[&panel].height;
+        let height = |regions: &BTreeMap<PaneKind, Rectangle>, panel| regions[&panel].height;
 
         drag(
             &mut layout,
@@ -1562,28 +1563,28 @@ mod tests {
         );
 
         let after = regions(&layout);
-        assert!(close_to(height(&after, Panel::Mission), 200.0));
+        assert!(close_to(height(&after, PaneKind::Mission), 200.0));
         assert!(close_to(
-            height(&after, Panel::Vehicles),
-            height(&before, Panel::Vehicles)
+            height(&after, PaneKind::Vehicles),
+            height(&before, PaneKind::Vehicles)
         ));
         assert!(close_to(
-            after[&Panel::Parameters].y + height(&after, Panel::Parameters),
-            before[&Panel::Parameters].y + height(&before, Panel::Parameters)
+            after[&PaneKind::Parameters].y + height(&after, PaneKind::Parameters),
+            before[&PaneKind::Parameters].y + height(&before, PaneKind::Parameters)
         ));
     }
 
     #[test]
     fn a_new_pane_takes_its_share_and_the_others_keep_their_proportions() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.workspace.left.panes = vec![(Panel::Vehicles, 3.0), (Panel::Mission, 1.0)];
+        layout.workspace.left.panes = vec![(PaneKind::Vehicles, 3.0), (PaneKind::Mission, 1.0)];
         layout.arrange();
 
-        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Left));
 
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Vehicles, Panel::Mission, Panel::Logs],
+            [PaneKind::Vehicles, PaneKind::Mission, PaneKind::Logs],
             "at the bottom"
         );
         let shares = shares(&layout.workspace.left);
@@ -1597,21 +1598,21 @@ mod tests {
         let regions = regions(&layout);
         let height = |panel| regions[&panel].height;
         let column = SIZE.height - 2.0 * SPACING;
-        assert!(close_to(height(Panel::Logs), column / 3.0));
-        assert!(close_to(height(Panel::Vehicles), column * 0.5));
+        assert!(close_to(height(PaneKind::Logs), column / 3.0));
+        assert!(close_to(height(PaneKind::Vehicles), column * 0.5));
     }
 
     #[test]
     fn the_row_beneath_the_map_tiles_sideways() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Logs, Slot::Middle));
-        layout.update(Message::Toggle(Panel::Links, Slot::Middle));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Middle));
+        layout.update(Message::Toggle(PaneKind::Links, Slot::Middle));
 
         let regions = regions(&layout);
         let (map, logs, links) = (
-            regions[&Panel::Map],
-            regions[&Panel::Logs],
-            regions[&Panel::Links],
+            regions[&PaneKind::Map],
+            regions[&PaneKind::Logs],
+            regions[&PaneKind::Links],
         );
         assert!(logs.y > map.y + map.height, "beneath the map");
         assert_eq!(logs.y, links.y, "side by side");
@@ -1623,15 +1624,21 @@ mod tests {
     #[test]
     fn side_columns_keep_their_pixels_when_the_window_is_resized() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Settings, Slot::Right));
+        layout.update(Message::Toggle(PaneKind::Settings, Slot::Right));
 
         for width in [1600.0, 1200.0, 2400.0] {
             layout.update(Message::Sized(Size::new(width, 900.0)));
             let regions = regions(&layout);
-            assert!(close_to(regions[&Panel::Vehicles].width, 360.0), "{width}");
-            assert!(close_to(regions[&Panel::Settings].width, 360.0), "{width}");
             assert!(
-                close_to(regions[&Panel::Map].width, width - 720.0 - 2.0 * SPACING),
+                close_to(regions[&PaneKind::Vehicles].width, 360.0),
+                "{width}"
+            );
+            assert!(
+                close_to(regions[&PaneKind::Settings].width, 360.0),
+                "{width}"
+            );
+            assert!(
+                close_to(regions[&PaneKind::Map].width, width - 720.0 - 2.0 * SPACING),
                 "the map gives the space"
             );
         }
@@ -1640,16 +1647,16 @@ mod tests {
     #[test]
     fn panes_keep_their_identity_when_others_open_and_close() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        let vehicles = layout.pane_of(Panel::Vehicles).unwrap();
-        let map = layout.pane_of(Panel::Map).unwrap();
+        let vehicles = layout.pane_of(PaneKind::Vehicles).unwrap();
+        let map = layout.pane_of(PaneKind::Map).unwrap();
 
-        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
-        layout.update(Message::Toggle(Panel::Links, Slot::Right));
-        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Links, Slot::Right));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Left));
 
-        assert_eq!(layout.pane_of(Panel::Vehicles), Some(vehicles));
-        assert_eq!(layout.pane_of(Panel::Map), Some(map));
-        assert!(!layout.is_open(Panel::Logs), "toggled closed");
+        assert_eq!(layout.pane_of(PaneKind::Vehicles), Some(vehicles));
+        assert_eq!(layout.pane_of(PaneKind::Map), Some(map));
+        assert!(!layout.is_open(PaneKind::Logs), "toggled closed");
     }
 
     #[test]
@@ -1672,30 +1679,30 @@ mod tests {
 
         // A wider window keeps the dragged width.
         layout.update(Message::Sized(Size::new(2000.0, 900.0)));
-        assert!(close_to(regions(&layout)[&Panel::Vehicles].width, 500.0));
+        assert!(close_to(regions(&layout)[&PaneKind::Vehicles].width, 500.0));
     }
 
     #[test]
     fn an_emptied_column_comes_back_at_its_size() {
         let mut layout = layout_at(Workspace::default(), SIZE);
         layout.workspace.left.size = 420.0;
-        layout.update(Message::Toggle(Panel::Vehicles, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Vehicles, Slot::Left));
         assert!(
-            regions(&layout)[&Panel::Map].width > SIZE.width - 1.0,
+            regions(&layout)[&PaneKind::Map].width > SIZE.width - 1.0,
             "collapsed"
         );
 
-        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
-        assert!(close_to(regions(&layout)[&Panel::Mission].width, 420.0));
+        layout.update(Message::Toggle(PaneKind::Mission, Slot::Left));
+        assert!(close_to(regions(&layout)[&PaneKind::Mission].width, 420.0));
     }
 
     #[test]
     fn dropped_panes_move_between_stacks() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Logs, Slot::Left));
-        let logs = layout.pane_of(Panel::Logs).unwrap();
-        let vehicles = layout.pane_of(Panel::Vehicles).unwrap();
-        let map = layout.pane_of(Panel::Map).unwrap();
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Left));
+        let logs = layout.pane_of(PaneKind::Logs).unwrap();
+        let vehicles = layout.pane_of(PaneKind::Vehicles).unwrap();
+        let map = layout.pane_of(PaneKind::Map).unwrap();
 
         // Onto the top half of the vehicles pane: above it.
         layout.update(Message::Dragged(pane_grid::DragEvent::Dropped {
@@ -1704,31 +1711,31 @@ mod tests {
         }));
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Logs, Panel::Vehicles]
+            [PaneKind::Logs, PaneKind::Vehicles]
         );
 
         // Onto the map: into the row beneath it.
-        let logs = layout.pane_of(Panel::Logs).unwrap();
+        let logs = layout.pane_of(PaneKind::Logs).unwrap();
         layout.update(Message::Dragged(pane_grid::DragEvent::Dropped {
             pane: logs,
             target: Target::Pane(map, Region::Center),
         }));
-        assert_eq!(panels(&layout.workspace.middle), [Panel::Logs]);
-        assert_eq!(panels(&layout.workspace.left), [Panel::Vehicles]);
+        assert_eq!(panels(&layout.workspace.middle), [PaneKind::Logs]);
+        assert_eq!(panels(&layout.workspace.left), [PaneKind::Vehicles]);
 
         // The map itself never moves.
         layout.update(Message::Dragged(pane_grid::DragEvent::Dropped {
             pane: map,
             target: Target::Edge(Edge::Left),
         }));
-        assert!(layout.workspace.find(Panel::Map).is_none());
+        assert!(layout.workspace.find(PaneKind::Map).is_none());
     }
 
     /// A layout of two panes stacked in the left column, sharing it evenly,
     /// and the regions the grid gives every pane.
     fn two_in_the_left_column() -> (Layout, BTreeMap<pane_grid::Pane, Rectangle>) {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Mission, Slot::Left));
+        layout.update(Message::Toggle(PaneKind::Mission, Slot::Left));
         let regions = layout.panes.layout().pane_regions(SPACING, MIN_PANE, SIZE);
         (layout, regions)
     }
@@ -1736,8 +1743,8 @@ mod tests {
     /// Open the log in the right column and drop it where `at` hints.
     /// `regions` are from before it opened: the left column's are the same.
     fn drop_at(layout: &mut Layout, regions: &BTreeMap<pane_grid::Pane, Rectangle>, at: Point) {
-        layout.update(Message::Toggle(Panel::Logs, Slot::Right));
-        let logs = layout.pane_of(Panel::Logs).unwrap();
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Right));
+        let logs = layout.pane_of(PaneKind::Logs).unwrap();
         let hint = layout.drop_hint(logs, at, regions).expect("a target");
         layout.update(Message::Dragged(pane_grid::DragEvent::Dropped {
             pane: logs,
@@ -1748,44 +1755,44 @@ mod tests {
     #[test]
     fn a_panel_dragged_in_from_the_rail_opens_where_it_is_dropped() {
         let (mut layout, regions) = two_in_the_left_column();
-        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let vehicles = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
 
         // A closed panel has nothing to swap with: the middle of a pane
         // splits it by the half the cursor is on.
         let below_middle = Point::new(vehicles.center_x(), vehicles.center_y() + 1.0);
         let hint = layout
-            .incoming_hint(Panel::Logs, below_middle, &regions)
+            .incoming_hint(PaneKind::Logs, below_middle, &regions)
             .expect("a target");
         assert!(matches!(
             hint.target,
             Target::Pane(_, Region::Edge(Edge::Bottom))
         ));
-        layout.update(Message::Placed(Panel::Logs, hint.target));
+        layout.update(Message::Placed(PaneKind::Logs, hint.target));
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Vehicles, Panel::Logs, Panel::Mission]
+            [PaneKind::Vehicles, PaneKind::Logs, PaneKind::Mission]
         );
         assert!(layout.is_dirty(), "a placed panel is saved");
 
         // An open panel dragged in moves as its pane would: the middle of
         // another swaps the two.
         let regions = pane_regions(&layout);
-        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let vehicles = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
         let hint = layout
-            .incoming_hint(Panel::Mission, vehicles.center(), &regions)
+            .incoming_hint(PaneKind::Mission, vehicles.center(), &regions)
             .expect("a target");
         assert!(matches!(hint.target, Target::Pane(_, Region::Center)));
-        layout.update(Message::Placed(Panel::Mission, hint.target));
+        layout.update(Message::Placed(PaneKind::Mission, hint.target));
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Mission, Panel::Logs, Panel::Vehicles]
+            [PaneKind::Mission, PaneKind::Logs, PaneKind::Vehicles]
         );
 
         // Over its own pane, an open panel has nowhere to go.
-        let logs = pane_regions(&layout)[&layout.pane_of(Panel::Logs).unwrap()];
+        let logs = pane_regions(&layout)[&layout.pane_of(PaneKind::Logs).unwrap()];
         assert!(
             layout
-                .incoming_hint(Panel::Logs, logs.center(), &pane_regions(&layout))
+                .incoming_hint(PaneKind::Logs, logs.center(), &pane_regions(&layout))
                 .is_none()
         );
     }
@@ -1793,7 +1800,7 @@ mod tests {
     #[test]
     fn a_drop_on_half_a_pane_splits_that_pane() {
         let (mut layout, regions) = two_in_the_left_column();
-        let first = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let first = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
 
         // The bottom half of the first pane, clear of the divider.
         let at = Point::new(first.center_x(), first.y + first.height * 0.75);
@@ -1801,7 +1808,7 @@ mod tests {
 
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Vehicles, Panel::Logs, Panel::Mission]
+            [PaneKind::Vehicles, PaneKind::Logs, PaneKind::Mission]
         );
         let shares = shares(&layout.workspace.left);
         for (share, expected) in shares.iter().zip([0.25, 0.25, 0.5]) {
@@ -1812,7 +1819,7 @@ mod tests {
     #[test]
     fn a_drop_on_a_divider_shares_the_stack_evenly() {
         let (mut layout, regions) = two_in_the_left_column();
-        let first = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let first = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
 
         // Just inside the first pane, but within reach of the divider.
         let at = Point::new(first.center_x(), first.y + first.height - 2.0);
@@ -1820,7 +1827,7 @@ mod tests {
 
         assert_eq!(
             panels(&layout.workspace.left),
-            [Panel::Vehicles, Panel::Logs, Panel::Mission]
+            [PaneKind::Vehicles, PaneKind::Logs, PaneKind::Mission]
         );
         for share in shares(&layout.workspace.left) {
             assert!((share - 1.0 / 3.0).abs() < 1e-6);
@@ -1830,12 +1837,12 @@ mod tests {
     #[test]
     fn hints_offer_only_what_the_columns_allow() {
         let (mut layout, _) = two_in_the_left_column();
-        layout.update(Message::Toggle(Panel::Links, Slot::Middle));
+        layout.update(Message::Toggle(PaneKind::Links, Slot::Middle));
         let regions_now = layout.panes.layout().pane_regions(SPACING, MIN_PANE, SIZE);
-        let dragged = layout.pane_of(Panel::Mission).unwrap();
-        let vehicles = regions_now[&layout.pane_of(Panel::Vehicles).unwrap()];
-        let links = regions_now[&layout.pane_of(Panel::Links).unwrap()];
-        let map = regions_now[&layout.pane_of(Panel::Map).unwrap()];
+        let dragged = layout.pane_of(PaneKind::Mission).unwrap();
+        let vehicles = regions_now[&layout.pane_of(PaneKind::Vehicles).unwrap()];
+        let links = regions_now[&layout.pane_of(PaneKind::Links).unwrap()];
+        let map = regions_now[&layout.pane_of(PaneKind::Map).unwrap()];
 
         let edge_of = |at: Point| match layout.drop_hint(dragged, at, &regions_now) {
             Some(DropHint {
@@ -1893,15 +1900,15 @@ mod tests {
         // Three panes side by side in the row; the last dropped on the
         // divider between the first two.
         let mut layout = layout_at(Workspace::default(), SIZE);
-        for panel in [Panel::Mission, Panel::Logs, Panel::Links] {
+        for panel in [PaneKind::Mission, PaneKind::Logs, PaneKind::Links] {
             layout.update(Message::Toggle(panel, Slot::Middle));
         }
         let regions = pane_regions(&layout);
         let region = |panel| regions[&layout.pane_of(panel).unwrap()];
-        let (first, second) = (region(Panel::Mission), region(Panel::Logs));
+        let (first, second) = (region(PaneKind::Mission), region(PaneKind::Logs));
         let seam = (first.x + first.width + second.x) / 2.0;
 
-        let links = layout.pane_of(Panel::Links).unwrap();
+        let links = layout.pane_of(PaneKind::Links).unwrap();
         let hint = layout
             .drop_hint(links, Point::new(seam, first.center_y()), &regions)
             .expect("the divider");
@@ -1919,22 +1926,22 @@ mod tests {
         }));
         assert!(close_to(
             hint.area.width,
-            self::regions(&layout)[&Panel::Links].width
+            self::regions(&layout)[&PaneKind::Links].width
         ));
         assert_eq!(
             panels(&layout.workspace.middle),
-            [Panel::Mission, Panel::Links, Panel::Logs]
+            [PaneKind::Mission, PaneKind::Links, PaneKind::Logs]
         );
     }
 
     #[test]
     fn from_elsewhere_a_divider_hint_is_where_the_pane_lands() {
         let (mut layout, _) = two_in_the_left_column();
-        layout.update(Message::Toggle(Panel::Logs, Slot::Right));
-        layout.update(Message::Toggle(Panel::Links, Slot::Right));
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Right));
+        layout.update(Message::Toggle(PaneKind::Links, Slot::Right));
         let regions = pane_regions(&layout);
-        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
-        let dragged = layout.pane_of(Panel::Logs).unwrap();
+        let vehicles = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
+        let dragged = layout.pane_of(PaneKind::Logs).unwrap();
 
         // The divider beneath a pane of the other column: an even share. (A
         // split's hint is half the pane as drawn instead, which can differ
@@ -1957,12 +1964,12 @@ mod tests {
             other => other,
         };
         dropped.update(Message::Dragged(pane_grid::DragEvent::Dropped {
-            pane: dropped.pane_of(Panel::Logs).unwrap(),
+            pane: dropped.pane_of(PaneKind::Logs).unwrap(),
             target,
         }));
         assert_eq!(
             hint.area,
-            self::regions(&dropped)[&Panel::Logs],
+            self::regions(&dropped)[&PaneKind::Logs],
             "at {at:?}"
         );
     }
@@ -1972,8 +1979,8 @@ mod tests {
         // Within its own column: half of the pane it splits, as that pane
         // is drawn now, although the move frees the dragged pane's place.
         let (layout, regions) = two_in_the_left_column();
-        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
-        let mission = layout.pane_of(Panel::Mission).unwrap();
+        let vehicles = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
+        let mission = layout.pane_of(PaneKind::Mission).unwrap();
         let hint = layout
             .drop_hint(
                 mission,
@@ -1991,8 +1998,8 @@ mod tests {
         // map is now, although the move collapses the column.
         let mut layout = layout_at(Workspace::default(), SIZE);
         let regions = pane_regions(&layout);
-        let map = regions[&layout.pane_of(Panel::Map).unwrap()];
-        let vehicles = layout.pane_of(Panel::Vehicles).unwrap();
+        let map = regions[&layout.pane_of(PaneKind::Map).unwrap()];
+        let vehicles = layout.pane_of(PaneKind::Vehicles).unwrap();
         let hint = layout
             .drop_hint(vehicles, map.center(), &regions)
             .expect("the empty row");
@@ -2003,18 +2010,18 @@ mod tests {
             pane: vehicles,
             target: hint.target,
         }));
-        assert_eq!(panels(&layout.workspace.middle), [Panel::Vehicles]);
+        assert_eq!(panels(&layout.workspace.middle), [PaneKind::Vehicles]);
     }
 
     #[test]
     fn a_drop_in_the_middle_of_a_pane_swaps_the_two() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Logs, Slot::Right));
-        layout.workspace.left.panes = vec![(Panel::Vehicles, 3.0), (Panel::Mission, 1.0)];
+        layout.update(Message::Toggle(PaneKind::Logs, Slot::Right));
+        layout.workspace.left.panes = vec![(PaneKind::Vehicles, 3.0), (PaneKind::Mission, 1.0)];
         layout.arrange();
         let regions = layout.panes.layout().pane_regions(SPACING, MIN_PANE, SIZE);
-        let logs = layout.pane_of(Panel::Logs).unwrap();
-        let vehicles = regions[&layout.pane_of(Panel::Vehicles).unwrap()];
+        let logs = layout.pane_of(PaneKind::Logs).unwrap();
+        let vehicles = regions[&layout.pane_of(PaneKind::Vehicles).unwrap()];
 
         let hint = layout
             .drop_hint(logs, vehicles.center(), &regions)
@@ -2028,16 +2035,16 @@ mod tests {
         // Each took the other's place, and its size there.
         assert_eq!(
             layout.workspace.left.panes,
-            [(Panel::Logs, 3.0), (Panel::Mission, 1.0)]
+            [(PaneKind::Logs, 3.0), (PaneKind::Mission, 1.0)]
         );
-        assert_eq!(panels(&layout.workspace.right), [Panel::Vehicles]);
+        assert_eq!(panels(&layout.workspace.right), [PaneKind::Vehicles]);
     }
 
     #[test]
     fn the_map_opens_an_empty_row() {
         let (layout, regions) = two_in_the_left_column();
-        let dragged = layout.pane_of(Panel::Mission).unwrap();
-        let map = regions[&layout.pane_of(Panel::Map).unwrap()];
+        let dragged = layout.pane_of(PaneKind::Mission).unwrap();
+        let map = regions[&layout.pane_of(PaneKind::Map).unwrap()];
 
         let hint = layout
             .drop_hint(dragged, map.center(), &regions)
@@ -2052,9 +2059,9 @@ mod tests {
     #[test]
     fn the_map_cannot_be_toggled() {
         let mut layout = layout_at(Workspace::default(), SIZE);
-        layout.update(Message::Toggle(Panel::Map, Slot::Left));
-        assert!(layout.is_open(Panel::Map));
-        assert!(layout.workspace.find(Panel::Map).is_none());
+        layout.update(Message::Toggle(PaneKind::Map, Slot::Left));
+        assert!(layout.is_open(PaneKind::Map));
+        assert!(layout.workspace.find(PaneKind::Map).is_none());
     }
 
     #[test]
@@ -2067,16 +2074,16 @@ mod tests {
         let broken = Workspace {
             left: Stack {
                 size: f32::NAN,
-                panes: vec![(Panel::Map, 1.0), (Panel::Logs, -2.0)],
+                panes: vec![(PaneKind::Map, 1.0), (PaneKind::Logs, -2.0)],
             },
             middle: Stack {
                 size: 10.0,
-                panes: vec![(Panel::Logs, 1.0)],
+                panes: vec![(PaneKind::Logs, 1.0)],
             },
             right: Stack::empty(360.0),
         };
         let layout = Layout::from_workspace(broken);
-        assert_eq!(layout.workspace.left.panes, [(Panel::Logs, 1.0)]);
+        assert_eq!(layout.workspace.left.panes, [(PaneKind::Logs, 1.0)]);
         assert!(layout.workspace.middle.panes.is_empty(), "no duplicates");
         assert!(layout.workspace.left.size.is_finite());
         assert_eq!(layout.workspace.middle.size, MIN_PANE);

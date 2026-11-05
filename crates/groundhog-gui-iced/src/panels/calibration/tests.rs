@@ -1,5 +1,5 @@
 //! Tests of the calibration panel: a whole six-sided accelerometer run,
-//! driven through the shared feature harness.
+//! driven through the shared panel harness.
 
 use std::time::Instant;
 
@@ -13,7 +13,7 @@ use mavio::{
 };
 
 use super::*;
-use crate::features::test_support::Env;
+use crate::panels::test_support::Env;
 
 const A: SystemId = SystemId(1);
 const ADDRESS: MavlinkId = MavlinkId {
@@ -146,7 +146,7 @@ async fn a_calibration_that_waits_for_a_reboot_offers_one() {
 
     let effects = env.step(&mut panel, Message::RequestReboot(A));
     assert!(
-        matches!(effects.as_slice(), [crate::features::Effect::Confirm(confirmation)]
+        matches!(effects.as_slice(), [crate::panels::Effect::Confirm(confirmation)]
             if matches!(confirmation.accept, Message::Reboot(A))),
         "a confirmation that leads to the reboot"
     );

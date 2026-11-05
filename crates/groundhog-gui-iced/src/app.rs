@@ -1,7 +1,7 @@
 //! The application root: composition, message routing, and policy.
 //!
-//! The root wires the layers together at boot, routes messages to features,
-//! applies the [`Effect`]s features request, and decides which fleet and link
+//! The root wires the layers together at boot, routes messages to panels,
+//! applies the [`Effect`]s panels request, and decides which fleet and link
 //! events become operator notices. It holds the latest fleet snapshot, which
 //! the fleet runtime publishes from off the UI thread.
 
@@ -31,21 +31,21 @@ use self::panels::{PanelEnv, PanelMessage, Panels};
 
 use crate::{
     config::{self, ConfigWriter, Configuration, Loaded, Settings},
-    features::{
+    layout::{self, Layout},
+    map::{self, LayerSet, Map, Placement},
+    panels::{
         Effect, LinkRequest, MapContext, Persisted, ViewContext,
         calibration::CalibrationPanel,
         confirm::{self, Answer, Confirmation},
-        link_panel::LinkPanel,
-        log_panel::LogPanel,
-        mission::MissionEditor,
+        links::LinkPanel,
+        logs::LogPanel,
+        mission::MissionPanel,
         notifications::{self, Level, Notice, Notifications},
-        parameter_panel::ParameterPanel,
-        settings_panel::SettingsPanel,
+        parameters::ParameterPanel,
+        settings::SettingsPanel,
         vehicles::VehiclePanel,
         video::{self, VideoPanel},
     },
-    layout::{self, Layout},
-    map::{self, LayerSet, Map, Placement},
     platform::{self, Insets},
     shell::{self, Floating, Shell},
     ui,
@@ -66,7 +66,7 @@ pub struct Application {
     /// The keyboard modifiers held, for the rail's clicks.
     modifiers: keyboard::Modifiers,
     /// The panel whose rail button is being dragged onto the grid.
-    rail_drag: Option<layout::Panel>,
+    rail_drag: Option<layout::PaneKind>,
     recorder: Option<TlogRecorder>,
     notices: Notifications,
     confirmation: Option<Confirmation<Message>>,
@@ -101,10 +101,10 @@ pub enum Message {
     Floating(shell::Message),
     /// A rail button was clicked with the primary button; the modifiers
     /// held decide where its panel opens.
-    Rail(layout::Panel),
+    Rail(layout::PaneKind),
     /// A rail button is being dragged; the grid shows where its panel
     /// would land.
-    RailDragged(layout::Panel),
+    RailDragged(layout::PaneKind),
     /// The rail button's drag ended: dropped (the grid reports where, as a
     /// layout message) or cancelled.
     RailDropped,
@@ -207,7 +207,7 @@ impl Application {
             confirmation: None,
             panels: Panels {
                 vehicles: VehiclePanel::default(),
-                mission: MissionEditor::default(),
+                mission: MissionPanel::default(),
                 parameters: ParameterPanel::default(),
                 calibration: CalibrationPanel::default(),
                 links: LinkPanel::new(),
@@ -666,7 +666,7 @@ impl Application {
     /// brings every panel up to date ([`Panel::on_tick`]): the settings or
     /// the shell may have changed, or time passed.
     ///
-    /// [`Panel::on_tick`]: crate::features::Panel::on_tick
+    /// [`Panel::on_tick`]: crate::panels::Panel::on_tick
     fn sync_panels(&mut self) -> Task<Message> {
         self.panels
             .video
@@ -787,7 +787,7 @@ impl Application {
         self.panels.video.slot().is_some() && self.floating.is_video_main()
     }
 
-    /// The map with the features' layers, placed as `placement`.
+    /// The map with the panels' layers, placed as `placement`.
     fn view_map(&self, placement: Placement) -> impl Widget<Message> + '_ {
         let theme = self.theme();
         let context = MapContext {
@@ -805,12 +805,12 @@ impl Application {
     }
 
     /// A panel's content, the same in every shell.
-    fn pane_body(&self, panel: layout::Panel) -> Element<'_, Message> {
+    fn pane_body(&self, panel: layout::PaneKind) -> Element<'_, Message> {
         match panel {
             // A `Stack` hides the pointer from the map only where an upper
             // layer shows one: here, over the toasts, which are meant to
             // hide it.
-            layout::Panel::Map => stack![
+            layout::PaneKind::Map => stack![
                 self.view_map(Placement::Pane),
                 self.view_toasts(ui::space::M)
             ]
@@ -1023,7 +1023,7 @@ fn change_links(
 /// (the map's corner, or the whole screen, with a tap), the tiled shell
 /// while the Video pane is open.
 fn video_shown(shell: Shell, layout: &Layout) -> bool {
-    shell == Shell::Floating || layout.is_open(layout::Panel::Video)
+    shell == Shell::Floating || layout.is_open(layout::PaneKind::Video)
 }
 
 mod floating;
@@ -1046,13 +1046,13 @@ mod tests {
         assert!(video_shown(Shell::Floating, &layout), "in the map's corner");
 
         layout.update(layout::Message::Toggle(
-            layout::Panel::Video,
+            layout::PaneKind::Video,
             layout::Slot::Left,
         ));
         assert!(video_shown(Shell::Tiled, &layout));
 
         layout.update(layout::Message::Toggle(
-            layout::Panel::Video,
+            layout::PaneKind::Video,
             layout::Slot::Left,
         ));
         assert!(!video_shown(Shell::Tiled, &layout), "closed again");

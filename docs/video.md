@@ -194,7 +194,7 @@ until the desktop video works.
   on Android, `ndk`), which `groundhog-logic` should not carry. Another
   frontend can use it the same way.
 - **The frontend**: `widget/video.rs` (the shader widget and its WGSL),
-  `features/video.rs` (the panel: source, status, the low-latency switch),
+  `panels/video.rs` (the panel: source, status, the low-latency switch),
   and the settings (URI, low-latency mode, jitter buffer).
 - **Later, from the vehicle:** the MAVLink camera protocol's
   `VIDEO_STREAM_INFORMATION` names a camera's stream URI. Asked for with
@@ -259,7 +259,7 @@ until the desktop video works.
    the picture send `MAV_CMD_CAMERA_TRACK_POINT` (releasing the right
    button, or a tap) and `MAV_CMD_CAMERA_TRACK_RECTANGLE` (a drag), in
    the image's own normalized coordinates, letterboxing removed
-   (`features/video/tracking.rs`). What the camera reports tracking
+   (`panels/video/tracking.rs`). What the camera reports tracking
    (`CAMERA_TRACKING_IMAGE_STATUS`, asked for at 10 Hz once it tracks) is
    drawn over the picture, and the chip says it tracks and stops it.
    It works in the panel, in the full screen, and where the floating

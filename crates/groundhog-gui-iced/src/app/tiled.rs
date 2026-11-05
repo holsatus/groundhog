@@ -52,7 +52,7 @@ impl Application {
         let panes = self.layout.panes();
         panes
             .maximized()
-            .is_none_or(|pane| panes.get(pane) == Some(&layout::Panel::Map))
+            .is_none_or(|pane| panes.get(pane) == Some(&layout::PaneKind::Map))
     }
 
     /// The rail: a button per panel, highlighted while it is open. Pressing
@@ -61,7 +61,7 @@ impl Application {
     /// Ctrl/Cmd or Shift click), or where its button is dragged onto the
     /// grid.
     fn view_rail(&self) -> impl Widget<Message> + '_ {
-        let button_of = |panel: layout::Panel| {
+        let button_of = |panel: layout::PaneKind| {
             let open = self.layout.is_open(panel);
             let icon = ui::icon::icon(panel.icon(), ui::size::RAIL_ICON, ButtonKind::Subtle, true);
             let button = button(container(icon).center(Length::Fill))
@@ -96,7 +96,7 @@ impl Application {
 
     /// The centre of `panel`'s button on the rail, from the rail's top.
     #[cfg(test)]
-    pub(super) fn rail_button_centre(panel: layout::Panel) -> f32 {
+    pub(super) fn rail_button_centre(panel: layout::PaneKind) -> f32 {
         let index = Destination::ALL
             .into_iter()
             .flat_map(|destination| destination.panels().iter().copied())

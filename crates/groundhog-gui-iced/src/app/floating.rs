@@ -19,7 +19,7 @@ use iced::{
 
 use super::{Application, Message};
 use crate::{
-    layout::Panel,
+    layout::PaneKind,
     map::Placement,
     shell::{self, Destination, Screen, SheetPlacement},
     ui::{
@@ -179,7 +179,11 @@ impl Application {
 
     /// The map, with `sheet` over it if one is open, and the toasts in the
     /// corner of what shows of the map.
-    fn view_map_screen(&self, sheet: Option<Panel>, geometry: &Geometry) -> Element<'_, Message> {
+    fn view_map_screen(
+        &self,
+        sheet: Option<PaneKind>,
+        geometry: &Geometry,
+    ) -> Element<'_, Message> {
         let expanded = self.floating.is_expanded();
         let placement = sheet.and_then(|_| geometry.sheet(expanded));
         let covered = geometry.covered(placement);
@@ -389,7 +393,7 @@ impl Application {
 
     /// `panel` in a sheet: a pane with its title, a button to let it take
     /// the whole window (or give the map its share back) and one to close it.
-    fn view_sheet(&self, panel: Panel) -> impl Widget<Message> + '_ {
+    fn view_sheet(&self, panel: PaneKind) -> impl Widget<Message> + '_ {
         let floating = |message| Message::Floating(message);
         let expand = if self.floating.is_expanded() {
             ui::icon_button(Icon::Minimize).hint("Show the map")

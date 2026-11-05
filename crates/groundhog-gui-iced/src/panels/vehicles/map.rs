@@ -23,11 +23,11 @@ use iced::{
 
 use super::Message;
 use crate::{
-    features::MapContext,
     map::{
         Anchor, Handle, HandleId, Interaction, LayerEvent, LayerId, LayerSet, MapFrame, MapLayer,
         MapView,
     },
+    panels::MapContext,
     widget::attitude,
 };
 

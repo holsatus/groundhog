@@ -3,7 +3,7 @@
 //! Commands that change what a vehicle does (arming, starting a mission,
 //! jumping to an item, clearing its mission, rebooting its autopilot,
 //! changing its mode in flight) are never sent on a single click, nor are
-//! destructive changes to what is stored (deleting a saved link). The feature asks for a [`Confirmation`];
+//! destructive changes to what is stored (deleting a saved link). The panel asks for a [`Confirmation`];
 //! the application shows it as a modal dialog and dispatches the
 //! confirmation's message only if the operator accepts.
 

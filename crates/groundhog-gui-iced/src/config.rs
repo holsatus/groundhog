@@ -448,7 +448,10 @@ mod tests {
         )))"#;
         let loaded: Configuration = ron::from_str(text).unwrap();
         let workspace = loaded.workspace.unwrap();
-        assert_eq!(workspace.left.panes, [(crate::layout::Panel::Mission, 2.0)]);
+        assert_eq!(
+            workspace.left.panes,
+            [(crate::layout::PaneKind::Mission, 2.0)]
+        );
         assert_eq!(workspace.right.panes.len(), 1);
     }
 }

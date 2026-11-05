@@ -1,4 +1,4 @@
-//! The vehicles feature: the selected vehicle's state, health and controls,
+//! The vehicles panel: the selected vehicle's state, health and controls,
 //! the vehicle picker, and the vehicles' map layers.
 //!
 //! The panel shows what an operator glances at in flight. Status texts are

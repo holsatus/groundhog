@@ -141,7 +141,7 @@ after an upload only rebase (`base = items`) and keep the plan.
 **P2** · Effort M · From the 2026-11-05 review of WP29
 
 Since WP29 a plan stores ArduPilot's jump to home (wire 0) as `-1`. The editor
-shows it as "Home" (`features/mission/view.rs` `format_value`), but
+shows it as "Home" (`panels/mission/view.rs` `format_value`), but
 `set_field` refuses the display value 0, so the editor cannot round-trip what
 it shows. A plan holding `-1` (from an ArduPilot download or any WPL file) that
 is uploaded to PX4, which has no home slot, sends `param1 = -1`. PX4 rejects
@@ -168,7 +168,7 @@ after a round trip, since both decode to the home slot.
 
 `Parameters::values()` exports decoded values (`parameter.rs:92-98`), and
 `SaveDialog` uses it even when `encoding_known` is false
-(`parameter_panel.rs:246-265`). Uploads are gated; saves are not, so a
+(`panels/parameters.rs:246-265`). Uploads are gated; saves are not, so a
 bytewise-decoded integer can be exported as if it were real.
 
 **Fix:** disable saving until the encoding is known, or export raw values with
@@ -198,20 +198,20 @@ it, and report truncation/duplicates in the load summary.
 **P3** · Effort S · From REVIEW area 11
 
 The header can say "3 changed" while the saved file contains only reported
-values (`parameter_panel.rs:246-264`). Either say the edits are not included
+values (`panels/parameters.rs:246-264`). Either say the edits are not included
 or save the edits too.
 
 ### PARAM-9 · Large `ParamValues` messages derive `Debug`
 **P3** · Effort S · From CODE Appendix D
 
 `SaveTo`/`Loaded` carry a whole `ParamValues` map with a derived `Debug`
-(`parameter_panel.rs:80-105`), which iced pretty-prints on the UI thread when
+(`panels/parameters.rs:80-105`), which iced pretty-prints on the UI thread when
 the `debug` feature is on. Use a summary `Debug` as `FleetUpdate` does.
 
 ### PARAM-10 · Serial-port enumeration is outside `Operations`
 **P3** · Effort S · From CODE-F4.1
 
-`link_panel/mod.rs:112-119` spawns `detect_serial_ports` with no busy flag, so
+`panels/links/mod.rs:112-119` spawns `detect_serial_ports` with no busy flag, so
 repeated actions can race. Put it behind `Operations` or a small busy guard.
 
 ### PARAM-14 · The INI reader accepts inf and NaN
@@ -393,7 +393,7 @@ statustexts decode lossily. One stray byte loses vendor/model.
 Four update shapes remain (`Context`, `LinkManager` + `Event`, video `Event`,
 no context), and persistence takes three routes (`Effect::RememberDirectory`,
 link/video events, direct settings save). Either document the split in
-`features/mod.rs` and `AGENTS.md`, or add `links` and `Effect::Persist` to
+`panels/mod.rs` and `AGENTS.md`, or add `links` and `Effect::Persist` to
 `Context`. The split is defensible; the silence is the problem.
 
 ### SVC-16 · `FleetEvent` does not carry `from`/`to`
@@ -490,7 +490,7 @@ load.
 ### UI-5 · Density-sensitive sizes are fixed pixels
 **P2** · Effort M · From CODE-F9.2
 
-`HEADER_HEIGHT = 28` and `INPUT_WIDTH = 96` (`parameter_panel.rs:540,685`), the
+`HEADER_HEIGHT = 28` and `INPUT_WIDTH = 96` (`panels/parameters.rs:540,685`), the
 mode picker and Arm button (`vehicles/mod.rs:274,290`), and the dialog width do
 not grow with `ui::Density`. Some other fixed widths (columns) are legitimate.
 
@@ -534,20 +534,20 @@ below >= above`, so a trigger near the bottom can get a clipped menu.
 ### UI-11 · The log panel rebuilds the whole timeline per view
 **P3** · Effort M · From REVIEW area 11
 
-`log_panel.rs:150-157,226-262` collects, filters, sorts and truncates ~8000
+`panels/logs.rs:150-157,226-262` collects, filters, sorts and truncates ~8000
 texts + 500 notices every view; the header shows the post-truncation count.
 Keep a maintained, bounded view or cache by revision.
 
 ### UI-12 · A lost slider release leaves the scale preview applied
 **P3** · Effort S · From REVIEW area 11
 
-`settings_panel.rs:72-77` commits only on release; `app.rs:665-670` has no
+`panels/settings.rs:72-77` commits only on release; `app.rs:665-670` has no
 unfocus/cursor-left path. Cancel the preview on unfocus like the map does.
 
 ### UI-13 · Small toolkit drifts
 **P3** · Effort S · From CODE-F9.1 / REVIEW area 13
 
-The marked input is still built in a feature (`parameter_panel.rs:649`); move
+The marked input is still built in a feature (`panels/parameters.rs:649`); move
 it into `ui` as `text_input_marked`. The "More" trigger is permanently
 `Active` (`ui/tool.rs:130`), icons do not scale with density
 (`ui/style.rs:86,95`), and the attitude docs say ±30° while
@@ -756,7 +756,7 @@ is the next step.
 only parameters honour: `arm`, `set_mode`, mission and calibration operations
 target `Vehicle::target()` (`vehicle.rs` `run`, `upload_mission`, …). So
 `fleet.component(gimbal).arm(true)` arms the autopilot. The GUI uses
-`component` only for parameters today (`parameter_panel.rs:154,391`).
+`component` only for parameters today (`panels/parameters.rs:154,391`).
 
 **Fix:** a `ComponentClient` with the per-component operations (parameters),
 and a `VehicleClient` with the vehicle's; neither can address the other's
@@ -785,9 +785,9 @@ sets a parameter right after the vehicle appears gets
 
 `AGENTS.md` puts rules every frontend would share in the logic crate, as
 `MissionDraft::check` does for missions. These are in the GUI: whether a mode
-change asks (`features/vehicles/mod.rs:305-309`), what blocks a calibration
-(armed, lost; `features/calibration.rs:129-135`), and the heading shown (yaw,
-else course over ground above 0.5 m/s; `features/vehicles/map.rs:367`).
+change asks (`panels/vehicles/mod.rs:305-309`), what blocks a calibration
+(armed, lost; `panels/calibration.rs:129-135`), and the heading shown (yaw,
+else course over ground above 0.5 m/s; `panels/vehicles/map.rs:367`).
 `start_calibration` itself does not refuse an armed vehicle.
 
 ### API-18 · Public enums are not `#[non_exhaustive]`

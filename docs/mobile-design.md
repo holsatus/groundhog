@@ -72,7 +72,7 @@ conventions, minus Liquid Glass:
 
 1. **One interface.** Features describe what a panel holds; the toolkit
    decides how a part is drawn in the space it gets; the shell decides
-   where the parts go. Nothing in `features/` asks whether it runs on a
+   where the parts go. Nothing in `panels/` asks whether it runs on a
    phone.
 2. **Adapt to the space and the input, separately.** Components respond to
    the width they are given, like container queries, so a narrow desktop
@@ -277,7 +277,7 @@ snapshots arrive.
 1. **Size classes and density** (`shell.rs`, `ui`): a `WindowClass` from the
    window's width and height, `Density` from the platform, both resolved
    in `Application` and handed to the shell and the toolkit.
-2. **Destinations** (`layout::Panel` gains a destination; a `Destination`
+2. **Destinations** (`layout::PaneKind` gains a destination; a `Destination`
    enum): the navigation bar and the rail's order read from it.
 3. **Panels return their anatomy instead of composing it.** A feature's
    `view` returns its parts (header subject and status, action groups,

@@ -935,7 +935,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::features::test_support::Env;
+    use crate::panels::test_support::Env;
 
     /// Run `message` through the panel's `update` in a context over `env`'s
     /// fleet.

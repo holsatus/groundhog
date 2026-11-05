@@ -1,8 +1,8 @@
-//! Shared harness for feature tests.
+//! Shared harness for panel tests.
 //!
-//! A feature test drives a panel's `update` with a [`Context`] over a
+//! A panel test drives a panel's `update` with a [`Context`] over a
 //! synthetic [`Fleet`] and a real [`FleetHandle`], then asserts on the
-//! feature's state, its notices and the effects it requested. [`Env`] owns
+//! panel's state, its notices and the effects it requested. [`Env`] owns
 //! the fleet and the context's inputs, and drives any [`Panel`].
 
 use std::time::Instant;
@@ -22,9 +22,9 @@ use mavio::{
 };
 
 use super::{Context, Effect, Panel, ViewContext};
-use crate::{config::Settings, features::notifications::Notifications};
+use crate::{config::Settings, panels::notifications::Notifications};
 
-/// A synthetic fleet and everything a feature's `update` reads from.
+/// A synthetic fleet and everything a panel's `update` reads from.
 pub struct Env {
     pub fleet: Fleet,
     /// A running backend, for its handle and its links. Its fleet is not
@@ -82,7 +82,7 @@ impl Env {
         );
     }
 
-    /// Run one message through `feature`'s `update`, returning the effects it
+    /// Run one message through `panel`'s `update`, returning the effects it
     /// requested. The task it returned is dropped, as a view interaction
     /// whose result the test does not drive.
     pub fn step<P: Panel>(

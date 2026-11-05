@@ -4,7 +4,7 @@
 //! needs to hold and route to its panels: [`PanelMessage`] (a variant per
 //! panel), [`Panels`] (their state), and the methods that dispatch a
 //! message, build a view, collect map layers and pass a fleet snapshot on.
-//! Adding a panel is a line here, beside its [`layout::Panel`] variant and
+//! Adding a panel is a line here, beside its [`layout::PaneKind`] variant and
 //! its place in a [`shell::Destination`](crate::shell::Destination).
 
 use std::{path::Path, time::Instant};
@@ -18,14 +18,14 @@ use iced::{Element, Task, Widget};
 use super::Message;
 use crate::{
     config::Settings,
-    features::{
-        Context, Effect, MapContext, Panel, ViewContext, calibration::CalibrationPanel,
-        link_panel::LinkPanel, log_panel::LogPanel, mission::MissionEditor,
-        notifications::Notifications, parameter_panel::ParameterPanel,
-        settings_panel::SettingsPanel, vehicles::VehiclePanel, video::VideoPanel,
-    },
     layout,
     map::LayerSet,
+    panels::{
+        Context, Effect, MapContext, Panel, ViewContext, calibration::CalibrationPanel,
+        links::LinkPanel, logs::LogPanel, mission::MissionPanel, notifications::Notifications,
+        parameters::ParameterPanel, settings::SettingsPanel, vehicles::VehiclePanel,
+        video::VideoPanel,
+    },
 };
 
 /// What a panel's update is given, borrowed from the application, and the
@@ -94,7 +94,7 @@ macro_rules! panels {
         impl Panels {
             /// The workspace's panels these are, in the list's order.
             #[cfg(test)]
-            pub(super) const LISTED: &[layout::Panel] = &[$(layout::Panel::$variant,)*];
+            pub(super) const LISTED: &[layout::PaneKind] = &[$(layout::PaneKind::$variant,)*];
 
             /// Route `message` to its panel.
             pub(super) fn update(
@@ -141,11 +141,11 @@ macro_rules! panels {
             /// The view of `panel`, if it is one of these.
             pub(super) fn view<'a>(
                 &'a self,
-                panel: layout::Panel,
+                panel: layout::PaneKind,
                 cx: ViewContext<'a>,
             ) -> Option<Element<'a, PanelMessage>> {
                 match panel {
-                    $(layout::Panel::$variant => {
+                    $(layout::PaneKind::$variant => {
                         Some(self.$field.view(cx).map(PanelMessage::$variant).boxed())
                     })*
                     _ => None,
@@ -170,7 +170,7 @@ macro_rules! panels {
 
 panels! {
     Vehicles: vehicles: VehiclePanel,
-    Mission: mission: MissionEditor,
+    Mission: mission: MissionPanel,
     Parameters: parameters: ParameterPanel,
     Calibration: calibration: CalibrationPanel,
     Links: links: LinkPanel,
@@ -188,11 +188,11 @@ mod tests {
     /// which is the application's own.
     #[test]
     fn every_offered_panel_is_listed_once() {
-        let offered: Vec<layout::Panel> = Destination::ALL
+        let offered: Vec<layout::PaneKind> = Destination::ALL
             .into_iter()
             .flat_map(Destination::panels)
             .copied()
-            .filter(|panel| *panel != layout::Panel::Map)
+            .filter(|panel| *panel != layout::PaneKind::Map)
             .collect();
 
         let mut listed = Panels::LISTED.to_vec();

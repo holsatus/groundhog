@@ -55,7 +55,7 @@ use mavio::{
 
 use super::*;
 use crate::{
-    features::{link_panel, mission, mission::MessageKind, parameter_panel, settings_panel},
+    panels::{links, mission, mission::MessageKind, parameters, settings},
     shell::{Destination, ShellMode},
     ui::{style, theme::ThemeMode},
     widget::pane_grid::{self, PaneGrid},
@@ -205,7 +205,7 @@ fn fleet() -> Fleet {
 
 /// The video panel as a pane.
 fn video_pane(app: &Application) -> impl Widget<Message> + '_ {
-    as_pane(app.pane_body(layout::Panel::Video))
+    as_pane(app.pane_body(layout::PaneKind::Video))
 }
 
 /// `body` as the tiled shell shows a pane: alone in a pane grid, which
@@ -221,7 +221,7 @@ fn as_pane(body: Element<'_, Message>) -> impl Widget<Message> + '_ {
 }
 
 /// Every panel but the map, in the order the destinations list them.
-fn panels() -> impl Iterator<Item = layout::Panel> {
+fn panels() -> impl Iterator<Item = layout::PaneKind> {
     Destination::ALL
         .into_iter()
         .flat_map(|destination| destination.panels().iter().copied())
@@ -324,7 +324,7 @@ async fn gallery() {
     }));
 
     // A configured link, so the link list shows.
-    let _ = app.update(Message::from(link_panel::Message::Save(LinkConfig {
+    let _ = app.update(Message::from(links::Message::Save(LinkConfig {
         name: "SITL".to_string(),
         auto_connect: false,
         high_latency: false,
@@ -336,7 +336,7 @@ async fn gallery() {
         },
     })));
 
-    let _ = app.update(Message::from(link_panel::Message::Save(LinkConfig {
+    let _ = app.update(Message::from(links::Message::Save(LinkConfig {
         name: "Telemetry radio".to_string(),
         auto_connect: false,
         high_latency: false,
@@ -348,7 +348,7 @@ async fn gallery() {
     })));
 
     // An edited parameter and a selected mission item, so their editors show.
-    let _ = app.update(Message::from(parameter_panel::Message::Edit(
+    let _ = app.update(Message::from(parameters::Message::Edit(
         AUTOPILOT,
         Ident::from_str_truncated("WPNAV_SPEED"),
         "750".into(),
@@ -359,16 +359,16 @@ async fn gallery() {
     }));
     // A panel in each of the three places.
     for (panel, slot) in [
-        (layout::Panel::Mission, layout::Slot::Left),
-        (layout::Panel::Parameters, layout::Slot::Right),
-        (layout::Panel::Logs, layout::Slot::Middle),
-        (layout::Panel::Links, layout::Slot::Middle),
+        (layout::PaneKind::Mission, layout::Slot::Left),
+        (layout::PaneKind::Parameters, layout::Slot::Right),
+        (layout::PaneKind::Logs, layout::Slot::Middle),
+        (layout::PaneKind::Links, layout::Slot::Middle),
     ] {
         let _ = app.update(Message::Layout(layout::Message::Toggle(panel, slot)));
     }
 
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
-        let _ = app.update(Message::from(settings_panel::Message::Theme(mode)));
+        let _ = app.update(Message::from(settings::Message::Theme(mode)));
         let theme = app.theme();
 
         // What the grid's sensor reports in the application: the window,
@@ -419,7 +419,7 @@ async fn gallery() {
     // is received. Its state comes as messages the gallery does not run; it
     // is handed the first receiver's once the first frame is in.
     let _ = app.update(Message::Layout(layout::Message::Toggle(
-        layout::Panel::Video,
+        layout::PaneKind::Video,
         layout::Slot::Right,
     )));
     let _ = app.update(Message::from(video::Message::EditSource(
@@ -519,16 +519,14 @@ async fn gallery() {
     // where they would land: the bottom half of the vehicles pane (splitting
     // it), the divider beneath it (an even share), its middle (a swap), and
     // the right half of the log, in the row beneath the map (splitting it).
-    let _ = app.update(Message::from(settings_panel::Message::Theme(
-        ThemeMode::Dark,
-    )));
+    let _ = app.update(Message::from(settings::Message::Theme(ThemeMode::Dark)));
     let grid = Size::new(
         1600.0 - 3.0 * ui::space::S - ui::size::RAIL_BUTTON,
         1000.0 - 2.0 * ui::space::S,
     );
     let _ = app.update(Message::Layout(layout::Message::Sized(grid)));
     let origin = iced::Point::new(1600.0 - ui::space::S - 360.0 / 2.0, ui::space::S + 18.0);
-    let regions: Vec<(layout::Panel, iced::Rectangle)> = app
+    let regions: Vec<(layout::PaneKind, iced::Rectangle)> = app
         .layout
         .panes()
         .layout()
@@ -542,7 +540,7 @@ async fn gallery() {
         })
         .collect();
     let region = |panel| regions.iter().find(|(p, _)| *p == panel).unwrap().1;
-    let vehicles = region(layout::Panel::Vehicles);
+    let vehicles = region(layout::PaneKind::Vehicles);
     for (name, at) in [
         (
             "drag-split",
@@ -554,7 +552,7 @@ async fn gallery() {
         ),
         ("drag-swap", vehicles.center()),
         ("drag-row", {
-            let logs = region(layout::Panel::Logs);
+            let logs = region(layout::PaneKind::Logs);
             iced::Point::new(logs.x + logs.width * 0.75, logs.center_y())
         }),
     ] {
@@ -605,17 +603,17 @@ async fn gallery() {
         .find(|(_, config, _)| config.name == "SITL")
         .map(|(id, ..)| id.clone())
         .expect("the SITL link is saved");
-    let _ = app.update(Message::from(link_panel::Message::EditLink(sitl.clone())));
+    let _ = app.update(Message::from(links::Message::EditLink(sitl.clone())));
     gallery.render(
         "panel-links-overwrite-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        as_pane(app.pane_body(layout::Panel::Links)),
+        as_pane(app.pane_body(layout::PaneKind::Links)),
     );
 
     // The link connected. (Its details are in a tooltip, which shows only
     // after a hover delay that a snapshot does not wait for.)
-    let _ = app.update(Message::from(link_panel::Message::Connect(sitl.clone())));
+    let _ = app.update(Message::from(links::Message::Connect(sitl.clone())));
     for _ in 0..100 {
         if app.backend.links().status(&sitl).is_connected() {
             break;
@@ -626,16 +624,14 @@ async fn gallery() {
         "panel-links-connected-dark",
         Size::new(560.0, 820.0),
         &ThemeMode::Dark.theme(),
-        as_pane(app.pane_body(layout::Panel::Links)),
+        as_pane(app.pane_body(layout::PaneKind::Links)),
     );
 
     // The floating shell on a phone, with the system bars over the map: in
     // portrait, the bare map, Fly's and Plan's sheets (Plan's expanded),
     // Setup's list and one of its pages, and Links; in landscape, Plan's
     // sheet beside the map, and a page.
-    let _ = app.update(Message::from(settings_panel::Message::Shell(
-        ShellMode::Floating,
-    )));
+    let _ = app.update(Message::from(settings::Message::Shell(ShellMode::Floating)));
     let portrait = Size::new(412.0, 915.0);
     let landscape = Size::new(915.0, 412.0);
     let portrait_insets = Insets {
@@ -652,7 +648,7 @@ async fn gallery() {
     };
     let go = |destination| Message::Floating(shell::Message::Go(destination));
     for (mode, suffix) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
-        let _ = app.update(Message::from(settings_panel::Message::Theme(mode)));
+        let _ = app.update(Message::from(settings::Message::Theme(mode)));
         let theme = app.theme();
         let _ = app.update(Message::Window(portrait));
         let _ = app.update(Message::Insets(portrait_insets));
@@ -702,7 +698,7 @@ async fn gallery() {
         let _ = app.update(go(Destination::Setup));
         render(&app, "setup", portrait);
         let _ = app.update(Message::Floating(shell::Message::Open(
-            layout::Panel::Parameters,
+            layout::PaneKind::Parameters,
         )));
         render(&app, "parameters", portrait);
         let _ = app.update(go(Destination::Links));
@@ -718,16 +714,14 @@ async fn gallery() {
         // Back to the bare map, for the next theme.
         while app.floating.update(shell::Message::Back) {}
     }
-    let _ = app.update(Message::from(settings_panel::Message::Shell(
+    let _ = app.update(Message::from(settings::Message::Shell(
         ShellMode::Automatic,
     )));
     let _ = app.update(Message::Insets(Insets::ZERO));
     app.window = None;
 
     // A pending confirmation, over the whole window.
-    let _ = app.update(Message::from(settings_panel::Message::Theme(
-        ThemeMode::Dark,
-    )));
+    let _ = app.update(Message::from(settings::Message::Theme(ThemeMode::Dark)));
     let _ = app.update(Message::from(mission::Message {
         plan: Some(SYSTEM),
         kind: MessageKind::Clear { confirmed: false },

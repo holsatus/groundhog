@@ -1,27 +1,27 @@
-//! The UI features, and the contract between them and the application.
+//! The UI panels, and the contract between them and the application.
 //!
-//! A feature owns its view state and operator state (drafts, edits, running
+//! A panel owns its view state and operator state (drafts, edits, running
 //! operations) and nothing else. Vehicle state reaches it as an immutable
 //! [`FleetSnapshot`]; operations go through [`FleetHandle`]. Everything a
-//! feature wants the *application* to do — ask for confirmation, change the
+//! panel wants the *application* to do — ask for confirmation, change the
 //! selected vehicle, move the map, remember a directory, persist what it
 //! holds, change a link — it requests through its [`Context`] as an
-//! [`Effect`], so features never reach into each other or into the
+//! [`Effect`], so panels never reach into each other or into the
 //! application's state.
 //!
-//! A feature the operator opens is a [`Panel`]: one interface for its
-//! messages, its view, and what it draws on the map. The application lists
+//! Every panel implements [`Panel`]: one interface for its messages, its
+//! view, and what it draws on the map. The application lists
 //! its panels once (`app/panels.rs`) and routes to them through it.
 
 pub mod calibration;
 pub mod confirm;
-pub mod link_panel;
-pub mod log_panel;
+pub mod links;
+pub mod logs;
 pub mod mission;
 pub mod notifications;
 pub mod operations;
-pub mod parameter_panel;
-pub mod settings_panel;
+pub mod parameters;
+pub mod settings;
 #[cfg(test)]
 mod test_support;
 pub mod vehicles;
@@ -45,7 +45,7 @@ use groundhog_logic::{
 use self::{confirm::Confirmation, notifications::Notifications};
 use crate::map::LayerSet;
 
-/// A feature the operator opens in a pane or a sheet.
+/// A panel the operator opens in a pane or a sheet.
 ///
 /// The application owns one of each, routes its messages to
 /// [`Panel::update`] with a [`Context`], shows [`Panel::view`] wherever the
@@ -109,7 +109,7 @@ pub struct ViewContext<'a> {
     pub recordings: Option<&'a Path>,
 }
 
-/// Something a feature asks the application to do.
+/// Something a panel asks the application to do.
 #[derive(Debug)]
 pub enum Effect<M> {
     /// Ask the operator before sending `M`.
@@ -122,7 +122,7 @@ pub enum Effect<M> {
     FollowVehicle(bool),
     /// Remember the directory of the last used file dialog.
     RememberDirectory(PathBuf),
-    /// Save what a feature keeps in the configuration file.
+    /// Save what a panel keeps in the configuration file.
     Persist(Persisted),
     /// Change the application's settings to these.
     Settings(crate::config::Settings),
@@ -143,7 +143,7 @@ pub enum LinkRequest {
     Delete(LinkId),
 }
 
-/// What a feature keeps in the configuration file, which the application
+/// What a panel keeps in the configuration file, which the application
 /// owns and writes.
 #[derive(Debug, Clone)]
 pub enum Persisted {
@@ -166,7 +166,7 @@ impl<M> Effect<M> {
     }
 }
 
-/// What a feature's `update` may use and request.
+/// What a panel's `update` may use and request.
 pub struct Context<'a, M> {
     /// The fleet as last published.
     pub fleet: &'a FleetSnapshot,
@@ -177,7 +177,7 @@ pub struct Context<'a, M> {
     pub notices: &'a mut Notifications,
     /// Where file dialogs open.
     pub directory: Option<&'a Path>,
-    /// Application settings features consult.
+    /// Application settings panels consult.
     pub settings: &'a crate::config::Settings,
     effects: Vec<Effect<M>>,
 }

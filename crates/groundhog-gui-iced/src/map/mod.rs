@@ -1,6 +1,6 @@
 //! The map engine: a slippy tile map with a layered, interactive overlay.
 //!
-//! The engine knows nothing about vehicles or missions. Features contribute
+//! The engine knows nothing about vehicles or missions. Panels contribute
 //! [`MapLayer`]s, gathered in a [`LayerSet`], and the engine draws them
 //! in z-order, caches their geometry by revision, hit-tests their
 //! [`Handle`]s, and runs the pointer state machine (hover, click, drag,

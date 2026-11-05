@@ -22,7 +22,7 @@ use std::fmt;
 
 use iced::Size;
 
-use crate::{layout::Panel, ui::Icon};
+use crate::{layout::PaneKind, ui::Icon};
 
 /// Below this window width the workspace has no room for a side column next
 /// to the map, whatever the platform.
@@ -140,13 +140,13 @@ impl Destination {
     }
 
     /// The panels it holds, in the order they are listed.
-    pub fn panels(self) -> &'static [Panel] {
+    pub fn panels(self) -> &'static [PaneKind] {
         match self {
-            Destination::Fly => &[Panel::Vehicles],
-            Destination::Plan => &[Panel::Mission],
-            Destination::Setup => &[Panel::Parameters, Panel::Calibration],
-            Destination::Links => &[Panel::Links],
-            Destination::More => &[Panel::Video, Panel::Logs, Panel::Settings],
+            Destination::Fly => &[PaneKind::Vehicles],
+            Destination::Plan => &[PaneKind::Mission],
+            Destination::Setup => &[PaneKind::Parameters, PaneKind::Calibration],
+            Destination::Links => &[PaneKind::Links],
+            Destination::More => &[PaneKind::Video, PaneKind::Logs, PaneKind::Settings],
         }
     }
 
@@ -167,7 +167,7 @@ pub struct Floating {
     /// Whether the sheet takes the whole window.
     expanded: bool,
     /// The panel opened from a page listing several (Setup's parameters).
-    page: Option<Panel>,
+    page: Option<PaneKind>,
     /// Whether the video fills the map's screen, the map in its corner,
     /// rather than the other way round (while there is video).
     video_main: bool,
@@ -177,12 +177,12 @@ pub struct Floating {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
     /// The map, with `panel` in a sheet over it if one is open.
-    Map { sheet: Option<Panel> },
+    Map { sheet: Option<PaneKind> },
     /// A page listing the destination's panels.
     List(Destination),
     /// A page showing `panel`; `nested` when it was opened from a list, so
     /// it has a way back.
-    Page { panel: Panel, nested: bool },
+    Page { panel: PaneKind, nested: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -191,7 +191,7 @@ pub enum Message {
     /// (or, on the map, shows or hides its sheet).
     Go(Destination),
     /// Open one of a list's panels.
-    Open(Panel),
+    Open(PaneKind),
     /// Go back a step: the system's back gesture, or a page's back arrow.
     Back,
     /// Let the sheet take the whole window, or give the map its share back.
@@ -384,22 +384,22 @@ mod tests {
     #[test]
     fn every_panel_but_the_map_has_one_destination() {
         let panels = [
-            Panel::Map,
-            Panel::Vehicles,
-            Panel::Mission,
-            Panel::Parameters,
-            Panel::Calibration,
-            Panel::Links,
-            Panel::Logs,
-            Panel::Settings,
-            Panel::Video,
+            PaneKind::Map,
+            PaneKind::Vehicles,
+            PaneKind::Mission,
+            PaneKind::Parameters,
+            PaneKind::Calibration,
+            PaneKind::Links,
+            PaneKind::Logs,
+            PaneKind::Settings,
+            PaneKind::Video,
         ];
         for panel in panels {
             let holding = Destination::ALL
                 .iter()
                 .filter(|destination| destination.panels().contains(&panel))
                 .count();
-            let expected = if panel == Panel::Map { 0 } else { 1 };
+            let expected = if panel == PaneKind::Map { 0 } else { 1 };
             assert_eq!(holding, expected, "{panel:?}");
         }
     }
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(
             floating.screen(),
             Screen::Map {
-                sheet: Some(Panel::Mission)
+                sheet: Some(PaneKind::Mission)
             }
         );
 
@@ -430,28 +430,28 @@ mod tests {
         assert_eq!(
             floating.screen(),
             Screen::Page {
-                panel: Panel::Links,
+                panel: PaneKind::Links,
                 nested: false
             }
         );
 
         floating.update(Message::Go(Destination::Setup));
         assert_eq!(floating.screen(), Screen::List(Destination::Setup));
-        floating.update(Message::Open(Panel::Calibration));
+        floating.update(Message::Open(PaneKind::Calibration));
         assert_eq!(
             floating.screen(),
             Screen::Page {
-                panel: Panel::Calibration,
+                panel: PaneKind::Calibration,
                 nested: true
             }
         );
 
         // Another destination's panel does not open here.
-        floating.update(Message::Open(Panel::Logs));
+        floating.update(Message::Open(PaneKind::Logs));
         assert_eq!(
             floating.screen(),
             Screen::Page {
-                panel: Panel::Calibration,
+                panel: PaneKind::Calibration,
                 nested: true
             }
         );
@@ -465,7 +465,7 @@ mod tests {
     fn back_steps_out_one_level_at_a_time_and_then_leaves() {
         let mut floating = Floating::default();
         floating.update(Message::Go(Destination::More));
-        floating.update(Message::Open(Panel::Settings));
+        floating.update(Message::Open(PaneKind::Settings));
 
         assert!(floating.update(Message::Back));
         assert_eq!(floating.screen(), Screen::List(Destination::More));

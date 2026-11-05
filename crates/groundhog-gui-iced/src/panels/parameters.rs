@@ -1,4 +1,4 @@
-//! The parameter feature: browsing, filtering, editing, uploading, and
+//! The parameter panel: browsing, filtering, editing, uploading, and
 //! saving/loading a component's parameters.
 //!
 //! Parameters are per MAVLink *component*: the operator picks which component

@@ -80,7 +80,7 @@ Another frontend (a CLI, say) is another crate next to these, depending on
 the crate is named where it is not obvious.
 
 ```
- gui-iced  features/  UI features: panels and map plugins             ┐
+ gui-iced  panels/    the panels, and what they draw on the map       ┐
            ui/        the toolkit: tokens, styles, icons, widgets     │
            map/       map engine: layers, hit-testing, gestures       │
            layout.rs  the tiled shell's workspace                     ├─ UI thread (iced)
@@ -116,7 +116,7 @@ How data moves:
    vehicles for liveness, and bootstraps new vehicles. At most every 33 ms it
    publishes an immutable `FleetSnapshot`, plus the `FleetEvent`s since the
    last one.
-4. **The frontend** (`app.rs`, `features/`) starts one `Backend` at boot,
+4. **The frontend** (`app.rs`, `panels/`) starts one `Backend` at boot,
    keeps the latest snapshot, and holds only *operator* state: mission
    drafts and parameter edits (modelled by the logic crate's `MissionDraft`
    and `ParamEdits`), the selected vehicle, view state. It changes
@@ -146,10 +146,10 @@ are shared by all.
 | logic `persist.rs` | Writing a frontend's own files: atomic replacement, setting unparseable files aside, ordered saves (`SaveQueue`) | `tokio` | know what is stored, or its format |
 | logic `services/` | `Backend`, fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `TransferProgress` and `LinkStats`, is fine |
 | gui `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
-| gui `features/` | One module per UI feature | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
-| gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about features or the domain |
+| gui `panels/` | One module per panel, and their shared toolkit (`Context`, `Effect`, `Operations`, confirmations, notices) | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
+| gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about panels or the domain |
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
-| gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; the list of panels (`app/panels.rs`); each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain feature logic |
+| gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; the list of panels (`app/panels.rs`); each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain panel logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame`; finding `.local` cameras through Avahi | GStreamer, `tokio::sync`, `zbus` on Linux | know about vehicles or the frontend |
@@ -226,7 +226,7 @@ also make the UI a pure function of data, which makes it easy to test.
 The fleet holds only what vehicles *reported*. Mission drafts
 (`domain::mission::MissionDraft`) and parameter edits
 (`domain::parameter::ParamEdits`) are held by the frontend, in
-`features::mission` and `features::parameter_panel`; the fleet never sees
+`panels::mission` and `panels::parameters`; the fleet never sees
 them.
 
 *Why:* an operator's draft must never be overwritten by telemetry, and
@@ -287,7 +287,7 @@ do now, progress, sides done, per-compass results), and a
 `CalibrationProtocol` per firmware (`domain/calibration/{ardupilot,px4}.rs`)
 gives the start, confirm and cancel commands and folds the vehicle's feedback
 into the session. The session lives on the `Vehicle`, so the runtime advances
-it as feedback arrives, and the UI (`features/calibration.rs`) only starts,
+it as feedback arrives, and the UI (`panels/calibration.rs`) only starts,
 confirms and cancels through `VehicleClient` and renders what the session and
 `Vehicle::calibration_controls` say.
 
@@ -344,7 +344,7 @@ else it is unknown, and `VehicleClient::set_parameter` returns
 `Error::ParamEncodingUnknown`. Stored values keep their raw wire form, so they
 are re-decoded if the encoding is learned later.
 
-### The map engine knows nothing about features
+### The map engine knows nothing about panels
 
 Panels contribute type-erased `map::MapLayer`s through `Panel::layers`.
 The engine (`map/overlay.rs`) owns all pointer state in the canvas widget's own
@@ -354,9 +354,9 @@ events, and no application state is needed to track one. A layer reporting a
 `revision` is drawn from cache until that number, the view or the theme
 changes.
 
-### Features talk to the application through a narrow contract
+### Panels talk to the application through a narrow contract
 
-A feature's `update` gets a `features::Context`, holding:
+A panel's `update` gets a `panels::Context`, holding:
 
 - the snapshot;
 - the services, and the links to read (`&LinkManager`);
@@ -368,30 +368,29 @@ map, remember a directory, persist what it keeps in the configuration file
 (`Effect::Persist`), change the settings (`Effect::Settings`, which the
 application persists and applies), change a link (`Effect::Link`: save,
 connect, disconnect or delete, which the application makes, announces and
-persists). An `Effect` is the only way a feature asks the application for
-anything. Features never reach into each other or into the application.
+persists). An `Effect` is the only way a panel asks the application for
+anything. Panels never reach into each other or into the application.
 
-*Why links are read-only to features:* every panel gets a `Context`, also
+*Why links are read-only to panels:* every panel gets a `Context`, also
 in the hooks that run with each snapshot and tick. Only the application
 holds the `LinkManager` mutably, so no panel's mistake can drop the
 connection to a vehicle in flight.
 
-A feature the operator opens is a `features::Panel`, one interface for all
-of them: `update` with a `Context`, `view` with a `ViewContext` (the
-application's state to read: the snapshot, the selected vehicle, whether
-the map follows it, the notices, the links, the settings, where telemetry
-and videos are recorded), and optional hooks: `layers`
-to draw on the map, `on_fleet` for each snapshot, and `on_tick` when the
-settings or the shell change, or, while `wants_ticks`, as time passes. The
-video's recording while armed lives in those hooks: it reads the fleet and
-the setting from its `Context`, and announces a recording that starts or
-stops on its own. What the shells own about the video stays the
-application's: whether anything shows it, its full screen, its inset in
-the floating shell. The application lists its
-panels once, in `app/panels.rs`: a macro turns the list into the panels'
-message (`PanelMessage`, one variant each), their state (`Panels`), and the
-routing of messages, views, layers and snapshots, all statically typed. A
-test checks that every panel the shells offer is listed.
+Every panel implements `panels::Panel`, one interface for all of them:
+`update` with a `Context`, `view` with a `ViewContext` (the application's
+state to read: the snapshot, the selected vehicle, whether the map follows
+it, the notices, the links, the settings, where telemetry and videos are
+recorded), and optional hooks: `layers` to draw on the map, `on_fleet` for
+each snapshot, and `on_tick` when the settings or the shell change, or,
+while `wants_ticks`, as time passes. The video's recording while armed
+lives in those hooks: it reads the fleet and the setting from its
+`Context`, and announces a recording that starts or stops on its own. What
+the shells own about the video stays the application's: whether anything
+shows it, its full screen, its inset in the floating shell. The application
+lists its panels once, in `app/panels.rs`: a macro turns the list into the
+panels' message (`PanelMessage`, one variant each), their state (`Panels`),
+and the routing of messages, views, layers and snapshots, all statically
+typed. A test checks that every panel the shells offer is listed.
 
 ### The workspace is three columns around the map
 
@@ -694,7 +693,7 @@ so the look is decided in one place:
   so a narrow desktop pane and a phone look the same: `ui::field` puts its
   label above the control when they do not fit side by side, `ui::stats`
   shows as many columns as fit, and a header folds its tools into a menu.
-  Do not fix widths in a feature where the content could give way
+  Do not fix widths in a panel where the content could give way
   instead.
 - **Text:** `ui::text`, `ui::caption`, `ui::title`, `ui::mono`, and
   `ui::overline` for section headings; colour by meaning with
@@ -774,9 +773,9 @@ colour means something. Read-outs put a muted caption above the value
 When a second view would build something the same way, add it to `ui`
 rather than copying it.
 
-### Operations from features
+### Operations from panels
 
-Run every vehicle operation through `features::operations::Operations`, keyed
+Run every vehicle operation through `panels::operations::Operations`, keyed
 by what it is about. That gives busy state, cancellation (dropping the task
 cancels the transaction), progress reporting, stale-result filtering, and
 the failure notice.
@@ -788,7 +787,7 @@ the failure notice.
 - What a run carries besides its key (the value an upload sets, whether
   tracking starts or stops) is its context: `Operations<K, C>` keeps it
   with the run (`start_with`), so messages stay small.
-- `start` takes the feature's `Finished` message variant; the result comes
+- `start` takes the panel's `Finished` message variant; the result comes
   back as an `operations::Finished<K, T>`. Hand it to `settle`, which drops
   a stale result, announces a failure, and returns the rest as `Settled`:
   handle the success, and whatever else a failure changes. Never word a
@@ -819,11 +818,11 @@ comes with a test that fails without the fix.
 | Domain | logic, next to the code | plain unit tests; fold messages with `Fleet::observe` / `Vehicle::handle_message` |
 | Map gestures | gui `map/overlay.rs` tests | drive the canvas `Program` with synthetic mouse and keyboard events |
 | Widget composition | gui `map/mod.rs` tests | `iced_test::Simulator` delivers real events through the composed widgets; assert on event status and messages |
-| Features | gui `features/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
+| Panels | gui `panels/*/tests.rs` | build a `Context` with a synthetic `Fleet` snapshot and a real `FleetHandle`; assert on state, notices and requested effects |
 
-Feature tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
+Panel tests need a `FleetHandle`, so they are `#[tokio::test]` and start a
 backend with `BackendOptions { bootstrap: false, .. }`; the snapshots they
-hand to the feature come from a `Fleet` they fold messages into with
+hand to the panel come from a `Fleet` they fold messages into with
 `Fleet::observe`. The folding methods and `Fleet::test_begin_calibration` are
 public only under `groundhog-logic`'s `test-support` feature, which the
 frontend enables from its dev-dependency. To simulate an operation's
@@ -881,16 +880,16 @@ Render it before and after a change to the look, and compare.
 2. Add an `async fn` to `services::VehicleClient`. Read wire details from the
    snapshot (`with_vehicle`), and map errors with `Error::from`. If the
    result changes what the vehicle holds, `report` it to the runtime.
-3. In the feature: add a request message, which may confirm first, and a
+3. In the panel: add a request message, which may confirm first, and a
    `Finished(operations::Finished<Key, T>)` message. Name the operation in
    the key's `Activity`, run it through `Operations`, and `settle` its
    result.
-4. Test the client end to end in `services/tests.rs`, and the feature flow
+4. Test the client end to end in `services/tests.rs`, and the panel's flow
    in its tests.
 
 ### Draw something on the map
 
-Implement `map::MapLayer` for a small struct that borrows your feature's state,
+Implement `map::MapLayer` for a small struct that borrows your panel's state,
 and push it from your panel's `Panel::layers`:
 
 ```rust
@@ -972,7 +971,7 @@ commands with a location), the file formats, and jump-target translation (for
 
 ### Add a UI panel
 
-1. Add a variant to `layout::Panel`, with a pinned `serde` rename, `title`,
+1. Add a variant to `layout::PaneKind`, with a pinned `serde` rename, `title`,
    `icon` (add the icon to `ui::Icon` if it is new) and `summary` (the line
    shown where it is listed among others), and list it in a
    `shell::Destination`'s `panels`. That puts it on the tiled shell's rail,
@@ -980,13 +979,13 @@ commands with a location), the file formats, and jump-target translation (for
    destination only for a new task: the navigation bar holds five. Where a
    panel opens in the tiled shell is the operator's choice (see
    [The workspace](#the-workspace-is-three-columns-around-the-map)).
-2. Create `features/<name>.rs` (or a directory) with its state and
-   `Message`, and implement `features::Panel`: `update`, which gets a
+2. Create `panels/<name>.rs` (or a directory) with its state and
+   `Message`, and implement `panels::Panel`: `update`, which gets a
    `Context`, and `view`, which gets a `ViewContext` and returns a
    `ui::panel`. Override `layers` to draw on the map, `on_fleet` to follow
    each snapshot, and `on_tick` (with `wants_ticks`) to act as time passes.
 3. List it in `app/panels.rs` (`Variant: field: Type`, the variant being its
-   `layout::Panel`), and build it in `Application::boot`. Both shells show
+   `layout::PaneKind`), and build it in `Application::boot`. Both shells show
    it, and its messages, map layers and snapshots reach it from there. Check
    it in a narrow sheet too: a phone gives a panel about 400 logical pixels
    of width.
@@ -995,7 +994,7 @@ commands with a location), the file formats, and jump-target translation (for
 
 Add a field to `config::Settings` (it is `#[serde(default)]`, so old
 configurations still load), a message and a control in
-`features/settings_panel.rs` (the panel asks for the new settings with
+`panels/settings.rs` (the panel asks for the new settings with
 `Effect::Settings`), and apply it in `Application::change_settings`.
 Configuration is persisted only through `ConfigWriter` (a
 `persist::SaveQueue`), which writes one save at a time, newest last, and
@@ -1111,3 +1110,4 @@ written by a newer build, saves nothing.
 | **Revision** | A counter that changes whenever content changes; used as a cache key. |
 | **Operation / `Ticket`** | A tracked, cancellable task from the UI, and the identity of one run of it. An `Activity` names what a run does, for the notice when it fails. |
 | **Notice** | An operator notification: a toast, plus an entry in the log panel's history. |
+| **Panel / pane kind** | A panel is what the operator opens (vehicles, mission, parameters, ...): a `panels::Panel`, shown in a pane of the tiled shell or a sheet or page of the floating one. A `layout::PaneKind` names what a pane holds: a panel, or the map, which is the application's own. |

@@ -11,7 +11,7 @@ use mavio::{
 };
 
 use super::*;
-use crate::features::test_support::Env;
+use crate::panels::test_support::Env;
 
 const A: SystemId = SystemId(1);
 

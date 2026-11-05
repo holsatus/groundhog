@@ -10,9 +10,9 @@
 
 mod app;
 mod config;
-mod features;
 mod layout;
 mod map;
+mod panels;
 mod platform;
 mod shell;
 mod ui;

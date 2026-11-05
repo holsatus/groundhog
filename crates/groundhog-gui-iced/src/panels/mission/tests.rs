@@ -8,7 +8,7 @@ use groundhog_logic::{
 use mavio::{DefaultDialect, default_dialect::messages};
 
 use super::*;
-use crate::features::test_support::Env;
+use crate::panels::test_support::Env;
 
 const A: SystemId = SystemId(1);
 const ADDRESS: MavlinkId = MavlinkId {
@@ -36,7 +36,7 @@ fn place_vehicle(env: &mut Env) {
     );
 }
 
-fn set_onboard(env: &mut Env, editor: &mut MissionEditor, items: Vec<MissionItem>, opaque_id: u32) {
+fn set_onboard(env: &mut Env, editor: &mut MissionPanel, items: Vec<MissionItem>, opaque_id: u32) {
     env.fleet.set_onboard_mission(
         A,
         OnboardMission {
@@ -50,19 +50,19 @@ fn set_onboard(env: &mut Env, editor: &mut MissionEditor, items: Vec<MissionItem
 
 fn step(
     env: &mut Env,
-    editor: &mut MissionEditor,
+    editor: &mut MissionPanel,
     plan: PlanKey,
     kind: MessageKind,
 ) -> Vec<Effect<Message>> {
     env.step(editor, Message { plan, kind })
 }
 
-fn draft(editor: &MissionEditor, plan: PlanKey) -> &Draft {
+fn draft(editor: &MissionPanel, plan: PlanKey) -> &Draft {
     editor.drafts.get(&plan).expect("draft exists")
 }
 
 /// Place a waypoint on the map at `lat`, as the operator clicks it there.
-fn place(env: &mut Env, editor: &mut MissionEditor, plan: PlanKey, lat: f64) {
+fn place(env: &mut Env, editor: &mut MissionPanel, plan: PlanKey, lat: f64) {
     if !editor.drafts.get(&plan).is_some_and(|draft| draft.placing) {
         step(env, editor, plan, MessageKind::TogglePlacing);
     }
@@ -85,7 +85,7 @@ fn waypoint(lat: f64) -> MissionItem {
 #[tokio::test]
 async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     step(&mut env, &mut editor, None, MessageKind::AddWaypoint);
@@ -95,14 +95,14 @@ async fn a_first_waypoint_with_nowhere_to_go_asks_to_be_placed() {
     assert!(offline.placing, "the map takes the next click");
     assert_eq!(
         env.notices.history().last().unwrap().level,
-        crate::features::notifications::Level::Info
+        crate::panels::notifications::Level::Info
     );
 }
 
 #[tokio::test]
 async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     editor
         .draft_mut(None)
@@ -121,7 +121,7 @@ async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
     assert_eq!(item.known_command(), Some(MavCmd::NavDelay), "unchanged");
     assert_eq!(
         env.notices.history().last().unwrap().level,
-        crate::features::notifications::Level::Warning
+        crate::panels::notifications::Level::Warning
     );
 }
 
@@ -129,7 +129,7 @@ async fn a_command_that_needs_a_location_the_plan_lacks_is_refused() {
 async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
     let mut env = env();
     place_vehicle(&mut env);
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
@@ -164,7 +164,7 @@ async fn new_waypoints_never_take_the_vehicles_ground_altitude() {
 #[tokio::test]
 async fn map_clicks_only_place_while_placing() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     step(
@@ -188,7 +188,7 @@ async fn map_clicks_only_place_while_placing() {
 #[tokio::test]
 async fn an_unmodified_draft_follows_the_onboard_mission() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     assert_eq!(
         editor.status(Some(A), &env.fleet.snapshot()),
@@ -211,7 +211,7 @@ async fn an_unmodified_draft_follows_the_onboard_mission() {
 #[tokio::test]
 async fn a_modified_draft_is_never_overwritten() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
 
     step(&mut env, &mut editor, Some(A), MessageKind::AddWaypoint);
@@ -232,7 +232,7 @@ async fn a_modified_draft_is_never_overwritten() {
 #[tokio::test]
 async fn downloading_over_changes_asks_first() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     place(&mut env, &mut editor, Some(A), 1.0);
 
@@ -261,7 +261,7 @@ async fn downloading_over_changes_asks_first() {
 #[tokio::test]
 async fn edits_wait_for_a_running_transfer() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     step(
@@ -286,7 +286,7 @@ async fn edits_wait_for_a_running_transfer() {
 #[tokio::test]
 async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     step(
@@ -326,7 +326,7 @@ async fn a_finished_download_replaces_the_draft_and_a_stale_one_is_ignored() {
 #[tokio::test]
 async fn uploading_an_empty_plan_asks_first() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
     step(&mut env, &mut editor, Some(A), MessageKind::Discard);
 
@@ -347,7 +347,7 @@ async fn uploading_an_empty_plan_asks_first() {
 #[tokio::test]
 async fn starting_says_when_the_vehicle_flies_another_mission() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
     place(&mut env, &mut editor, Some(A), 2.0);
 
@@ -368,7 +368,7 @@ async fn starting_says_when_the_vehicle_flies_another_mission() {
 #[tokio::test]
 async fn resuming_asks_and_pausing_does_not() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     set_onboard(&mut env, &mut editor, vec![waypoint(1.0)], 1);
 
     let effects = step(
@@ -388,7 +388,7 @@ async fn resuming_asks_and_pausing_does_not() {
 #[tokio::test]
 async fn failures_are_shown_to_the_operator() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     // An empty plan asks first; this one was confirmed.
@@ -410,7 +410,7 @@ async fn failures_are_shown_to_the_operator() {
     );
 
     let notice = env.notices.history().last().expect("a notice");
-    assert_eq!(notice.level, crate::features::notifications::Level::Error);
+    assert_eq!(notice.level, crate::panels::notifications::Level::Error);
     let name = env.fleet.snapshot().vehicle_name(A);
     assert_eq!(notice.title, format!("Mission upload on {name} failed"));
 }
@@ -418,7 +418,7 @@ async fn failures_are_shown_to_the_operator() {
 #[tokio::test]
 async fn drags_address_items_by_id() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     place(&mut env, &mut editor, None, 1.0);
     place(&mut env, &mut editor, None, 2.0);
@@ -456,7 +456,7 @@ async fn drags_address_items_by_id() {
 #[tokio::test]
 async fn jumping_needs_a_synced_plan_and_a_confirmation() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     set_onboard(&mut env, &mut editor, vec![waypoint(1.0), waypoint(2.0)], 1);
     let second = draft(&editor, Some(A)).plan().items()[1].id();
 
@@ -486,14 +486,14 @@ async fn jumping_needs_a_synced_plan_and_a_confirmation() {
     assert!(!editor.operations.is_running(&(A, Operation::SetCurrent)));
     assert_eq!(
         env.notices.history().last().unwrap().level,
-        crate::features::notifications::Level::Warning
+        crate::panels::notifications::Level::Warning
     );
 }
 
 #[tokio::test]
 async fn clearing_the_vehicle_always_asks() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
 
     let effects = step(
@@ -510,7 +510,7 @@ async fn clearing_the_vehicle_always_asks() {
 #[tokio::test]
 async fn a_transfer_keeps_selection_enabled_and_edits_disabled() {
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     let adding = editor.draft_mut(Some(A));
     let first = adding.plan_mut().push(waypoint(1.0));
@@ -560,7 +560,7 @@ async fn loading_a_file_asks_over_edits_and_waits_for_a_transfer() {
     use groundhog_logic::storage::mission::WplMission;
 
     let mut env = env();
-    let mut editor = MissionEditor::default();
+    let mut editor = MissionPanel::default();
     env.on_fleet(&mut editor);
     editor.draft_mut(Some(A)).plan_mut().push(waypoint(1.0));
 
@@ -617,6 +617,6 @@ async fn loading_a_file_asks_over_edits_and_waits_for_a_transfer() {
     assert_eq!(draft(&editor, Some(A)).plan().mission_items(), before);
     assert_eq!(
         env.notices.history().last().unwrap().level,
-        crate::features::notifications::Level::Warning
+        crate::panels::notifications::Level::Warning
     );
 }

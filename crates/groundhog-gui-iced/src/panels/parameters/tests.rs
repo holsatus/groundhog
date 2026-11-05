@@ -7,7 +7,7 @@ use mavio::{
 };
 
 use super::*;
-use crate::features::{notifications::Level, test_support::Env};
+use crate::panels::{notifications::Level, test_support::Env};
 
 const ADDRESS: MavlinkId = MavlinkId {
     system: 1,

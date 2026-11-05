@@ -1,16 +1,16 @@
-//! The layer API: what a feature implements to put things on the map.
+//! The layer API: what a panel implements to put things on the map.
 //!
 //! A [`MapLayer`] draws into the map overlay and, optionally, exposes
 //! interactive [`Handle`]s. The map engine owns all pointer state (hover,
 //! press, drag, click detection, escape-to-cancel) and reports the outcome to
 //! the layer as a [`LayerEvent`]; the layer answers with a message of its
-//! feature. Layers are rebuilt each frame from the feature's state, borrowed
+//! panel. Layers are rebuilt each frame from the panel's state, borrowed
 //! for the frame, and type-erased, so the map knows nothing about missions,
-//! vehicles or any other feature.
+//! vehicles or any other panel.
 //!
-//! Each feature fills a [`LayerSet`] of its own messages; the application
+//! Each panel fills a [`LayerSet`] of its own messages; the application
 //! gathers them into one with [`LayerSet::extend`], translating each
-//! feature's messages into its own.
+//! panel's messages into its own.
 
 use std::rc::Rc;
 
@@ -146,7 +146,7 @@ pub trait MapLayer<Message> {
         Vec::new()
     }
 
-    /// React to a gesture on this layer, with a message for its feature.
+    /// React to a gesture on this layer, with a message for its panel.
     fn on_event(&self, _event: &LayerEvent) -> Option<Message> {
         None
     }
