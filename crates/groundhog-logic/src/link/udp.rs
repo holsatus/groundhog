@@ -173,6 +173,13 @@ impl AsyncRead for UdpReader {
             let mut read_buf = ReadBuf::new(this.buffer.as_mut());
             match shared.socket.poll_recv_from(cx, &mut read_buf) {
                 Poll::Ready(Ok(from)) => {
+                    // An empty datagram carries nothing, and returned it
+                    // would read as the end of the stream: skip it, before
+                    // it can admit its sender as a peer.
+                    if read_buf.filled().is_empty() {
+                        log::trace!("empty UDP datagram from {from} ignored");
+                        continue;
+                    }
                     // A peer-mode link hears only its peer; anything else
                     // is dropped, and the next datagram awaited.
                     if !shared.accept(from) {
@@ -397,6 +404,40 @@ mod tests {
             .expect("the peer's datagram arrives")
             .unwrap();
         assert_eq!(&buffer, b"vehicle");
+    }
+
+    /// An empty datagram carries nothing. Passed on, it would read as the end
+    /// of the stream, which the router counts as a failure and the frame
+    /// parser as a broken frame. It is skipped, and does not admit its sender
+    /// as a peer.
+    #[tokio::test]
+    async fn empty_datagrams_are_skipped() {
+        let (gcs, gcs_addr) = bound().await;
+        let shared = UdpShared::listening(gcs);
+        let mut reader = UdpReader::new(shared.clone());
+        let mut writer = UdpWriter::new(shared);
+
+        let (stranger, _) = bound().await;
+        let (vehicle, _) = bound().await;
+        for _ in 0..12 {
+            stranger.send_to(&[], gcs_addr).await.unwrap();
+        }
+        vehicle.send_to(b"frame", gcs_addr).await.unwrap();
+
+        let mut buffer = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(1), reader.read(&mut buffer))
+            .await
+            .expect("the frame arrives")
+            .unwrap();
+        assert_eq!(&buffer[..n], b"frame", "not an end of stream");
+
+        writer.write_all(b"hello").await.unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(1), vehicle.recv(&mut buffer))
+            .await
+            .expect("the vehicle is a peer")
+            .unwrap();
+        assert_eq!(&buffer[..n], b"hello");
+        assert!(stranger.try_recv(&mut buffer).is_err(), "not a peer");
     }
 
     /// Before anyone has spoken, listen mode has nobody to send to: frames are
