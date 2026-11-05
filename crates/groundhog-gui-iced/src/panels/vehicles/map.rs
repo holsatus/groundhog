@@ -2,7 +2,6 @@
 //! attitude HUD of the selected vehicle.
 
 use std::{
-    collections::BTreeMap,
     hash::{DefaultHasher, Hash, Hasher},
     time::Duration,
 };
@@ -18,7 +17,7 @@ use iced::{
     Color, Point,
     color::Oklch,
     theme::Palette,
-    widget::canvas::{LineCap, LineJoin, Path, Stroke, Style},
+    widget::canvas::{LineCap, LineJoin, Path, Stroke, Style, gradient},
 };
 
 use super::Message;
@@ -35,9 +34,11 @@ use crate::{
 const DECIMATE_PX: f32 = 1.5;
 /// A gap between fixes longer than this is drawn faint: the track broke.
 const GAP: Duration = Duration::from_secs(30);
-/// Altitude bands of the trail colouring, each one stroke per pass.
-const BANDS: usize = 24;
-const BAND_MAX_ALT_M: f32 = 1000.0;
+/// The altitude at which the trail's colour reaches its last hue.
+const TOP_ALT_M: f32 = 1000.0;
+/// The smallest step an 8-bit screen shows: colours closer than this in
+/// every channel look the same.
+const INVISIBLE: f32 = 1.0 / 255.0;
 const ICON_SIZE: f32 = 40.0;
 
 impl super::VehiclePanel {
@@ -111,7 +112,10 @@ impl TrailPass {
     }
 }
 
-/// Where each vehicle has been, coloured by altitude.
+/// Where each vehicle has been, coloured by altitude: each segment shades
+/// from the colour of its first fix's altitude to its second's, so the colour
+/// changes continuously along the trail. A segment whose ends look the same
+/// colour is drawn solid instead, which is cheaper (see [`segment_style`]).
 ///
 /// Stroking a long trail is the most expensive drawing on the map, and a
 /// moving vehicle changes its trail on every fix. So the trail is split: a
@@ -158,10 +162,20 @@ impl MapLayer<Message> for Trails<'_> {
     }
 
     fn draw(&self, frame: &mut MapFrame<'_>, _interaction: Interaction) {
-        // Segments grouped by (band, faint), so a whole trail takes a few
-        // strokes rather than one per segment.
-        let mut groups: BTreeMap<(usize, bool), Vec<(Point, Point)>> = BTreeMap::new();
         let view = frame.view().clone();
+        let (width, brightness) = self.pass.style();
+        let stroke = |style| Stroke {
+            style,
+            width,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        };
+        // Solid segments are stroked as they come, shaded ones after them
+        // all: the renderer starts a new mesh (and a draw call) each time
+        // the strokes switch between solid and gradient, and keeps one mesh
+        // for any number in a row.
+        let mut shaded = Vec::new();
 
         for vehicle in self.fleet.vehicles() {
             let trail = &vehicle.position.trail;
@@ -185,56 +199,76 @@ impl MapLayer<Message> for Trails<'_> {
                     continue;
                 }
 
-                let faint = fix.at.saturating_duration_since(last_fix.at) > GAP;
                 let visible = view.contains(last_point, 50.0) || view.contains(point, 50.0);
                 if visible {
-                    let band = band_of((last_fix.alt_agl + fix.alt_agl) / 2.0);
-                    groups
-                        .entry((band, faint))
-                        .or_default()
-                        .push((last_point, point));
+                    let faint = fix.at.saturating_duration_since(last_fix.at) > GAP;
+                    let alpha = if faint { 0.25 } else { 1.0 };
+                    let path = Path::line(last_point, point);
+                    match segment_style(
+                        (last_point, last_fix.alt_agl),
+                        (point, fix.alt_agl),
+                        brightness,
+                        alpha,
+                    ) {
+                        style @ Style::Solid(_) => frame.frame().stroke(&path, stroke(style)),
+                        style @ Style::Gradient(_) => shaded.push((path, style)),
+                    }
                 }
 
                 previous = Some((point, fix));
             }
         }
 
-        let (width, brightness) = self.pass.style();
-        for ((band, faint), segments) in &groups {
-            let alpha = if *faint { 0.25 } else { 1.0 };
-            let path = Path::new(|builder| {
-                for (from, to) in segments {
-                    builder.move_to(*from);
-                    builder.line_to(*to);
-                }
-            });
-
-            frame.frame().stroke(
-                &path,
-                Stroke {
-                    style: Style::Solid(band_color(*band, brightness).scale_alpha(alpha)),
-                    width,
-                    line_cap: LineCap::Round,
-                    line_join: LineJoin::Round,
-                    ..Stroke::default()
-                },
-            );
+        for (path, style) in shaded {
+            frame.frame().stroke(&path, stroke(style));
         }
     }
 }
 
-fn band_of(altitude_m: f32) -> usize {
-    let t = (altitude_m / BAND_MAX_ALT_M).clamp(0.0, 1.0);
-    ((t * (BANDS - 1) as f32).round() as usize).min(BANDS - 1)
+/// The colouring of a segment from `from` to `to`, each a point on screen
+/// and its altitude: the colour of the first altitude at `from`, shading to
+/// the colour of the second at `to`. A segment's ends share their colours
+/// with the segments on either side, so the trail has no seams.
+///
+/// A gradient takes four times the vertex data of a solid colour, so a
+/// segment whose ends look alike ([`INVISIBLE`]) is solid, in the colour of
+/// its middle altitude: it is off by less than half a step at either end,
+/// which no screen shows. Level flight comes out solid, a climb shaded.
+fn segment_style(
+    (from, from_alt_m): (Point, f32),
+    (to, to_alt_m): (Point, f32),
+    brightness: f32,
+    alpha: f32,
+) -> Style {
+    let first = altitude_color(from_alt_m, brightness).scale_alpha(alpha);
+    let second = altitude_color(to_alt_m, brightness).scale_alpha(alpha);
+    if difference(first, second) < INVISIBLE {
+        let middle = altitude_color((from_alt_m + to_alt_m) / 2.0, brightness);
+        return Style::Solid(middle.scale_alpha(alpha));
+    }
+
+    Style::Gradient(
+        gradient::Linear::new(from, to)
+            .add_stop(0.0, first)
+            .add_stop(1.0, second)
+            .into(),
+    )
 }
 
-/// The colour of altitude band `band`: yellow → green → blue → purple → red
-/// from the ground to [`BAND_MAX_ALT_M`].
-fn band_color(band: usize, brightness: f32) -> Color {
+/// The largest difference between two colours' channels, alpha aside.
+fn difference(a: Color, b: Color) -> f32 {
+    [a.r - b.r, a.g - b.g, a.b - b.b]
+        .into_iter()
+        .fold(0.0, |most, channel| channel.abs().max(most))
+}
+
+/// The trail's colour at `altitude_m`: yellow → green → blue → purple → red
+/// from the ground to [`TOP_ALT_M`], continuously.
+fn altitude_color(altitude_m: f32, brightness: f32) -> Color {
     const YELLOW_HUE_DEG: f32 = 90.0;
     const RED_HUE_DEG: f32 = 380.0;
 
-    let t = band as f32 / (BANDS - 1) as f32;
+    let t = (altitude_m / TOP_ALT_M).clamp(0.0, 1.0);
     let hue_deg = YELLOW_HUE_DEG + t * (RED_HUE_DEG - YELLOW_HUE_DEG);
 
     Color::from(Oklch {
@@ -435,6 +469,8 @@ impl MapLayer<Message> for Hud<'_> {
 
 #[cfg(test)]
 mod tests {
+    use iced::widget::canvas::Gradient;
+
     use super::*;
 
     /// The whole outline is drawn before any bright line: across body and
@@ -468,12 +504,369 @@ mod tests {
         );
     }
 
+    /// No metre of altitude changes the colour by much, in either pass's
+    /// brightness. Altitude bands, the trail's colouring before, jumped by
+    /// 0.1 at a typical band edge and up to 0.3. The steepest metre left is
+    /// about 0.025, near 270 m in the core's brightness, where the scale
+    /// leaves what sRGB can show and a channel clips to zero.
     #[test]
-    fn bands_cover_the_altitude_range() {
-        assert_eq!(band_of(-10.0), 0);
-        assert_eq!(band_of(0.0), 0);
-        assert_eq!(band_of(BAND_MAX_ALT_M), BANDS - 1);
-        assert_eq!(band_of(10_000.0), BANDS - 1);
-        assert!(band_of(500.0) > band_of(100.0));
+    fn the_colour_follows_the_altitude_without_steps() {
+        for pass in [TrailPass::Casing, TrailPass::Core] {
+            let (_, brightness) = pass.style();
+            let at = |altitude_m| altitude_color(altitude_m, brightness);
+            assert_eq!(at(-10.0), at(0.0), "below the ground is the ground");
+            assert_eq!(at(10_000.0), at(TOP_ALT_M), "above the top is the top");
+            assert_ne!(at(0.0), at(TOP_ALT_M));
+
+            let steepest = (0..1000)
+                .map(|metres| metres as f32)
+                .map(|altitude_m| difference(at(altitude_m), at(altitude_m + 1.0)))
+                .fold(0.0, f32::max);
+            assert!(steepest < 0.03, "{steepest} in a metre at {brightness}");
+        }
+    }
+
+    /// A segment's gradient runs the way the vehicle flew: from its first
+    /// fix's colour at its first point to its second's at its second.
+    #[test]
+    fn a_segment_shades_from_its_first_fix_to_its_second() {
+        let (from, to) = (Point::new(10.0, 20.0), Point::new(30.0, 5.0));
+
+        let Style::Gradient(Gradient::Linear(linear)) =
+            segment_style((from, 0.0), (to, 600.0), 0.85, 0.25)
+        else {
+            panic!("a climb is shaded");
+        };
+
+        assert_eq!((linear.start, linear.end), (from, to));
+        let stops: Vec<_> = linear.stops.iter().flatten().collect();
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0].offset, 0.0);
+        assert_eq!(stops[0].color, altitude_color(0.0, 0.85).scale_alpha(0.25));
+        assert_eq!(stops[1].offset, 1.0);
+        assert_eq!(
+            stops[1].color,
+            altitude_color(600.0, 0.85).scale_alpha(0.25)
+        );
+    }
+
+    /// A segment flown level is solid, in a colour no screen tells apart
+    /// from either end's, so it joins its neighbours without a seam.
+    #[test]
+    fn a_level_segment_is_solid_and_seamless() {
+        let (from, to) = (Point::new(10.0, 20.0), Point::new(30.0, 5.0));
+        for (first_m, second_m) in [(120.0, 120.0), (120.0, 120.3), (271.0, 271.1)] {
+            let Style::Solid(color) = segment_style((from, first_m), (to, second_m), 0.85, 1.0)
+            else {
+                panic!("{first_m} to {second_m} m is level");
+            };
+            for end_m in [first_m, second_m] {
+                let off = difference(color, altitude_color(end_m, 0.85));
+                assert!(off < INVISIBLE / 2.0, "{off} from the end at {end_m} m");
+            }
+        }
+    }
+
+    /// What drawing the trails costs on the GPU renderer the application
+    /// uses. Not a regression test: it prints its figures, to compare a
+    /// change to the trails before and after. Run it optimised, alone:
+    ///
+    /// ```sh
+    /// cargo test --release -p groundhog-gui-iced trail_drawing_cost -- --ignored --nocapture
+    /// ```
+    mod measurement {
+        use std::time::{Duration, Instant};
+
+        use groundhog_logic::{
+            MavlinkId,
+            domain::{fleet::Fleet, geo::GeoPosition, vehicle::position::TRAIL_MAX_LEN},
+        };
+        use iced::{
+            Rectangle, Size,
+            advanced::{Renderer as _, renderer::Headless},
+            widget::canvas::{Cache, Frame},
+        };
+        use iced_renderer::{
+            geometry::Renderer as _,
+            graphics::mesh::{GradientVertex2D, SolidVertex2D},
+        };
+        use mavio::{
+            DefaultDialect,
+            default_dialect::{
+                enums::{MavAutopilot, MavModeFlag, MavType},
+                messages,
+            },
+        };
+
+        use super::*;
+        use crate::map::MapView;
+
+        type Renderer = iced::Renderer;
+        type Geometry = <Renderer as iced_renderer::geometry::Renderer>::Geometry;
+
+        const CENTRE: GeoPosition = GeoPosition {
+            lat: 47.0,
+            lon: 8.0,
+        };
+        /// A desktop window's map, at a zoom where the trails fill it.
+        const SIZE: Size = Size::new(1600.0, 1000.0);
+        const ZOOM: f64 = 16.0;
+        const WARM_UP: usize = 5;
+        const RUNS: usize = 40;
+        /// How many times a frame draws the trails, so the GPU's share stands
+        /// out from reading the frame back (about 2 ms on its own).
+        const COPIES: u32 = 20;
+
+        /// How a measured flight changes altitude.
+        #[derive(Debug, Clone, Copy)]
+        enum Profile {
+            /// Climbing and descending between 10 and 290 m all the time:
+            /// every segment changes colour.
+            Climbing,
+            /// A survey: a climb to 120 m over the first tenth, the height
+            /// held (wobbling by 0.3 m) until the last tenth, then a descent.
+            Survey,
+        }
+
+        impl Profile {
+            /// The altitude at `t`, from 0 to 1 over the flight.
+            fn altitude_m(self, t: f64, phase: f64) -> f64 {
+                match self {
+                    Profile::Climbing => {
+                        150.0 + 140.0 * (5.0 * std::f64::consts::TAU * t + phase).sin()
+                    }
+                    Profile::Survey => {
+                        let held = 120.0 + 0.3 * (400.0 * t + phase).sin();
+                        held * (t / 0.1).min((1.0 - t) / 0.1).min(1.0)
+                    }
+                }
+            }
+        }
+
+        /// `vehicles` copters, each with a full trail: a figure about 2.3 by
+        /// 1.3 km flown over 500 s, its altitude as `profile` says.
+        fn fleet(vehicles: u8, profile: Profile) -> FleetSnapshot {
+            let mut fleet = Fleet::default();
+            let start = Instant::now();
+            for system in 1..=vehicles {
+                let source = MavlinkId {
+                    system,
+                    component: 1,
+                };
+                let heartbeat = DefaultDialect::Heartbeat(messages::Heartbeat {
+                    type_: MavType::Quadrotor,
+                    autopilot: MavAutopilot::Ardupilotmega,
+                    base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+                    ..Default::default()
+                });
+                fleet.observe(source, start, Some(&heartbeat));
+
+                let phase = f64::from(system) * 0.3;
+                for fix in 0..TRAIL_MAX_LEN {
+                    let along = fix as f64 / TRAIL_MAX_LEN as f64;
+                    let t = along * std::f64::consts::TAU;
+                    let lat = CENTRE.lat + 0.006 * (3.0 * t + phase).sin();
+                    let lon = CENTRE.lon + 0.015 * (2.0 * t).sin();
+                    let altitude_m = profile.altitude_m(along, phase);
+                    let position = DefaultDialect::GlobalPositionInt(messages::GlobalPositionInt {
+                        lat: (lat * 1e7) as i32,
+                        lon: (lon * 1e7) as i32,
+                        relative_alt: (altitude_m * 1000.0) as i32,
+                        ..Default::default()
+                    });
+                    let at = start + Duration::from_millis(500 * fix as u64);
+                    fleet.observe(source, at, Some(&position));
+                }
+            }
+
+            let snapshot = fleet.snapshot();
+            for vehicle in snapshot.vehicles() {
+                assert_eq!(vehicle.position.trail.len(), TRAIL_MAX_LEN, "a full trail");
+            }
+            snapshot
+        }
+
+        fn layers(fleet: &FleetSnapshot, part: TrailPart) -> [Trails<'_>; 2] {
+            [TrailPass::Casing, TrailPass::Core].map(|pass| Trails { fleet, part, pass })
+        }
+
+        fn draw(renderer: &Renderer, layer: &Trails<'_>, view: &MapView) -> Geometry {
+            let mut frame = Frame::new(renderer, SIZE);
+            layer.draw(
+                &mut MapFrame::for_tests(&mut frame, view),
+                Interaction::default(),
+            );
+            frame.into_geometry()
+        }
+
+        /// What `geometry` holds: its vertices, those with a gradient, their
+        /// bytes, and its meshes (a draw call each). The renderer's geometry
+        /// type is private to iced, but its `Debug` names every vertex and
+        /// mesh. (The indices are the same whatever the vertices hold.)
+        #[derive(Default)]
+        struct Contents {
+            vertices: usize,
+            gradient: usize,
+            bytes: usize,
+            meshes: usize,
+        }
+
+        fn contents(geometry: &Geometry) -> Contents {
+            let debug = format!("{geometry:?}");
+            assert!(debug.starts_with("Primary(Live"), "live wgpu geometry");
+            let solid = debug.matches("SolidVertex2D {").count();
+            let gradient = debug.matches("GradientVertex2D {").count();
+            Contents {
+                vertices: solid + gradient,
+                gradient,
+                bytes: solid * std::mem::size_of::<SolidVertex2D>()
+                    + gradient * std::mem::size_of::<GradientVertex2D>(),
+                meshes: debug.matches("Solid {").count() + debug.matches("Gradient {").count(),
+            }
+        }
+
+        /// The median of `runs` timings of `run`, after a warm-up.
+        fn median(mut run: impl FnMut() -> Duration) -> Duration {
+            for _ in 0..WARM_UP {
+                run();
+            }
+            let mut times: Vec<Duration> = (0..RUNS).map(|_| run()).collect();
+            times.sort();
+            times[RUNS / 2]
+        }
+
+        /// Render what was drawn, and read it back.
+        fn screenshot(renderer: &mut Renderer) -> Vec<u8> {
+            let size = Size::new(SIZE.width as u32, SIZE.height as u32);
+            renderer.screenshot(size, 1.0, iced::Color::BLACK)
+        }
+
+        fn ms(duration: Duration) -> String {
+            format!("{:7.3} ms", duration.as_secs_f64() * 1000.0)
+        }
+
+        #[test]
+        #[ignore = "measures and prints; see the module documentation"]
+        fn trail_drawing_cost() {
+            let mut renderer = futures::executor::block_on(<Renderer as Headless>::new(
+                iced::advanced::renderer::Settings::default(),
+                Some("wgpu"),
+            ))
+            .expect("a headless renderer");
+            assert_eq!(renderer.name(), "wgpu", "measured on the GPU renderer");
+            let view = MapView::for_tests_of(CENTRE, ZOOM, SIZE);
+            let bounds = Rectangle::with_size(SIZE);
+
+            // Nothing drawn: what every frame below costs besides the trails
+            // (making the target, reading the pixels back).
+            let baseline = median(|| {
+                renderer.reset(bounds);
+                let start = Instant::now();
+                drop(screenshot(&mut renderer));
+                start.elapsed()
+            });
+
+            for (profile, vehicles) in [
+                (Profile::Climbing, 1),
+                (Profile::Climbing, 5),
+                (Profile::Survey, 1),
+                (Profile::Survey, 5),
+            ] {
+                let fleet = fleet(vehicles, profile);
+                let body = layers(&fleet, TrailPart::Body);
+
+                // What a pan or zoom costs on the CPU: the body re-stroked.
+                let tessellate = median(|| {
+                    let start = Instant::now();
+                    for layer in &body {
+                        drop(draw(&renderer, layer, &view));
+                    }
+                    start.elapsed()
+                });
+                let size = body
+                    .iter()
+                    .map(|layer| contents(&draw(&renderer, layer, &view)))
+                    .fold(Contents::default(), |total, layer| Contents {
+                        vertices: total.vertices + layer.vertices,
+                        gradient: total.gradient + layer.gradient,
+                        bytes: total.bytes + layer.bytes,
+                        meshes: total.meshes + layer.meshes,
+                    });
+
+                // The trails are really drawn.
+                renderer.reset(bounds);
+                for layer in &body {
+                    renderer.draw_geometry(draw(&renderer, layer, &view));
+                }
+                let lit = screenshot(&mut renderer)
+                    .chunks(4)
+                    .filter(|pixel| pixel[..3].iter().any(|channel| *channel > 10))
+                    .count();
+                assert!(lit > 10_000, "the trails cover the frame: {lit} pixels");
+
+                // A pan: the body freshly tessellated, uploaded and drawn,
+                // `COPIES` times over. Only the GPU's part is timed.
+                let panning = median(|| {
+                    renderer.reset(bounds);
+                    for _ in 0..COPIES {
+                        for layer in &body {
+                            renderer.draw_geometry(draw(&renderer, layer, &view));
+                        }
+                    }
+                    let start = Instant::now();
+                    drop(screenshot(&mut renderer));
+                    start.elapsed()
+                });
+
+                // The view still: the body drawn from its cache, already on
+                // the GPU, `COPIES` times over.
+                let caches = [Cache::new(), Cache::new()];
+                let steady = median(|| {
+                    renderer.reset(bounds);
+                    for _ in 0..COPIES {
+                        for (layer, cache) in body.iter().zip(&caches) {
+                            let geometry = cache.draw(&renderer, SIZE, |frame| {
+                                layer.draw(
+                                    &mut MapFrame::for_tests(frame, &view),
+                                    Interaction::default(),
+                                );
+                            });
+                            renderer.draw_geometry(geometry);
+                        }
+                    }
+                    let start = Instant::now();
+                    drop(screenshot(&mut renderer));
+                    start.elapsed()
+                });
+                let per_copy = |frame: Duration| frame.saturating_sub(baseline) / COPIES;
+
+                println!(
+                    "{profile:?}, {vehicles} vehicle(s), {} segments each:",
+                    TRAIL_MAX_LEN - 1
+                );
+                println!(
+                    "  body tessellation (CPU, per pan frame) {}",
+                    ms(tessellate)
+                );
+                println!(
+                    "  body vertices                         {:7.1} KiB, {} vertices, {:.0}% with a gradient, {} meshes",
+                    size.bytes as f64 / 1024.0,
+                    size.vertices,
+                    100.0 * size.gradient as f64 / size.vertices as f64,
+                    size.meshes,
+                );
+                println!(
+                    "  GPU, freshly uploaded body            {} ({COPIES} copies: {})",
+                    ms(per_copy(panning)),
+                    ms(panning)
+                );
+                println!(
+                    "  GPU, cached body                      {} ({COPIES} copies: {})",
+                    ms(per_copy(steady)),
+                    ms(steady)
+                );
+            }
+            println!("baseline (empty frame, read back)      {}", ms(baseline));
+        }
     }
 }

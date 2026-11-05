@@ -1909,6 +1909,7 @@ dependencies = [
  "groundhog-logic",
  "groundhog-video",
  "iced",
+ "iced_renderer",
  "iced_runtime",
  "iced_test",
  "jni 0.21.1",

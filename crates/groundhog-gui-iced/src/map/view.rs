@@ -32,12 +32,18 @@ impl MapView {
     /// A fixed view for tests of layers.
     #[cfg(test)]
     pub fn for_tests() -> Self {
+        Self::for_tests_of(GeoPosition::new(47.0, 8.0), 14.0, Size::new(800.0, 600.0))
+    }
+
+    /// A view of `size` centred on `centre` at `zoom`, for tests of layers.
+    #[cfg(test)]
+    pub fn for_tests_of(centre: GeoPosition, zoom: f64, size: Size) -> Self {
         Self::new(
             Viewpoint {
-                position: Geodetic::new(8.0, 47.0).as_mercator(),
-                zoom: slippery::Zoom::try_from(14.0).expect("a valid zoom"),
+                position: mercator(centre),
+                zoom: slippery::Zoom::try_from(zoom).expect("a valid zoom"),
             },
-            Size::new(800.0, 600.0),
+            size,
             Padding::ZERO,
         )
     }
@@ -119,6 +125,12 @@ pub struct MapFrame<'a> {
 impl<'a> MapFrame<'a> {
     pub(super) fn new(frame: &'a mut Frame, view: &'a MapView) -> Self {
         Self { frame, view }
+    }
+
+    /// A frame to draw a layer into outside the map widget, for tests.
+    #[cfg(test)]
+    pub fn for_tests(frame: &'a mut Frame, view: &'a MapView) -> Self {
+        Self::new(frame, view)
     }
 
     pub fn view(&self) -> &MapView {
