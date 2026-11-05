@@ -99,13 +99,13 @@ impl Panel for CalibrationPanel {
     fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
         match message {
             Message::Start(system, kind) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.run((system, Action::Start), async move {
                     client.start_calibration(kind).await
                 });
             }
             Message::Confirm(system) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.run((system, Action::Confirm), async move {
                     client.confirm_calibration_step().await
                 });
@@ -114,18 +114,18 @@ impl Panel for CalibrationPanel {
                 // A calibration that runs inside its start command (ArduPilot
                 // airspeed) stops with it.
                 self.operations.cancel(&(system, Action::Start));
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.run((system, Action::Cancel), async move {
                     client.cancel_calibration().await
                 });
             }
-            Message::Dismiss(system) => cx.services.vehicle(system).dismiss_calibration(),
+            Message::Dismiss(system) => cx.vehicle_client(system).dismiss_calibration(),
             Message::RequestReboot(system) => {
                 let name = cx.fleet.vehicle_name(system);
                 cx.confirm(Confirmation::reboot(&name, Message::Reboot(system)));
             }
             Message::Reboot(system) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.run(
                     (system, Action::Reboot),
                     async move { client.reboot().await },

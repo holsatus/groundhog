@@ -568,7 +568,7 @@ impl MissionPanel {
             return Task::none();
         };
 
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.transfer(system, Operation::Download, move |progress| async move {
             client.download_mission(&*progress).await.map(Some)
         })
@@ -589,7 +589,7 @@ impl MissionPanel {
         };
 
         let items = draft.plan().mission_items();
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.transfer(system, Operation::Upload, move |progress| async move {
             client.upload_mission(items, &*progress).await.map(Some)
         })
@@ -606,7 +606,7 @@ impl MissionPanel {
             return Task::none();
         };
 
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.transfer(system, Operation::Clear, move |_| async move {
             client.clear_mission().await.map(|()| None)
         })
@@ -637,7 +637,7 @@ impl MissionPanel {
             return Task::none();
         };
 
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.operations.start(
             (system, operation),
             async move {
@@ -678,7 +678,7 @@ impl MissionPanel {
             return Task::none();
         };
 
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.operations.start(
             (system, Operation::SetCurrent),
             async move { client.set_current_mission_item(index).await.map(|()| None) },

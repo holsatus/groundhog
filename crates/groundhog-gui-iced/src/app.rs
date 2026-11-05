@@ -441,7 +441,7 @@ impl Application {
         let fleet = self.fleet.clone();
         let mut env = PanelEnv {
             fleet: &fleet,
-            services: self.backend.fleet(),
+            handle: self.backend.fleet(),
             links: self.backend.links(),
             notices: &mut self.notices,
             directory: self.configuration.file_picker_path.as_deref(),

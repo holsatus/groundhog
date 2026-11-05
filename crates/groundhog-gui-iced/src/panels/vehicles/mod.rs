@@ -134,7 +134,7 @@ impl Panel for VehiclePanel {
             }
             Message::Arm(system, arm) => {
                 let command = if arm { Command::Arm } else { Command::Disarm };
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.commands.start(
                     (system, command),
                     async move { client.arm(arm).await },
@@ -160,7 +160,7 @@ impl Panel for VehiclePanel {
                 );
             }
             Message::SetMode(system, mode) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.commands.start(
                     (system, Command::SetMode),
                     async move { client.set_mode(mode).await },
@@ -187,7 +187,7 @@ impl Panel for VehiclePanel {
                 );
             }
             Message::ModeKind(system, kind) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.commands.start(
                     (system, Command::SetMode),
                     async move { client.set_mode_kind(kind).await.map(|_| ()) },
@@ -199,7 +199,7 @@ impl Panel for VehiclePanel {
                 cx.confirm(Confirmation::reboot(&name, Message::Reboot(system)));
             }
             Message::Reboot(system) => {
-                let client = cx.services.vehicle(system);
+                let client = cx.vehicle_client(system);
                 return self.commands.start(
                     (system, Command::Reboot),
                     async move { client.reboot().await },

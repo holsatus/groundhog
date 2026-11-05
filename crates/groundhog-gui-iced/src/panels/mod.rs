@@ -2,7 +2,8 @@
 //!
 //! A panel owns its view state and operator state (drafts, edits, running
 //! operations) and nothing else. Vehicle state reaches it as an immutable
-//! [`FleetSnapshot`]; operations go through [`FleetHandle`]. Everything a
+//! [`FleetSnapshot`]; operations go through a [`VehicleClient`] its
+//! [`Context`] hands out. Everything a
 //! panel wants the *application* to do — ask for confirmation, change the
 //! selected vehicle, move the map, remember a directory, persist what it
 //! holds, change a link — it requests through its [`Context`] as an
@@ -36,10 +37,10 @@ use std::{
 use iced::{Element, Task, theme::Palette};
 
 use groundhog_logic::{
-    SystemId,
+    MavlinkId, SystemId,
     domain::{fleet::FleetSnapshot, geo::GeoPosition},
     link::{LinkConfig, LinkId},
-    services::{FleetHandle, LinkManager},
+    services::{FleetHandle, LinkManager, VehicleClient},
 };
 
 use self::{confirm::Confirmation, notifications::Notifications};
@@ -170,7 +171,9 @@ impl<M> Effect<M> {
 pub struct Context<'a, M> {
     /// The fleet as last published.
     pub fleet: &'a FleetSnapshot,
-    pub services: &'a FleetHandle,
+    /// Where vehicle clients come from: only through
+    /// [`Context::vehicle_client`] and [`Context::component_client`].
+    handle: &'a FleetHandle,
     /// The links and their status. A change is asked with
     /// [`Effect::Link`].
     pub links: &'a LinkManager,
@@ -185,7 +188,7 @@ pub struct Context<'a, M> {
 impl<'a, M> Context<'a, M> {
     pub fn new(
         fleet: &'a FleetSnapshot,
-        services: &'a FleetHandle,
+        handle: &'a FleetHandle,
         links: &'a LinkManager,
         notices: &'a mut Notifications,
         directory: Option<&'a Path>,
@@ -193,13 +196,25 @@ impl<'a, M> Context<'a, M> {
     ) -> Self {
         Self {
             fleet,
-            services,
+            handle,
             links,
             notices,
             directory,
             settings,
             effects: Vec::new(),
         }
+    }
+
+    /// A client for the vehicle `system`, addressing its autopilot: to
+    /// command it and transfer what it holds.
+    pub fn vehicle_client(&self, system: SystemId) -> VehicleClient {
+        self.handle.vehicle(system)
+    }
+
+    /// A client for one component of a vehicle, for per-component
+    /// operations such as parameters.
+    pub fn component_client(&self, address: MavlinkId) -> VehicleClient {
+        self.handle.component(address)
     }
 
     pub fn request(&mut self, effect: Effect<M>) {

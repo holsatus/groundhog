@@ -155,7 +155,7 @@ impl Panel for ParameterPanel {
                     .insert(address.system_id(), address.component);
             }
             Message::Reload(address) => {
-                let client = cx.services.component(address);
+                let client = cx.component_client(address);
                 return self.reloads.start(
                     Download(address),
                     async move { client.fetch_parameters().await },
@@ -609,7 +609,7 @@ impl ParameterPanel {
             return Task::none();
         };
 
-        let client = cx.services.component(address);
+        let client = cx.component_client(address);
         let key = (address, ident.clone());
 
         let value = upload.value;

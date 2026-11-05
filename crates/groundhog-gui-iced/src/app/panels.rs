@@ -32,7 +32,7 @@ use crate::{
 /// effects its panels request.
 pub(super) struct PanelEnv<'a> {
     pub(super) fleet: &'a FleetSnapshot,
-    pub(super) services: &'a FleetHandle,
+    pub(super) handle: &'a FleetHandle,
     pub(super) links: &'a LinkManager,
     pub(super) notices: &'a mut Notifications,
     pub(super) directory: Option<&'a Path>,
@@ -51,7 +51,7 @@ impl PanelEnv<'_> {
     ) -> Task<PanelMessage> {
         let mut cx = Context::new(
             self.fleet,
-            self.services,
+            self.handle,
             self.links,
             &mut *self.notices,
             self.directory,

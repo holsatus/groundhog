@@ -359,7 +359,8 @@ changes.
 A panel's `update` gets a `panels::Context`, holding:
 
 - the snapshot;
-- the services, and the links to read (`&LinkManager`);
+- vehicle clients, from `cx.vehicle_client(system)` and
+  `cx.component_client(address)`, and the links to read (`&LinkManager`);
 - the notices;
 - settings and the file-dialog directory.
 
@@ -882,8 +883,8 @@ Render it before and after a change to the look, and compare.
    result changes what the vehicle holds, `report` it to the runtime.
 3. In the panel: add a request message, which may confirm first, and a
    `Finished(operations::Finished<Key, T>)` message. Name the operation in
-   the key's `Activity`, run it through `Operations`, and `settle` its
-   result.
+   the key's `Activity`, run it through `Operations` with a client from
+   `cx.vehicle_client`, and `settle` its result.
 4. Test the client end to end in `services/tests.rs`, and the panel's flow
    in its tests.
 

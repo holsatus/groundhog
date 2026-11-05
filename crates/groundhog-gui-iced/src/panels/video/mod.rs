@@ -516,7 +516,7 @@ impl VideoPanel {
         cx: &mut Context<Message>,
     ) -> Task<Message> {
         let (system, camera) = key;
-        let client = cx.services.vehicle(system);
+        let client = cx.vehicle_client(system);
         self.asked = Some((key, action));
         self.tracking.start_with(
             key,
