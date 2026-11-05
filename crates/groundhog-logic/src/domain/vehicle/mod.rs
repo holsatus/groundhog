@@ -628,10 +628,10 @@ impl Vehicle {
             }
             DefaultDialect::Attitude(message) if self.is_authoritative(component) => {
                 self.observe_boot_time(message.time_boot_ms);
-                self.attitude.observe_attitude(message);
+                self.attitude.observe_attitude(message, time);
             }
             DefaultDialect::AttitudeQuaternion(message) if self.is_authoritative(component) => {
-                self.attitude.observe_attitude_quaternion(message);
+                self.attitude.observe_attitude_quaternion(message, time);
             }
             DefaultDialect::GlobalPositionInt(message) if self.is_authoritative(component) => {
                 self.observe_boot_time(message.time_boot_ms);

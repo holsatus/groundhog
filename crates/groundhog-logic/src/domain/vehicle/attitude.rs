@@ -1,5 +1,7 @@
 //! Vehicle attitude.
 
+use std::time::Instant;
+
 use mavio::default_dialect::messages;
 use nalgebra::{Quaternion, UnitQuaternion};
 
@@ -17,16 +19,25 @@ pub struct AttitudeState {
 #[derive(Clone, Debug)]
 pub struct Attitude {
     attitude: UnitQuaternion<f32>,
+    /// When the report arrived.
+    pub at: Instant,
+    /// When the autopilot measured it, by its clock since boot: the spacing
+    /// of reports as taken, which their arrival blurs.
+    pub time_boot_ms: u32,
 }
 
 impl Attitude {
     /// `attitude`, if every component is finite.
-    fn new(attitude: UnitQuaternion<f32>) -> Option<Self> {
+    fn new(attitude: UnitQuaternion<f32>, at: Instant, time_boot_ms: u32) -> Option<Self> {
         attitude
             .coords
             .iter()
             .all(|component| component.is_finite())
-            .then_some(Self { attitude })
+            .then_some(Self {
+                attitude,
+                at,
+                time_boot_ms,
+            })
     }
 
     /// Roll, pitch and yaw in radians, in the aerospace 3-2-1 convention.
@@ -36,17 +47,21 @@ impl Attitude {
 }
 
 impl AttitudeState {
-    pub(crate) fn observe_attitude(&mut self, message: &messages::Attitude) {
+    pub(crate) fn observe_attitude(&mut self, message: &messages::Attitude, at: Instant) {
         // MAVLink ATTITUDE reports roll/pitch/yaw in radians in the NED frame using the
         // aerospace 3-2-1 (Z-Y-X) convention, matching `from_euler_angles`.
-        self.current = Attitude::new(UnitQuaternion::from_euler_angles(
-            message.roll,
-            message.pitch,
-            message.yaw,
-        ));
+        self.current = Attitude::new(
+            UnitQuaternion::from_euler_angles(message.roll, message.pitch, message.yaw),
+            at,
+            message.time_boot_ms,
+        );
     }
 
-    pub(crate) fn observe_attitude_quaternion(&mut self, message: &messages::AttitudeQuaternion) {
+    pub(crate) fn observe_attitude_quaternion(
+        &mut self,
+        message: &messages::AttitudeQuaternion,
+        at: Instant,
+    ) {
         // MAVLink ATTITUDE_QUATERNION order is (q1..q4) = (w, x, y, z) (Hamilton),
         // matching nalgebra's `Quaternion::new(w, i, j, k)`.
         let quaternion = Quaternion::new(message.q1, message.q2, message.q3, message.q4);
@@ -55,7 +70,13 @@ impl AttitudeState {
         // no direction to normalise to.
         let norm = quaternion.norm();
         self.current = (norm.is_finite() && norm > UNKNOWN_NORM)
-            .then(|| Attitude::new(UnitQuaternion::from_quaternion(quaternion)))
+            .then(|| {
+                Attitude::new(
+                    UnitQuaternion::from_quaternion(quaternion),
+                    at,
+                    message.time_boot_ms,
+                )
+            })
             .flatten();
     }
 }
@@ -80,7 +101,7 @@ mod tests {
         };
 
         let mut state = AttitudeState::default();
-        state.observe_attitude_quaternion(&message);
+        state.observe_attitude_quaternion(&message, Instant::now());
 
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
@@ -99,7 +120,7 @@ mod tests {
         };
 
         let mut state = AttitudeState::default();
-        state.observe_attitude_quaternion(&message);
+        state.observe_attitude_quaternion(&message, Instant::now());
 
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
@@ -117,12 +138,38 @@ mod tests {
         };
 
         let mut state = AttitudeState::default();
-        state.observe_attitude_quaternion(&message);
+        state.observe_attitude_quaternion(&message, Instant::now());
 
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
             (PI / 2.0, 0.0, 0.0),
         );
+    }
+
+    #[test]
+    fn an_attitude_keeps_when_it_was_measured_and_arrived() {
+        let at = Instant::now();
+        let mut state = AttitudeState::default();
+        state.observe_attitude(
+            &messages::Attitude {
+                time_boot_ms: 1234,
+                ..Default::default()
+            },
+            at,
+        );
+        let attitude = state.current.as_ref().expect("attitude recorded");
+        assert_eq!((attitude.at, attitude.time_boot_ms), (at, 1234));
+
+        state.observe_attitude_quaternion(
+            &messages::AttitudeQuaternion {
+                q1: 1.0,
+                time_boot_ms: 1250,
+                ..Default::default()
+            },
+            at,
+        );
+        let attitude = state.current.as_ref().expect("attitude recorded");
+        assert_eq!(attitude.time_boot_ms, 1250);
     }
 
     #[test]
@@ -133,7 +180,7 @@ mod tests {
         };
 
         let mut state = AttitudeState::default();
-        state.observe_attitude(&message);
+        state.observe_attitude(&message, Instant::now());
 
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
@@ -149,7 +196,7 @@ mod tests {
         };
 
         let mut state = AttitudeState::default();
-        state.observe_attitude(&message);
+        state.observe_attitude(&message, Instant::now());
 
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
@@ -177,19 +224,25 @@ mod tests {
                     ..Default::default()
                 },
             ] {
-                state.observe_attitude(&messages::Attitude {
-                    yaw: 1.0,
-                    ..Default::default()
-                });
-                state.observe_attitude(&message);
+                state.observe_attitude(
+                    &messages::Attitude {
+                        yaw: 1.0,
+                        ..Default::default()
+                    },
+                    Instant::now(),
+                );
+                state.observe_attitude(&message, Instant::now());
                 assert!(state.current.is_none(), "{message:?}");
             }
         }
 
-        state.observe_attitude(&messages::Attitude {
-            yaw: PI / 2.0,
-            ..Default::default()
-        });
+        state.observe_attitude(
+            &messages::Attitude {
+                yaw: PI / 2.0,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
         assert_angles(
             state.current.as_ref().expect("attitude recorded"),
             (0.0, 0.0, PI / 2.0),
@@ -200,15 +253,21 @@ mod tests {
     fn non_finite_quaternions_are_an_unknown_attitude() {
         let mut state = AttitudeState::default();
         for bad in [f32::NAN, f32::INFINITY] {
-            state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
-                q1: 1.0,
-                ..Default::default()
-            });
-            state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
-                q1: 1.0,
-                q4: bad,
-                ..Default::default()
-            });
+            state.observe_attitude_quaternion(
+                &messages::AttitudeQuaternion {
+                    q1: 1.0,
+                    ..Default::default()
+                },
+                Instant::now(),
+            );
+            state.observe_attitude_quaternion(
+                &messages::AttitudeQuaternion {
+                    q1: 1.0,
+                    q4: bad,
+                    ..Default::default()
+                },
+                Instant::now(),
+            );
             assert!(state.current.is_none(), "q4 = {bad}");
         }
     }
@@ -216,11 +275,14 @@ mod tests {
     #[test]
     fn an_all_zero_quaternion_is_an_unknown_attitude() {
         let mut state = AttitudeState::default();
-        state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
-            q1: 1.0,
-            ..Default::default()
-        });
-        state.observe_attitude_quaternion(&messages::AttitudeQuaternion::default());
+        state.observe_attitude_quaternion(
+            &messages::AttitudeQuaternion {
+                q1: 1.0,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        state.observe_attitude_quaternion(&messages::AttitudeQuaternion::default(), Instant::now());
 
         assert!(state.current.is_none(), "unknown, not NaN");
     }

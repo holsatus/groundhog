@@ -27,9 +27,15 @@ pub struct PositionTrack {
 
 #[derive(Clone, Debug)]
 pub struct GlobalPosition {
+    /// When the report arrived.
     pub at: Instant,
+    /// When the autopilot took the fix, by its clock since boot, where the
+    /// report says: the spacing of fixes as taken, which their arrival blurs.
+    pub time_boot_ms: Option<u32>,
     /// Altitude above home, metres.
     pub alt_agl: f32,
+    /// Altitude above mean sea level, metres.
+    pub alt_msl: f32,
     pub pos: GeoPosition,
 }
 
@@ -60,8 +66,10 @@ impl PositionTrack {
     ) {
         self.register(GlobalPosition {
             at: time,
+            time_boot_ms: Some(message.time_boot_ms),
             pos,
             alt_agl: message.relative_alt as f32 / 1000.0,
+            alt_msl: message.alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(
             message.vx as f32 / 100.,
@@ -78,10 +86,14 @@ impl PositionTrack {
         pos: GeoPosition,
         time: Instant,
     ) {
+        // Its `time_usec` may count from boot or from 1970, so it is not
+        // taken as either
         self.register(GlobalPosition {
             at: time,
+            time_boot_ms: None,
             pos,
             alt_agl: message.relative_alt as f32 / 1000.0,
+            alt_msl: message.alt as f32 / 1000.0,
         });
         self.velocity_ned = Some(Vector3::new(message.vx, message.vy, message.vz));
     }
@@ -170,9 +182,27 @@ mod tests {
     fn position(at: Instant, lat: f64, lon: f64) -> GlobalPosition {
         GlobalPosition {
             at,
+            time_boot_ms: None,
             alt_agl: 0.0,
+            alt_msl: 0.0,
             pos: GeoPosition::new(lat, lon),
         }
+    }
+
+    #[test]
+    fn a_fix_keeps_its_altitudes_and_when_it_was_taken() {
+        let mut track = PositionTrack::default();
+        let message = messages::GlobalPositionInt {
+            time_boot_ms: 5000,
+            alt: 123_456,
+            relative_alt: 23_456,
+            ..Default::default()
+        };
+        track.observe_global_position_int(&message, GeoPosition::new(1.0, 2.0), Instant::now());
+        let fix = track.current.as_ref().expect("a fix");
+        assert_eq!(fix.time_boot_ms, Some(5000));
+        assert_eq!(fix.alt_msl, 123.456);
+        assert_eq!(fix.alt_agl, 23.456);
     }
 
     #[test]

@@ -994,6 +994,34 @@ mod commands {
     }
 
     #[tokio::test]
+    async fn attitudes_are_asked_for_at_an_interval_and_back_at_the_default() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Ardupilotmega).await;
+        let client = harness.fleet.vehicle(SYSTEM);
+
+        let faster = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_attitude_interval(Some(Duration::from_millis(50)))
+                    .await
+            }
+        });
+        let command = expect_command(&mut harness, MavCmd::SetMessageInterval).await;
+        assert_eq!(command.param1, 30.0, "ATTITUDE");
+        assert_eq!(command.param2, 50_000.0, "every 50 ms");
+        accept(&mut harness, MavCmd::SetMessageInterval).await;
+        faster.await.unwrap().expect("accepted");
+
+        let default = tokio::spawn(async move { client.set_attitude_interval(None).await });
+        let command = expect_command(&mut harness, MavCmd::SetMessageInterval).await;
+        assert_eq!(command.param1, 30.0, "ATTITUDE");
+        assert_eq!(command.param2, 0.0, "the autopilot's default rate");
+        accept(&mut harness, MavCmd::SetMessageInterval).await;
+        default.await.unwrap().expect("accepted");
+    }
+
+    #[tokio::test]
     async fn an_ardupilot_mode_sends_its_custom_mode() {
         let mut harness = harness();
         register(&mut harness, MavAutopilot::Ardupilotmega).await;

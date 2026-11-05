@@ -16,7 +16,9 @@ use std::{
 use mav_param::{Ident, Value};
 use mavio::default_dialect::{
     enums::{MavMissionType, MavResult},
-    messages::{AutopilotVersion, CameraInformation, CameraTrackingImageStatus, HomePosition},
+    messages::{
+        Attitude, AutopilotVersion, CameraInformation, CameraTrackingImageStatus, HomePosition,
+    },
 };
 
 use super::{Error, FleetHandle, Result, runtime::Input};
@@ -630,11 +632,28 @@ impl VehicleClient {
     async fn request_tracking_reports(&self, camera: CameraId) {
         let command = commands::set_message_interval(
             CameraTrackingImageStatus::message_id(),
-            TRACKING_REPORT_INTERVAL,
+            Some(TRACKING_REPORT_INTERVAL),
         );
         if let Err(error) = self.run_on_camera(camera, command).await {
             log::info!("{camera:?} will not report its tracking: {error}");
         }
+    }
+
+    /// Ask the autopilot to send its attitude (`ATTITUDE`) every
+    /// `interval`, or, with `None`, at its default rate again. The rate
+    /// holds until the autopilot reboots.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
+    /// [`Error::Rejected`] if it refuses (an autopilot that cannot set
+    /// rates per message), or [`Error::Timeout`] / [`Error::NoLink`].
+    pub async fn set_attitude_interval(&self, interval: Option<Duration>) -> Result<()> {
+        self.run(commands::set_message_interval(
+            Attitude::message_id(),
+            interval,
+        ))
+        .await
     }
 
     /// Start executing the stored mission.

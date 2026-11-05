@@ -23,12 +23,16 @@ pub(crate) fn request_message_id(message_id: u32) -> Command {
 }
 
 /// `MAV_CMD_SET_MESSAGE_INTERVAL`: send the message with the given id every
-/// `interval`.
-pub(crate) fn set_message_interval(message_id: u32, interval: std::time::Duration) -> Command {
+/// `interval`, or at the autopilot's default rate.
+pub(crate) fn set_message_interval(
+    message_id: u32,
+    interval: Option<std::time::Duration>,
+) -> Command {
     CommandLong {
         command: MavCmd::SetMessageInterval,
         param1: message_id as f32,
-        param2: interval.as_micros() as f32,
+        // Zero is the protocol's word for the default rate
+        param2: interval.map_or(0.0, |interval| interval.as_micros() as f32),
         ..Default::default()
     }
     .into()

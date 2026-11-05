@@ -5,9 +5,12 @@
 //! [`View`], as `f32` can not represent positions on the earth to better than about a meter.
 //!
 //! It renders into an image rather than a window (see [`crate::output`]), and moves only by
-//! the [`Gesture`]s the frontend sends: it has no input devices of its own. What it looks at is
-//! published back as an [`Overhead`], the same terms a frontend places it in, so a flat map
-//! and the globe can hand a view back and forth.
+//! what the frontend sends: [`Gesture`]s, or the samples of a pose it rides along with
+//! ([`crate::ride`]). It has no input devices of its own. What it looks at is published back
+//! as an [`Overhead`], the same terms a frontend places it in, so a flat map and the globe can
+//! hand a view back and forth.
+
+use std::time::Instant;
 
 use bevy::{
     camera::Hdr,
@@ -16,12 +19,19 @@ use bevy::{
 };
 use tokio::sync::watch;
 
-use crate::{geo, tiles::Tiles};
+use crate::{
+    geo,
+    ride::{Fix, Orientation, Ride},
+    tiles::Tiles,
+};
 
 /// How much closer to the ground one step of zoom takes the camera.
 const ZOOM_STEP: f64 = 0.2;
 /// Closest the camera may get to the terrain.
 const MIN_CLEARANCE: f64 = 2.0;
+/// Closest a ridden camera may get to the terrain: the vehicle carrying it may sit on the
+/// ground, which the terrain only roughly follows.
+const RIDING_CLEARANCE: f64 = 0.5;
 const MAX_HEIGHT: f64 = 40_000_000.0;
 /// The detail of the elevation the camera keeps clear of and measures the ground with.
 const GROUND_ZOOM: u8 = 15;
@@ -99,21 +109,19 @@ pub enum Gesture {
     Look { dx: f64, dy: f64 },
     /// Move towards what the camera looks at, by steps (negative steps move away).
     Zoom { steps: f64 },
-    /// Jump to a placement.
+    /// Jump to a placement, ending a ride.
     Go(Placement),
 }
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(View::new(StartView::default()))
-            .insert_resource(Gestures(vec![Gesture::Go(self.start)]))
-            .insert_resource(Pinned(None))
+        let mut view = View::new(StartView::default());
+        view.apply(Gesture::Go(self.start));
+        app.insert_resource(view)
             .insert_resource(Focus(self.focus.clone()))
             .add_systems(
                 Update,
-                (apply_gestures, publish_focus)
-                    .chain()
-                    .in_set(CameraSystems),
+                (move_camera, publish_focus).chain().in_set(CameraSystems),
             )
             .add_systems(PostUpdate, sync_camera.before(TransformSystems::Propagate));
     }
@@ -126,13 +134,16 @@ pub(crate) struct CameraSystems;
 #[derive(Component)]
 pub(crate) struct MainCamera;
 
-/// The gestures received since the last frame, in order.
-#[derive(Resource, Default)]
-pub(crate) struct Gestures(pub Vec<Gesture>);
-
-/// The overhead placement the camera keeps until it is moved.
-#[derive(Resource)]
-struct Pinned(Option<Overhead>);
+/// What moves the camera besides gestures.
+#[derive(Debug)]
+enum Mode {
+    /// Only gestures.
+    Free,
+    /// Kept overhead, above the ground as its elevation streams in, until a gesture moves it.
+    Pinned(Overhead),
+    /// Carried along with a ride; gestures do not move it.
+    Riding(Box<Ride>),
+}
 
 /// Where what the camera looks at is published.
 #[derive(Resource)]
@@ -149,6 +160,12 @@ pub(crate) struct View {
     pub viewport_height: f64,
     /// Height of the terrain below the camera.
     pub ground: f64,
+    mode: Mode,
+    /// The camera's up while it rides, rolled with what carries it. Otherwise it is away from
+    /// the earth, and the horizon level.
+    rolled_up: Option<DVec3>,
+    /// Where the camera was last settled, to keep it level from there as it moves.
+    settled: DVec3,
 }
 
 impl View {
@@ -160,6 +177,9 @@ impl View {
             aspect: 16.0 / 9.0,
             viewport_height: 1080.0,
             ground: 0.0,
+            mode: Mode::Free,
+            rolled_up: None,
+            settled: DVec3::X,
         };
         view.go(start);
         view
@@ -173,6 +193,7 @@ impl View {
         let horizontal = north * heading.cos() + east * heading.sin();
         self.position = position;
         self.forward = (horizontal * pitch.cos() + up * pitch.sin()).normalize();
+        self.settled = position;
     }
 
     /// Look down at `overhead`, its point raised to the ground's height there.
@@ -185,6 +206,7 @@ impl View {
         let distance = overhead.span_m / (2.0 * (self.fov / 2.0).tan());
         self.position = target - forward * distance;
         self.forward = forward;
+        self.settled = self.position;
     }
 
     /// What the centre of the picture shows, and the ground the picture spans there. Looking
@@ -213,8 +235,43 @@ impl View {
         self.position.normalize()
     }
 
+    /// The camera's right, rolled while it rides, as the picture is: the terrain is chosen
+    /// for the view this spans.
     pub(crate) fn right(&self) -> DVec3 {
-        self.forward.cross(self.up()).normalize()
+        self.forward.cross(self.camera_up()).normalize()
+    }
+
+    /// The camera's up: rolled while it rides.
+    fn camera_up(&self) -> DVec3 {
+        self.rolled_up.unwrap_or_else(|| self.up())
+    }
+
+    /// Ride along with the samples sent from here on, starting over if already riding.
+    pub(crate) fn ride(&mut self, now: Instant) {
+        self.mode = Mode::Riding(Box::new(Ride::new(now)));
+    }
+
+    /// Stop riding, the camera free where the ride left it, level again.
+    pub(crate) fn release(&mut self) {
+        if matches!(self.mode, Mode::Riding(_)) {
+            self.mode = Mode::Free;
+            self.rolled_up = None;
+            self.settled = self.position;
+        }
+    }
+
+    /// Take a fix for the ride, which reached it at `now`.
+    pub(crate) fn fix(&mut self, fix: Fix, now: Instant) {
+        if let Mode::Riding(ride) = &mut self.mode {
+            ride.fix(fix, now);
+        }
+    }
+
+    /// Take an orientation for the ride, which reached it at `now`.
+    pub(crate) fn orientation(&mut self, orientation: Orientation, now: Instant) {
+        if let Mode::Riding(ride) = &mut self.mode {
+            ride.orientation(orientation, now);
+        }
     }
 
     pub(crate) fn height_above_ground(&self) -> f64 {
@@ -226,9 +283,25 @@ impl View {
         self.height_above_ground().max(MIN_CLEARANCE) * 2.0 * (self.fov / 2.0).tan()
     }
 
-    /// Move by a gesture. An overhead placement is made by [`apply_gestures`], which has the
+    /// Move by a gesture. An overhead placement is kept by [`move_camera`], which has the
     /// ground to place it on.
-    fn apply(&mut self, gesture: Gesture) {
+    pub(crate) fn apply(&mut self, gesture: Gesture) {
+        if let Gesture::Go(placement) = gesture {
+            self.rolled_up = None;
+            self.mode = match placement {
+                Placement::View(start) => {
+                    self.go(start);
+                    Mode::Free
+                }
+                Placement::Overhead(overhead) => Mode::Pinned(overhead),
+            };
+            return;
+        }
+        if matches!(self.mode, Mode::Riding(_)) {
+            return;
+        }
+        // The operator takes over from a placement
+        self.mode = Mode::Free;
         let up = self.up();
         match gesture {
             Gesture::Pan { dx, dy } => {
@@ -252,25 +325,50 @@ impl View {
                 let factor = (1.0 - ZOOM_STEP).powf(steps);
                 self.position += self.forward * reach * (1.0 - factor);
             }
-            Gesture::Go(Placement::View(start)) => self.go(start),
-            Gesture::Go(Placement::Overhead(_)) => {}
+            Gesture::Go(_) => {}
         }
     }
 
-    /// Keep the camera above the terrain, within sight of the earth, and level with the
-    /// horizon as it moves around the globe.
-    fn settle(&mut self, ground: impl Fn(DVec2) -> f64, before: DVec3) {
+    /// Move as the mode has it at `now`, and keep the camera above the terrain and within
+    /// sight of the earth. Unless it rides, also level with the horizon as it moves around
+    /// the globe: a ridden camera keeps the attitude of what carries it.
+    fn advance(&mut self, now: Instant, ground: impl Fn(DVec2) -> f64) {
+        let (pinned, ridden) = match &mut self.mode {
+            Mode::Free => (None, None),
+            Mode::Pinned(overhead) => (Some(*overhead), None),
+            Mode::Riding(ride) => (None, Some(ride.pose(now))),
+        };
+        // Placed anew each frame, as the elevation beneath may have come in
+        if let Some(overhead) = pinned {
+            self.place(overhead, &ground);
+        }
+        // Until the ride's first fix, the camera waits where it is
+        if let Some(pose) = ridden.flatten() {
+            self.position = pose.position;
+            self.forward = pose.forward;
+            self.rolled_up = Some(pose.up);
+            self.settled = pose.position;
+        }
+        let clearance = match self.mode {
+            Mode::Riding(_) => RIDING_CLEARANCE,
+            Mode::Free | Mode::Pinned(_) => MIN_CLEARANCE,
+        };
+
         let (lon_lat, _) = geo::from_ecef(self.position);
         self.ground = ground(lon_lat);
-        let min = geo::EARTH_RADIUS + self.ground + MIN_CLEARANCE;
+        let min = geo::EARTH_RADIUS + self.ground + clearance;
         self.position = self.position.normalize()
             * self
                 .position
                 .length()
                 .clamp(min, geo::EARTH_RADIUS + MAX_HEIGHT);
-        self.forward = (DQuat::from_rotation_arc(before.normalize(), self.position.normalize())
-            * self.forward)
-            .normalize();
+        if self.rolled_up.is_none() {
+            self.forward =
+                (DQuat::from_rotation_arc(self.settled.normalize(), self.position.normalize())
+                    * self.forward)
+                    .normalize();
+        }
+        self.settled = self.position;
     }
 }
 
@@ -292,29 +390,8 @@ fn ground_of(tiles: &Tiles) -> impl Fn(DVec2) -> f64 + '_ {
     |lon_lat| f64::from(tiles.height_at(lon_lat, GROUND_ZOOM).unwrap_or(0.0))
 }
 
-fn apply_gestures(
-    mut gestures: ResMut<Gestures>,
-    mut pinned: ResMut<Pinned>,
-    tiles: Res<Tiles>,
-    mut view: ResMut<View>,
-) {
-    let before = view.position;
-    for gesture in gestures.0.drain(..) {
-        pinned.0 = match gesture {
-            Gesture::Go(Placement::Overhead(overhead)) => Some(overhead),
-            _ => None,
-        };
-        view.apply(gesture);
-    }
-    // Placed anew each frame, as the elevation beneath may have come in
-    let before = match pinned.0 {
-        Some(overhead) => {
-            view.place(overhead, ground_of(&tiles));
-            view.position
-        }
-        None => before,
-    };
-    view.settle(ground_of(&tiles), before);
+fn move_camera(tiles: Res<Tiles>, mut view: ResMut<View>) {
+    view.advance(Instant::now(), ground_of(&tiles));
 }
 
 fn publish_focus(view: Res<View>, tiles: Res<Tiles>, focus: Res<Focus>) {
@@ -342,7 +419,8 @@ fn sync_camera(
     camera: Single<(&mut Transform, &mut Projection, &Camera), With<MainCamera>>,
 ) {
     let (mut transform, mut projection, camera) = camera.into_inner();
-    *transform = Transform::default().looking_to(view.forward.as_vec3(), view.up().as_vec3());
+    *transform =
+        Transform::default().looking_to(view.forward.as_vec3(), view.camera_up().as_vec3());
 
     if let Projection::Perspective(perspective) = projection.as_mut() {
         // The depth buffer is reversed and has no far plane, so precision is plentiful
@@ -455,6 +533,99 @@ mod tests {
         );
         let expected = 2.0 * 1000.0 * (view.fov / 2.0).tan();
         assert!((focus.span_m - expected).abs() < 1e-6, "{focus:?}");
+    }
+
+    fn fix_at(now: Instant) -> Fix {
+        Fix {
+            taken_s: None,
+            received: now,
+            lat: 55.0,
+            lon: 10.0,
+            alt_msl_m: 150.0,
+            velocity_ned: None,
+        }
+    }
+
+    #[test]
+    fn a_ridden_camera_goes_where_the_ride_does_and_rolls_with_it() {
+        let now = Instant::now();
+        let mut view = view();
+        view.ride(now);
+        view.fix(fix_at(now), now);
+        view.orientation(
+            Orientation {
+                taken_s: None,
+                received: now,
+                roll: 20f64.to_radians(),
+                pitch: 0.0,
+                yaw: 0.0,
+            },
+            now,
+        );
+        view.advance(now + std::time::Duration::from_millis(50), flat);
+
+        let (lon_lat, height) = geo::from_ecef(view.position);
+        assert!((lon_lat.y.to_degrees() - 55.0).abs() < 1e-9);
+        assert!((height - 150.0).abs() < 1e-6, "{height}");
+        let (_, north, _) = geo::enu(view.position);
+        assert!(view.forward.dot(north) > 0.999);
+        let roll = view.camera_up().dot(view.up()).acos().to_degrees();
+        assert!((roll - 20.0).abs() < 1e-6, "{roll}");
+
+        // The terrain is chosen for the picture drawn, rolled as it is, or the tiles in its
+        // lower corners would be culled in a bank
+        let drawn_right = view.forward.cross(view.camera_up()).normalize();
+        assert!(
+            view.right().distance(drawn_right) < 1e-9,
+            "{}",
+            view.right()
+        );
+    }
+
+    #[test]
+    fn gestures_do_not_move_a_ridden_camera_but_a_placement_ends_the_ride() {
+        let now = Instant::now();
+        let mut view = view();
+        view.ride(now);
+        view.fix(fix_at(now), now);
+        view.advance(now, flat);
+        let riding = view.position;
+
+        view.apply(Gesture::Pan { dx: 0.5, dy: 0.5 });
+        view.apply(Gesture::Zoom { steps: 3.0 });
+        assert_eq!(view.position, riding);
+
+        view.apply(Gesture::Go(Placement::Overhead(Overhead {
+            lat: 0.0,
+            lon: 0.0,
+            span_m: 1000.0,
+        })));
+        view.fix(fix_at(now), now);
+        view.advance(now, flat);
+        assert_close(
+            view.focus(flat),
+            Overhead {
+                lat: 0.0,
+                lon: 0.0,
+                span_m: 1000.0,
+            },
+        );
+        assert!(view.rolled_up.is_none(), "level again");
+    }
+
+    #[test]
+    fn a_released_ride_leaves_the_camera_where_it_was() {
+        let now = Instant::now();
+        let mut view = view();
+        view.ride(now);
+        view.fix(fix_at(now), now);
+        view.advance(now, flat);
+        let riding = view.position;
+        view.release();
+        view.advance(now, flat);
+        assert!((view.position - riding).length() < 1e-6);
+        view.apply(Gesture::Pan { dx: 0.5, dy: 0.0 });
+        assert!((view.position - riding).length() > 1.0, "free to move");
     }
 
     #[test]

@@ -22,6 +22,7 @@ mod material;
 mod mesh;
 mod output;
 mod post;
+mod ride;
 mod scattering;
 mod sources;
 mod terrain;
@@ -46,6 +47,7 @@ use tokio::sync::watch;
 
 pub use camera::{Gesture, Overhead, Placement, StartView};
 pub use output::Frame;
+pub use ride::{Fix, Orientation};
 
 /// The imagery draped over the terrain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -165,6 +167,29 @@ impl Controls {
         self.send(Command::Imagery(imagery));
     }
 
+    /// Ride along with the [`fix`](Self::fix)es and [`orientation`](Self::orientation)s sent
+    /// from here on: the camera is carried as they say, looking along the way they point, and
+    /// gestures do not move it. Starts the ride over if one is under way; a placement or
+    /// [`release`](Self::release) ends it.
+    pub fn ride(&self) {
+        self.send(Command::Ride);
+    }
+
+    /// Stop riding, the camera free where the ride left it.
+    pub fn release(&self) {
+        self.send(Command::Release);
+    }
+
+    /// Where the ridden pose was. Ignored while not riding.
+    pub fn fix(&self, fix: Fix) {
+        self.send(Command::Fix(fix));
+    }
+
+    /// Which way the ridden pose pointed. Ignored while not riding.
+    pub fn orientation(&self, orientation: Orientation) {
+        self.send(Command::Orientation(orientation));
+    }
+
     /// Render a frame, with every command sent before it. Requests that pile up while a frame
     /// renders are taken as one. The frame arrives a frame or two of requests later, once it
     /// is read back from the GPU.
@@ -183,6 +208,10 @@ enum Command {
     Resize { width: u32, height: u32 },
     Gesture(Gesture),
     Imagery(Imagery),
+    Ride,
+    Release,
+    Fix(Fix),
+    Orientation(Orientation),
     Frame,
 }
 
@@ -261,7 +290,18 @@ fn apply(world: &mut World, command: Command) -> bool {
         Command::Resize { width, height } => world
             .resource_mut::<output::Target>()
             .request(width, height),
-        Command::Gesture(gesture) => world.resource_mut::<camera::Gestures>().0.push(gesture),
+        Command::Gesture(gesture) => world.resource_mut::<camera::View>().apply(gesture),
+        Command::Ride => world
+            .resource_mut::<camera::View>()
+            .ride(std::time::Instant::now()),
+        Command::Release => world.resource_mut::<camera::View>().release(),
+        // Received now, which is how late it reaches the ride
+        Command::Fix(fix) => world
+            .resource_mut::<camera::View>()
+            .fix(fix, std::time::Instant::now()),
+        Command::Orientation(orientation) => world
+            .resource_mut::<camera::View>()
+            .orientation(orientation, std::time::Instant::now()),
         Command::Imagery(imagery) => {
             let mut settings = world.resource_mut::<terrain::TerrainSettings>();
             if settings.imagery != imagery.source() {

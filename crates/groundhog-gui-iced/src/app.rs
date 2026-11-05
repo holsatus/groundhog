@@ -84,11 +84,15 @@ pub struct Application {
     window: Option<Size>,
     /// The 3D globe, while it shows in the map pane's place.
     #[cfg(not(target_os = "android"))]
-    globe: Option<groundhog_globe::Globe>,
+    globe: Option<globe::Shown>,
     /// The map pane's size, once measured: it joins the map's scale and the
     /// globe's.
     #[cfg(not(target_os = "android"))]
     map_size: Option<Size>,
+    /// The vehicle ridden along with on the globe, asked to send its
+    /// attitude faster.
+    #[cfg(not(target_os = "android"))]
+    attitude_rate: globe::AttitudeRate,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +139,9 @@ pub enum Message {
     /// Show the 3D globe in the map pane's place, or the map again.
     #[cfg(not(target_os = "android"))]
     ToggleGlobe,
+    /// Ride along with the selected vehicle on the globe, or stop.
+    #[cfg(not(target_os = "android"))]
+    ToggleRide,
     /// The map pane was laid out at this size.
     #[cfg(not(target_os = "android"))]
     MapResized(Size),
@@ -237,6 +244,8 @@ impl Application {
             globe: None,
             #[cfg(not(target_os = "android"))]
             map_size: None,
+            #[cfg(not(target_os = "android"))]
+            attitude_rate: globe::AttitudeRate::default(),
         };
 
         if application.configuration.settings.record_telemetry {
@@ -311,6 +320,13 @@ impl Application {
             #[cfg(not(target_os = "android"))]
             Message::ToggleGlobe => {
                 self.toggle_globe();
+                self.sync_attitude_rate();
+                Task::none()
+            }
+            #[cfg(not(target_os = "android"))]
+            Message::ToggleRide => {
+                self.toggle_ride();
+                self.sync_attitude_rate();
                 Task::none()
             }
             #[cfg(not(target_os = "android"))]
@@ -578,6 +594,11 @@ impl Application {
         let task = self.with_panels(|panels, env| panels.on_fleet(env));
 
         self.follow_selected();
+        #[cfg(not(target_os = "android"))]
+        {
+            self.feed_globe();
+            self.sync_attitude_rate();
+        }
         task
     }
 
@@ -637,6 +658,8 @@ impl Application {
             .detail("Download it to see the vehicle's current mission.")
             .vehicle(system),
             FleetEvent::Rebooted(system) => {
+                #[cfg(not(target_os = "android"))]
+                self.attitude_rate.rebooted(system);
                 Notice::warning(format!("{} rebooted", name(system))).vehicle(system)
             }
             FleetEvent::CalibrationFinished(system, kind, outcome) => {

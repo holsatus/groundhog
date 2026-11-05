@@ -159,7 +159,7 @@ are shared by all.
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
 | gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, `globe`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame`; finding `.local` cameras through Avahi | GStreamer, `tokio::sync`, `zbus` on Linux | know about vehicles or the frontend |
-| globe | `Globe` (a Bevy app on its own thread, stopped by dropping it), `Controls` (size, `Gesture`s, a `Placement` among them, and a request per frame in, so the frontend's display paces it), `Frame` (RGBA out), `Overhead` (where it looks and at what scale, out, so a map can take over); the tile cache it is given | `bevy` without a window, `tokio`, `reqwest` | know about vehicles or the frontend; share a GPU device with the frontend |
+| globe | `Globe` (a Bevy app on its own thread, stopped by dropping it), `Controls` (size, `Gesture`s, a `Placement` among them, a ride's `Fix`es and `Orientation`s, which it smooths, and a request per frame in, so the frontend's display paces it), `Frame` (RGBA out), `Overhead` (where it looks and at what scale, out, so a map can take over); the tile cache it is given | `bevy` without a window, `tokio`, `reqwest` | know about vehicles or the frontend; share a GPU device with the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and
@@ -1155,7 +1155,9 @@ written by a newer build, saves nothing.
   assume a message arrives because the dialect has it. The exceptions ask
   for what the operator just started: a camera that begins tracking is
   asked for `CAMERA_TRACKING_IMAGE_STATUS`, which it sends only at a rate
-  it is given.
+  it is given, and a vehicle ridden along with on the globe is asked for
+  `ATTITUDE` every 50 ms, and for its default rate again when the ride
+  ends.
 - **Never resend calibration commands.** Firmwares do not deduplicate them: a
   resent start restarts or repeats the calibration, and a resent ArduPilot
   orientation confirmation is refused once measuring has begun.
