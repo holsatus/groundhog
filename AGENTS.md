@@ -144,7 +144,7 @@ are shared by all.
 | logic `domain/` | Vehicle state and its folding, positions (`geo`), missions, parameters, firmware adapters, calibration protocols; the operator models that are compared with vehicle state (`MissionDraft`, `ParamEdits`) | `wire`, `mavio` types as vocabulary | do I/O, spawn tasks, call the middleware |
 | logic `storage/` | File formats (WPL missions; INI/`.param`/`.params` parameters) | `domain` | touch the filesystem (callers do) |
 | logic `persist.rs` | Writing a frontend's own files: atomic replacement, setting unparseable files aside, ordered saves (`SaveQueue`) | `tokio` | know what is stored, or its format |
-| logic `services/` | `Backend`, fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `TransferProgress` and `LinkStats`, is fine |
+| logic `services/` | `Backend`, fleet runtime, `FleetHandle`, `VehicleClient`, `LinkManager`, tlog recording | `mavlink`, `domain`, `link` | expose middleware machinery (router, frames, transactions) in its API. Plain data it re-exports, like `Progress` and `LinkStats`, is fine |
 | gui `map/` | The map engine: layers, projection, pointer state machine, caching | iced, `slippery`, `domain::geo` | know about vehicles or missions |
 | gui `panels/` | One module per panel, and their shared toolkit (`Context`, `Effect`, `Operations`, confirmations, notices) | `services`, `domain`, `map`, `storage`, `ui` | each other's state; style raw iced widgets |
 | gui `ui/` | The toolkit over iced: design tokens, `Tone`s, every style function, the icon set, and the constructors views build widgets with | iced | know about panels or the domain |
@@ -778,8 +778,10 @@ rather than copying it.
 
 Run every vehicle operation through `panels::operations::Operations`, keyed
 by what it is about. That gives busy state, cancellation (dropping the task
-cancels the transaction), progress reporting, stale-result filtering, and
-the failure notice.
+cancels the transaction), stale-result filtering, and the failure notice.
+Progress is not the operation's to report: transfers that change what a
+vehicle holds report theirs to the fleet, and every reader sees it in the
+snapshot (`Vehicle::mission.transfer`, a component's `ParamDownload`).
 
 - The key type implements `Activity`: what a run does ("Arming", "Setting
   RATE_P") and which vehicle it concerns, so every failure reads "{activity}

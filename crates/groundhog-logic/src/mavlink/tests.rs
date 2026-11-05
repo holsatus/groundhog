@@ -1132,7 +1132,11 @@ async fn mission_clear_reports_nack() {
 
     let task = tokio::spawn({
         let router = router.clone();
-        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+        async move {
+            router
+                .mission_clear(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
     });
 
     let DefaultDialect::MissionClearAll(_) = vehicle.recv().await else {
@@ -1304,8 +1308,10 @@ async fn download_reports_progress_per_item() {
         let seen = seen.clone();
         async move {
             router
-                .mission_download(VEHICLE, MavMissionType::Mission, &move |progress| {
-                    seen.lock().unwrap().push((progress.done, progress.total))
+                .mission_download(VEHICLE, MavMissionType::Mission, &move |report| {
+                    if let TransferReport::Progress(progress) = report {
+                        seen.lock().unwrap().push((progress.done, progress.total))
+                    }
                 })
                 .await
         }
@@ -1335,7 +1341,11 @@ async fn mission_clear_succeeds_on_an_accepted_ack() {
 
     let task = tokio::spawn({
         let router = router.clone();
-        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+        async move {
+            router
+                .mission_clear(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
     });
 
     let DefaultDialect::MissionClearAll(clear) = vehicle.recv().await else {
@@ -1361,7 +1371,11 @@ async fn mission_clear_resends_until_acknowledged() {
 
     let task = tokio::spawn({
         let router = router.clone();
-        async move { router.mission_clear(VEHICLE, MavMissionType::Mission).await }
+        async move {
+            router
+                .mission_clear(VEHICLE, MavMissionType::Mission, &|_| {})
+                .await
+        }
     });
 
     for _ in 0..2 {
@@ -1564,8 +1578,10 @@ async fn mission_upload_reports_progress_per_served_item() {
         let seen = seen.clone();
         async move {
             router
-                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &move |progress| {
-                    seen.lock().unwrap().push((progress.done, progress.total))
+                .mission_upload(VEHICLE, MavMissionType::Mission, &items, &move |report| {
+                    if let TransferReport::Progress(progress) = report {
+                        seen.lock().unwrap().push((progress.done, progress.total))
+                    }
                 })
                 .await
         }

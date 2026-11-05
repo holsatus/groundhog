@@ -256,7 +256,7 @@ async fn uploads_to_ardupilot_fill_the_home_slot() {
     });
     let client = harness.fleet.vehicle(SYSTEM);
     let items = vec![waypoint.clone()];
-    let upload = tokio::spawn(async move { client.upload_mission(items, &|_| {}).await });
+    let upload = tokio::spawn(async move { client.upload_mission(items).await });
 
     let DefaultDialect::MissionCount(count) = harness.vehicle.recv().await else {
         panic!("expected MISSION_COUNT")
@@ -332,7 +332,7 @@ async fn uploading_an_empty_plan_sends_a_count_of_zero() {
     register(&mut harness, MavAutopilot::Ardupilotmega).await;
 
     let client = harness.fleet.vehicle(SYSTEM);
-    let upload = tokio::spawn(async move { client.upload_mission(Vec::new(), &|_| {}).await });
+    let upload = tokio::spawn(async move { client.upload_mission(Vec::new()).await });
 
     let DefaultDialect::MissionCount(count) = harness.vehicle.recv().await else {
         panic!("expected MISSION_COUNT")
@@ -360,7 +360,7 @@ async fn downloads_from_ardupilot_set_the_home_slot_apart() {
     register(&mut harness, MavAutopilot::Ardupilotmega).await;
 
     let client = harness.fleet.vehicle(SYSTEM);
-    let download = tokio::spawn(async move { client.download_mission(&|_| {}).await });
+    let download = tokio::spawn(async move { client.download_mission().await });
 
     let DefaultDialect::MissionRequestList(_) = harness.vehicle.recv().await else {
         panic!("expected MISSION_REQUEST_LIST")
@@ -723,7 +723,7 @@ async fn operations_on_unknown_vehicles_fail_cleanly() {
 
     assert_eq!(client.arm(true).await, Err(Error::UnknownVehicle));
     assert!(matches!(
-        client.download_mission(&|_| {}).await,
+        client.download_mission().await,
         Err(Error::UnknownVehicle)
     ));
 }
@@ -1828,5 +1828,213 @@ mod calibration {
 
         harness.fleet.vehicle(SYSTEM).dismiss_calibration();
         until(&mut harness.updates, |fleet| session(fleet).is_none()).await;
+    }
+}
+
+mod mission_transfers {
+    use mavio::default_dialect::messages::{MissionClearAll, MissionCurrent};
+
+    use super::*;
+
+    const ROUNDS: u32 = 20;
+
+    /// The vehicle's mission as the published snapshot holds it.
+    fn onboard_id(fleet: &FleetSnapshot) -> Option<u32> {
+        Some(fleet.vehicle(SYSTEM)?.mission.onboard.as_ref()?.opaque_id)
+    }
+
+    fn reported_id(fleet: &FleetSnapshot) -> Option<u32> {
+        fleet.vehicle(SYSTEM)?.mission.progress.mission_id
+    }
+
+    impl MockVehicle {
+        /// What PX4 broadcasts about the mission it holds.
+        async fn mission_current(&mut self, mission_id: u32, total: u16) {
+            self.send(&MissionCurrent {
+                total,
+                mission_id,
+                ..Default::default()
+            })
+            .await;
+        }
+
+        /// Serve a one-item upload and accept it as `mission_id`, then at once
+        /// announce that id, as PX4 does right after its ACK.
+        async fn accept_upload(&mut self, mission_id: u32) {
+            let DefaultDialect::MissionCount(count) = self.recv().await else {
+                panic!("expected MISSION_COUNT")
+            };
+            assert_eq!(count.count, 1);
+            self.send(&MissionRequestInt {
+                seq: 0,
+                mission_type: MavMissionType::Mission,
+                target_system: DEFAULT_GCS_ID.system,
+                target_component: DEFAULT_GCS_ID.component,
+            })
+            .await;
+            let DefaultDialect::MissionItemInt(_) = self.recv().await else {
+                panic!("expected MISSION_ITEM_INT")
+            };
+            self.send(&MissionAck {
+                type_: MavMissionResult::MavMissionAccepted,
+                mission_type: MavMissionType::Mission,
+                opaque_id: mission_id,
+                ..Default::default()
+            })
+            .await;
+            self.mission_current(mission_id, 1).await;
+        }
+    }
+
+    fn waypoint() -> Vec<MissionItem> {
+        vec![MissionItem::waypoint(Position {
+            lat: 47.2,
+            lon: 8.2,
+            alt_m: 60.0,
+        })]
+    }
+
+    /// Collect the events published until `done` holds.
+    async fn events_until(
+        updates: &mut FleetUpdates,
+        done: impl Fn(&FleetSnapshot) -> bool,
+    ) -> Vec<FleetEvent> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut events = Vec::new();
+        loop {
+            let update = tokio::time::timeout_at(deadline, updates.next())
+                .await
+                .expect("the condition is reached in time")
+                .expect("the runtime runs");
+            events.extend(update.events);
+            if done(&update.snapshot) {
+                return events;
+            }
+        }
+    }
+
+    fn stale(events: &[FleetEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, FleetEvent::OnboardMissionStale(SYSTEM)))
+    }
+
+    /// PX4 announces an upload's new mission id right after its ACK, and the
+    /// two travel on different channels: the id must not be taken for
+    /// another GCS's change, however they are ordered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn our_own_upload_is_not_announced_as_changed_elsewhere() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Px4).await;
+
+        for round in 0..ROUNDS {
+            let mission_id = 100 + round;
+            let client = harness.fleet.vehicle(SYSTEM);
+            let upload = tokio::spawn(async move { client.upload_mission(waypoint()).await });
+            harness.vehicle.accept_upload(mission_id).await;
+            upload.await.unwrap().expect("the upload succeeds");
+
+            let events = events_until(&mut harness.updates, |fleet| {
+                onboard_id(fleet) == Some(mission_id) && reported_id(fleet) == Some(mission_id)
+            })
+            .await;
+            assert!(!stale(&events), "round {round}: {events:?}");
+        }
+    }
+
+    /// Clearing changes PX4's mission id too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn our_own_clear_is_not_announced_as_changed_elsewhere() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Px4).await;
+
+        for round in 0..ROUNDS {
+            let client = harness.fleet.vehicle(SYSTEM);
+            let upload = tokio::spawn(async move { client.upload_mission(waypoint()).await });
+            harness.vehicle.accept_upload(1000 + round).await;
+            upload.await.unwrap().expect("the upload succeeds");
+
+            let cleared_id = 2000 + round;
+            let client = harness.fleet.vehicle(SYSTEM);
+            let clear = tokio::spawn(async move { client.clear_mission().await });
+            let DefaultDialect::MissionClearAll(MissionClearAll { .. }) =
+                harness.vehicle.recv().await
+            else {
+                panic!("expected MISSION_CLEAR_ALL")
+            };
+            harness
+                .vehicle
+                .send(&MissionAck {
+                    type_: MavMissionResult::MavMissionAccepted,
+                    mission_type: MavMissionType::Mission,
+                    opaque_id: cleared_id,
+                    ..Default::default()
+                })
+                .await;
+            harness.vehicle.mission_current(cleared_id, 0).await;
+            clear.await.unwrap().expect("cleared");
+
+            let events = events_until(&mut harness.updates, |fleet| {
+                reported_id(fleet) == Some(cleared_id)
+                    && fleet
+                        .vehicle(SYSTEM)
+                        .and_then(|vehicle| vehicle.mission.onboard.as_ref())
+                        .is_some_and(|onboard| onboard.items.is_empty())
+            })
+            .await;
+            assert!(!stale(&events), "round {round}: {events:?}");
+        }
+    }
+
+    /// An upload's progress is in the snapshot while it runs, and gone once
+    /// it ends, whether it finished or was dropped.
+    #[tokio::test]
+    async fn a_transfer_shows_its_progress_in_the_snapshot() {
+        use crate::{Progress, domain::vehicle::mission::TransferKind};
+
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Px4).await;
+        let transfer = |fleet: &FleetSnapshot| {
+            fleet
+                .vehicle(SYSTEM)
+                .and_then(|vehicle| vehicle.mission.transfer)
+                .map(|transfer| (transfer.kind, transfer.progress))
+        };
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let upload = tokio::spawn(async move { client.upload_mission(waypoint()).await });
+        let DefaultDialect::MissionCount(_) = harness.vehicle.recv().await else {
+            panic!("expected MISSION_COUNT")
+        };
+        until(&mut harness.updates, |fleet| {
+            transfer(fleet) == Some((TransferKind::Upload, Some(Progress { done: 0, total: 1 })))
+        })
+        .await;
+
+        // Dropped before the vehicle answers: the transfer still ends.
+        upload.abort();
+        until(&mut harness.updates, |fleet| transfer(fleet).is_none()).await;
+    }
+
+    /// The warning still comes when the vehicle's mission really changes
+    /// after ours.
+    #[tokio::test]
+    async fn another_gcs_upload_is_announced() {
+        let mut harness = harness();
+        register(&mut harness, MavAutopilot::Px4).await;
+
+        let client = harness.fleet.vehicle(SYSTEM);
+        let upload = tokio::spawn(async move { client.upload_mission(waypoint()).await });
+        harness.vehicle.accept_upload(11).await;
+        upload.await.unwrap().expect("the upload succeeds");
+        events_until(&mut harness.updates, |fleet| {
+            onboard_id(fleet) == Some(11) && reported_id(fleet) == Some(11)
+        })
+        .await;
+
+        harness.vehicle.mission_current(12, 3).await;
+        let events =
+            events_until(&mut harness.updates, |fleet| reported_id(fleet) == Some(12)).await;
+        assert!(stale(&events), "{events:?}");
     }
 }

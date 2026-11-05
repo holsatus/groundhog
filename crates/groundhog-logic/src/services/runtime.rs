@@ -28,6 +28,7 @@ use crate::{
         fleet::{Fleet, FleetEvent, FleetSnapshot},
         mission::OnboardMission,
         parameter::DownloadUpdate,
+        vehicle::mission::TransferUpdate,
     },
     mavlink::{Event, EventReceiver, MavlinkRouter, decode},
 };
@@ -53,6 +54,10 @@ pub(super) enum Input {
     Calibration {
         system: SystemId,
         update: CalibrationUpdate,
+    },
+    MissionTransfer {
+        system: SystemId,
+        update: TransferUpdate,
     },
 }
 
@@ -232,6 +237,9 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
         }
         Input::ParamDownload { address, update } => {
             fleet.set_param_download(address, update);
+        }
+        Input::MissionTransfer { system, update } => {
+            fleet.update_mission_transfer(system, update);
         }
         Input::Calibration { system, update } => {
             return fleet

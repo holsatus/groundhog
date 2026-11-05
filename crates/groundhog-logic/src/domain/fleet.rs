@@ -31,7 +31,7 @@ use crate::{
         firmware::FlightMode,
         mission::OnboardMission,
         parameter::{DownloadUpdate, Parameters},
-        vehicle::{Liveness, StatusText, Vehicle, class::VehicleClass},
+        vehicle::{Liveness, StatusText, Vehicle, class::VehicleClass, mission::TransferUpdate},
     },
 };
 
@@ -383,6 +383,18 @@ impl Fleet {
         match self.vehicle_mut(id) {
             Some(vehicle) => {
                 vehicle.set_onboard_mission(mission);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply what the operation running a mission transfer reports. Returns
+    /// whether the vehicle is known.
+    pub(crate) fn update_mission_transfer(&mut self, id: SystemId, update: TransferUpdate) -> bool {
+        match self.vehicle_mut(id) {
+            Some(vehicle) => {
+                vehicle.mission.update_transfer(update);
                 true
             }
             None => false,

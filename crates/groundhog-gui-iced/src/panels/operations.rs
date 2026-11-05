@@ -7,32 +7,27 @@
 //! - cancellation: [`Operations::cancel`] aborts the task, which drops the
 //!   transaction's future and lets the middleware clean up (release locks,
 //!   cancel commands and mission transfers on the vehicle);
-//! - progress, for operations that report it;
 //! - stale-result filtering: a result whose operation was cancelled or
 //!   superseded is dropped by [`Operations::settle`];
 //! - the operator hears of every failure: [`Operations::settle`] pushes a
 //!   notice worded from the key's [`Activity`], the same way in every
 //!   panel.
 //!
-//! A panel routes the [`Finished`] (and [`Progressed`]) messages its
-//! operations end with back into its set, and handles what [`Settled`] says:
+//! A panel routes the [`Finished`] messages its operations end with back
+//! into its set, and handles what [`Settled`] says:
 //! the success value, and whatever a failure changes besides the notice.
 
-use std::{borrow::Cow, collections::BTreeMap, fmt, future::Future, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, fmt, future::Future};
 
-use futures::{StreamExt, channel::mpsc, stream};
 use iced::Task;
 
 use groundhog_logic::{
-    Progress, SystemId,
+    SystemId,
     domain::fleet::FleetSnapshot,
     services::{Error, Result},
 };
 
 use super::{Context, notifications::Notice};
-
-/// A sink for progress reports, handed to operations that make progress.
-pub type ProgressReporter = Arc<dyn Fn(Progress) + Send + Sync>;
 
 /// What a run under a key does, for the notice when it fails. `C` is the
 /// context each run carries beside its key (what a parameter upload sets,
@@ -89,14 +84,6 @@ impl<K: fmt::Debug, T> fmt::Debug for Finished<K, T> {
     }
 }
 
-/// A progress report of a running operation, as a message.
-#[derive(Debug, Clone)]
-pub struct Progressed<K> {
-    key: K,
-    ticket: Ticket,
-    progress: Progress,
-}
-
 /// A result that was current, after [`Operations::settle`] announced its
 /// failure, if it failed.
 pub struct Settled<K, C, T> {
@@ -110,7 +97,6 @@ struct Running<C> {
     _handle: iced::task::Handle,
     ticket: Ticket,
     context: C,
-    progress: Option<Progress>,
 }
 
 /// The operations a panel has in flight, by key.
@@ -143,57 +129,6 @@ impl<K: Ord + Clone + Send + 'static> Operations<K> {
         M: Send + 'static,
     {
         self.start_with(key, (), future, done)
-    }
-
-    /// Start an operation that reports progress. `operation` receives the
-    /// [`ProgressReporter`] sink; `progress` wraps each report in the
-    /// panel's message, to be handed to [`Operations::report`].
-    pub fn start_with_progress<T, M, Fut>(
-        &mut self,
-        key: K,
-        operation: impl FnOnce(ProgressReporter) -> Fut,
-        progress: impl Fn(Progressed<K>) -> M + Send + 'static,
-        done: impl FnOnce(Finished<K, T>) -> M + Send + 'static,
-    ) -> Task<M>
-    where
-        Fut: Future<Output = Result<T>> + Send + 'static,
-        T: Send + 'static,
-        M: Send + 'static,
-    {
-        let ticket = self.ticket();
-        let (sender, receiver) = mpsc::unbounded();
-        let sink: ProgressReporter = Arc::new(move |report| {
-            drop(sender.unbounded_send(report));
-        });
-
-        // The sink is dropped with the operation's future, which ends the
-        // progress stream, so the merged stream ends with the operation.
-        let future = operation(sink);
-        let reported = key.clone();
-        let reports = receiver.map(move |report| {
-            Some(progress(Progressed {
-                key: reported.clone(),
-                ticket,
-                progress: report,
-            }))
-        });
-        let finished = key.clone();
-        let mut done = Some(done);
-        let result = stream::once(future).map(move |result| {
-            done.take().map(|done| {
-                done(Finished {
-                    key: finished.clone(),
-                    ticket,
-                    result,
-                })
-            })
-        });
-
-        let merged = stream::select(reports, result).filter_map(futures::future::ready);
-
-        let (task, handle) = Task::stream(merged).abortable();
-        self.insert(key, handle, ticket, ());
-        task
     }
 }
 
@@ -238,7 +173,6 @@ impl<K: Ord + Clone + Send + 'static, C> Operations<K, C> {
                 _handle: handle.abort_on_drop(),
                 ticket,
                 context,
-                progress: None,
             },
         );
     }
@@ -286,15 +220,6 @@ impl<K: Ord + Clone + Send + 'static, C> Operations<K, C> {
             .is_some_and(|running| running.ticket == ticket)
     }
 
-    /// Record a progress report. Stale reports are ignored.
-    pub fn report(&mut self, progressed: Progressed<K>) {
-        if let Some(running) = self.running.get_mut(&progressed.key)
-            && running.ticket == progressed.ticket
-        {
-            running.progress = Some(progressed.progress);
-        }
-    }
-
     /// Abort the operation under `key`. Returns whether one was running.
     pub fn cancel(&mut self, key: &K) -> bool {
         self.running.remove(key).is_some()
@@ -302,11 +227,6 @@ impl<K: Ord + Clone + Send + 'static, C> Operations<K, C> {
 
     pub fn is_running(&self, key: &K) -> bool {
         self.running.contains_key(key)
-    }
-
-    /// The last progress report of the operation under `key`.
-    pub fn progress(&self, key: &K) -> Option<Progress> {
-        self.running.get(key).and_then(|running| running.progress)
     }
 
     /// Whether any key matching `matches` is running.
@@ -323,18 +243,6 @@ impl<K: Ord + Clone + Send + 'static, C> Operations<K, C> {
             key: key.clone(),
             ticket: running.ticket,
             result,
-        }
-    }
-
-    /// The progress message the operation running under `key` would send,
-    /// for tests that simulate progress.
-    #[cfg(test)]
-    pub fn progressed(&self, key: &K, progress: Progress) -> Progressed<K> {
-        let running = self.running.get(key).expect("the operation runs");
-        Progressed {
-            key: key.clone(),
-            ticket: running.ticket,
-            progress,
         }
     }
 }
@@ -480,20 +388,5 @@ mod tests {
 
         assert_eq!(settled.result, Err(Error::NotCalibrating));
         assert_eq!(env.notices.history().count(), 0);
-    }
-
-    #[test]
-    fn progress_is_kept_per_run() {
-        let mut operations = Operations::<Key, &'static str>::default();
-        start(&mut operations, 1, "first");
-        let stale = operations.progressed(&Key(1), Progress { done: 1, total: 5 });
-        start(&mut operations, 1, "second");
-
-        operations.report(stale);
-        assert_eq!(operations.progress(&Key(1)), None, "stale report ignored");
-
-        let report = Progress { done: 2, total: 5 };
-        operations.report(operations.progressed(&Key(1), report));
-        assert_eq!(operations.progress(&Key(1)), Some(report));
     }
 }

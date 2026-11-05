@@ -12,6 +12,7 @@ use groundhog_logic::{
             Field, FieldKind, FieldView, ItemId, MissionItem,
             command::{SPECS, spec_of},
         },
+        vehicle::mission::TransferKind,
     },
 };
 use iced::{
@@ -199,7 +200,7 @@ impl MissionPanel {
             column![
                 actions,
                 changed_elsewhere,
-                plan.and_then(|system| self.view_progress(system, message)),
+                plan.and_then(|system| self.view_progress(fleet, system, message)),
                 body.spacing(ui::space::M),
             ]
             .spacing(ui::space::M),
@@ -210,14 +211,25 @@ impl MissionPanel {
     /// The running transfer's progress and a cancel button.
     fn view_progress<'a>(
         &'a self,
+        fleet: &FleetSnapshot,
         system: SystemId,
         message: impl Fn(MessageKind) -> Message + 'a,
     ) -> Option<impl Widget<Message> + 'a> {
-        let operation = [Operation::Download, Operation::Upload, Operation::Clear]
-            .into_iter()
-            .find(|operation| self.operations.is_running(&(system, *operation)))?;
+        let (operation, kind) = [
+            (Operation::Download, TransferKind::Download),
+            (Operation::Upload, TransferKind::Upload),
+            (Operation::Clear, TransferKind::Clear),
+        ]
+        .into_iter()
+        .find(|(operation, _)| self.operations.is_running(&(system, *operation)))?;
 
-        let progress = self.operations.progress(&(system, operation));
+        // The vehicle's transfer, if it is this one: ours may still wait
+        // behind another (the download that follows the vehicle's arrival).
+        let progress = fleet
+            .vehicle(system)
+            .and_then(|vehicle| vehicle.mission.transfer)
+            .filter(|transfer| transfer.kind == kind)
+            .and_then(|transfer| transfer.progress);
         let label = match progress {
             Some(progress) => format!(
                 "{}: {} of {}",

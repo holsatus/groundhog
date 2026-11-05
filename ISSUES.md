@@ -20,41 +20,6 @@ Paths are relative to a crate's `src/`. Trust the symbol over any line number.
 
 ## Fix first
 
-### MISSION-1 · Our own upload is announced as "changed elsewhere"
-**P1** · M
-
-The upload's result reaches the runtime through the `Input` channel
-(`services/vehicle.rs` `upload_mission`), frames through the router's, and
-nothing orders the two (`services/runtime.rs`). A vehicle that reports
-`mission_id` (PX4, ArduPilot 4.5+) sends `MISSION_CURRENT` with the new id
-right after the ACK. When that is folded before the result,
-`VehicleMission::onboard_is_stale` compares it with the old id and the fleet
-emits `OnboardMissionStale`: 30 times in 30 on a multi-thread runtime.
-`clear_mission` races the same way. Older firmware reports no id at all, so
-another GCS's upload is never noticed.
-
-**Fix:** give mission transfers the shape parameter downloads already have.
-- `runtime::Input` gains `MissionTransfer { system, update }`, with
-  `TransferUpdate::{Start(Direction), Progress(Progress), End}` and
-  `Direction::{Upload, Download, Clear}`. A drop guard in
-  `services/vehicle.rs` (like `DownloadReport`) reports `Start` before the
-  router call, `Progress` from the router's callback, and `End` when dropped,
-  after the `Input::OnboardMission` result.
-- `VehicleMission` gains `pub transfer: Option<MissionTransfer { direction,
-  progress }>`. `onboard_is_stale()` is false while it is `Some`.
-- `download_mission` and `upload_mission` lose their `&dyn Fn` progress
-  parameter; the GUI reads `vehicle.mission.transfer`.
-- Without a mission id, a reported `MISSION_CURRENT.total` that differs from
-  the onboard item count also means stale. Say in the doc that this catches
-  only a changed count.
-- Document on `MissionDraft::transferred` that a frontend must not let the
-  plan change while a transfer runs, and point to `VehicleMission::transfer`.
-
-**Test:** multi-thread runtime, PX4 mock, twenty rounds: upload, ACK with a
-new id, `MISSION_CURRENT` with that id at once; never `OnboardMissionStale`.
-The same with `clear_mission`. A snapshot during a slow upload shows the
-transfer; a dropped upload ends it. No id, total 3 against 2 items: stale.
-
 ### MISSION-2 · A jump to home cannot be entered, and reaches PX4 as `-1`
 **P2** · M
 

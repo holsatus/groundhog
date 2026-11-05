@@ -30,12 +30,11 @@ use crate::{
         vehicle::{
             Vehicle,
             camera::{CameraId, ImagePoint, ImageRect, TrackingSupport},
+            mission::{TransferId, TransferKind, TransferUpdate},
         },
     },
-    mavlink::{MavError, ParamListResult, commands},
+    mavlink::{MavError, ParamListResult, TransferReport, commands},
 };
-
-use crate::Progress;
 
 /// How often a camera is asked to report what it tracks, once it tracks.
 const TRACKING_REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -125,6 +124,61 @@ impl Drop for DownloadReport<'_> {
 /// The last parameter download handed out; download ids only need to be
 /// unique within the process.
 static LAST_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
+
+/// Reports a mission transfer to the runtime: its start once the router
+/// holds the vehicle's mission channel (before anything is sent), its
+/// progress, and its end when dropped. The operation reports its result
+/// before this drops, so the runtime sees the result first. While a transfer
+/// runs, the fleet does not judge the onboard mission from the vehicle's
+/// reports: they may already name the mission being transferred.
+struct MissionReport<'a> {
+    fleet: &'a FleetHandle,
+    system: SystemId,
+    kind: TransferKind,
+    id: TransferId,
+    /// Atomic for the same reason as [`DownloadReport::started`].
+    started: AtomicBool,
+}
+
+impl<'a> MissionReport<'a> {
+    fn new(fleet: &'a FleetHandle, system: SystemId, kind: TransferKind) -> Self {
+        Self {
+            fleet,
+            system,
+            kind,
+            id: TransferId::next(),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// The router's report of the transfer, passed on to the runtime.
+    fn report(&self, report: TransferReport) {
+        let update = match report {
+            TransferReport::Started => {
+                if self.started.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                TransferUpdate::Start(self.id, self.kind)
+            }
+            TransferReport::Progress(progress) => TransferUpdate::Progress(self.id, progress),
+        };
+        self.fleet.report(Input::MissionTransfer {
+            system: self.system,
+            update,
+        });
+    }
+}
+
+impl Drop for MissionReport<'_> {
+    fn drop(&mut self) {
+        if self.started.load(Ordering::Relaxed) {
+            self.fleet.report(Input::MissionTransfer {
+                system: self.system,
+                update: TransferUpdate::End(self.id),
+            });
+        }
+    }
+}
 
 /// Reports a calibration start to the runtime, naming its run: begun when
 /// created, then acknowledged, or abandoned if dropped first. A dropped start
@@ -237,7 +291,7 @@ impl VehicleClient {
             log::warn!("Parameter download from {target:?} failed: {error}");
         }
 
-        if let Err(error) = self.download_mission(&|_| {}).await {
+        if let Err(error) = self.download_mission().await {
             log::warn!("Mission download from {target:?} failed: {error}");
         }
 
@@ -323,7 +377,9 @@ impl VehicleClient {
             .map_err(Error::from)
     }
 
-    /// Download the vehicle's mission.
+    /// Download the vehicle's mission. Its progress is visible in the fleet
+    /// snapshot, as the vehicle's
+    /// [`MissionTransfer`](crate::domain::vehicle::mission::MissionTransfer).
     ///
     /// # Errors
     ///
@@ -331,17 +387,17 @@ impl VehicleClient {
     /// [`Error::MissionRejected`] if it refuses the transfer,
     /// [`Error::Protocol`] if it sends a mission this build cannot decode, or
     /// [`Error::Timeout`] / [`Error::NoLink`].
-    pub async fn download_mission(
-        &self,
-        progress: &(dyn Fn(Progress) + Send + Sync),
-    ) -> Result<OnboardMission> {
+    pub async fn download_mission(&self) -> Result<OnboardMission> {
         let (target, layout) =
             self.with_vehicle(|vehicle| (vehicle.target(), vehicle.mission_layout()))?;
 
+        let report = MissionReport::new(&self.fleet, self.system, TransferKind::Download);
         let downloaded = self
             .fleet
             .router()
-            .mission_download(target, MavMissionType::Mission, progress)
+            .mission_download(target, MavMissionType::Mission, &|update| {
+                report.report(update)
+            })
             .await?;
 
         let mission = codec::decode(&downloaded.items, downloaded.opaque_id, layout);
@@ -354,17 +410,15 @@ impl VehicleClient {
     }
 
     /// Upload `items` as the vehicle's mission, returning what it now holds.
+    /// Its progress is visible in the fleet snapshot, as the vehicle's
+    /// [`MissionTransfer`](crate::domain::vehicle::mission::MissionTransfer).
     ///
     /// # Errors
     ///
     /// [`Error::UnknownVehicle`] if the vehicle left the fleet,
     /// [`Error::MissionRejected`] if it refuses the plan (no space for it, an
     /// item it cannot fly, ...), or [`Error::Timeout`] / [`Error::NoLink`].
-    pub async fn upload_mission(
-        &self,
-        items: Vec<MissionItem>,
-        progress: &(dyn Fn(Progress) + Send + Sync),
-    ) -> Result<OnboardMission> {
+    pub async fn upload_mission(&self, items: Vec<MissionItem>) -> Result<OnboardMission> {
         let (target, layout, home) = self.with_vehicle(|vehicle| {
             (
                 vehicle.target(),
@@ -375,10 +429,13 @@ impl VehicleClient {
 
         let wire = codec::encode(&items, home.as_ref(), layout, MavMissionType::Mission)
             .map_err(|_| Error::PlanTooLong)?;
+        let report = MissionReport::new(&self.fleet, self.system, TransferKind::Upload);
         let opaque_id = self
             .fleet
             .router()
-            .mission_upload(target, MavMissionType::Mission, &wire, progress)
+            .mission_upload(target, MavMissionType::Mission, &wire, &|update| {
+                report.report(update)
+            })
             .await?;
 
         let mission = OnboardMission {
@@ -404,9 +461,12 @@ impl VehicleClient {
     pub async fn clear_mission(&self) -> Result<()> {
         let target = self.with_vehicle(Vehicle::target)?;
 
+        let report = MissionReport::new(&self.fleet, self.system, TransferKind::Clear);
         self.fleet
             .router()
-            .mission_clear(target, MavMissionType::Mission)
+            .mission_clear(target, MavMissionType::Mission, &|update| {
+                report.report(update)
+            })
             .await?;
 
         self.fleet.report(Input::OnboardMission {

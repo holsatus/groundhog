@@ -34,7 +34,7 @@ use super::{
     confirm::Confirmation,
     file_dialog,
     notifications::Notice,
-    operations::{Activity, Finished, Operations, ProgressReporter, Progressed, Settled},
+    operations::{Activity, Finished, Operations, Settled},
 };
 use crate::map::LayerSet;
 
@@ -182,7 +182,6 @@ pub enum MessageKind {
         confirmed: bool,
     },
     Cancel(Operation),
-    Progress(Progressed<Key>),
     Finished(Finished<Key, Option<OnboardMission>>),
 
     // Editing.
@@ -241,10 +240,6 @@ impl Panel for MissionPanel {
                         Notice::info(format!("{} cancelled", operation.describe())).vehicle(system),
                     );
                 }
-                Task::none()
-            }
-            MessageKind::Progress(progressed) => {
-                self.operations.report(progressed);
                 Task::none()
             }
             MessageKind::Finished(finished) => {
@@ -569,8 +564,8 @@ impl MissionPanel {
         };
 
         let client = cx.vehicle_client(system);
-        self.transfer(system, Operation::Download, move |progress| async move {
-            client.download_mission(&*progress).await.map(Some)
+        self.transfer(system, Operation::Download, async move {
+            client.download_mission().await.map(Some)
         })
     }
 
@@ -590,8 +585,8 @@ impl MissionPanel {
 
         let items = draft.plan().mission_items();
         let client = cx.vehicle_client(system);
-        self.transfer(system, Operation::Upload, move |progress| async move {
-            client.upload_mission(items, &*progress).await.map(Some)
+        self.transfer(system, Operation::Upload, async move {
+            client.upload_mission(items).await.map(Some)
         })
     }
 
@@ -607,7 +602,7 @@ impl MissionPanel {
         };
 
         let client = cx.vehicle_client(system);
-        self.transfer(system, Operation::Clear, move |_| async move {
+        self.transfer(system, Operation::Clear, async move {
             client.clear_mission().await.map(|()| None)
         })
     }
@@ -689,33 +684,24 @@ impl MissionPanel {
         )
     }
 
-    /// Start a transfer with progress, unless one is already running.
-    fn transfer<Fut>(
+    /// Start a transfer, unless one is already running. Its progress is in
+    /// the fleet snapshot.
+    fn transfer(
         &mut self,
         system: SystemId,
         operation: Operation,
-        run: impl FnOnce(ProgressReporter) -> Fut,
-    ) -> Task<Message>
-    where
-        Fut: std::future::Future<Output = Result<Option<OnboardMission>>> + Send + 'static,
-    {
+        transfer: impl std::future::Future<Output = Result<Option<OnboardMission>>> + Send + 'static,
+    ) -> Task<Message> {
         if self.transferring(system) {
             return Task::none();
         }
 
         let plan = Some(system);
-        self.operations.start_with_progress(
-            (system, operation),
-            run,
-            move |progressed| Message {
-                plan,
-                kind: MessageKind::Progress(progressed),
-            },
-            move |finished| Message {
+        self.operations
+            .start((system, operation), transfer, move |finished| Message {
                 plan,
                 kind: MessageKind::Finished(finished),
-            },
-        )
+            })
     }
 
     fn finished(

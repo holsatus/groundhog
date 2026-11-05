@@ -424,7 +424,7 @@ impl Vehicle {
 
     /// Record the mission the vehicle holds after a transfer.
     pub(crate) fn set_onboard_mission(&mut self, mission: OnboardMission) {
-        self.mission.onboard = Some(Arc::new(mission));
+        self.mission.set_onboard(mission);
     }
 
     /// Apply what the operation running a calibration reports. Returns the
@@ -654,7 +654,7 @@ impl Vehicle {
                 }
             }
             DefaultDialect::MissionCurrent(message) if self.is_authoritative(component) => {
-                self.mission.progress.observe_current(message);
+                self.mission.observe_current(message);
             }
             DefaultDialect::Statustext(message) => {
                 let text =

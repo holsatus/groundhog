@@ -59,6 +59,16 @@ pub(crate) struct DownloadedMission {
     pub(crate) opaque_id: u32,
 }
 
+/// What a mission transfer reports while it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferReport {
+    /// The transfer holds the vehicle's mission channel, before it sends
+    /// anything: once a transfer of the same mission type before it is over.
+    Started,
+    /// Items moved so far, from `done: 0` once the count is known.
+    Progress(Progress),
+}
+
 /// A mission message decoded from the wire, filtered to the mission transaction.
 enum MissionMessage {
     Count(MissionCount),
@@ -227,12 +237,14 @@ impl MavlinkRouter {
     /// earlier transfer that arrives during this one completes it. The
     /// listener starts with the clear, which does not help: it never sees what
     /// arrived before the transfer began anyway.
-    pub async fn mission_clear(
+    pub(crate) async fn mission_clear(
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
+        report: &(dyn Fn(TransferReport) + Send + Sync),
     ) -> Result<()> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
+        report(TransferReport::Started);
         let mut listener = MissionListener::new(self, target, mission_type);
         let (_, ack_timeout) = self.transfer_timeouts(target);
 
@@ -265,14 +277,17 @@ impl MavlinkRouter {
         Err(MavError::Timeout)
     }
 
-    /// Download the full mission from `target`, reporting progress per item.
+    /// Download the full mission from `target`, reporting its start and its
+    /// progress per item.
     pub(crate) async fn mission_download(
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
-        progress: &(dyn Fn(Progress) + Send + Sync),
+        report: &(dyn Fn(TransferReport) + Send + Sync),
     ) -> Result<DownloadedMission> {
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
+        report(TransferReport::Started);
+        let progress = |progress| report(TransferReport::Progress(progress));
         let mut listener = MissionListener::new(self, target, mission_type);
         let (item_timeout, ack_timeout) = self.transfer_timeouts(target);
         let mut cancel = CancelOnDrop::new(self, target, mission_type);
@@ -326,18 +341,21 @@ impl MavlinkRouter {
     }
 
     /// Upload `items` to `target`, returning the `opaque_id` it acknowledges
-    /// with. Progress counts the distinct items the vehicle has requested.
+    /// with. Reports its start, then progress as the distinct items the
+    /// vehicle has requested.
     pub(crate) async fn mission_upload(
         &self,
         target: MavlinkId,
         mission_type: MavMissionType,
         items: &[RawMissionItem],
-        progress: &(dyn Fn(Progress) + Send + Sync),
+        report: &(dyn Fn(TransferReport) + Send + Sync),
     ) -> Result<u32> {
         let count = u16::try_from(items.len())
             .map_err(|_| MavError::Encode(format!("{} mission items", items.len())))?;
 
         let _lock = self.lock_key(mission_lock(target, mission_type)).await;
+        report(TransferReport::Started);
+        let progress = |progress| report(TransferReport::Progress(progress));
         let mut listener = MissionListener::new(self, target, mission_type);
         let (_, ack_timeout) = self.transfer_timeouts(target);
         let mut cancel = CancelOnDrop::new(self, target, mission_type);
