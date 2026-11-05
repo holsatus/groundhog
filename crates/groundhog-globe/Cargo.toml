@@ -1,0 +1,35 @@
+[package]
+name = "groundhog-globe"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+log.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "fs"] }
+
+# The globe is rendered by Bevy, offscreen and without a window: no winit, no
+# input devices, no audio and no logging of its own (its `tracing` events are
+# not collected). What remains is the renderer and the plugins the terrain,
+# the sky and the exposure are built on.
+bevy = { version = "0.19.1", default-features = false, features = [
+    "std",
+    "multi_threaded",
+    "async_executor",
+    "bevy_asset",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_post_process",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd_rust",
+] }
+crossbeam-channel = "0.5"
+# For reading the lookup tables of the atmosphere back from the GPU.
+half = "2"
+# Fetching and decoding tiles.
+reqwest = "0.13.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

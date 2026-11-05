@@ -68,12 +68,13 @@ application ID the desktop knows it by).
 
 ## The architecture
 
-The workspace has three crates, under `crates/`:
+The workspace has four crates, under `crates/`:
 
 | Crate | What it is | Depends on |
 |---|---|---|
 | `groundhog-logic` | The backend: all vehicle state and every rule about it, the middleware, the transports, and the vocabulary frontends name it with (`SystemId`, `MavlinkId`, `GeoPosition`, link descriptions) | `mavio`, `tokio` |
 | `groundhog-video` | Video from the vehicle: a stream's URI in, decoded frames out, at low latency (see `docs/video.md`) | GStreamer on the desktop, `tokio` |
+| `groundhog-globe` | A 3D globe with streamed imagery and elevation, rendered offscreen by Bevy: a size and gestures in, RGBA frames out. Vendored from bevy-worldmap, without its flight simulator; desktop only | `bevy`, `tokio`, `reqwest` |
 | `groundhog-gui-iced` | The frontend, built as the `groundhog` binary on the desktop and as a `cdylib` on Android | `groundhog-logic`, `groundhog-video`, `iced` |
 
 Another frontend (a CLI, say) is another crate next to these, depending on
@@ -102,6 +103,10 @@ the crate is named where it is not obvious.
  video     receiver   a GStreamer pipeline per attempt, supervised    ┐
            record     the branch that writes the stream to a file     │ own threads
            frame      the newest frame, for the frontend to draw      ┘
+
+ globe     camera     the view, moved by the frontend's gestures      ┐
+           terrain    tiles, elevation, atmosphere (bevy-worldmap)    │ own threads
+           output     render to an image, read back as frames         ┘
 ```
 
 How data moves:
@@ -152,8 +157,9 @@ are shared by all.
 | gui `layout.rs`, `shell.rs` | Where panels go: the tiled workspace, which shell is on screen, the floating shell's sheet | `ui`, `widget` | know what a panel shows |
 | gui `app.rs`, `app/` | Wiring at boot, message routing, effects, notice policy; the list of panels (`app/panels.rs`); each shell's view (`app/tiled.rs`, `app/floating.rs`) over the same `pane_body` | everything | contain panel logic |
 | gui `platform/` | What differs between the desktop and Android: file locations, logging, the system bars' insets and icon colour, keeping the screen on, `TOUCH` | iced, `android-activity`, `jni` | know about the interface |
-| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, attitude) | iced | depend on the domain |
+| gui `widget/` | Reusable widgets (vendored `pane_grid` fork, `virtual_list`, `drag_source` and its `drag_preview`, `surface`, `video`, `globe`, attitude) | iced | depend on the domain |
 | video | `Receiver` (URI to frames, its `State`, recording into files with `Receiver::record`), `FrameSlot`, `Frame`; finding `.local` cameras through Avahi | GStreamer, `tokio::sync`, `zbus` on Linux | know about vehicles or the frontend |
+| globe | `Globe` (a Bevy app on its own thread, stopped by dropping it), `Controls` (size, `Gesture`s, a `Placement` among them, and a request per frame in, so the frontend's display paces it), `Frame` (RGBA out), `Overhead` (where it looks and at what scale, out, so a map can take over); the tile cache it is given | `bevy` without a window, `tokio`, `reqwest` | know about vehicles or the frontend; share a GPU device with the frontend |
 
 The crate boundary enforces most of the table: `mavlink`, `wire` and the
 transports are private to `groundhog-logic`, so no frontend can reach the router, and

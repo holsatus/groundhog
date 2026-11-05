@@ -35,7 +35,7 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 # sources (incompatible types). The exact revision is fixed by the committed
 # Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
 # dependency first.
-iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image"] }
+iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image", "debug"] }
 
 # For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
 iced_runtime = { git = "https://github.com/iced-rs/iced" }
@@ -48,6 +48,9 @@ anyhow = "1.0.104"
 # `directories` has no usable directories there (Android has no `$HOME`).
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17.2"
+# The 3D globe, rendered by Bevy. Not on Android until it is measured there:
+# a second GPU device and a frame copied through memory cost a phone more.
+groundhog-globe = { path = "../groundhog-globe" }
 env_logger = "0.11.10"
 directories = "6.0.0"
 

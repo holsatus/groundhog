@@ -5,6 +5,8 @@ pub mod adaptive;
 pub mod attitude;
 pub mod drag_preview;
 pub mod drag_source;
+#[cfg(not(target_os = "android"))]
+pub mod globe;
 pub mod menu;
 pub mod pane_grid;
 pub mod surface;

@@ -82,6 +82,13 @@ pub struct Application {
     floating: Floating,
     /// The window's size, once measured; it decides the shell.
     window: Option<Size>,
+    /// The 3D globe, while it shows in the map pane's place.
+    #[cfg(not(target_os = "android"))]
+    globe: Option<groundhog_globe::Globe>,
+    /// The map pane's size, once measured: it joins the map's scale and the
+    /// globe's.
+    #[cfg(not(target_os = "android"))]
+    map_size: Option<Size>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +132,12 @@ pub enum Message {
     Insets(Insets),
     /// Put the whole application in full screen, or take it out (F11).
     ToggleFullScreen,
+    /// Show the 3D globe in the map pane's place, or the map again.
+    #[cfg(not(target_os = "android"))]
+    ToggleGlobe,
+    /// The map pane was laid out at this size.
+    #[cfg(not(target_os = "android"))]
+    MapResized(Size),
     /// The operator asked to close the window.
     CloseRequested,
     /// Unsaved changes are saved (or could not be in time): leave.
@@ -220,6 +233,10 @@ impl Application {
             full_screen: FullScreen::default(),
             floating: Floating::default(),
             window: None,
+            #[cfg(not(target_os = "android"))]
+            globe: None,
+            #[cfg(not(target_os = "android"))]
+            map_size: None,
         };
 
         if application.configuration.settings.record_telemetry {
@@ -290,6 +307,16 @@ impl Application {
             Message::ToggleFullScreen => {
                 self.full_screen.toggle_app();
                 self.sync_full_screen()
+            }
+            #[cfg(not(target_os = "android"))]
+            Message::ToggleGlobe => {
+                self.toggle_globe();
+                Task::none()
+            }
+            #[cfg(not(target_os = "android"))]
+            Message::MapResized(size) => {
+                self.map_size = Some(size);
+                Task::none()
             }
             Message::Insets(insets) => {
                 self.insets = insets;
@@ -810,6 +837,16 @@ impl Application {
             // A `Stack` hides the pointer from the map only where an upper
             // layer shows one: here, over the toasts, which are meant to
             // hide it.
+            #[cfg(not(target_os = "android"))]
+            layout::PaneKind::Map => sensor(stack![
+                self.view_map_or_globe(),
+                self.view_globe_switch(),
+                self.view_toasts(ui::space::M)
+            ])
+            .on_show(Message::MapResized)
+            .on_resize(Message::MapResized)
+            .boxed(),
+            #[cfg(target_os = "android")]
             layout::PaneKind::Map => stack![
                 self.view_map(Placement::Pane),
                 self.view_toasts(ui::space::M)
@@ -1029,6 +1066,8 @@ fn video_shown(shell: Shell, layout: &Layout) -> bool {
 mod floating;
 #[cfg(test)]
 mod gallery;
+#[cfg(not(target_os = "android"))]
+mod globe;
 mod panels;
 mod tiled;
 

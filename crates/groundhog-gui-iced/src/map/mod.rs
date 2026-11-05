@@ -103,6 +103,28 @@ impl Map {
         }
     }
 
+    /// Where the view is centred, and the meters of ground a logical pixel
+    /// spans there.
+    #[cfg(not(target_os = "android"))]
+    pub fn centre(&self) -> (GeoPosition, f64) {
+        let geodetic = self.viewpoint.position.as_geodetic();
+        let centre = GeoPosition::new(geodetic.latitude(), geodetic.longitude());
+        (centre, metres_per_px(centre.lat, self.viewpoint.zoom.f64()))
+    }
+
+    /// Centre the view on `centre`, zoomed so a logical pixel spans
+    /// `metres_per_px` of ground there, as near as the map's zoom allows.
+    #[cfg(not(target_os = "android"))]
+    pub fn look_at(&mut self, centre: GeoPosition, metres_per_px: f64) {
+        let zoom = (metres_per_px_at_zoom_0(centre.lat) / metres_per_px)
+            .log2()
+            .clamp(Zoom::MIN.f64(), Zoom::MAX.f64());
+        self.viewpoint = Viewpoint {
+            position: view::mercator(centre),
+            zoom: Zoom::try_from(zoom).unwrap_or(self.viewpoint.zoom),
+        };
+    }
+
     pub fn is_following(&self) -> bool {
         self.follow
     }
@@ -157,6 +179,23 @@ impl Map {
         // handle is hovered, disabling zoom and pan there (see `layered`).
         layered::Layered::new(Widget::<Message>::map(tiles, wrap), overlay)
     }
+}
+
+/// The meters of ground a logical pixel spans at latitude `lat` (degrees)
+/// on a map at `zoom`.
+#[cfg(not(target_os = "android"))]
+fn metres_per_px(lat: f64, zoom: f64) -> f64 {
+    metres_per_px_at_zoom_0(lat) / zoom.exp2()
+}
+
+/// [`metres_per_px`] at zoom 0, where the world is one tile wide.
+#[cfg(not(target_os = "android"))]
+fn metres_per_px_at_zoom_0(lat: f64) -> f64 {
+    /// The circumference of the earth at the equator, in meters.
+    const EQUATOR_M: f64 = 40_075_016.7;
+    // The east edge of the world is one half of its width east of the centre
+    let world_px = 2.0 * slippery::Mercator::new(1.0, 0.0).into_pixel_space(0.0).x;
+    EQUATOR_M * lat.to_radians().cos() / world_px
 }
 
 /// A wash over the tiles, so overlays stand out: the map's own decoration,
@@ -231,6 +270,23 @@ mod tests {
             position: at,
         })]);
         simulator.simulate([iced::Event::Mouse(event)])[0]
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn the_scale_a_view_is_set_to_is_the_scale_it_reports() {
+        let mut map = Map::new(None);
+        let copenhagen = GeoPosition::new(55.68, 12.57);
+        map.look_at(copenhagen, 2.5);
+        let (centre, scale) = map.centre();
+        assert!((centre.lat - copenhagen.lat).abs() < 1e-9, "{centre:?}");
+        assert!((centre.lon - copenhagen.lon).abs() < 1e-9, "{centre:?}");
+        assert!((scale - 2.5).abs() < 1e-9, "{scale}");
+
+        // At zoom 0, the equator's 40 000 km across slippery's 512 pixels
+        assert!((metres_per_px(0.0, 0.0) - 40_075_016.7 / 512.0).abs() < 1e-6);
+        // Each zoom level halves it
+        assert!((metres_per_px(0.0, 1.0) * 2.0 - metres_per_px(0.0, 0.0)).abs() < 1e-6);
     }
 
     fn wheel() -> mouse::Event {

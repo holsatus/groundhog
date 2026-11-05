@@ -89,6 +89,12 @@ icons! {
     Minimize => "minimize-2.svg",
     /// The map.
     Map => "map.svg",
+    /// The 3D globe in the map's place.
+    #[cfg_attr(
+        target_os = "android",
+        expect(dead_code, reason = "the globe is not built for Android")
+    )]
+    Globe => "globe.svg",
     /// The vehicles panel.
     Vehicle => "navigation.svg",
     /// The mission panel.
