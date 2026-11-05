@@ -321,12 +321,16 @@ lift as the end, so a second finger abandons a drag without publishing
 `on_end` and leaves the pane grid's highlight stuck. The vendored
 `widget/pane_grid.rs` handles finger presses but reads `mouse::Cursor` for
 positions, so divider and title-bar drags follow a stale mouse cursor on a
-tablet.
+tablet. `drag_source` also runs two copies of its press, drag and release
+machine, one for the mouse and one for fingers, which differ only in the
+deadband, the lift and where the position comes from.
 
 **Fix:** one `widget::touch` tracker that follows one finger by id with its
 own position, ignores other fingers, and ends on lift or `FingerLost`. Use it
 in `drag_source` (publishing `on_end` on every terminal path) and in the
 pane grid (note the change in its header), and move the map overlay onto it.
+`drag_source` feeds both inputs into one machine, with a source that gives
+the deadband and lift, as `map/overlay.rs` does with its `Source`.
 
 **Test:** a second finger neither starts nor ends a drag; a lost finger
 publishes `on_end`; a divider drag follows the finger.
@@ -360,6 +364,24 @@ shows with a Retry; other errors keep retrying, since a camera may boot after
 the GCS. A failed spawn sets `Failed`.
 
 **Test:** a stream needing a decoder that is not installed ends in `Failed`.
+
+### MISSION-3 · A saved mission can take a zero home over the planned one
+**P2** · S
+
+`panels/mission/mod.rs` `save_to` writes the vehicle's home, else the onboard
+mission's home slot, else the plan's home. `Vehicle::home()` already falls
+back to the onboard slot but skips one at 0,0 (ArduPilot's placeholder before
+it has a home); the second fallback reads the same slot without that check.
+So a file saved from an ArduPilot vehicle with no home yet holds a home at
+0,0, and the planned home is lost. The precedence is a rule any exporter
+shares, decided in the frontend.
+
+**Fix:** `MissionDraft::export_home(&self, vehicle: Option<&Vehicle>) ->
+Option<MissionItem>`: the vehicle's home, else the planned home; the format's
+placeholder only when neither is known. `save_to` calls it.
+
+**Test:** a vehicle with a 0,0 onboard home slot and no reported home saves
+the planned home; a vehicle with a home saves that.
 
 ---
 
@@ -406,6 +428,11 @@ UI shows as a banner ("vehicle state stopped updating").
   (`panels/vehicles/mod.rs`), and icons. The unlabelled checkbox
   (`ui/input.rs`) is a 22 px target at touch density; give it a
   `size::control()` hit area.
+- Views fix raw widths where the toolkit wants tokens (`AGENTS.md`, "The
+  toolkit"): `panels/logs.rs`, `panels/vehicles/mod.rs`,
+  `panels/mission/view.rs`, `panels/settings.rs`, `panels/links/mod.rs`,
+  `panels/parameters.rs`. Name them in `ui::size`. `ui/style.rs` writes
+  `6.0` and `1.0` where `WIDGET_RADIUS` and `PANE_BORDER_WIDTH` are meant.
 
 **Test:** a short window reaches the last rail button; a scale factor of 0
 loads as the minimum.
@@ -415,10 +442,13 @@ loads as the minimum.
 
 `panels/logs.rs` collects, filters, sorts and truncates up to ~8500 status
 texts and notices each time it is drawn, and the header counts the entries
-after truncation.
+after truncation. Truncating drains the oldest entries and renumbers the
+rest, and the list keys its rows on `(index, at)`, so once the cap is reached
+every row changes key with each new entry.
 
 **Fix:** keep the merged, filtered timeline in the panel, updated from the
-status logs' and notices' revisions. Count before truncating.
+status logs' and notices' revisions. Count before truncating. Key rows by
+their source and time, not their position.
 
 ### MAP-1 · Map view edge cases
 **P3** · S
@@ -470,6 +500,156 @@ stall timeout that closes the link. `LinkStats` gains `last_tx`.
 **Test:** a writer that never completes a write closes the link within the
 timeout; a flood of bulk traffic does not delay the heartbeat.
 
+### UI-4 · The mission panel spells each vehicle operation five times
+**P3** · M
+
+Download, upload, clear, start, resume and jump each have a `MessageKind`
+variant carrying `confirmed`, a method that builds the confirmation's `again`
+message by hand, an `Operation`, and for flying a `Flight`
+(`panels/mission/mod.rs`). The logic crate's `MissionAction` already names
+every one of them and is `Copy + Eq`. The edit messages share the enum, so
+`update` hands the rest to `edit` through a catch-all and `edit` ends in
+`_ => {}`: a new variant compiles and does nothing.
+
+**Fix:** `MessageKind::Run { action: MissionAction, confirmed: bool }` with
+one dispatch, and `Operation::of(MissionAction)`; `Flight` goes. The edits
+move to their own `Edit` enum, so both matches are exhaustive.
+
+**Test:** the panel's confirmation tests pass unchanged.
+
+### UI-5 · Panels keep derived state and repeat shared flows
+**P3** · S
+
+- `LinkConfigurator::build` (`panels/links/editor.rs`) is always
+  `builder.try_build()`, recomputed by hand in three places (`edit_builder`,
+  and `ChangeVariant` and `SerialPortsDetected` in `panels/links/mod.rs`). One
+  that forgets leaves Save enabled for a link that does not parse. Derive it
+  in `parse()` and drop the field. The same file splits `impl LinkBuilder`
+  over three blocks.
+- The mission and parameters panels each build the file flow: a dialog, a
+  `task::blocking` read or write, the result sent back, and the same
+  "… saved", "Could not save …" and "Could not load …" notices with
+  `Effect::RememberDirectory`. One `panels/files.rs` keeps the two from
+  drifting apart.
+- `panels/links/mod.rs` looks a link up with `entries().find(..)` twice; add
+  `LinkManager::entry(&LinkId)` beside `entries`.
+- `Level` becomes a `MavSeverity` in `panels/logs.rs` (`severity_of`) and is
+  derived from a severity's rank in `app.rs` (`on_fleet_event`); keep both
+  conversions next to `Level`.
+- Smaller: `on_vehicle` and `on_plan` in `panels/mission/view.rs` are the
+  same closure; `panels/parameters.rs` repeats the "Uploads wait for the
+  running download" refusal in two arms; the video panel's `persist` takes a
+  task only to return it.
+
+**Test:** a link edit that stops parsing disables Save, from a variant change
+too.
+
+### UI-6 · `layout.rs`'s drop hints panic on paths they call impossible
+**P3** · S
+
+- `Layout::hint_for` ends in `unreachable!("handled above")`,
+  `Workspace::place` has another for `Swap`, and `chain` one for an empty
+  stack. `AGENTS.md` allows `expect` on a proven invariant, not panics as
+  control flow; `let … else`, a separate `swap` and `split_first` say the
+  same without them.
+- `hint_for` clones and places the workspace twice for a drop between panes.
+- The area maths for a split and for a drop between panes is written once
+  for the row (x, width) and once for the columns (y, height);
+  `drop_target_at` and `Workspace::resize` repeat the shape. One helper
+  taking the stack's axis serves all of them.
+- `self.size.unwrap_or(ASSUMED_SIZE)` is written six times; name it
+  `grid_size()`.
+- `layout::Destination` (where a dragged panel lands) shares its name with
+  `shell::Destination` (the five navigation tasks), and `app/` uses both.
+  Rename it, `Landing` say.
+
+**Test:** the hint tests pass unchanged.
+
+### UI-7 · The shells repeat their chrome
+**P3** · S
+
+- Padding grown by a gap on every side is built field by field seven times
+  (`app/floating.rs` four times, `app.rs` `view_toasts`, `ui/dialog.rs`,
+  `panels/video/mod.rs`), and `app/tiled.rs` has a variant taking the larger
+  of the two. Add a `ui` helper for each.
+- `Floating::view_toasts_within` (`app/floating.rs`) rebuilds
+  `ui::toast::layer`, which `view_toasts` uses.
+- The title bar's padding and divider are built in both `app/tiled.rs` and
+  `app/floating.rs`.
+- `Destination::ALL` flattened into its panels is written seven times
+  (`app/tiled.rs` and `app/floating.rs` twice each, `app/panels.rs`,
+  `app/gallery.rs`, `shell.rs`). A `Destination::all_panels()` makes the
+  rail's order the floating shell's by construction, where today a comment in
+  `view_rail` asks for it.
+- `app.rs` flushes the layout the same way on `CloseRequested` and on
+  `LayoutSaveTick`.
+- `config::data_dir` only calls `platform::data_dir`.
+
+### UI-8 · Toolkit leftovers
+**P3** · S
+
+- `widget/virtualized.rs` keeps a measured-height mode (`Height::Measured`,
+  an estimate, a map of measured heights cleared when the width changes)
+  that no list uses: all three set `item_height`, as `AGENTS.md` asks. Make
+  the height required and delete the mode.
+- `ui::text::severity` shows mavio's `Debug` name of a severity, so the label
+  changes with the dependency, beside a commented-out sketch of another
+  format. Give it an explicit label.
+- `ui::button::transparent_icon_button` is
+  `icon_button(..).kind(ButtonKind::Transparent)` with a copied doc; its one
+  caller is `ui/toast.rs`.
+- `style::subtle_button` and `style::transparent_button` are the same
+  function but for the fill.
+
+### UI-9 · Small per-frame waste
+**P3** · S
+
+- While the map is the main view, the floating shell builds the video inset
+  twice per view: `view_map_screen` (`app/floating.rs`) builds it to fill the
+  screen, discards it, and builds it again for the corner.
+- The video panel's `sync` clones the recordings directory on every snapshot
+  only to compare it.
+- `Application::sync_system_bars` builds a whole `Theme` to read `is_dark`;
+  `ThemeMode` can answer.
+- `map/overlay.rs` `mouse_interaction` asks the hovered layer for all its
+  handles again to learn whether one is draggable, which `hit` already knew.
+- Every move of a divider drag runs `sync_panels`, and with it every panel's
+  `on_tick`. Check that no panel relies on that before running it only when
+  the open panels change.
+
+### PLAT-1 · Four copies of the JNI preamble
+**P3** · S
+
+`platform/android.rs` attaches to the VM and wraps the activity in four
+functions, each with its own `unsafe` block and SAFETY note. One
+`with_activity(app, f)` keeps one of each. The log filter's crate list is
+also written twice, in `platform/desktop.rs` and `platform/android.rs`; keep
+it in `platform/mod.rs`. Verify with `android/lint.sh`.
+
+### TEST-1 · Tests repeat other tests and break the lint rules
+**P3** · S
+
+- The gallery (`app/gallery.rs`) opens with `#![allow(let_underscore_drop)]`
+  and discards 52 updates with `let _ =`; `AGENTS.md` wants `drop(..)` and
+  never `#[allow]`. A `send` helper that drops the task removes both.
+- Panel tests repeat logic tests. `a_decimal_can_be_typed_over_an_integral_value`
+  (`panels/parameters/tests.rs`) is the logic crate's
+  `typed_text_that_parses_to_the_current_value_survives`.
+  `an_unmodified_draft_follows_the_onboard_mission` and
+  `a_modified_draft_is_never_overwritten` (`panels/mission/tests.rs`) share
+  their names with `domain/mission/draft.rs` tests that assert more; keep one
+  panel test that `on_fleet` makes the draft follow.
+  `new_waypoints_never_take_the_vehicles_ground_altitude` needs only what the
+  panel adds: the settings' default altitude, and the hand-off to placing.
+- `every_panel_but_the_map_has_one_destination` (`shell.rs`) lists the pane
+  kinds by hand, so a new kind that no destination offers passes. Derive the
+  list from a `PaneKind::ALL` kept complete by an exhaustive `match`.
+- Six panel test modules define the same system, address and `env()`, and
+  three the same "the view shows this text" simulator. Move them to
+  `panels/test_support.rs`.
+
+**Test:** a `PaneKind` missing from every destination fails the shell test.
+
 ### DOCS-1 · Small doc fixes
 **P3** · S
 
@@ -484,6 +664,22 @@ timeout; a flood of bulk traffic does not delay the heartbeat.
   today; build rejections only from failure values.
 - `domain/vehicle/mod.rs` `string_from_cstring` drops a whole name for one
   invalid UTF-8 byte; decode lossily, as status texts do.
+
+### DOCS-2 · Comments that restate the code
+**P3** · S
+
+- `config.rs` says "Migrations from older versions run here" above a line
+  that only sets the version; there are no migrations.
+- `panels/` holds about two dozen comments that label a group of variants
+  (`MessageKind` in `panels/mission/mod.rs`) or narrate the block below (the
+  battery and GPS in `panels/vehicles/mod.rs`, `panels/parameters.rs`), and
+  eleven that repeat that `settle` announced the failure, which belongs once
+  in the docs of `Settled`. The first `MessageKind` label also says what
+  `confirmed` means; that belongs in a `///`.
+- Tests in `layout.rs`, `app.rs` and `config.rs`, and the gallery's steps,
+  narrate the next line.
+
+Keep the comments that give a reason.
 
 ---
 
@@ -581,3 +777,45 @@ and `Default` (0/0, broadcast); the GUI converts with `as` and truncates
 `u64` to `u32` in the map's helper ids. Components are a bare `u8`
 throughout (`component_state(u8)`, `target_for(u8)`). Consider private
 fields with conversions and a `ComponentId`; at least remove the truncation.
+
+### API-7 · "Armed, or may be" is decided outside the vehicle, three ways
+**P3** · S
+
+Whether a mode change asks first is a safety rule (`AGENTS.md`, "Failures
+reach the operator"), yet `panels/vehicles/mod.rs` `mode_change_asks`
+decides it as `armed() != Some(false)`, and a second frontend would have to
+know to do the same. The logic crate spells the same fact
+`armed() == Some(false)` (`Vehicle::can_reboot`) and `armed().unwrap_or(true)`
+(`MissionDraft::check`).
+
+**Fix:** `Vehicle::may_be_armed()`, used by all three. The panel keeps asking
+for a vehicle it does not know.
+
+**Test:** a vehicle whose armed state is unknown may be armed; the panel's
+test that a disarmed vehicle changes mode without asking stays.
+
+### API-8 · The GUI derives vehicle and mission facts another frontend would repeat
+**P3** · M
+
+- `loiter_radius` (`panels/mission/map.rs`) picks the radius parameter by
+  `MavCmd`: wire layout that `domain::mission::command::SPECS` owns. Give
+  `CommandSpec` a radius slot and add `MissionItem::loiter_radius_m()`.
+- `heading` (`panels/vehicles/map.rs`) is the attitude's yaw, else the course
+  over ground above 0.5 m/s, else 0. `Vehicle::heading_rad() -> Option<f32>`
+  lets a frontend hide what is unknown.
+- "The vehicle's current item, only while the draft is synced" is computed
+  in both `panels/mission/view.rs` and `panels/mission/map.rs`: a
+  `MissionDraft` method.
+- `panels/calibration.rs` decides which side an `Instruction` concerns, and
+  which sessions show sides (an accelerometer, or a compass that reported
+  some): `Instruction::side()` and a `Session` method.
+- "Any vehicle armed" (`panels/video/mod.rs` `follow`):
+  `FleetSnapshot::any_armed()`. The recording-while-armed window
+  (`WhileArmed`) moves only if a headless recorder is planned.
+- "The download stopped short" (`panels/parameters.rs`, `expected > 0 && got
+  < expected`): `ParamDownload::is_incomplete()`, with API-3's `expected()`
+  as an `Option`.
+
+**Test:** each rule moves to the logic crate with its test
+(`only_loiters_have_a_radius`; a heading that prefers the attitude and
+ignores a slow course).

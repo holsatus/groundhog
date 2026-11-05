@@ -2340,7 +2340,7 @@ dependencies = [
 [[package]]
 name = "iced"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_core",
  "iced_debug",
@@ -2356,7 +2356,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -2375,7 +2375,7 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -2385,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "futures",
  "iced_core",
@@ -2399,7 +2399,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2419,7 +2419,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -2428,7 +2428,7 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_graphics",
  "iced_tiny_skia",
@@ -2440,7 +2440,7 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "bytes",
  "iced_core",
@@ -2451,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "iced_selector"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_core",
 ]
@@ -2459,7 +2459,7 @@ dependencies = [
 [[package]]
 name = "iced_test"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_futures",
  "iced_program",
@@ -2475,7 +2475,7 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2492,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2512,7 +2512,7 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "iced_renderer",
  "iced_runtime",
@@ -2526,7 +2526,7 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
-source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#188498b306029f264401eaac437bdeb94a09a1b2"
+source = "git+https://github.com/peterkrull/iced?branch=groundhog-compat#05aea36ccbc798d9ce161a53abe48d9a04d5ad72"
 dependencies = [
  "arboard",
  "iced_debug",
@@ -4009,7 +4009,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
