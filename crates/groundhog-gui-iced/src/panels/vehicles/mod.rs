@@ -386,7 +386,7 @@ fn view_telemetry(vehicle: &Vehicle) -> impl Widget<Message> + '_ {
         .attitude
         .current
         .as_ref()
-        .map(|attitude| attitude.attitude.euler_angles())
+        .map(|attitude| attitude.euler_angles())
         .map(|(roll, pitch, yaw)| {
             (
                 format!("{:.1}°", roll.to_degrees()),

@@ -405,7 +405,7 @@ impl MapLayer<Message> for Icons<'_> {
 /// ground.
 fn heading(vehicle: &Vehicle) -> f32 {
     if let Some(attitude) = &vehicle.attitude.current {
-        return attitude.attitude.euler_angles().2;
+        return attitude.euler_angles().2;
     }
 
     vehicle
@@ -433,7 +433,7 @@ impl MapLayer<Message> for Hud<'_> {
 
     fn draw(&self, frame: &mut MapFrame<'_>, _interaction: Interaction) {
         if let Some(current) = &self.vehicle.attitude.current {
-            let (roll, pitch, yaw) = current.attitude.euler_angles();
+            let (roll, pitch, yaw) = current.euler_angles();
             let area = frame.view().visible();
             attitude::overlay(frame.frame(), area, roll, pitch, yaw, &self.palette);
         }

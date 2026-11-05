@@ -252,6 +252,12 @@ pub(crate) fn draw_arrow_head(
     let tip = Point::new(0.0, -half);
     let notch = Point::new(0.0, half / 2.0);
 
+    // A non-finite heading has no direction, and its path would fail
+    // tessellation, which the GPU renderer turns into a crash.
+    if !yaw.is_finite() {
+        return;
+    }
+
     frame.with_save(|frame| {
         frame.translate(center - Point::ORIGIN);
         frame.rotate(Radians(yaw));

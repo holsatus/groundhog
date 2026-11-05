@@ -11,18 +11,39 @@ pub struct AttitudeState {
     pub current: Option<Attitude>,
 }
 
+/// A vehicle's orientation, always a finite rotation: a reported NaN or
+/// infinity has no direction, and drawn it would fail tessellation, which
+/// iced's GPU renderer turns into a crash.
 #[derive(Clone, Debug)]
 pub struct Attitude {
-    pub attitude: UnitQuaternion<f32>,
+    attitude: UnitQuaternion<f32>,
+}
+
+impl Attitude {
+    /// `attitude`, if every component is finite.
+    fn new(attitude: UnitQuaternion<f32>) -> Option<Self> {
+        attitude
+            .coords
+            .iter()
+            .all(|component| component.is_finite())
+            .then_some(Self { attitude })
+    }
+
+    /// Roll, pitch and yaw in radians, in the aerospace 3-2-1 convention.
+    pub fn euler_angles(&self) -> (f32, f32, f32) {
+        self.attitude.euler_angles()
+    }
 }
 
 impl AttitudeState {
     pub(crate) fn observe_attitude(&mut self, message: &messages::Attitude) {
         // MAVLink ATTITUDE reports roll/pitch/yaw in radians in the NED frame using the
         // aerospace 3-2-1 (Z-Y-X) convention, matching `from_euler_angles`.
-        self.current = Some(Attitude {
-            attitude: UnitQuaternion::from_euler_angles(message.roll, message.pitch, message.yaw),
-        });
+        self.current = Attitude::new(UnitQuaternion::from_euler_angles(
+            message.roll,
+            message.pitch,
+            message.yaw,
+        ));
     }
 
     pub(crate) fn observe_attitude_quaternion(&mut self, message: &messages::AttitudeQuaternion) {
@@ -33,9 +54,9 @@ impl AttitudeState {
         // All zeros is how a sender says it does not know the attitude; it has
         // no direction to normalise to.
         let norm = quaternion.norm();
-        self.current = (norm.is_finite() && norm > UNKNOWN_NORM).then(|| Attitude {
-            attitude: UnitQuaternion::from_quaternion(quaternion),
-        });
+        self.current = (norm.is_finite() && norm > UNKNOWN_NORM)
+            .then(|| Attitude::new(UnitQuaternion::from_quaternion(quaternion)))
+            .flatten();
     }
 }
 
@@ -45,7 +66,7 @@ mod tests {
     use std::f32::consts::{FRAC_1_SQRT_2, PI};
 
     fn assert_angles(attitude: &Attitude, expected: (f32, f32, f32)) {
-        let (roll, pitch, yaw) = attitude.attitude.euler_angles();
+        let (roll, pitch, yaw) = attitude.euler_angles();
         assert!((roll - expected.0).abs() < 1e-6, "roll: {roll}");
         assert!((pitch - expected.1).abs() < 1e-6, "pitch: {pitch}");
         assert!((yaw - expected.2).abs() < 1e-6, "yaw: {yaw}");
@@ -134,6 +155,62 @@ mod tests {
             state.current.as_ref().expect("attitude recorded"),
             (0.0, 0.0, PI / 2.0),
         );
+    }
+
+    /// A non-finite angle has no direction; drawn, it would crash the
+    /// renderer. The attitude is unknown until a finite one arrives.
+    #[test]
+    fn non_finite_euler_angles_are_an_unknown_attitude() {
+        let mut state = AttitudeState::default();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for message in [
+                messages::Attitude {
+                    roll: bad,
+                    ..Default::default()
+                },
+                messages::Attitude {
+                    pitch: bad,
+                    ..Default::default()
+                },
+                messages::Attitude {
+                    yaw: bad,
+                    ..Default::default()
+                },
+            ] {
+                state.observe_attitude(&messages::Attitude {
+                    yaw: 1.0,
+                    ..Default::default()
+                });
+                state.observe_attitude(&message);
+                assert!(state.current.is_none(), "{message:?}");
+            }
+        }
+
+        state.observe_attitude(&messages::Attitude {
+            yaw: PI / 2.0,
+            ..Default::default()
+        });
+        assert_angles(
+            state.current.as_ref().expect("attitude recorded"),
+            (0.0, 0.0, PI / 2.0),
+        );
+    }
+
+    #[test]
+    fn non_finite_quaternions_are_an_unknown_attitude() {
+        let mut state = AttitudeState::default();
+        for bad in [f32::NAN, f32::INFINITY] {
+            state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
+                q1: 1.0,
+                ..Default::default()
+            });
+            state.observe_attitude_quaternion(&messages::AttitudeQuaternion {
+                q1: 1.0,
+                q4: bad,
+                ..Default::default()
+            });
+            assert!(state.current.is_none(), "q4 = {bad}");
+        }
     }
 
     #[test]

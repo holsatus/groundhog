@@ -1130,14 +1130,7 @@ mod tests {
         );
 
         assert_eq!(vehicle.battery.primary().unwrap().voltage, Some(12.0));
-        let roll = vehicle
-            .attitude
-            .current
-            .as_ref()
-            .unwrap()
-            .attitude
-            .euler_angles()
-            .0;
+        let roll = vehicle.attitude.current.as_ref().unwrap().euler_angles().0;
         assert!((roll - 1.0).abs() < 1e-6);
     }
 
@@ -1402,7 +1395,7 @@ mod tests {
             .current
             .as_ref()
             .expect("attitude recorded");
-        let (roll, pitch, yaw) = attitude.attitude.euler_angles();
+        let (roll, pitch, yaw) = attitude.euler_angles();
         assert!(roll.abs() < 1e-6 && pitch.abs() < 1e-6 && yaw.abs() < 1e-6);
     }
 
