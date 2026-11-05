@@ -227,11 +227,25 @@ pub fn list_row<'a, W>(index: usize, content: W) -> Container<'a, W> {
         .style(style::list_row(index))
 }
 
+/// How long the pointer rests on content before its hint shows: long enough
+/// that crossing it is not enough, short enough to feel like an answer.
+const DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// `content`, explained by `hint` on `side` when hovered; on a touch
 /// screen, which cannot hover, only `content`.
 pub fn tooltip<'a, M: 'a>(
     content: impl Widget<M> + 'a,
     hint: impl IntoFragment<'a>,
+    side: Position,
+) -> Element<'a, M> {
+    tooltip_with(content, text(hint), side)
+}
+
+/// [`tooltip`] whose hint is laid out rather than a single line: a record
+/// whose parts are set apart (a time, a source, a message).
+pub fn tooltip_with<'a, M: 'a>(
+    content: impl Widget<M> + 'a,
+    hint: impl Widget<M> + 'a,
     side: Position,
 ) -> Element<'a, M> {
     // Without hover, a tooltip opens on a tap and lingers until something
@@ -242,12 +256,10 @@ pub fn tooltip<'a, M: 'a>(
 
     iced::widget::tooltip(
         content,
-        container(text(hint))
-            .padding(space::M)
-            .style(style::tooltip),
+        container(hint).padding(space::M).style(style::tooltip),
         side,
     )
-    .delay(std::time::Duration::from_millis(250))
+    .delay(DELAY)
     .boxed()
 }
 

@@ -110,6 +110,9 @@ pub mod size {
     pub fn field_control() -> f32 {
         by_density(160.0, 200.0)
     }
+    /// The widest a tooltip's hint gets before its text wraps: a message long
+    /// enough to be cut in a row is shown whole here.
+    pub const TOOLTIP_MAX_WIDTH: f32 = 320.0;
     /// The height of a list row of one line of body text.
     pub fn list_row() -> f32 {
         by_density(26.0, 44.0)

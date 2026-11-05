@@ -6,7 +6,7 @@
 //! narrowed to the selected vehicle or to the GCS, and a minimum severity can
 //! be applied.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use groundhog_logic::{
     SystemId,
@@ -17,7 +17,7 @@ use groundhog_logic::{
 };
 use iced::{
     Alignment, Element, Length, Task, Widget,
-    widget::{container, row, scrollable},
+    widget::{column, container, row, scrollable, tooltip},
 };
 use mavio::default_dialect::enums::MavSeverity;
 
@@ -50,6 +50,10 @@ impl std::fmt::Display for Scope {
 
 /// The largest number of messages rendered at once; older ones are dropped.
 const MAX_ENTRIES: usize = 2000;
+
+/// The source column: room for a system and a component number in monospace,
+/// so the severities beside them line up.
+const SOURCE_WIDTH: f32 = 56.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Filter {
@@ -103,22 +107,82 @@ impl Entry<'_> {
 
 /// One line of a timeline of messages: where it came from, how severe it is,
 /// and what it says.
+///
+/// The row is one line high, so a message that does not fit is cut. The
+/// tooltip is the whole record of it: when it was received, its source, its
+/// severity in full, and every character of the message.
 fn timeline_row<'a, M: 'a>(
     index: usize,
+    received: SystemTime,
     source: String,
     severity: MavSeverity,
     message: String,
 ) -> impl Widget<M> + 'a {
-    ui::list_row(
-        index,
+    let detail = column![
         row![
-            ui::text(source)
-                .tone(Tone::Muted)
-                .width(Length::Fixed(72.0)),
-            ui::severity(severity).width(Length::Fixed(96.0)),
-            ui::text(message).single_line().width(Length::Fill),
+            ui::mono(time_of_day(received)).tone(Tone::Muted),
+            ui::mono(source.clone()).tone(Tone::Muted),
+            ui::severity_name(severity),
         ]
         .spacing(ui::space::M),
+        ui::text(message.clone()).width(Length::Fit.max(ui::size::TOOLTIP_MAX_WIDTH)),
+    ]
+    .spacing(ui::space::S);
+
+    let line = ui::list_row(
+        index,
+        row![
+            ui::mono(source)
+                .tone(Tone::Muted)
+                .single_line()
+                .width(Length::Fixed(SOURCE_WIDTH)),
+            ui::severity(severity),
+            ui::text(message).single_line().width(Length::Fill),
+        ]
+        .spacing(ui::space::S),
+    );
+
+    ui::tooltip_with(line, detail, tooltip::Position::FollowCursor)
+}
+
+/// The clock an entry is shown by.
+///
+/// An `Instant` has no epoch, so the view anchors one to the wall clock as it
+/// is built: the entry's time is the wall clock less what has passed since.
+struct WallClock {
+    wall: SystemTime,
+    monotonic: Instant,
+}
+
+impl WallClock {
+    fn now() -> Self {
+        Self {
+            wall: SystemTime::now(),
+            monotonic: Instant::now(),
+        }
+    }
+
+    /// When the moment `at` was, on the wall clock.
+    fn at(&self, at: Instant) -> SystemTime {
+        self.wall
+            .checked_sub(self.monotonic.saturating_duration_since(at))
+            .unwrap_or(self.wall)
+    }
+}
+
+/// The time of day of `time` in UTC, to the second.
+fn time_of_day(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let of_day = seconds % 86_400;
+
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        of_day / 3600,
+        of_day / 60 % 60,
+        of_day % 60
     )
 }
 
@@ -168,22 +232,29 @@ impl LogPanel {
         let count = entries.len();
         let entries = entries.into_iter().enumerate().collect::<Vec<_>>();
         let row_height = ui::size::list_row();
-        let list = virtual_list(entries, |&(index, entry)| match entry {
-            Entry::Vehicle(system, status) => timeline_row(
+        let clock = WallClock::now();
+        let list = virtual_list(entries, move |&(index, entry)| {
+            let (source, message) = match entry {
+                Entry::Vehicle(system, status) => (
+                    format!("{}:{}", system.0, status.component),
+                    status.text.clone(),
+                ),
+                Entry::Gcs(notice) => (
+                    "GCS".to_string(),
+                    match &notice.detail {
+                        Some(detail) => format!("{}: {detail}", notice.title),
+                        None => notice.title.clone(),
+                    },
+                ),
+            };
+
+            timeline_row(
                 index,
-                format!("{}:{}", system.0, status.component),
-                status.severity,
-                status.text.clone(),
-            ),
-            Entry::Gcs(notice) => timeline_row(
-                index,
-                "GCS".to_string(),
+                clock.at(entry.at()),
+                source,
                 entry.severity(),
-                match &notice.detail {
-                    Some(detail) => format!("{}: {detail}", notice.title),
-                    None => notice.title.clone(),
-                },
-            ),
+                message,
+            )
         })
         .item_height(move |_| row_height)
         .key(|(index, entry)| (*index, entry.at()));
@@ -272,5 +343,34 @@ impl LogPanel {
         entries.retain(|entry| status::rank(entry.severity()) <= threshold);
         entries.sort_by_key(Entry::at);
         entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A clock time is the time of day in UTC, whatever the day.
+    #[test]
+    fn the_time_of_day_is_utc() {
+        let time = UNIX_EPOCH + Duration::from_secs(2 * 86_400 + 3_661);
+        assert_eq!(time_of_day(time), "01:01:01 UTC");
+    }
+
+    /// The tooltip shows when the entry was received, not when it was opened:
+    /// both are anchored to the wall clock when the view is built.
+    #[test]
+    fn an_entry_keeps_the_time_it_was_received() {
+        let monotonic = Instant::now();
+        let clock = WallClock {
+            wall: UNIX_EPOCH + Duration::from_secs(3_600),
+            monotonic,
+        };
+
+        let received = clock.at(monotonic - Duration::from_secs(90));
+
+        assert_eq!(time_of_day(received), "00:58:30 UTC");
     }
 }
