@@ -1,0 +1,8 @@
+# Widget tests render on the CPU (tiny-skia), as they do on a machine
+# without a GPU. On wgpu, every `iced_test::Simulator` creates a Vulkan
+# instance, and the Vulkan loader crashes when one thread creates or
+# destroys an instance while another queries it, which parallel tests do.
+# A variable set in the environment wins: the gallery sets it to `wgpu`, so
+# it renders as the application does.
+[env]
+ICED_TEST_BACKEND = "tiny-skia"

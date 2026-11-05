@@ -1,0 +1,55 @@
+// A version 2 configuration using every persisted field and enum variant
+// it can. It must keep loading: see the module doc of `src/config.rs`.
+(
+    version: 2,
+    links: [
+        (
+            name: "Telemetry radio",
+            auto_connect: true,
+            high_latency: false,
+            auto_reconnect: true,
+            build: Serial(port: "/dev/ttyUSB0", baud: 57600),
+        ),
+        (
+            name: "SITL",
+            auto_connect: false,
+            high_latency: false,
+            auto_reconnect: true,
+            build: Udp(sock_addr: "0.0.0.0:14550", peer: None),
+        ),
+        (
+            name: "Companion",
+            auto_connect: false,
+            high_latency: true,
+            auto_reconnect: false,
+            build: Udp(sock_addr: "0.0.0.0:14551", peer: Some("192.168.1.2:14555")),
+        ),
+        (
+            name: "Router",
+            auto_connect: false,
+            high_latency: false,
+            auto_reconnect: true,
+            build: Tcp(sock_addr: "127.0.0.1:5760"),
+        ),
+    ],
+    file_picker_path: Some("/home/operator/missions"),
+    workspace: Some((
+        left: (size: 360.0, panes: [(Vehicles, 1.0), (Mission, 2.0), (Calibration, 1.0)]),
+        middle: (size: 260.0, panes: [(Logs, 1.0), (Video, 1.0)]),
+        right: (size: 360.0, panes: [(Parameters, 1.0), (Links, 1.0), (Settings, 1.0)]),
+    )),
+    settings: (
+        theme: Light,
+        shell: Tiled,
+        touch_controls: true,
+        scale_factor: 1.25,
+        record_telemetry: false,
+        default_waypoint_altitude_m: 40.0,
+    ),
+    video: (
+        uri: "rtsp://192.168.1.10:8554/main",
+        low_latency: false,
+        jitter_buffer_ms: 200,
+        enabled: true,
+    ),
+)

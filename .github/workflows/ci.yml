@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libudev-dev \
+            libasound2-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  android:
+    name: clippy for Android
+    runs-on: ubuntu-latest
+
+    # `platform/android.rs` and the `android_main` export only exist for
+    # `target_os = "android"`, so the job above never compiles them. This is
+    # where the crate's `unsafe_code` deny (and everything else in
+    # `[workspace.lints]`) reaches the one module that needs an exception.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The runner image usually ships an NDK; install one when it does not,
+      # because the C dependencies (`jni`, `android-activity`) need a cross
+      # compiler for this target.
+      - name: Android NDK
+        run: |
+          if [ -z "$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null)" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;27.2.12479018" > /dev/null
+          fi
+
+      - name: Clippy
+        run: ./android/lint.sh

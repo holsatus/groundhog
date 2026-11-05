@@ -1,0 +1,64 @@
+# Groundhog as a Flatpak. Build it with flatpak/build.sh, which vendors the
+# crates this manifest reads first (see flatpak/README.md).
+id: org.holsatus.Groundhog
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: groundhog
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # UDP and TCP links, and the map's tiles.
+  - --share=network
+  # The GPU, and serial links: USB adapters appear as /dev/ttyACM* and
+  # /dev/ttyUSB*, which no narrower permission reaches.
+  - --device=all
+  # Listing serial ports asks udev which of them are USB adapters.
+  - --filesystem=/run/udev:ro
+  # A camera named `something.local` is found through Avahi: the runtime has
+  # no resolver for multicast DNS names of its own.
+  - --system-talk-name=org.freedesktop.Avahi
+
+modules:
+  - name: groundhog
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      # The SDK's flags carry an -O2 that lands after aws-lc's -O0 for its
+      # jitter entropy source, which refuses to be optimised (aws-lc-sys
+      # comes with the map tiles' HTTPS). The `cc` crate sets the
+      # optimisation of a release build itself.
+      cflags: -pipe -g -fstack-protector-strong -fstack-clash-protection -fcf-protection
+      cflags-override: true
+      env:
+        # Inside the build directory, so nothing of the host's leaks in.
+        CARGO_HOME: /run/build/groundhog/cargo-home
+    build-commands:
+      # The build has no network: Cargo reads the crates build.sh vendored,
+      # through the source replacement `cargo vendor` printed for them.
+      - cat flatpak/out/vendor-config.toml >> .cargo/config.toml
+      - cargo build --offline --locked --release -p groundhog-gui-iced --bin groundhog
+      - install -Dm755 target/release/groundhog -t /app/bin
+      - install -Dm644 flatpak/org.holsatus.Groundhog.desktop -t /app/share/applications
+      - install -Dm644 flatpak/org.holsatus.Groundhog.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 flatpak/org.holsatus.Groundhog.svg -t /app/share/icons/hicolor/scalable/apps
+    sources:
+      # The working tree as it is, uncommitted changes included.
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - target
+          - flatpak/out
+      # Where the vendored configuration expects them, relative to the
+      # workspace root.
+      - type: dir
+        path: out/vendor
+        dest: flatpak/out/vendor
+      - type: file
+        path: out/vendor-config.toml
+        dest: flatpak/out

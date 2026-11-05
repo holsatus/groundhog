@@ -1,0 +1,11 @@
+# Clippy configuration for the lints that need one. The lint levels themselves
+# live in the root `Cargo.toml` (`[workspace.lints]`); this file only holds the
+# settings those lints read.
+
+# A test asserts the failure paths of the code it covers, so it panics on
+# purpose: `panic!`/`assert!`/`unwrap()` are how it reports a wrong result, and
+# a skipped test says so on stderr. Production code keeps all of these denied.
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true

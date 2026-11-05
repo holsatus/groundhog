@@ -1,0 +1,91 @@
+[package]
+name = "groundhog-gui-iced"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# A library next to the binary so Android can load the application as a
+# `cdylib`: Android has no `main`, it calls the exported `android_main` from
+# `libgroundhog_gui_iced.so`. The binary remains the desktop entry point.
+# The library is an `rlib` here, so desktop builds do not link a shared
+# object nobody loads; `android/build.sh` asks for the `cdylib` with
+# `cargo rustc --crate-type cdylib`.
+[lib]
+name = "groundhog_gui_iced"
+
+[[bin]]
+name = "groundhog"
+path = "src/main.rs"
+
+[dependencies]
+groundhog-logic = { path = "../groundhog-logic" }
+groundhog-video = { path = "../groundhog-video" }
+
+log.workspace = true
+futures.workspace = true
+mav-param.workspace = true
+mavio.workspace = true
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+
+# Intentionally not rev-pinned: the `slippery` dependency also depends on iced
+# via this same bare git URL, and adding a `rev` here would split iced into two
+# sources (incompatible types). The exact revision is fixed by the committed
+# Cargo.lock; fully rev-pinning iced requires aligning slippery's iced
+# dependency first.
+iced = { git = "https://github.com/iced-rs/iced", features = ["tokio", "svg", "advanced", "canvas", "image"] }
+
+# For `task::blocking`, which is not re-exported by `iced`; kept on the same source as `iced`.
+iced_runtime = { git = "https://github.com/iced-rs/iced" }
+slippery = { git = "https://github.com/peterkrull/slippery" }
+ron = "0.12.1"
+anyhow = "1.0.104"
+
+# Desktop-only platform services: rfd has no Android backend and does not
+# compile for it; `env_logger` writes to stderr (which Android discards) and
+# `directories` has no usable directories there (Android has no `$HOME`).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.17.2"
+env_logger = "0.11.10"
+directories = "6.0.0"
+
+# Keeping the screen on (`platform/awake.rs`) asks each desktop its own way.
+# All three crates are ones iced already builds there (zbus for its theme
+# detection, the others for the window), so they add none.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Power"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# `native-activity` is what turns on winit's Android backend: winit's own
+# feature is only `android-activity/native-activity`, and Cargo unifies it.
+# It also provides `AndroidApp`, the entry point argument and the data paths.
+android-activity = { version = "0.6", features = ["native-activity"] }
+# `env_logger` writes to stderr, which is /dev/null for an Android app.
+android_logger = "0.15.1"
+# Reading the window insets (`WindowInsets`) needs JNI. This is a different
+# major version from the one `android-activity` uses internally; only raw JNI
+# pointers cross between them.
+jni = "0.21"
+
+[dev-dependencies]
+groundhog-logic = { path = "../groundhog-logic", features = ["test-support"] }
+# Headless widget tests (event propagation through composed widgets). Same bare
+# git source as `iced`, so it shares the revision pinned by Cargo.lock.
+iced_test = { git = "https://github.com/iced-rs/iced" }
+# Reads back a rendered snapshot's pixels; the version `iced_test` writes them
+# with.
+png = "0.18"
+
+# The keep-awake tests talk to mock desktop services over a socket pair
+# rather than the user's session bus.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A placeholder application icon: a quadcopter seen from above. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#24515f"/>
+  <g stroke="#e8f1f2" stroke-width="7" stroke-linecap="round" fill="none">
+    <line x1="40" y1="40" x2="88" y2="88"/>
+    <line x1="88" y1="40" x2="40" y2="88"/>
+  </g>
+  <g stroke="#e8f1f2" stroke-width="5" fill="#2f6b7c">
+    <circle cx="38" cy="38" r="15"/>
+    <circle cx="90" cy="38" r="15"/>
+    <circle cx="38" cy="90" r="15"/>
+    <circle cx="90" cy="90" r="15"/>
+  </g>
+  <rect x="54" y="54" width="20" height="20" rx="5" fill="#f2b134"/>
+</svg>

@@ -1,0 +1,801 @@
+//! The parameter panel: browsing, filtering, editing, uploading, and
+//! saving/loading a component's parameters.
+//!
+//! Parameters are per MAVLink *component*: the operator picks which component
+//! to view (the autopilot by default), and every operation addresses that
+//! `(system, component)` pair. Reported values come from the fleet snapshot;
+//! the panel owns only the operator's pending [`ParamEdits`] and the uploads
+//! in flight.
+//!
+//! Uploads are refused while the component's parameter encoding is unknown:
+//! a value written with a guessed encoding may be stored as something else
+//! entirely.
+
+use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
+
+use groundhog_logic::{
+    MavlinkId, SystemId,
+    domain::{
+        fleet::FleetSnapshot,
+        parameter::{
+            DownloadOutcome, EditStatus, LoadSummary, ParamDownload, ParamEdit, ParamEdits,
+            ParamValues, Parameters, ReportedParam, Upload, UploadOutcome, group_of,
+            value_to_string, value_type_name,
+        },
+        vehicle::Vehicle,
+    },
+    storage::parameter::{ParamFileFormat, read_parameters, write_parameters},
+};
+use iced::{
+    Alignment, Element, Length, Task, Widget,
+    widget::{column, container, row, scrollable, space},
+};
+use mav_param::{Ident, Value};
+
+use super::{
+    Context, Effect, Panel, ViewContext, file_dialog,
+    notifications::Notice,
+    operations::{Activity, Finished, Operations, Settled},
+};
+use crate::{
+    ui::{
+        self, Icon, TextExt, Tone,
+        style::{self, ButtonKind},
+    },
+    widget::virtualized::virtual_list,
+};
+
+#[derive(Default, PartialEq)]
+pub struct ParameterFilter {
+    pub ident_pattern: String,
+    pub only_changed: bool,
+}
+
+impl ParameterFilter {
+    /// Whether `ident` matches the filter, given the already-lowercased
+    /// pattern and whether it has a pending edit.
+    fn matches(&self, ident: &Ident, edited: bool, pattern_lower: &str) -> bool {
+        if self.only_changed && !edited {
+            return false;
+        }
+
+        contains_ignore_ascii_case(ident.as_str(), pattern_lower)
+    }
+}
+
+/// Non-allocating ASCII-case-insensitive substring search. MAVLink parameter
+/// names are ASCII, so this is equivalent to lowercasing both sides.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.windows(n.len())
+        .any(|window| window.eq_ignore_ascii_case(n))
+}
+
+/// A parameter upload: the component and the parameter, carrying what it
+/// sets as its context.
+type UploadKey = (MavlinkId, Ident);
+
+impl Activity<Upload> for UploadKey {
+    fn activity(&self, _: &Upload) -> Cow<'static, str> {
+        format!("Setting {}", self.1.as_str()).into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0.system_id()
+    }
+}
+
+/// A download of a component's parameter list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Download(MavlinkId);
+
+impl Activity for Download {
+    fn activity(&self, (): &()) -> Cow<'static, str> {
+        "Parameter download".into()
+    }
+
+    fn system(&self) -> SystemId {
+        self.0.system_id()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    FilterIdentPattern(String),
+    FilterOnlyChanged(bool),
+    /// Show the parameters of this component.
+    SelectComponent(MavlinkId),
+    /// Download the component's parameter list again.
+    Reload(MavlinkId),
+    /// Stop a download this panel started.
+    CancelReload(MavlinkId),
+    Reloaded(Finished<Download, DownloadOutcome>),
+    /// The operator typed into a value field.
+    Edit(MavlinkId, Ident, String),
+    /// Discard a pending edit.
+    Reset(MavlinkId, Ident),
+    /// Discard every pending edit of the component.
+    ResetAll(MavlinkId),
+    Upload(MavlinkId, Ident),
+    UploadAll(MavlinkId),
+    Uploaded(Finished<UploadKey, Value>),
+    SaveDialog(MavlinkId),
+    SaveTo(PathBuf, MavlinkId, ParamValues),
+    Saved(PathBuf, std::result::Result<(), String>),
+    LoadDialog(MavlinkId),
+    LoadFrom(PathBuf, MavlinkId),
+    Loaded(PathBuf, MavlinkId, std::result::Result<ParamValues, String>),
+}
+
+#[derive(Default)]
+pub struct ParameterPanel {
+    filter: ParameterFilter,
+    /// Pending edits, per component and parameter. Kept here (not in the
+    /// fleet) so switching components or vehicles and back keeps them.
+    edits: BTreeMap<MavlinkId, ParamEdits>,
+    uploads: Operations<UploadKey, Upload>,
+    reloads: Operations<Download>,
+    /// The component the operator chose to view, per vehicle.
+    component: BTreeMap<SystemId, u8>,
+}
+
+impl Panel for ParameterPanel {
+    type Message = Message;
+
+    fn update(&mut self, message: Message, cx: &mut Context<Message>) -> Task<Message> {
+        match message {
+            Message::FilterIdentPattern(pattern) => self.filter.ident_pattern = pattern,
+            Message::FilterOnlyChanged(only) => self.filter.only_changed = only,
+            Message::SelectComponent(address) => {
+                self.component
+                    .insert(address.system_id(), address.component);
+            }
+            Message::Reload(address) => {
+                let client = cx.component_client(address);
+                return self.reloads.start(
+                    Download(address),
+                    async move { client.fetch_parameters().await },
+                    Message::Reloaded,
+                );
+            }
+            Message::CancelReload(address) => {
+                if self.reloads.cancel(&Download(address)) {
+                    cx.notices
+                        .push(Notice::info("Parameter download cancelled"));
+                }
+            }
+            Message::Reloaded(finished) => {
+                // A failed request is announced; the outcome of one that
+                // ran is told here.
+                let Some(Settled {
+                    key,
+                    result: Ok(outcome),
+                    ..
+                }) = self.reloads.settle(finished, cx)
+                else {
+                    return Task::none();
+                };
+                match outcome {
+                    DownloadOutcome::Complete => {
+                        cx.notices
+                            .push(Notice::success("Parameter download complete"));
+                    }
+                    DownloadOutcome::Incomplete(progress) => {
+                        cx.notices
+                            .push(Notice::warning("Parameter download incomplete").detail(
+                                format!(
+                                    "Received {} of {} parameters",
+                                    progress.done, progress.total
+                                ),
+                            ));
+                    }
+                    DownloadOutcome::NoParameters => {
+                        cx.notices
+                            .push(Notice::info("No parameters were reported").detail(
+                            "The component may have none, or may not have answered the request.",
+                        ))
+                    }
+                    DownloadOutcome::Cancelled => {}
+                    DownloadOutcome::Failed(error) => {
+                        cx.notices.push(key.failure(&(), error, cx.fleet));
+                    }
+                }
+            }
+            Message::Edit(address, ident, text) => {
+                // Editing supersedes any upload in flight.
+                self.uploads.cancel(&(address, ident.clone()));
+
+                let current = reported(cx.fleet, address, &ident).map(ReportedParam::value);
+                self.edits
+                    .entry(address)
+                    .or_default()
+                    .edit(ident, current, text);
+            }
+            Message::Reset(address, ident) => {
+                self.uploads.cancel(&(address, ident.clone()));
+                if let Some(edits) = self.edits.get_mut(&address) {
+                    edits.reset(&ident);
+                }
+            }
+            Message::ResetAll(address) => {
+                if let Some(edits) = self.edits.remove(&address) {
+                    for (ident, _) in edits.iter() {
+                        self.uploads.cancel(&(address, ident.clone()));
+                    }
+                }
+            }
+            Message::Upload(address, ident) => {
+                if self.is_downloading(address, cx) {
+                    cx.notices
+                        .push(Notice::info("Uploads wait for the running download"));
+                    return Task::none();
+                }
+
+                return self.upload(address, ident, cx);
+            }
+            Message::UploadAll(address) => {
+                if self.is_downloading(address, cx) {
+                    cx.notices
+                        .push(Notice::info("Uploads wait for the running download"));
+                    return Task::none();
+                }
+
+                let idents: Vec<Ident> = self
+                    .edits
+                    .get(&address)
+                    .into_iter()
+                    .flat_map(ParamEdits::uploadable)
+                    .map(|(ident, _)| ident.clone())
+                    .collect();
+
+                // The middleware bounds how many sets are in flight at once.
+                return Task::batch(
+                    idents
+                        .into_iter()
+                        .map(|ident| self.upload(address, ident, cx)),
+                );
+            }
+            Message::Uploaded(finished) => {
+                let Some(Settled {
+                    key: (address, ident),
+                    context: upload,
+                    result,
+                }) = self.uploads.settle(finished, cx)
+                else {
+                    return Task::none();
+                };
+
+                let outcome = self
+                    .edits
+                    .get_mut(&address)
+                    .and_then(|edits| edits.finish_upload(&ident, upload, result));
+
+                match outcome {
+                    Some(UploadOutcome::Rejected {
+                        requested,
+                        reported,
+                    }) => cx.notices.push(
+                        Notice::warning(format!("{} was not set as requested", ident.as_str()))
+                            .detail(format!(
+                                "Requested {}, the vehicle holds {}",
+                                value_to_string(requested),
+                                value_to_string(reported)
+                            )),
+                    ),
+                    // A failure was announced when it settled.
+                    Some(UploadOutcome::Set | UploadOutcome::Failed(_)) | None => {}
+                }
+            }
+            Message::SaveDialog(address) => {
+                // Snapshot the values now, not when the dialog closes.
+                let Some(values) = cx.fleet.parameters(address).map(Parameters::values) else {
+                    return Task::none();
+                };
+                let dialog = file_dialog(cx.directory)
+                    .set_file_name("parameters.param")
+                    .add_filter("Mission Planner", &["param", "parm"])
+                    .add_filter("QGroundControl", &["params"])
+                    .add_filter("Groundhog INI", &["ini"]);
+                return Task::future(async move {
+                    dialog
+                        .save_file()
+                        .await
+                        .map(|file| (file.path().to_owned(), values))
+                })
+                .and_then(move |(path, values)| {
+                    Task::done(Message::SaveTo(path, address, values))
+                });
+            }
+            Message::SaveTo(path, address, values) => {
+                return iced_runtime::task::blocking(move |mut sender| {
+                    let text = write_parameters(
+                        ParamFileFormat::of_file_extension(&path),
+                        &values,
+                        address,
+                    );
+                    let result = std::fs::write(&path, text).map_err(|error| error.to_string());
+                    drop(sender.try_send(Message::Saved(path, result)));
+                });
+            }
+            Message::Saved(path, result) => match result {
+                Ok(()) => {
+                    cx.notices
+                        .push(Notice::success("Parameters saved").detail(path.display()));
+                    cx.request(Effect::RememberDirectory(path));
+                }
+                Err(error) => cx.notices.push(
+                    Notice::error(format!("Could not save {}", path.display())).detail(error),
+                ),
+            },
+            Message::LoadDialog(address) => {
+                let dialog = file_dialog(cx.directory);
+                return Task::future(async move {
+                    dialog.pick_file().await.map(|file| file.path().to_owned())
+                })
+                .and_then(move |path| Task::done(Message::LoadFrom(path, address)));
+            }
+            Message::LoadFrom(path, address) => {
+                // Untyped formats are read as the types the component reports.
+                let reported = cx
+                    .fleet
+                    .parameters(address)
+                    .map(Parameters::values)
+                    .unwrap_or_default();
+                return iced_runtime::task::blocking(move |mut sender| {
+                    let result = std::fs::read_to_string(&path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|text| {
+                            read_parameters(
+                                ParamFileFormat::of_file_extension(&path),
+                                &text,
+                                |ident| reported.get(ident).copied(),
+                            )
+                        });
+                    drop(sender.try_send(Message::Loaded(path, address, result)));
+                });
+            }
+            Message::Loaded(path, address, result) => match result {
+                Ok(loaded) => {
+                    // Loading replaces these edits: stop sending the old ones.
+                    for ident in loaded.keys() {
+                        self.uploads.cancel(&(address, ident.clone()));
+                    }
+                    let LoadSummary { changed, skipped } = self
+                        .edits
+                        .entry(address)
+                        .or_default()
+                        .load(cx.fleet.parameters(address), &loaded);
+                    let mut notice =
+                        Notice::success(format!("Loaded {changed} changed parameters"));
+                    if skipped > 0 {
+                        notice = notice.detail(format!(
+                            "{skipped} entries were unknown or of another type and were skipped"
+                        ));
+                    }
+                    cx.notices.push(notice);
+                    cx.request(Effect::RememberDirectory(path));
+                }
+                Err(error) => cx.notices.push(
+                    Notice::error(format!("Could not load {}", path.display())).detail(error),
+                ),
+            },
+        }
+
+        Task::none()
+    }
+
+    /// Render the parameter panel.
+    fn view<'a>(&'a self, cx: ViewContext<'a>) -> Element<'a, Message> {
+        let ViewContext {
+            fleet, selected, ..
+        } = cx;
+        let Some(vehicle) = selected.and_then(|system| fleet.vehicle(system)) else {
+            return ui::empty("No vehicle selected.").boxed();
+        };
+
+        let system = vehicle.system;
+        let component = self.selected_component(vehicle);
+        let address = vehicle.target_for(component);
+        let parameters = vehicle.parameters(component);
+        let encoding_known = vehicle.param_encoding(component).is_some();
+
+        // Which component's parameters are shown; the autopilot is marked.
+        let component_ids = vehicle.component_ids();
+        let autopilot = vehicle.autopilot_component();
+        let picker = (!component_ids.is_empty()).then(|| {
+            ui::pick_list(Some(component), component_ids, move |id: &u8| {
+                if Some(*id) == autopilot {
+                    format!("Component {id} (autopilot)")
+                } else {
+                    format!("Component {id}")
+                }
+            })
+            .on_select(move |id| {
+                Message::SelectComponent(MavlinkId {
+                    system: system.0,
+                    component: id,
+                })
+            })
+        });
+
+        let download = parameters.map(Parameters::download);
+        let downloading = self.reloads.is_running(&Download(address))
+            || download.is_some_and(ParamDownload::is_running);
+        // What the operator changed (an upload in flight and text that does
+        // not parse included), and what of it can be uploaded now.
+        let edits = self.edits.get(&address);
+        let changed = edits.map_or(0, ParamEdits::changes);
+        let pending = edits.map_or(0, |edits| edits.uploadable().count());
+
+        let got = download.map_or(0, ParamDownload::received);
+        let expected = download.map_or(0, ParamDownload::expected);
+        let refused = download.map_or(0, ParamDownload::refused);
+
+        // What the operator is looking at: the component, and how its
+        // values stand against the vehicle's. A download left incomplete says
+        // so here, since the activity below shows only while one runs.
+        let incomplete = !downloading && expected > 0 && got < usize::from(expected);
+        let state = if changed > 0 {
+            ui::badge(format!("{changed} changed"), Tone::Warning)
+        } else if incomplete {
+            ui::badge(format!("{got} of {expected}"), Tone::Warning)
+        } else if got > 0 {
+            ui::badge(format!("{got} parameters"), Tone::Muted)
+        } else {
+            ui::badge("Not downloaded", Tone::Muted)
+        };
+        let header = ui::header(
+            picker,
+            [state.boxed()],
+            [vec![
+                ui::tool(Icon::Open, "Load values from a file")
+                    .on_press(Message::LoadDialog(address)),
+                ui::tool(Icon::Save, "Save to a file").on_press(Message::SaveDialog(address)),
+            ]],
+        );
+
+        let actions = ui::actions([vec![
+            ui::button("Download")
+                .icon(Icon::Download)
+                .busy(downloading, "Download")
+                .hint("Read every parameter from the vehicle")
+                .on_press(Message::Reload(address))
+                .boxed(),
+            ui::button(if changed > 0 {
+                format!("Restore {changed}")
+            } else {
+                "Restore".to_string()
+            })
+            .icon(Icon::Restore)
+            .hint("Restore all locally changed parameters")
+            .on_press_maybe(
+                edits
+                    .is_some_and(|edits| !edits.is_empty())
+                    .then_some(Message::ResetAll(address)),
+            )
+            .boxed(),
+            ui::button(if pending > 0 {
+                format!("Upload {pending}")
+            } else {
+                "Upload".to_string()
+            })
+            .icon(Icon::Upload)
+            .kind(if pending > 0 && encoding_known && !downloading {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Subtle
+            })
+            .hint(if downloading {
+                "A download is running; uploads wait for it"
+            } else {
+                "Write every changed value to the vehicle"
+            })
+            .on_press_maybe(
+                (pending > 0 && encoding_known && !downloading)
+                    .then_some(Message::UploadAll(address)),
+            )
+            .boxed(),
+        ]]);
+
+        let encoding_warning = (!encoding_known
+            && parameters.is_some_and(|parameters| !parameters.is_empty()))
+        .then(|| {
+            ui::banner(
+                "The component's parameter encoding is not known yet, so values may \
+                 display wrongly and uploads are disabled.",
+                Tone::Warning,
+            )
+        });
+
+        let failure = match download.and_then(ParamDownload::outcome) {
+            Some(DownloadOutcome::Failed(error)) => Some(ui::banner(
+                format!("The last download failed: {error}"),
+                Tone::Danger,
+            )),
+            Some(DownloadOutcome::NoParameters) => Some(ui::banner(
+                "No parameters were reported. The component may have none, or may not \
+                 have answered the request.",
+                Tone::Warning,
+            )),
+            _ => None,
+        };
+
+        let refused_warning = (refused > 0).then(|| {
+            ui::banner(
+                format!("{refused} parameter values could not be decoded and were left out."),
+                Tone::Warning,
+            )
+        });
+
+        let progress = downloading.then(|| {
+            ui::activity(
+                if expected > 0 {
+                    format!("Downloading: {got} of {expected}")
+                } else {
+                    "Downloading…".to_string()
+                },
+                (expected > 0).then(|| (got as f32, f32::from(expected))),
+                self.reloads
+                    .is_running(&Download(address))
+                    .then_some(Message::CancelReload(address)),
+            )
+        });
+
+        let filter = row![
+            ui::text_input("Search parameters", &self.filter.ident_pattern)
+                .on_input(Message::FilterIdentPattern),
+            ui::checkbox("Only changed", self.filter.only_changed)
+                .on_toggle(Message::FilterOnlyChanged),
+        ]
+        .spacing(ui::space::M)
+        .align_y(Alignment::Center);
+
+        ui::panel_with(
+            header,
+            column![
+                actions,
+                encoding_warning,
+                failure,
+                refused_warning,
+                progress,
+                filter,
+                self.view_param_list(address, parameters, encoding_known, downloading),
+            ]
+            .spacing(ui::space::M),
+        )
+        .boxed()
+    }
+}
+
+impl ParameterPanel {
+    /// The component shown for `vehicle`: the operator's choice, else its
+    /// autopilot (or the conventional component 1 before one is known).
+    fn selected_component(&self, vehicle: &Vehicle) -> u8 {
+        self.component
+            .get(&vehicle.system)
+            .copied()
+            .unwrap_or_else(|| vehicle.default_parameter_component())
+    }
+
+    fn edit(&self, address: MavlinkId, ident: &Ident) -> Option<&ParamEdit> {
+        self.edits.get(&address)?.get(ident)
+    }
+
+    /// Whether `address`'s component is downloading its parameters: the panel
+    /// started a reload, or the vehicle is being read by someone else.
+    fn is_downloading(&self, address: MavlinkId, cx: &Context<Message>) -> bool {
+        self.reloads.is_running(&Download(address))
+            || cx
+                .fleet
+                .parameters(address)
+                .is_some_and(|parameters| parameters.download().is_running())
+    }
+
+    fn upload(
+        &mut self,
+        address: MavlinkId,
+        ident: Ident,
+        cx: &mut Context<Message>,
+    ) -> Task<Message> {
+        let Some(upload) = self
+            .edits
+            .get_mut(&address)
+            .and_then(|edits| edits.begin_upload(&ident))
+        else {
+            return Task::none();
+        };
+
+        let client = cx.component_client(address);
+        let key = (address, ident.clone());
+
+        let value = upload.value;
+        self.uploads.start_with(
+            key,
+            upload,
+            async move { client.set_parameter(ident, value).await },
+            Message::Uploaded,
+        )
+    }
+
+    fn view_param_list<'a>(
+        &'a self,
+        address: MavlinkId,
+        parameters: Option<&'a Parameters>,
+        encoding_known: bool,
+        downloading: bool,
+    ) -> Element<'a, Message> {
+        // Heights must fit the tallest content of each item kind: a
+        // parameter's row holds a field and buttons.
+        let row_height = ui::size::control();
+        const HEADER_HEIGHT: f32 = 28.0;
+        const SEPARATOR_HEIGHT: f32 = 1.0;
+
+        enum Item<'a> {
+            /// `first` is the ident following the section, used as its key
+            Section {
+                name: Option<&'a str>,
+                separator: bool,
+                first: &'a Ident,
+            },
+            Param(&'a Ident, &'a ReportedParam, Option<&'a ParamEdit>),
+        }
+
+        let Some(parameters) = parameters else {
+            return space::Space::new().boxed();
+        };
+
+        let pattern = self.filter.ident_pattern.to_lowercase();
+        let mut items = Vec::with_capacity(parameters.len() + 64);
+        let mut section = None;
+
+        for (ident, param) in parameters.iter() {
+            let edit = self.edit(address, ident);
+            if !self.filter.matches(ident, edit.is_some(), &pattern) {
+                continue;
+            }
+
+            let this_section = group_of(ident);
+
+            // Add larger section headers and separators
+            if this_section != section {
+                let separator = section.is_some();
+                if separator || this_section.is_some() {
+                    items.push(Item::Section {
+                        name: this_section,
+                        separator,
+                        first: ident,
+                    });
+                }
+                section = this_section;
+            }
+
+            items.push(Item::Param(ident, param, edit));
+        }
+
+        let list = virtual_list(items, move |item| match item {
+            Item::Section {
+                name, separator, ..
+            } => column![
+                separator.then(ui::divider),
+                name.map(|name| {
+                    container(ui::overline(name.to_string()))
+                        .height(Length::Fill)
+                        .align_bottom(Length::Fill)
+                }),
+            ]
+            .boxed(),
+            Item::Param(ident, param, edit) => {
+                view_param_row(address, ident, param, *edit, encoding_known, downloading).boxed()
+            }
+        })
+        .item_height(move |item| match item {
+            Item::Section { name: None, .. } => SEPARATOR_HEIGHT,
+            Item::Section { .. } => HEADER_HEIGHT,
+            Item::Param(..) => row_height,
+        })
+        .key(move |item| match item {
+            Item::Section { first, .. } => ((address, (*first).clone()), true),
+            Item::Param(ident, ..) => ((address, (*ident).clone()), false),
+        })
+        .spacing(ui::space::XS);
+
+        scrollable(list).spacing(ui::space::XS).boxed()
+    }
+}
+
+fn reported<'a>(
+    fleet: &'a FleetSnapshot,
+    address: MavlinkId,
+    ident: &Ident,
+) -> Option<&'a ReportedParam> {
+    fleet.parameters(address)?.get(ident)
+}
+
+/// How an edit is marked: by whether it can be uploaded and how its last
+/// upload went.
+fn edit_tone(edit: &ParamEdit) -> Tone {
+    match &edit.status {
+        EditStatus::Pending if edit.value.is_some() => Tone::Success,
+        EditStatus::Pending => Tone::Muted,
+        EditStatus::Uploading => Tone::Accent,
+        EditStatus::Failed(_) => Tone::Warning,
+        EditStatus::Rejected { .. } => Tone::Danger,
+    }
+}
+
+fn view_param_row<'a>(
+    address: MavlinkId,
+    ident: &'a Ident,
+    param: &'a ReportedParam,
+    edit: Option<&'a ParamEdit>,
+    encoding_known: bool,
+    downloading: bool,
+) -> impl Widget<Message> + 'a {
+    let value_text = edit.map_or_else(|| value_to_string(param.value()), |edit| edit.text.clone());
+
+    let input = || {
+        let input = ui::text_input("Value", value_text.clone())
+            .on_input(move |text| Message::Edit(address, ident.clone(), text));
+        match edit {
+            Some(edit) => input.style(style::marked_text_input(edit_tone(edit))),
+            None => input,
+        }
+    };
+
+    let restore_hint = match edit {
+        Some(_) => format!("Restore to {}", value_to_string(param.value())),
+        None => "Nothing to restore".to_string(),
+    };
+    let restore = || {
+        ui::icon_button(Icon::Restore)
+            .hint(restore_hint.clone())
+            .on_press_maybe(edit.map(|_| Message::Reset(address, ident.clone())))
+            .boxed()
+    };
+
+    let uploadable = edit
+        .and_then(ParamEdit::uploadable)
+        .filter(|_| encoding_known && !downloading);
+    let upload_hint = match (edit.map(|edit| &edit.status), uploadable) {
+        _ if downloading => "A download is running; uploads wait for it".to_string(),
+        _ if edit.is_some_and(ParamEdit::is_uploading) => "Uploading…".to_string(),
+        (Some(EditStatus::Failed(error)), _) => format!("Failed: {error}"),
+        (Some(EditStatus::Rejected { reported }), _) => {
+            format!("The vehicle kept {}", value_to_string(*reported))
+        }
+        (_, Some(value)) => format!("Upload as {}", value_to_string(value)),
+        (Some(_), None) if !encoding_known => "Encoding unknown; uploads disabled".to_string(),
+        _ => "Nothing to upload".to_string(),
+    };
+    let upload = || {
+        ui::icon_button(Icon::Upload)
+            .hint(upload_hint.clone())
+            .on_press_maybe(uploadable.map(|_| Message::Upload(address, ident.clone())))
+            .boxed()
+    };
+
+    const INPUT_WIDTH: f32 = 96.0;
+
+    let name = ident.as_str();
+    let kind = value_type_name(param.value());
+
+    row![
+        ui::mono(name)
+            .single_line_ellipsis_start()
+            .width(Length::Fill),
+        ui::mono(kind).tone(Tone::Muted),
+        space::horizontal().width(ui::space::M),
+        input().width(INPUT_WIDTH),
+        restore(),
+        upload(),
+    ]
+    .spacing(ui::space::XS)
+    .align_y(Alignment::Center)
+}
+
+#[cfg(test)]
+mod tests;

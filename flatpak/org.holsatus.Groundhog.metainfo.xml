@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- What software centres (GNOME Software, Discover, Flathub) show. -->
+<component type="desktop-application">
+  <id>org.holsatus.Groundhog</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Groundhog</name>
+  <summary>Monitor and command MAVLink vehicles</summary>
+  <developer id="org.holsatus">
+    <name>Holsatus</name>
+  </developer>
+  <description>
+    <p>
+      Groundhog is a ground control station for vehicles that speak MAVLink,
+      such as those running ArduPilot or PX4. It connects over UDP, TCP and
+      serial links, and shows every vehicle it hears on a map.
+    </p>
+    <ul>
+      <li>Telemetry, flight modes, arming and the vehicle's status messages</li>
+      <li>Mission planning, upload and download</li>
+      <li>Parameters, with loading and saving of parameter files</li>
+      <li>Sensor calibration</li>
+      <li>Low-latency video from the vehicle, with recording</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">org.holsatus.Groundhog.desktop</launchable>
+  <url type="homepage">https://github.com/holsatus/groundhog</url>
+  <url type="bugtracker">https://github.com/holsatus/groundhog/issues</url>
+  <url type="vcs-browser">https://github.com/holsatus/groundhog</url>
+  <categories>
+    <category>Science</category>
+    <category>Engineering</category>
+  </categories>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <!-- Newest first; add one for each version released. -->
+  <releases>
+    <release version="0.1.0" date="2026-11-03"/>
+  </releases>
+</component>
