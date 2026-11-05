@@ -84,9 +84,6 @@ iced_test = { git = "https://github.com/iced-rs/iced" }
 # Reads back a rendered snapshot's pixels; the version `iced_test` writes them
 # with.
 png = "0.18"
-# The trail measurement in `panels/vehicles/map.rs` reads the meshes the wgpu
-# renderer is handed. Same bare git source as `iced`, patched to the same fork.
-iced_renderer = { git = "https://github.com/iced-rs/iced" }
 
 # The keep-awake tests talk to mock desktop services over a socket pair
 # rather than the user's session bus.
