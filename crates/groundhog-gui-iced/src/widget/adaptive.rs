@@ -303,9 +303,14 @@ impl<Message> Widget<Message, Theme, Renderer> for Adaptive<'_, Message> {
                 tree.state.downcast_mut::<Hidden>().0 = Some(hidden);
                 // A child that sees no events cannot close what it opened (a
                 // folded menu left open): it is hidden as it was first built,
-                // and shows again that way.
+                // and shows again that way. `Tree::new` leaves out the
+                // children's trees, which `diff` builds: a layout may come
+                // again before the next rebuild (a scrollable asks for one),
+                // and measures the tools whether shown or not.
                 if was_hidden != Some(hidden) {
-                    tree.children[hidden] = Tree::new(&self.children[hidden]);
+                    let child = &mut self.children[hidden];
+                    tree.children[hidden] = Tree::new(child);
+                    tree.children[hidden].diff(child);
                 }
                 tree.children[hidden].size = Size::ZERO;
 
