@@ -4,19 +4,20 @@ Groundhog is a MAVLink ground control station (GCS) written in Rust with the
 [iced](https://github.com/iced-rs/iced) GUI toolkit. It flies real aircraft, so
 the code favours being correct and easy to read over being clever.
 
-This file is for **people and coding agents alike**. Read the first two
+This file is for **people and coding agents alike**. Read the first three
 sections before changing anything; the rest is reference, to be read when you
 touch the area it describes.
 
 1. [Quick start](#quick-start)
 2. [The architecture](#the-architecture)
-3. [The layers](#the-layers)
-4. [Design decisions](#design-decisions)
-5. [Conventions](#conventions)
-6. [Testing](#testing)
-7. [Recipes](#recipes)
-8. [Pitfalls](#pitfalls)
-9. [Glossary](#glossary)
+3. [The backlog](#the-backlog)
+4. [The layers](#the-layers)
+5. [Design decisions](#design-decisions)
+6. [Conventions](#conventions)
+7. [Testing](#testing)
+8. [Recipes](#recipes)
+9. [Pitfalls](#pitfalls)
+10. [Glossary](#glossary)
 
 ---
 
@@ -575,6 +576,122 @@ unacknowledged, and the retransmissions take about fifteen minutes to
 give up. A UDP link with a peer is not `connect`ed: that would pin its
 local address to the network it opened on, and after a change of
 network it would hear nothing and report nothing.
+
+---
+
+## The backlog
+
+Every known open problem is a GitHub issue in the
+[Groundhog project](https://github.com/orgs/holsatus/projects/3). Nothing about
+the backlog lives in the repository: no issue file, no todo lists in the code.
+An issue is the whole entry — the claim, the fix and the test that proves it —
+and the project orders and tracks it.
+
+The title carries the entry's ID and never loses it (`MISSION-2: …`); IDs never
+change, and an issue refers to another by its own number where the work
+depends on it (`**After:** #12 (LINK-1)`). Paths are relative to a crate's
+`src/`, and a symbol beats a line number.
+
+| Project field | Values | What it means |
+|---|---|---|
+| `Status` | `Todo`, `In Progress`, `Done` | the column of the board |
+| `Queue` | `Fix first`, `Next`, `Later`, `Public API` | how soon; `Public API` waits for a second frontend or a headless client |
+| `Priority` | `P1`, `P2`, `P3` | P1 a wrong result the operator sees often · P2 degraded behaviour or a correctness edge · P3 maintainability or polish |
+| `Effort` | `S`, `M`, `L`, `S/M` | S a small change · M a few modules · L a design change |
+| `Order` | a number | the position in the fix order, across the whole backlog |
+
+`Priority` is also a label, so a plain issue list shows it without the
+project. `Backlog` is the board view and `Table` shows every field; a board's
+columns (`Status`) and its sort (`Order`) are view settings made in the web
+UI, because the API creates a view but cannot set its groups or its sort. Read
+the order with the commands below, not from how a view happens to be arranged.
+
+### Read the backlog
+
+```sh
+# The whole backlog in fix order: order, status, queue, priority, title.
+gh project item-list 3 --owner holsatus --limit 100 --format json |
+  jq -r '.items | sort_by(.order)[]
+         | "\(.order)\t\(.status)\t\(.queue)\t\(.priority)\t\(.title)"'
+
+# Only the queue to work on.
+gh project item-list 3 --owner holsatus --limit 100 --format json |
+  jq -r '.items | map(select(.queue == "Fix first"))
+         | sort_by(.order)[].title'
+```
+
+`gh project item-list` shows 30 items unless told otherwise: always pass
+`--limit`. `gh issue list --label P2 --state open` reads the issues without
+the project.
+
+### Work an item
+
+1. Move it to `In Progress`, so another agent does not take it as well:
+   `gh project item-edit 3 --owner holsatus --url <issue-url> --field Status --value "In Progress"`.
+2. Write the test the issue names first and watch it fail (see
+   [Testing](#testing)).
+3. The commit that fixes it closes it (`Closes #<n>`) and sets `Status` to
+   `Done`; the project does not close it on its own. Archive the item with
+   `gh project item-archive 3 --owner holsatus --url <issue-url>` when it no
+   longer needs to be on the board.
+4. If the work contradicts the issue, say so in a comment and change the
+   issue. The issue is where the reason goes, not the commit message alone.
+
+### Add an item
+
+Add a claim checked against the code as it is today: a stale entry costs more
+than a missing one.
+
+```sh
+gh issue create --title "AREA-n: what is wrong" \
+  --body-file /tmp/body.md --label P2
+
+gh project item-add 3 --owner holsatus --url <issue-url>
+
+gh project item-edit 3 --owner holsatus --url <issue-url> \
+  --field Queue --value "Next"        # Fix first | Next | Later | Public API
+gh project item-edit 3 --owner holsatus --url <issue-url> \
+  --field Priority --value P2
+gh project item-edit 3 --owner holsatus --url <issue-url> \
+  --field Effort --value M
+gh project item-edit 3 --owner holsatus --url <issue-url> \
+  --field Order --number 6.5
+```
+
+The body holds the claim, then **Fix:** and **Test:**, as the tracker always
+has. `AREA-n` takes the next free number of its area (`MISSION`, `VEH`,
+`PROTO`, `FW`, `PARAM`, `LINK`, `REC`, `RUN`, `UI`, `VIDEO`, `PERSIST`, `MAP`,
+`PLAT`, `TEST`, `DOCS`, `API`). `Order` is the position in the whole backlog,
+so a new fix-first entry goes just after the last fix-first one: the field
+takes fractions, so `6.5` needs no renumbering.
+
+`gh issue create` does not put the issue on the board, and no automatic
+workflow does: `gh project item-add` is part of adding one.
+
+### Reprioritise
+
+`Queue` and `Order` are two halves of one decision: `Queue` says which stretch
+of the backlog the entry belongs to, `Order` says where inside the whole
+backlog it sits. Move both together, with an `Order` between the neighbours it
+should land between — fractions are free, so no other entry has to change.
+
+### Close an item
+
+- **Fixed:** `Closes #<n>` in the commit, `Status` = `Done`.
+- **Wrong claim, or not worth fixing:** close it as not planned
+  (`gh issue close <n> --reason "not planned"`) and say why in a comment. If
+  the work touched it, say why in the commit message too.
+- **Deferred:** leave it open and move it to the queue it belongs in. `Order`
+  is the promise about when, not `Status`.
+
+Closed issues are the history; the project keeps no second copy of it.
+
+### When `gh` cannot be reached
+
+The tracker needs `gh`, authenticated with the `project` scope
+(`gh auth refresh -s project`). An agent that cannot reach it reports the
+finding where a person will see it — in the answer, the pull request, or the
+commit message — and does not start a markdown tracker in the repository.
 
 ---
 
