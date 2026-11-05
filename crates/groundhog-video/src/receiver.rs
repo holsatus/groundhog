@@ -545,7 +545,9 @@ fn frame_of(sample: &gst::Sample) -> Option<Frame> {
     let planes = (0..video.n_planes())
         .map(|index| {
             let rows = if index == 0 { height } else { chroma_rows };
-            let stride = video.plane_stride()[index as usize] as u32;
+            // A negative stride (rows stored bottom up) is not one the
+            // viewer can upload.
+            let stride = u32::try_from(video.plane_stride()[index as usize]).ok()?;
             let data = video.plane_data(index).ok()?;
             let length = (stride as usize * rows as usize).min(data.len());
             Some(Plane {

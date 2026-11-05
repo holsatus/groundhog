@@ -14,7 +14,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use groundhog_video::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Range};
+use groundhog_video::{Colour, Frame, FrameSlot, Matrix, PixelLayout, Plane, Range};
 use iced::{
     Length, Point, Rectangle, Size, Widget, mouse, wgpu,
     widget::shader::{self, Viewport},
@@ -76,6 +76,12 @@ impl shader::Primitive for Primitive {
             .entry(self.stream)
             .or_insert_with(|| Stream::new(device));
         stream.used = true;
+
+        // A texture larger than the device allows fails wgpu's validation,
+        // which panics. The last frame that fit stays on screen.
+        if !fits_device(frame, device.limits().max_texture_dimension_2d) {
+            return;
+        }
 
         if stream.generation != Some(*generation) {
             let fits = stream
@@ -366,12 +372,10 @@ impl Textures {
     fn upload(&self, queue: &wgpu::Queue, frame: &Frame) {
         for (texture, plane) in self.planes.iter().zip(&frame.planes) {
             let size = texture.size();
-            // A plane shorter than its texture is a broken frame; skip it
-            // rather than read past it.
+            // A plane that does not fill its texture is a broken frame; skip
+            // it rather than read past it, or fail wgpu's validation.
             let bytes_per_texel = texture.format().block_copy_size(None).unwrap_or(1);
-            let needed = plane.stride as usize * (size.height as usize - 1)
-                + (size.width * bytes_per_texel) as usize;
-            if plane.data.len() < needed {
+            if !plane_fills(plane, size.width, size.height, bytes_per_texel) {
                 continue;
             }
 
@@ -392,6 +396,26 @@ impl Textures {
             );
         }
     }
+}
+
+/// Whether every plane of `frame` fits in a texture at most `max_dimension`
+/// texels wide and tall. The chroma planes are no larger than the luma.
+fn fits_device(frame: &Frame, max_dimension: u32) -> bool {
+    frame.width <= max_dimension && frame.height <= max_dimension
+}
+
+/// Whether `plane` fills a texture `width` by `height` texels of
+/// `bytes_per_texel`: its rows hold a row of texels, there are as many as
+/// the texture is tall, and its data holds all of them.
+fn plane_fills(plane: &Plane, width: u32, height: u32, bytes_per_texel: u32) -> bool {
+    let Some(row) = width.checked_mul(bytes_per_texel) else {
+        return false;
+    };
+    // At most (2^32 - 1)^2 + 2^32 - 1, which a u64 holds.
+    let needed = u64::from(plane.stride) * u64::from(height.saturating_sub(1)) + u64::from(row);
+    plane.stride >= row
+        && plane.rows >= height
+        && u64::try_from(plane.data.len()).is_ok_and(|length| length >= needed)
 }
 
 fn plane_texture(
@@ -523,6 +547,59 @@ mod tests {
         let (x, y) = letterbox(640, 480, 1600.0, 400.0);
         assert!((x - (4.0 / 3.0) / 4.0).abs() < 1e-6);
         assert_eq!(y, 1.0);
+    }
+
+    fn frame(width: u32, height: u32) -> Frame {
+        Frame {
+            width,
+            height,
+            layout: PixelLayout::Nv12,
+            planes: Vec::new(),
+            colour: Colour {
+                matrix: Matrix::Bt709,
+                range: Range::Limited,
+            },
+        }
+    }
+
+    /// wgpu panics on a texture larger than the device allows, so a frame
+    /// that would need one is not drawn.
+    #[test]
+    fn a_frame_larger_than_the_device_allows_does_not_fit() {
+        assert!(fits_device(&frame(8192, 8192), 8192));
+        assert!(!fits_device(&frame(8193, 1080), 8192));
+        assert!(!fits_device(&frame(1920, 8193), 8192));
+        assert!(fits_device(&frame(0, 0), 8192), "sized up to one texel");
+    }
+
+    fn plane(stride: u32, rows: u32, length: usize) -> Plane {
+        Plane {
+            data: vec![0; length],
+            stride,
+            rows,
+        }
+    }
+
+    /// wgpu panics on a copy whose rows are shorter than the texture's, or
+    /// fewer than its height, so only a plane that fills its texture is
+    /// uploaded.
+    #[test]
+    fn only_a_plane_that_fills_its_texture_is_uploaded() {
+        assert!(plane_fills(&plane(64, 4, 256), 64, 4, 1));
+        assert!(plane_fills(&plane(64, 4, 64 * 3 + 32), 32, 4, 1));
+        assert!(
+            plane_fills(&plane(128, 2, 256), 64, 2, 2),
+            "two bytes a texel"
+        );
+
+        assert!(!plane_fills(&plane(64, 4, 255), 64, 4, 1), "data short");
+        assert!(!plane_fills(&plane(32, 8, 256), 64, 4, 1), "rows short");
+        assert!(!plane_fills(&plane(64, 3, 256), 64, 4, 1), "too few rows");
+        assert!(!plane_fills(&plane(0, 4, 256), 64, 4, 1), "no stride");
+        assert!(
+            !plane_fills(&plane(u32::MAX, u32::MAX, 256), u32::MAX, u32::MAX, 4),
+            "sizes that overflow"
+        );
     }
 
     fn rgb(colour: Colour, yuv: [f32; 3]) -> [f32; 3] {
