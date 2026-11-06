@@ -537,16 +537,12 @@ impl Panel for ParameterPanel {
         let encoding_choice = (unknown || stated.is_some()).then(|| {
             let note = if stated.is_some() {
                 ui::banner(
-                    "You stated how this component encodes its parameters. It holds until \
-                     the component makes its own encoding known, or Groundhog restarts.",
+                    "Overwritten parameter encoding",
                     Tone::Accent,
                 )
             } else {
                 ui::banner(
-                    "The component has not said how it encodes parameter values, so they may \
-                     display incorrectly and uploads are disabled. If you know its encoding, \
-                     choose it: the values are decoded with it at once, and integers that \
-                     read as huge numbers mean it is the wrong one.",
+                    "Unspecified parameter encoding",
                     Tone::Warning,
                 )
             };
