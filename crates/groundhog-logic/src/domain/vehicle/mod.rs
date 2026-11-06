@@ -68,7 +68,7 @@ use crate::{
         firmware::{self, Firmware, FlightMode, MissionLayout, ModeKind},
         geo::GeoPosition,
         mission::OnboardMission,
-        parameter::{DownloadUpdate, Parameters},
+        parameter::{DownloadUpdate, EncodingSource, Parameters},
     },
     wire::{self, param::ParamEncoding},
 };
@@ -109,6 +109,9 @@ pub struct ComponentState {
     kind: Option<MavType>,
     pub model_name: Option<String>,
     pub vendor_name: Option<String>,
+    /// The encoding the operator stated, held only while nothing else says
+    /// how the component encodes its parameters.
+    stated_encoding: Option<ParamEncoding>,
     parameters: Parameters,
 }
 
@@ -123,19 +126,53 @@ impl ComponentState {
     }
 
     /// How this component encodes parameter values: as advertised in its
-    /// capabilities, else as its firmware is known to. `None` when neither
-    /// is known, in which case parameter writes must not be attempted.
+    /// capabilities, else as its firmware is known to, else as the operator
+    /// stated. `None` when none of them says, in which case parameter writes
+    /// must not be attempted.
     pub fn param_encoding(&self) -> Option<ParamEncoding> {
-        self.capabilities
-            .and_then(ParamEncoding::advertised)
-            .or_else(|| {
-                self.autopilot
-                    .and_then(|autopilot| firmware::for_autopilot(autopilot).param_encoding())
-            })
+        self.param_encoding_source().map(|(encoding, _)| encoding)
     }
 
-    /// Re-decode parameters if what is known about the encoding changed.
+    /// The component's encoding and how it is known.
+    pub fn param_encoding_source(&self) -> Option<(ParamEncoding, EncodingSource)> {
+        self.inferred_encoding().or_else(|| {
+            self.stated_encoding
+                .map(|encoding| (encoding, EncodingSource::Stated))
+        })
+    }
+
+    /// The encoding the component itself makes known: advertised, or implied
+    /// by its firmware.
+    fn inferred_encoding(&self) -> Option<(ParamEncoding, EncodingSource)> {
+        let advertised = self
+            .capabilities
+            .and_then(ParamEncoding::advertised)
+            .map(|encoding| (encoding, EncodingSource::Advertised));
+        advertised.or_else(|| {
+            self.autopilot
+                .and_then(|autopilot| firmware::for_autopilot(autopilot).param_encoding())
+                .map(|encoding| (encoding, EncodingSource::Firmware))
+        })
+    }
+
+    /// Take the operator's word for the encoding (`None` takes it back).
+    /// Refused, returning `false`, while the component's encoding can be
+    /// inferred: the operator's word is the last resort, not an override.
+    fn state_encoding(&mut self, encoding: Option<ParamEncoding>) -> bool {
+        if self.inferred_encoding().is_some() {
+            return false;
+        }
+        self.stated_encoding = encoding;
+        self.refresh_encoding();
+        true
+    }
+
+    /// Re-decode parameters if what is known about the encoding changed. A
+    /// stated encoding gives way to one the component makes known.
     fn refresh_encoding(&mut self) {
+        if self.stated_encoding.is_some() && self.inferred_encoding().is_some() {
+            self.stated_encoding = None;
+        }
         let encoding = self.param_encoding();
         self.parameters.set_encoding(encoding);
     }
@@ -238,6 +275,24 @@ impl Vehicle {
     pub fn param_encoding(&self, component: u8) -> Option<ParamEncoding> {
         self.component_state(component)
             .and_then(ComponentState::param_encoding)
+    }
+
+    /// How `component` encodes parameter values and how that is known, if it
+    /// is.
+    pub fn param_encoding_source(&self, component: u8) -> Option<(ParamEncoding, EncodingSource)> {
+        self.component_state(component)
+            .and_then(ComponentState::param_encoding_source)
+    }
+
+    /// Take the operator's word for how `component` encodes parameter values
+    /// (`None` takes it back). Refused, returning `false`, while the
+    /// component advertises an encoding or its firmware implies one.
+    pub(crate) fn state_param_encoding(
+        &mut self,
+        component: u8,
+        encoding: Option<ParamEncoding>,
+    ) -> bool {
+        Arc::make_mut(self.components.entry(component).or_default()).state_encoding(encoding)
     }
 
     /// Every component heard from, in ascending id order.
@@ -1059,6 +1114,86 @@ mod tests {
             }),
         );
         assert_eq!(vehicle.param_encoding(1), Some(ParamEncoding::Bytewise));
+    }
+
+    /// An integer reported with a C cast, as a component that never says so
+    /// would: decoded bytewise for display, it reads as nonsense.
+    fn unknown_component_with_a_c_cast_value() -> Vehicle {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Generic));
+        vehicle.handle_message(t, 1, &param_value("COUNT", 1.0, MavParamType::Int32));
+        vehicle
+    }
+
+    fn count(vehicle: &Vehicle) -> Option<Value> {
+        vehicle
+            .parameters(1)?
+            .value(&Ident::from_str_truncated("COUNT"))
+    }
+
+    #[test]
+    fn a_stated_encoding_settles_a_component_nothing_else_does() {
+        let mut vehicle = unknown_component_with_a_c_cast_value();
+        assert_eq!(count(&vehicle), Some(Value::I32(1_065_353_216)));
+
+        assert!(vehicle.state_param_encoding(1, Some(ParamEncoding::CCast)));
+        assert_eq!(
+            vehicle.param_encoding_source(1),
+            Some((ParamEncoding::CCast, EncodingSource::Stated))
+        );
+        assert_eq!(count(&vehicle), Some(Value::I32(1)), "re-decoded");
+
+        // Taking it back leaves the encoding unknown again.
+        assert!(vehicle.state_param_encoding(1, None));
+        assert_eq!(vehicle.param_encoding(1), None);
+        assert_eq!(count(&vehicle), Some(Value::I32(1_065_353_216)));
+    }
+
+    #[test]
+    fn a_stated_encoding_is_refused_where_one_is_inferred() {
+        let mut vehicle = vehicle();
+        let t = Instant::now();
+        vehicle.handle_message(t, 1, &heartbeat(MavAutopilot::Ardupilotmega));
+
+        assert!(!vehicle.state_param_encoding(1, Some(ParamEncoding::Bytewise)));
+        assert_eq!(
+            vehicle.param_encoding_source(1),
+            Some((ParamEncoding::CCast, EncodingSource::Firmware))
+        );
+    }
+
+    #[test]
+    fn an_advertised_encoding_replaces_a_stated_one() {
+        let mut vehicle = unknown_component_with_a_c_cast_value();
+        vehicle.state_param_encoding(1, Some(ParamEncoding::CCast));
+
+        vehicle.handle_message(
+            Instant::now(),
+            1,
+            &DefaultDialect::AutopilotVersion(messages::AutopilotVersion {
+                capabilities: MavProtocolCapability::PARAM_ENCODE_BYTEWISE,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            vehicle.param_encoding_source(1),
+            Some((ParamEncoding::Bytewise, EncodingSource::Advertised))
+        );
+        assert_eq!(vehicle.component_state(1).unwrap().stated_encoding, None);
+    }
+
+    #[test]
+    fn a_firmware_named_later_replaces_a_stated_encoding() {
+        let mut vehicle = unknown_component_with_a_c_cast_value();
+        vehicle.state_param_encoding(1, Some(ParamEncoding::Bytewise));
+
+        vehicle.handle_message(Instant::now(), 1, &heartbeat(MavAutopilot::Px4));
+        assert_eq!(
+            vehicle.param_encoding_source(1),
+            Some((ParamEncoding::Bytewise, EncodingSource::Firmware))
+        );
+        assert_eq!(vehicle.component_state(1).unwrap().stated_encoding, None);
     }
 
     #[test]

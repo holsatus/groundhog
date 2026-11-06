@@ -26,7 +26,7 @@ use crate::{
         calibration::{CalibrationKind, CalibrationUpdate, Confirmation, RunId},
         firmware::{FlightMode, ModeKind},
         mission::{MissionItem, OnboardMission, codec},
-        parameter::{DownloadId, DownloadOutcome, DownloadUpdate},
+        parameter::{DownloadId, DownloadOutcome, DownloadUpdate, ParamEncoding},
         vehicle::{
             Vehicle,
             camera::{CameraId, ImagePoint, ImageRect, TrackingSupport},
@@ -375,6 +375,30 @@ impl VehicleClient {
             .param_set(target, ident, value, encoding)
             .await
             .map_err(Error::from)
+    }
+
+    /// Take the operator's word for how the component encodes parameter
+    /// values, for a component that neither advertises an encoding nor names
+    /// a firmware that implies one; `None` takes it back. Its values are
+    /// re-decoded with it, and [`Self::set_parameter`] writes with it, until
+    /// the component makes its own encoding known
+    /// ([`FleetEvent::StatedEncodingContradicted`] if they differ).
+    ///
+    /// Ignored for a component whose encoding can be inferred: the
+    /// operator's word is the last resort, not an override. Not kept beyond
+    /// the session, since a system id may name another vehicle next time.
+    ///
+    /// [`FleetEvent::StatedEncodingContradicted`]: crate::domain::fleet::FleetEvent::StatedEncodingContradicted
+    pub fn state_param_encoding(&self, encoding: Option<ParamEncoding>) {
+        match self.target() {
+            Ok(address) => self
+                .fleet
+                .report(Input::ParamEncoding { address, encoding }),
+            Err(error) => log::warn!(
+                "Not stating the parameter encoding of {}: {error}",
+                self.system
+            ),
+        }
     }
 
     /// Download the vehicle's mission. Its progress is visible in the fleet

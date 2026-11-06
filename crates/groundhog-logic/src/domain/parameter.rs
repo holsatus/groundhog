@@ -20,6 +20,17 @@ use crate::Progress;
 /// the firmware adapters. Encoding and decoding stay inside the crate.
 pub use crate::wire::param::ParamEncoding;
 
+/// How a component's [`ParamEncoding`] is known, most trusted first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingSource {
+    /// The component advertised it in its capabilities.
+    Advertised,
+    /// The component's firmware is known to use it.
+    Firmware,
+    /// The operator stated it manually.
+    Stated,
+}
+
 /// A plain set of parameter values, as read from or written to a file.
 pub type ParamValues = BTreeMap<Ident, Value>;
 
@@ -165,8 +176,8 @@ pub(crate) enum DownloadUpdate {
 pub struct Parameters {
     map: BTreeMap<Ident, ReportedParam>,
     /// The encoding values are decoded with, once known (advertised by the
-    /// component, or implied by its firmware). Until then values are decoded
-    /// bytewise for display, and writes are refused.
+    /// component, implied by its firmware, or stated by the operator). Until
+    /// then values are decoded bytewise for display, and writes are refused.
     encoding: Option<ParamEncoding>,
     download: ParamDownload,
 }

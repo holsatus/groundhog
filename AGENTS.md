@@ -341,9 +341,22 @@ and removes it, and shifts jump targets accordingly, based on the firmware's
 Writing a value with a guessed encoding can store something else entirely: an
 integer written bytewise to a C-cast autopilot arrives as zero. The encoding
 comes from the component's advertised capabilities, else from its firmware,
-else it is unknown, and `VehicleClient::set_parameter` returns
-`Error::ParamEncodingUnknown`. Stored values keep their raw wire form, so they
-are re-decoded if the encoding is learned later.
+else from the operator, else it is unknown, and
+`VehicleClient::set_parameter` returns `Error::ParamEncodingUnknown`. Stored
+values keep their raw wire form, so they are re-decoded if the encoding is
+learned later.
+
+Some components never advertise their capabilities. For those alone, the
+operator may state the encoding (`VehicleClient::state_param_encoding`, from
+the parameter panel). That is a last resort, not an override: it is refused
+while the encoding can be inferred, and dropped as soon as the component
+advertises one or names its firmware, with
+`FleetEvent::StatedEncodingContradicted` when the two differ (values written
+meanwhile may be wrong). It lives on the component in the fleet, although
+the fleet otherwise holds only what vehicles reported, because the fleet
+decodes the values every reader sees and `set_parameter` encodes with what
+the snapshot holds. It is not persisted: a system id may name another
+vehicle next session, which would inherit a guess.
 
 ### The map engine knows nothing about panels
 

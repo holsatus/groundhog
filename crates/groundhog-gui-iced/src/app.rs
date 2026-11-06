@@ -41,7 +41,7 @@ use crate::{
         logs::LogPanel,
         mission::MissionPanel,
         notifications::{self, Level, Notice, Notifications},
-        parameters::ParameterPanel,
+        parameters::{self, ParameterPanel},
         settings::SettingsPanel,
         vehicles::VehiclePanel,
         video::{self, VideoPanel},
@@ -623,6 +623,22 @@ impl Application {
                 }
                 .vehicle(system)
             }
+            FleetEvent::StatedEncodingContradicted {
+                address,
+                stated,
+                inferred,
+            } => Notice::warning(format!(
+                "Component {} of {} encodes parameters {}, not {}",
+                address.component,
+                name(address.system_id()),
+                parameters::encoding_name(inferred),
+                parameters::encoding_name(stated),
+            ))
+            .detail(
+                "Values written since its encoding was stated may have been stored wrong. \
+                 Download its parameters and check them.",
+            )
+            .vehicle(address.system_id()),
             // The backend asks the camera to describe itself; the cameras
             // it describes show where they are used.
             FleetEvent::CameraAppeared(_) => return,

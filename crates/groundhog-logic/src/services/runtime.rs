@@ -27,7 +27,7 @@ use crate::{
         calibration::CalibrationUpdate,
         fleet::{Fleet, FleetEvent, FleetSnapshot},
         mission::OnboardMission,
-        parameter::DownloadUpdate,
+        parameter::{DownloadUpdate, ParamEncoding},
         vehicle::mission::TransferUpdate,
     },
     mavlink::{Event, EventReceiver, MavlinkRouter, decode},
@@ -50,6 +50,11 @@ pub(super) enum Input {
     ParamDownload {
         address: MavlinkId,
         update: DownloadUpdate,
+    },
+    /// The operator's word for a component's parameter encoding.
+    ParamEncoding {
+        address: MavlinkId,
+        encoding: Option<ParamEncoding>,
     },
     Calibration {
         system: SystemId,
@@ -237,6 +242,14 @@ fn apply(fleet: &mut Fleet, input: Input) -> Vec<FleetEvent> {
         }
         Input::ParamDownload { address, update } => {
             fleet.set_param_download(address, update);
+        }
+        Input::ParamEncoding { address, encoding } => {
+            if !fleet.state_param_encoding(address, encoding) {
+                log::info!(
+                    "Not taking {encoding:?} for {address:?}: its encoding is known, \
+                     or it is not a vehicle"
+                );
+            }
         }
         Input::MissionTransfer { system, update } => {
             fleet.update_mission_transfer(system, update);

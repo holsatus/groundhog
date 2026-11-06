@@ -29,7 +29,7 @@ use crate::{
     domain::{
         fleet::{FleetEvent, FleetSnapshot},
         mission::{MissionItem, Position},
-        parameter::DownloadOutcome,
+        parameter::{DownloadOutcome, ParamEncoding},
         vehicle::Vehicle,
     },
     link::LinkId,
@@ -416,6 +416,47 @@ async fn parameter_writes_need_a_known_encoding() {
         .await;
 
     assert_eq!(result, Err(Error::ParamEncodingUnknown));
+}
+
+/// A component that neither advertises its encoding nor runs a known firmware
+/// is written to in the encoding the operator states for it.
+#[tokio::test]
+async fn parameter_writes_use_a_stated_encoding() {
+    let mut harness = harness();
+    register(&mut harness, MavAutopilot::Generic).await;
+
+    let client = harness.fleet.vehicle(SYSTEM);
+    client.state_param_encoding(Some(ParamEncoding::Bytewise));
+    until(&mut harness.updates, |fleet| {
+        fleet
+            .vehicle(SYSTEM)
+            .unwrap()
+            .param_encoding(VEHICLE.component)
+            == Some(ParamEncoding::Bytewise)
+    })
+    .await;
+
+    let set = tokio::spawn(async move {
+        client
+            .set_parameter(Ident::from_str_truncated("SOME_PARAM"), Value::I32(1))
+            .await
+    });
+    let DefaultDialect::ParamSet(message) = harness.vehicle.recv().await else {
+        panic!("expected PARAM_SET")
+    };
+    assert_eq!(message.param_value.to_bits(), 1, "a bytewise copy");
+    harness
+        .vehicle
+        .send(&ParamValue {
+            param_id: message.param_id,
+            param_value: message.param_value,
+            param_type: message.param_type,
+            param_index: u16::MAX,
+            ..Default::default()
+        })
+        .await;
+
+    assert_eq!(set.await.unwrap(), Ok(Value::I32(1)));
 }
 
 /// Dropping a download (the operator cancelled it) must not leave it in
