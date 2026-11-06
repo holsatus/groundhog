@@ -381,6 +381,44 @@ async fn param_set_returns_echoed_value() {
     assert_eq!(value, Value::F32(1.5));
 }
 
+#[tokio::test(start_paused = true)]
+async fn param_set_takes_an_echo_whose_name_has_bytes_after_its_end() {
+    let (router, _guard, mut vehicle) = setup();
+    let ident = Ident::try_from(b"PTG_AIRSPD_KP").unwrap();
+    let cap = crate::wire::param::ParamEncoding::Bytewise;
+
+    let task = tokio::spawn({
+        let router = router.clone();
+        let ident = ident.clone();
+        async move {
+            router
+                .param_set(VEHICLE, ident, Value::F32(0.05), cap)
+                .await
+        }
+    });
+
+    let DefaultDialect::ParamSet(set) = vehicle.recv().await else {
+        panic!("expected PARAM_SET")
+    };
+
+    // The name ends at its terminator; what follows it is whatever the
+    // sender's buffer held (here, the start of the next string in its memory)
+    let mut param_id = set.param_id;
+    param_id[14..].copy_from_slice(b"-\0");
+    vehicle
+        .send(&ParamValue {
+            param_id,
+            param_value: set.param_value,
+            param_type: set.param_type,
+            param_index: 3,
+            param_count: 10,
+        })
+        .await;
+
+    let value = task.await.unwrap().expect("echo");
+    assert_eq!(value, Value::F32(0.05));
+}
+
 /// Entry `index` of a list of `count` parameters named `P<index>`.
 fn list_value(index: u16, count: u16) -> ParamValue {
     let mut param_id = [0u8; 16];

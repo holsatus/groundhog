@@ -92,9 +92,12 @@ impl MavlinkRouter {
         let _permit = self.param_permit().await?;
 
         let param_id = *ident.as_raw();
-        let mut recv_value = self
-            .receive_message::<ParamValue>(target)
-            .filter(move |reply| reply.param_id == param_id);
+        // Filter and compare by identifier. A name shorter than 16 bytes ends at its
+        // terminator, and some senders may leave other random bytes after it.
+        let mut recv_value = self.receive_message::<ParamValue>(target).filter({
+            let ident = ident.clone();
+            move |reply| Ident::try_from(&reply.param_id).is_ok_and(|reply| reply == ident)
+        });
 
         for attempt in 0..=PARAM_SET_RETRIES {
             if attempt > 0 {
