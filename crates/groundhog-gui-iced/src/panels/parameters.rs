@@ -493,6 +493,7 @@ impl Panel for ParameterPanel {
                 .busy(downloading, "Download")
                 .hint("Read every parameter from the vehicle")
                 .on_press(Message::Reload(address))
+                .width(Length::FillPortion(1))
                 .boxed(),
             ui::button(if changed > 0 {
                 format!("Restore {changed}")
@@ -506,6 +507,7 @@ impl Panel for ParameterPanel {
                     .is_some_and(|edits| !edits.is_empty())
                     .then_some(Message::ResetAll(address)),
             )
+            .width(Length::FillPortion(1))
             .boxed(),
             ui::button(if pending > 0 {
                 format!("Upload {pending}")
@@ -527,6 +529,7 @@ impl Panel for ParameterPanel {
                 (pending > 0 && encoding_known && !downloading)
                     .then_some(Message::UploadAll(address)),
             )
+            .width(Length::FillPortion(1))
             .boxed(),
         ]]);
 
@@ -536,15 +539,9 @@ impl Panel for ParameterPanel {
             !encoding_known && parameters.is_some_and(|parameters| !parameters.is_empty());
         let encoding_choice = (unknown || stated.is_some()).then(|| {
             let note = if stated.is_some() {
-                ui::banner(
-                    "Overwritten parameter encoding",
-                    Tone::Accent,
-                )
+                ui::banner("Overwritten parameter encoding", Tone::Accent)
             } else {
-                ui::banner(
-                    "Unspecified parameter encoding",
-                    Tone::Warning,
-                )
+                ui::banner("Unspecified parameter encoding", Tone::Warning)
             };
             let picker = ui::pick_list(Some(stated), ENCODING_CHOICES, |choice| {
                 choice.map_or("Not known", encoding_name).to_string()
