@@ -30,7 +30,7 @@ use crate::{
         calibration::{CalibrationKind, CalibrationUpdate, Cancel, Ended, Outcome},
         firmware::FlightMode,
         mission::OnboardMission,
-        parameter::{DownloadUpdate, Parameters},
+        parameter::{DownloadUpdate, EncodingSource, ParamEncoding, Parameters},
         vehicle::{Liveness, StatusText, Vehicle, class::VehicleClass, mission::TransferUpdate},
     },
 };
@@ -70,6 +70,15 @@ pub enum FleetEvent {
     Rebooted(SystemId),
     /// A calibration ended: succeeded, failed or cancelled.
     CalibrationFinished(SystemId, CalibrationKind, Outcome),
+    /// A component made its parameter encoding known (advertised it, or
+    /// named its firmware), and it is not the one the operator stated for
+    /// it. Values written under the stated encoding may have been stored
+    /// wrong; the component's own encoding replaces the stated one.
+    StatedEncodingContradicted {
+        address: MavlinkId,
+        stated: ParamEncoding,
+        inferred: ParamEncoding,
+    },
     /// A component's heartbeat said for the first time that it is a camera.
     /// It describes itself only when asked.
     CameraAppeared(MavlinkId),
@@ -276,6 +285,10 @@ impl Fleet {
                 .is_some_and(|state| state.is_camera())
         };
         let camera_before = is_camera(vehicle);
+        let stated_before = match vehicle.param_encoding_source(source.component) {
+            Some((encoding, EncodingSource::Stated)) => Some(encoding),
+            _ => None,
+        };
 
         let folded = vehicle.handle_message(received_at, source.component, message);
         if let Some(text) = folded.text {
@@ -286,6 +299,18 @@ impl Fleet {
 
         if !camera_before && is_camera(vehicle) {
             events.push(FleetEvent::CameraAppeared(source));
+        }
+
+        if let Some(stated) = stated_before
+            && let Some((inferred, source_now)) = vehicle.param_encoding_source(source.component)
+            && source_now != EncodingSource::Stated
+            && inferred != stated
+        {
+            events.push(FleetEvent::StatedEncodingContradicted {
+                address: source,
+                stated,
+                inferred,
+            });
         }
 
         if vehicle.boot_count() != boots_before {
@@ -430,6 +455,19 @@ impl Fleet {
         Some(finished(id, ended))
     }
 
+    /// Take the operator's word for how the component at `address` encodes
+    /// parameter values (`None` takes it back). Returns whether it was taken:
+    /// not for an unknown vehicle, nor for a component whose encoding can be
+    /// inferred.
+    pub(crate) fn state_param_encoding(
+        &mut self,
+        address: MavlinkId,
+        encoding: Option<ParamEncoding>,
+    ) -> bool {
+        self.vehicle_mut(address.system_id())
+            .is_some_and(|vehicle| vehicle.state_param_encoding(address.component, encoding))
+    }
+
     /// Record a parameter list download's progress. Returns whether the
     /// vehicle is known.
     pub(crate) fn set_param_download(
@@ -456,7 +494,7 @@ fn finished(id: SystemId, ended: Ended) -> FleetEvent {
 mod tests {
     use super::*;
     use mavio::default_dialect::{
-        enums::{MavModeFlag, MavState, MavType},
+        enums::{MavModeFlag, MavProtocolCapability, MavState, MavType},
         messages::{self, Heartbeat},
     };
 
@@ -655,6 +693,49 @@ mod tests {
                 .any(|event| matches!(event, FleetEvent::CameraAppeared(_))),
             "{second:?}"
         );
+    }
+
+    /// A component that advertises an encoding other than the one the
+    /// operator stated may have stored wrong values: that is announced. One
+    /// that agrees is not.
+    #[test]
+    fn a_contradicted_stated_encoding_is_announced() {
+        let version = |capabilities| {
+            DefaultDialect::AutopilotVersion(messages::AutopilotVersion {
+                capabilities,
+                ..Default::default()
+            })
+        };
+        let t0 = Instant::now();
+
+        for (stated, advertised, announced) in [
+            (
+                ParamEncoding::CCast,
+                MavProtocolCapability::PARAM_ENCODE_BYTEWISE,
+                true,
+            ),
+            (
+                ParamEncoding::CCast,
+                MavProtocolCapability::PARAM_ENCODE_C_CAST,
+                false,
+            ),
+        ] {
+            let mut fleet = Fleet::default();
+            fleet.observe(source(A), t0, Some(&heartbeat(MavAutopilot::Generic)));
+            assert!(fleet.state_param_encoding(source(A), Some(stated)));
+
+            let contradicted: Vec<_> = fleet
+                .observe(source(A), t0, Some(&version(advertised)))
+                .into_iter()
+                .filter(|event| matches!(event, FleetEvent::StatedEncodingContradicted { .. }))
+                .collect();
+            let expected = announced.then_some(FleetEvent::StatedEncodingContradicted {
+                address: source(A),
+                stated,
+                inferred: ParamEncoding::Bytewise,
+            });
+            assert_eq!(contradicted, Vec::from_iter(expected));
+        }
     }
 
     #[test]

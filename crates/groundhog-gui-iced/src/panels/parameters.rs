@@ -9,7 +9,10 @@
 //!
 //! Uploads are refused while the component's parameter encoding is unknown:
 //! a value written with a guessed encoding may be stored as something else
-//! entirely.
+//! entirely. For a component that neither advertises its encoding nor names
+//! a firmware that implies one, the operator may state it, as a last resort;
+//! the values re-decode at once, so a wrong choice shows before anything is
+//! written.
 
 use std::{borrow::Cow, collections::BTreeMap, path::PathBuf};
 
@@ -18,9 +21,9 @@ use groundhog_logic::{
     domain::{
         fleet::FleetSnapshot,
         parameter::{
-            DownloadOutcome, EditStatus, LoadSummary, ParamDownload, ParamEdit, ParamEdits,
-            ParamValues, Parameters, ReportedParam, Upload, UploadOutcome, group_of,
-            value_to_string, value_type_name,
+            DownloadOutcome, EditStatus, EncodingSource, LoadSummary, ParamDownload, ParamEdit,
+            ParamEdits, ParamEncoding, ParamValues, Parameters, ReportedParam, Upload,
+            UploadOutcome, group_of, value_to_string, value_type_name,
         },
         vehicle::Vehicle,
     },
@@ -109,6 +112,9 @@ pub enum Message {
     FilterOnlyChanged(bool),
     /// Show the parameters of this component.
     SelectComponent(MavlinkId),
+    /// The operator's word for how the component encodes its parameters
+    /// (`None` takes it back).
+    StateEncoding(MavlinkId, Option<ParamEncoding>),
     /// Download the component's parameter list again.
     Reload(MavlinkId),
     /// Stop a download this panel started.
@@ -129,6 +135,21 @@ pub enum Message {
     LoadDialog(MavlinkId),
     LoadFrom(PathBuf, MavlinkId),
     Loaded(PathBuf, MavlinkId, std::result::Result<ParamValues, String>),
+}
+
+/// What the operator may state about a component's encoding.
+const ENCODING_CHOICES: [Option<ParamEncoding>; 3] = [
+    None,
+    Some(ParamEncoding::CCast),
+    Some(ParamEncoding::Bytewise),
+];
+
+/// The encoding's name, with the firmware the operator may know it from.
+pub fn encoding_name(encoding: ParamEncoding) -> &'static str {
+    match encoding {
+        ParamEncoding::CCast => "C-cast (as ArduPilot)",
+        ParamEncoding::Bytewise => "Bytewise (as PX4)",
+    }
 }
 
 #[derive(Default)]
@@ -153,6 +174,9 @@ impl Panel for ParameterPanel {
             Message::SelectComponent(address) => {
                 self.component
                     .insert(address.system_id(), address.component);
+            }
+            Message::StateEncoding(address, encoding) => {
+                cx.component_client(address).state_param_encoding(encoding);
             }
             Message::Reload(address) => {
                 let client = cx.component_client(address);
@@ -401,7 +425,12 @@ impl Panel for ParameterPanel {
         let component = self.selected_component(vehicle);
         let address = vehicle.target_for(component);
         let parameters = vehicle.parameters(component);
-        let encoding_known = vehicle.param_encoding(component).is_some();
+        let encoding = vehicle.param_encoding_source(component);
+        let encoding_known = encoding.is_some();
+        let stated = match encoding {
+            Some((encoding, EncodingSource::Stated)) => Some(encoding),
+            _ => None,
+        };
 
         // Which component's parameters are shown; the autopilot is marked.
         let component_ids = vehicle.component_ids();
@@ -464,6 +493,7 @@ impl Panel for ParameterPanel {
                 .busy(downloading, "Download")
                 .hint("Read every parameter from the vehicle")
                 .on_press(Message::Reload(address))
+                .width(Length::FillPortion(1))
                 .boxed(),
             ui::button(if changed > 0 {
                 format!("Restore {changed}")
@@ -477,6 +507,7 @@ impl Panel for ParameterPanel {
                     .is_some_and(|edits| !edits.is_empty())
                     .then_some(Message::ResetAll(address)),
             )
+            .width(Length::FillPortion(1))
             .boxed(),
             ui::button(if pending > 0 {
                 format!("Upload {pending}")
@@ -498,17 +529,25 @@ impl Panel for ParameterPanel {
                 (pending > 0 && encoding_known && !downloading)
                     .then_some(Message::UploadAll(address)),
             )
+            .width(Length::FillPortion(1))
             .boxed(),
         ]]);
 
-        let encoding_warning = (!encoding_known
-            && parameters.is_some_and(|parameters| !parameters.is_empty()))
-        .then(|| {
-            ui::banner(
-                "The component's parameter encoding is not known yet, so values may \
-                 display wrongly and uploads are disabled.",
-                Tone::Warning,
-            )
+        // The operator's word for the encoding: offered only while nothing
+        // else says it, and kept in view while it is what values decode with.
+        let unknown =
+            !encoding_known && parameters.is_some_and(|parameters| !parameters.is_empty());
+        let encoding_choice = (unknown || stated.is_some()).then(|| {
+            let note = if stated.is_some() {
+                ui::banner("Overwritten parameter encoding", Tone::Accent)
+            } else {
+                ui::banner("Unspecified parameter encoding", Tone::Warning)
+            };
+            let picker = ui::pick_list(Some(stated), ENCODING_CHOICES, |choice| {
+                choice.map_or("Not known", encoding_name).to_string()
+            })
+            .on_select(move |choice| Message::StateEncoding(address, choice));
+            column![note, ui::field("Encoding", picker)].spacing(ui::space::S)
         });
 
         let failure = match download.and_then(ParamDownload::outcome) {
@@ -558,7 +597,7 @@ impl Panel for ParameterPanel {
             header,
             column![
                 actions,
-                encoding_warning,
+                encoding_choice,
                 failure,
                 refused_warning,
                 progress,
